@@ -3,11 +3,10 @@ from functools import cached_property
 from os.path import join, exists
 
 import yaml
-from utz import run, err, Log
-from utz.collections import solo
+from utz import run, err, Log, solo
+from utz.s3 import parse_bkt_key, get_etag
 
 from ctbk.paths import S3
-from ctbk.s3 import parse_bkt_key, get_etag
 
 
 class DvcBlob:

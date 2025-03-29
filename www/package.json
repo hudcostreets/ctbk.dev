@@ -88,9 +88,9 @@
     },
     "repository": {
         "type": "git",
-        "url": "https://github.com/neighbor-ryan/ctbk.dev"
+        "url": "https://github.com/hudcostreets/ctbk.dev"
     },
     "bugs": {
-        "url": "https://github.com/neighbor-ryan/ctbk.dev/issues"
+        "url": "https://github.com/hudcostreets/ctbk.dev/issues"
     }
 }

@@ -97,7 +97,7 @@ agg_sec --> spj
 
 Clone this repo and install this library:
 ```bash
-git clone https://github.com/neighbor-ryan/ctbk.dev
+git clone https://github.com/hudcostreets/ctbk.dev
 cd ctbk.dev
 pip install -e ctbk
 ```
@@ -426,7 +426,7 @@ ctbk n -d2022- urls
 ## GitHub Actions <a id="ghas"></a>
 
 ### [`ci.yml`] <a id="ci-yml"></a>
-[`ci.yml`] breaks each derived dataset into a separate job, [for example](https://github.com/neighbor-ryan/ctbk.dev/actions/runs/4272517971):
+[`ci.yml`] breaks each derived dataset into a separate job, [for example](https://github.com/hudcostreets/ctbk.dev/actions/runs/4272517971):
 
 ![ctbk dev gha dag](https://user-images.githubusercontent.com/465045/221387746-92200afa-9d9c-40c5-8066-166b10a9ad07.png)
 
@@ -453,9 +453,9 @@ The code for the site is under [../www](../www).
 [ctbk.dev]: https://ctbk.dev
 [`ci.yml`]: ../.github/workflows/ci.yml
 [`www.yml`]: ../.github/workflows/www.yml
-[@www]: https://github.com/neighbor-ryan/ctbk.dev/tree/www
-[the www branch]: https://github.com/neighbor-ryan/ctbk.dev/tree/www
-[www GHA]: https://github.com/neighbor-ryan/ctbk.dev/actions/workflows/www.yml
+[@www]: https://github.com/hudcostreets/ctbk.dev/tree/www
+[the www branch]: https://github.com/hudcostreets/ctbk.dev/tree/www
+[www GHA]: https://github.com/hudcostreets/ctbk.dev/actions/workflows/www.yml
 
 [`zips`]: #zips
 [`TripdataZips`]: #zips

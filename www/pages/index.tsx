@@ -607,7 +607,7 @@ export default function App({ data }: { data: Row[] }) {
               <li><A href={"/"}>Default view (system-wide rides over time)</A></li>
             </ul>
             <p>This plot refreshes when <A href={"https://www.citibikenyc.com/system-data"} target={"_blank"}>new data is published by Citi Bike</A> (typically the 1st or 2nd week of each month, covering the previous month).</p>
-            <p><A href={"https://github.com/neighbor-ryan/ctbk.dev"} target={"_blank"}>The GitHub repo</A> has more info as well as <a href={"https://github.com/neighbor-ryan/ctbk.dev/issues"} target={"_blank"}>planned enhancements</a>. Data updates are performed <A href={"https://github.com/neighbor-ryan/ctbk.dev/actions"}>by Github Actions</A>.</p>
+            <p><A href={"https://github.com/hudcostreets/ctbk.dev"} target={"_blank"}>The GitHub repo</A> has more info as well as <a href={"https://github.com/hudcostreets/ctbk.dev/issues"} target={"_blank"}>planned enhancements</a>. Data updates are performed <A href={"https://github.com/hudcostreets/ctbk.dev/actions"}>by Github Actions</A>.</p>
             <hr/>
             <h3 id={"map"}>Map: Stations + Common Destinations</h3>
             <p>Tap a station to see where rides originating there go:</p>
@@ -624,7 +624,7 @@ Several things changed in February 2021 (presumably as part of [the Lyft acquisi
 - The "User Type" values changed ("Annual" → "member", "Daily" → "casual"); I'm using the former/old values here, they seem equivalent.
                     ` })}
             <div className={css.footer}>
-              Code: <GitHub repo={"neighbor-ryan/ctbk.dev"} />
+              Code: <GitHub repo={"hudcostreets/ctbk.dev"} />
               Data: <S3 href={"https://s3.amazonaws.com/ctbk/index.html"} title={"Browse s3://ctbk"} />
               Author: <Bluesky profile={"runsascoded.com"} />
             </div>

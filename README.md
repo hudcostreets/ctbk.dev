@@ -92,9 +92,9 @@ Feel free to [file an issue here][github new issue] with any comments, bug repor
 [`s3://ctbk`]: https://ctbk.s3.amazonaws.com/index.html
 [s3://ctbk]: https://ctbk.s3.amazonaws.com/index.html
 
-[github actions]: https://github.com/neighbor-ryan/ctbk.dev/actions
-[github issues]: https://github.com/neighbor-ryan/ctbk.dev/issues
-[github new issue]: https://github.com/neighbor-ryan/ctbk.dev/issues/new
+[github actions]: https://github.com/hudcostreets/ctbk.dev/actions
+[github issues]: https://github.com/hudcostreets/ctbk.dev/issues
+[github new issue]: https://github.com/hudcostreets/ctbk.dev/issues/new
 
 [`ctbk`]: ctbk
 [ctbk.dev]: https://ctbk.dev/

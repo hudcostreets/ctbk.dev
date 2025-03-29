@@ -2,7 +2,7 @@ name: List or generate aggregate data using `ctbk aggregate`
 on:
   workflow_dispatch:
     inputs:
-      # Combined a few sets of flags into single `choice` inputs, to avoid "you may only define up to 10 `inputs` for a `workflow_dispatch` event": https://github.com/neighbor-ryan/ctbk.dev/actions/runs/5954742040
+      # Combined a few sets of flags into single `choice` inputs, to avoid "you may only define up to 10 `inputs` for a `workflow_dispatch` event": https://github.com/hudcostreets/ctbk.dev/actions/runs/5954742040
       time:
         description: "Group by time-period granularity"
         type: choice

@@ -4,15 +4,15 @@ from functools import wraps
 from os.path import basename
 from re import Pattern
 
-import utz
 from click import option, UsageError
+import utz
 from utz import err
 from utz.cli import flag
+from utz.s3 import get_etags
 
 from ctbk.blob import Blob
 from ctbk.cli.base import ctbk
 from ctbk.cli.git_dvc_cmd import git_dvc_cmd
-from ctbk.s3 import get_etags
 
 BKT = 'tripdata'
 
