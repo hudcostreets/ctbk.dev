@@ -65,7 +65,7 @@ class TripdataMonth(DvcBlob):
             return f'{self.name}-citbike-tripdata.csv.zip'  # Typo: "citbike"
         elif self.name == 'JC-201708':
             return f'{self.name} citibike-tripdata.csv.zip'  # Typo: " citibike" (space)
-        elif self.region == 'JC' or (self.region == 'NYC' and 202401 <= int(self.ym) <= 202404):
+        elif self.region == 'JC' or (self.region == 'NYC' and (202401 <= int(self.ym) <= 202404 or int(self.ym) == 202503)):
             return f'{self.name}-citibike-tripdata.csv.zip'  # Extra ".csv" segment
         elif self.region == 'NYC' and self.ym.y <= 2023:
             return f'{self.ym.y}-citibike-tripdata.zip'  # Full-year zips
