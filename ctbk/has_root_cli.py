@@ -1,12 +1,14 @@
+import sys
 from abc import ABC
 from functools import wraps
+from os.path import basename
 from typing import Optional
 
-import click
 import utz
 from click import option, Group, argument
-from utz import decos, YM
+from utz import decos, YM, run
 from utz.case import dash_case
+from utz.cli import count
 
 from ctbk.cli.base import ctbk, StableCommandOrder
 from ctbk.task import Task
@@ -66,9 +68,9 @@ class HasRootCLI(Tasks, ABC):
         group: Group,
         cmd_decos: list = None,
         create_decos: list = None,
-        group_cls: type[click.Group] = None,
-        urls=True,
-        create=True,
+        group_cls: type[Group] = None,
+        urls: bool = True,
+        create: bool = True,
     ):
         cmd_decos = cmd_decos or []
 
@@ -83,15 +85,28 @@ class HasRootCLI(Tasks, ABC):
             def urls(**kwargs):
                 tasks = cls(**kwargs)
                 children = tasks.children
-                for month in children:
-                    print(month.url)
+                for child in children:
+                    print(child.url)
 
         if create:
             @cmd(help="Create selected datasets")
             @decos(create_decos or [])
-            def create(**kwargs):
+            @count('-G', '--no-git', help="0x: `dvc add` and `git commit` created/modified `.dvc` files; 1x: `dvc add` but don't `git commit`; 2x: don't `dvc add` or `git commit`")
+            def create(
+                no_git: int,
+                **kwargs,
+            ):
                 tasks = cls(**kwargs)
                 tasks.create()
+                if no_git < 2:
+                    run('dvc', 'add', *[ child.url for child in tasks.children ])
+                    if no_git < 1:
+                        argv = sys.argv
+                        ctbk, *args = argv
+                        if basename(ctbk) == 'ctbk':
+                            argv = ['ctbk', *args]
+                        msg = f"`{' '.join(argv)}`"
+                        run('git', 'commit', '-m', msg)
 
     @classmethod
     def cli(
