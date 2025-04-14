@@ -1,78 +1,75 @@
-name: CI
+name: Ingest a new month of data
 on:
-  push:
-    branches:
-      - daily
-      - push-www
-  schedule:
-    - cron: "0 17 3-14 * *"
   workflow_dispatch:
+    inputs:
+      ym:
+        description: "Month (YYYYMM) to process"
 env:
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   AWS_DEFAULT_REGION: us-east-1
 jobs:
-  csvs:
-    uses: ./.github/workflows/step.yml
-    with:
-      name: Unzip+Cache CSVs
-      run: ctbk --s3 csv create
-    secrets: inherit
   normalized:
-    needs: csvs
     uses: ./.github/workflows/step.yml
     with:
       name: Join regions, convert to Parquet
-      run: ctbk --s3 normalized create
+      run: ctbk normalized create ${{ inputs.ym }}
+    secrets: inherit
+  consolidated:
+    needs: normalized
+    uses: ./.github/workflows/step.yml
+    with:
+      name: Join regions, convert to Parquet
+      run: ctbk consolidated create ${{ inputs.ym }}
     secrets: inherit
   meta_hist-names:
-    needs: normalized
+    needs: consolidated
     uses: ./.github/workflows/step.yml
     with:
       name: Compute station name histograms
-      run: ctbk --s3 station-meta-hist create -gin
+      run: ctbk station-meta-hist create -gin ${{ inputs.ym }}
     secrets: inherit
   meta_hist-latlngs:
-    needs: normalized
+    needs: consolidated
     uses: ./.github/workflows/step.yml
     with:
       name: Compute station lat/lng histograms
-      run: ctbk --s3 station-meta-hist create -gil
+      run: ctbk station-meta-hist create -gil ${{ inputs.ym }}
     secrets: inherit
   group_counts-end:
-    needs: normalized
+    needs: consolidated
     uses: ./.github/workflows/step.yml
     with:
       name: Aggregate counts by end station
-      run: ctbk --s3 aggregated create -ge -ac
+      run: ctbk aggregated create -ge -ac ${{ inputs.ym }}
     secrets: inherit
   group_counts-year-month-region-gender-type-bike-counts-durations:
-    needs: normalized
+    needs: consolidated
     uses: ./.github/workflows/step.yml
     with:
       name: Aggregate counts by (month, region, gender, user type, rideable type)
-      run: ctbk --s3 aggregated  create -gymrgtb -acd
+      run: ctbk aggregated  create -gymrgtb -acd ${{ inputs.ym }}
     secrets: inherit
   group_counts-start-end:
-    needs: normalized
+    needs: consolidated
     uses: ./.github/workflows/step.yml
     with:
       name: Aggregate counts by station-pair
-      run: ctbk --s3 aggregated create -gse -ac
+      run: ctbk aggregated create -gse -ac ${{ inputs.ym }}
     secrets: inherit
   station-modes:
     needs: [meta_hist-names, meta_hist-latlngs, group_counts-end]
     uses: ./.github/workflows/step.yml
     with:
       name: Compute canonical station names, latlngs
-      run: ctbk --s3 station-mode create
+      run: ctbk station-mode create ${{ inputs.ym }}
     secrets: inherit
   station_pair_jsons:
     needs: [station-modes, group_counts-start-end]
     uses: ./.github/workflows/step.yml
     with:
       name: Build station-pair count JSONs
-      run: ctbk --s3 station-pair-json create
+      run: ctbk station-pair-json create ${{ inputs.ym }}
     secrets: inherit
   ymrgtb_cd_json:
     name: Write `ymrgtb_cd.json` used by www
@@ -89,16 +86,13 @@ jobs:
           python-version: 3.11.8
           cache: pip
       - run: pip install -e .
-      - run: ctbk ymrgtb-cd
+      - run: dvc pull s3/ctbk/aggregated/ymrgtb_cd_20*.parquet.dvc
+      - run: ctbk ymrgtb-cd -f
       - name: Update www/public/assets/last_month.json
         run: |
-          last_month="$(ctbk --s3 aggregated urls -gymrgtb -acd | tail -n1 | grep -Eo '[0-9]+' | tail -n1)"
-          if [ -z "$last_month" ]; then
-            echo "Failed to find last month"
-            exit 1
-          fi
+          last_month="$(jq "map(.Year * 100 + .Month) | max | tostring" www/public/assets/ymrgtb_cd.json)"
           echo "Last month: $last_month"
           path=www/public/assets/last-month.json
-          echo "$(jq ". = \"$last_month\"" $path)" > $path
+          echo "\"$last_month\"" > $path
       - run: |
           python -m ctbk.gha_update -Bpush-www -Pwww -Pmain -u "GitHub Actions" -e github@actions www/public/assets/ymrgtb_cd.json www/public/assets/last-month.json

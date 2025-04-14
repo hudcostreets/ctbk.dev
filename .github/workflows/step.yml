@@ -13,19 +13,12 @@ on:
         required: true
       AWS_SECRET_ACCESS_KEY:
         required: true
-      MAIL_USERNAME:
-        required: true
-      MAIL_PASSWORD:
-        required: true
-      MAIL_TO:
-        required: false
 env:
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   AWS_DEFAULT_REGION: us-east-1
-  MAIL_FROM: ${{ secrets.MAIL_USERNAME }}
-  MAIL_PSWD: ${{ secrets.MAIL_PASSWORD }}
-  MAIL_TO: ${{ secrets.MAIL_TO }}
+permissions:
+  contents: write
 jobs:
   run:
     name: ${{ inputs.name }}
@@ -33,6 +26,9 @@ jobs:
     steps:
       - name: Clone repo
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GITHUB_REF }}
+          fetch-depth: 1
       - name: Setup Python 3.11.8
         uses: actions/setup-python@v5
         with:
@@ -42,3 +38,5 @@ jobs:
         run: pip install -e .
       - name: ${{ inputs.name }}
         run: ${{ inputs.run }}
+      - run: dvc push
+      - run: git push
