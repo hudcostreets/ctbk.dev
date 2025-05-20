@@ -23,7 +23,6 @@ import { clampIndex, pivot } from "../src/danfo"
 import { Colors, DownloadFmt, DownloadFmts, Gender, GenderQueryStrings, GenderRollingAvgCutoff, Genders, Int2Gender, NormalizeRideableType, Region, RegionQueryStrings, Regions, RideableType, RideableTypeChars, RideableTypes, Row, StackBy, StackBys, stackKeyDict, toYM, UnknownRideableCutoff, UserType, UserTypeQueryStrings, UserTypes, YAxes, YAxis, yAxisLabelDict, } from "../src/data"
 import { DateRange, DateRange2Dates, dateRangeParam } from "../src/date-range"
 import Head from "../src/head"
-import { LAST_MONTH_PATH } from "../src/paths"
 import { Radios } from "../src/radios"
 
 const { Bluesky, GitHub, S3 } = icons({ TooltipC: Tooltip, className: css.icon })
@@ -34,8 +33,7 @@ const JSON_PATH = 'public/assets/ymrgtb_cd.json'
 
 export async function getStaticProps() {
   const data = loadJsonSync<Row[]>(JSON_PATH)
-  const lastMonthStr = loadJsonSync<string>(LAST_MONTH_PATH)
-  return { props: { data, lastMonthStr } }
+  return { props: { data } }
 }
 
 type Params = {
