@@ -309,6 +309,7 @@ class NormalizedMonth(MonthDirTables):
             rv[name] = df
         return rv
 
+
 class NormalizedMonths(MonthsDirTables, HasRootCLI):
     DIR = DIR
     CHILD_CLS = NormalizedMonth

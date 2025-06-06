@@ -99,7 +99,8 @@ class HasRootCLI(Tasks, ABC):
                 tasks = cls(**kwargs)
                 tasks.create()
                 if no_git < 2:
-                    run('dvc', 'add', *[ child.url for child in tasks.children ])
+                    children = [ child.url for child in tasks.children ]
+                    run('dvc', 'add', *children)
                     if no_git < 1:
                         argv = sys.argv
                         ctbk, *args = argv
@@ -107,6 +108,7 @@ class HasRootCLI(Tasks, ABC):
                             argv = ['ctbk', *args]
                         msg = f"`{' '.join(argv)}`"
                         run('git', 'commit', '-m', msg)
+                    run('dvc', 'push', *children)
 
     @classmethod
     def cli(
