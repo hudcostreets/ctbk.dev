@@ -24,12 +24,11 @@ import { Colors, DownloadFmt, DownloadFmts, Gender, GenderQueryStrings, GenderRo
 import { DateRange, DateRange2Dates, dateRangeParam } from "../src/date-range"
 import Head from "../src/head"
 import { Radios } from "../src/radios"
+import { JSON_PATH } from "../src/paths"
 
 const { Bluesky, GitHub, S3 } = icons({ TooltipC: Tooltip, className: css.icon })
 
 const { pow } = Math
-
-const JSON_PATH = 'public/assets/ymrgtb_cd.json'
 
 export async function getStaticProps() {
   const data = loadJsonSync<Row[]>(JSON_PATH)

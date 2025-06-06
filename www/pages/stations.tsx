@@ -3,15 +3,16 @@ import { loadJsonSync } from "@rdub/base/json/load"
 import { floatParam, LL, llParam, Param, stringParam } from "@rdub/next-params/params"
 import { parseQueryParams } from "@rdub/next-params/query"
 import 'leaflet/dist/leaflet.css'
-import _ from "lodash"
+import _, { max } from "lodash"
 import dynamic from "next/dynamic"
 import { useMemo, useState } from 'react'
 import css from './stations.module.css'
 import { loadDvcUrlsMap } from '../src/dvc'
 import Head from "../src/head"
-import { LAST_MONTH_PATH } from "../src/paths"
+import { JSON_PATH } from "../src/paths"
 import type { ID, Props as StationsProps, StationPairCounts, Stations } from "../src/stations"
 import type { MapContainerProps } from "@rdub/next-leaflet/container"
+import { Row } from "../src/data"
 
 const Map = dynamic(() => import("../src/stations"), { ssr: false })
 
@@ -33,7 +34,8 @@ export type Props = {
 }
 
 export async function getStaticProps() {
-  const ym = loadJsonSync<string>(LAST_MONTH_PATH)
+  const ymrgtb = loadJsonSync<Row[]>(JSON_PATH)
+  const ym = max(ymrgtb.map(({ Year, Month }) => `${Year}${Month.toString().padStart(2, '0')}`))!
   const stationsUrls = await loadDvcUrlsMap(`../s3/ctbk/aggregated/20*/stations.json.dvc`)
   const stationsPairsUrl = await loadDvcUrlsMap(`../s3/ctbk/aggregated/20*/se_c.json.dvc`)
   const stationsUrl = stationsUrls[ym]

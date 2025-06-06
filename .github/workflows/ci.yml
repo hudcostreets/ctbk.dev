@@ -88,11 +88,4 @@ jobs:
       - run: pip install -e .
       - run: dvc pull s3/ctbk/aggregated/ymrgtb_cd_20*.parquet.dvc
       - run: ctbk ymrgtb-cd -f
-      - name: Update www/public/assets/last_month.json
-        run: |
-          last_month="$(jq "map(.Year * 100 + .Month) | max | tostring" www/public/assets/ymrgtb_cd.json)"
-          echo "Last month: $last_month"
-          path=www/public/assets/last-month.json
-          echo "\"$last_month\"" > $path
-      - run: |
-          python -m ctbk.gha_update -Bpush-www -Pwww -Pmain -u "GitHub Actions" -e github@actions www/public/assets/ymrgtb_cd.json www/public/assets/last-month.json
+      - run: python -m ctbk.gha_update -Bpush-www -Pwww -Pmain -u "GitHub Actions" -e github@actions www/public/assets/ymrgtb_cd.json
