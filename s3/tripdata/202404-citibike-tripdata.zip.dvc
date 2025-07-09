@@ -1,0 +1,12 @@
+md5: e366abdd3af05e0397bdb3e8c09ae1cf
+frozen: true
+deps:
+- etag: 98c6312acc3dfc6b7392f2e0e7f2532a-37
+  size: 629567797
+  hash: md5
+  path: s3://tripdata/202404-citibike-tripdata.zip
+outs:
+- md5: 44f9824cf02c93aa4c60fac73beebbb0
+  size: 629567797
+  hash: md5
+  path: 202404-citibike-tripdata.zip
