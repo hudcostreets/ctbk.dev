@@ -5,7 +5,7 @@ import pandas as pd
 import yaml
 from numpy import float64
 from pandas import CategoricalDtype, DataFrame, isna
-from utz import YM, singleton, err, sxs
+from utz import YM, singleton, err, sxs, solo
 from utz.ym import Monthy
 
 from ctbk.has_root_cli import yms_arg, HasRootCLI
@@ -64,6 +64,30 @@ def merge_dupes(df: DataFrame, cols: tuple[str, ...]) -> DataFrame:
         for col in cols:
             r1[col] = r0[col]
     return r1.to_frame().T.astype(df.dtypes)
+
+
+def get_station_id(df: DataFrame) -> str | None:
+    if len(df) == 1:
+        return None
+    elif len(df) != 2:
+        raise ValueError(f"Unexpected IDs dataframe for station name: {df}")
+    name = solo(df['name'])
+    [id0, id1] = sorted(df['id'].tolist())
+    if id0 + "0" != id1:
+        err(f"{name}: compatible IDs {id0}, {id1}")
+        return None
+    return id1
+
+
+def fix_station_id(df, ds):
+    k = 'Start' if 'Start Station ID' in df else 'End'
+    name = df[f'{k} Station Name']
+    v0 = df[f'{k} Station ID']
+    if name in ds:
+        v1 = ds[name]
+        if v0 + "0" == v1:
+            return v1
+    return v0
 
 
 class ConsolidatedMonth(MonthTable):
@@ -218,6 +242,16 @@ class ConsolidatedMonth(MonthTable):
             err(f"{ym}: missing columns: {', '.join(missing_cols)}")
 
         d1 = d1[[ k for k in OUT_FIELD_ORDER if k in d1 ]]
+        all_ids = set(d1['Start Station ID']).union(set(d1['End Station ID']))
+        bad = [ i for i in all_ids if (i + '0') in all_ids ]
+        s_msk = d1['Start Station ID'].isin(bad)
+        d1.loc[s_msk, 'Start Station ID'] = d1['Start Station ID'] + '0'
+        e_msk = d1['End Station ID'].isin(bad)
+        d1.loc[e_msk,   'End Station ID'] = d1[  'End Station ID'] + '0'
+        n_s = s_msk.sum()
+        n_e = e_msk.sum()
+        if n_s or n_e:
+            err(f"{ym}: fixed {n_s} Start Station IDs, {n_e} End Station IDs")
         return d1
 
 
