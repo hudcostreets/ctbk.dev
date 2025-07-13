@@ -155,19 +155,6 @@ Usage: ctbk [OPTIONS] COMMAND [ARGS]...
   - See also: https://ctbk.s3.amazonaws.com/index.html#/aggregated
 
 Options:
-  -r, --read TEXT   Set "read" behavior for `HasRoot` subclasses, `<alias>=<value>` to set specific classes by
-                    alias, just `<value>` to set a global default. `<value>`s are `memory`, `disk`, and their
-                    aliases, indicating whether to return disk-round-tripped versions of newly-computed
-                    datasets.
-  -t, --root TEXT   Path- or URL-prefixes for `HasRoot` subclasses to write to and read from. `<alias>=<value>`
-                    to set specific classes by alias, just `<value>` to set a global default. `<value>`s are
-                    `memory`, `disk`, and their aliases, indicating whether to return disk-round-tripped
-                    versions of newly-computed datasets.
-  -w, --write TEXT  Set "write" behavior for `HasRoot` subclasses, `<alias>=<value>` to set specific classes by
-                    alias, just `<value>` to set a global default. `<value>`s are `never`, `ifabsent`, `always`,
-                    and their aliases, indicating how to handle each dataset type already existing on disk
-                    (under its `root`) vs. not.
-  --s3              Alias for `--root s3:/`, pointing all classes' "root" dirs at S3
   --help            Show this message and exit.
 
 Commands:
@@ -352,15 +339,7 @@ Each of the `ctbk` commands above supports 3 further subcommands:
 ### Examples <a id="examples"></a>
 
 #### `urls`: print URLS
-Print URLs for 3 months of [`normalized`] data on S3:
-```bash
-ctbk --s3 normalized -d 202206-202209 urls
-# s3://ctbk/normalized/202206.parquet
-# s3://ctbk/normalized/202207.parquet
-# s3://ctbk/normalized/202208.parquet
-```
-
-Print URLs for 3 months of [`normalized`] data in the local folder s3/
+Print URLs for 3 months of [`normalized`] data in the local s3/ folder:
 ```bash
 ctbk normalized -d 202206-202209 urls
 # s3/ctbk/normalized/202206.parquet
@@ -370,50 +349,29 @@ ctbk normalized -d 202206-202209 urls
 
 #### `create`: create+save data
 Compute one month of [`normalized`] ride data:
-<details><summary><code>ctbk --s3 -tnorm=tmproot normalized -d202101 create</code></summary>
-
 ```bash
-ctbk --s3 -tnorm=tmproot normalized -d202101 create
-# Writing tmproot/ctbk/normalized/202101.parquet
-# Reading s3://ctbk/csvs/202101-citibike-tripdata.csv.gz
-# s3://ctbk/csvs/202101-citibike-tripdata.csv.gz: "Rideable Type" column not found; setting to "unknown" for all rows
-# Reading s3://ctbk/csvs/JC-202101-citibike-tripdata.csv.gz
-# s3://ctbk/csvs/JC-202101-citibike-tripdata.csv.gz: "Rideable Type" column not found; setting to "unknown" for all rows
+ctbk normalized -d202101 create
 ```
 
-Upstream data is read from S3 (`--s3` flag):
-- `zips` from [`s3://tripdata`]
-- `csvs` from [`s3://ctbk`]
+This reads upstream CSVs from the local `s3/ctbk/csvs/` directory and writes normalized parquet files to `s3/ctbk/normalized/`.
 
-Output [`normalized`] data is written under local folder `tmproot/` (`-tnorm=tmproot`):
+Note: stderr messages about `Rideable Type` not being found are due to older months predating the addition of that column in February 2021.
+
+**Current create options include:**
+- `-e, --engine`: Parquet engine selection
+- `-t, --name-type INTEGER`: CSV name-type preference
+- `-G, --no-git`: Skip git/DVC workflow integration
+
+Generate all the data used by [ctbk.dev] in the local `s3/ctbk` directory:
+
 ```bash
-tree -sh tmproot
-# [  96]  tmproot
-# └── [  96]  ctbk
-#     └── [  96]  normalized
-#         └── [ 30M]  202101.parquet
-#
-# 3 directories, 1 file
+ctbk station-pairs-json create
 ```
 
-stderr messages about `Rideable Type` not being found are due to the chosen month predating the addition of that column in February 2021.
-
-</details>
-
-Generate all the data used by [ctbk.dev] in a local `s3/ctbk` directory (mirroring [`s3://ctbk`]):
-
-<details><summary><code>ctbk spj create</code></summary>
-
-- `spj` stands for [`station-pair-json`] (the final derived data product in [the diagram above](#data-flow))
-- `create`ing `spj` requires `create`ing all predecessor datasets
-  - Default "root" for each dataset is the local folder `s3/`
-    - No existing data will be found there (on your computer), so it will be computed and saved
-    - One exception to this is the initial [`TripdataZips`], which are read from [`s3://tripdata`] by default
-  - Previous examples use `--s3` to point datasets to S3 locations, where they already exist
-    - `--s3` is equivalent to `-ts3` or `--root s3`
-    - This is in turn equivalent to `--root csvs=s3:/ --root norm=s3:/ --root agg=s3:/ ...`; all stages' URLs are prefixed with `s3:/`
-    - Point at your own bucket with `-ts3://my_bucket`, which will result in files written under `s3://my_bucket/ctbk/`
-</details>
+- `station-pairs-json` (abbreviated as `spj`) is the final derived data product in [the diagram above](#data-flow)
+- Creating station-pair JSONs requires creating all predecessor datasets in the pipeline
+- Data is stored in the local `s3/ctbk/` directory structure
+- Initial [`TripdataZips`] are downloaded from the public [`s3://tripdata`] bucket
 
 ⚠️ takes O(hours), streams ≈7GB of [`.csv.zip`s](#zips) from [`s3://tripdata`], writes ≈12GiB under `s3/ctbk/` locally.
 
