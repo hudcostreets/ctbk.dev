@@ -72,6 +72,7 @@ def import_zips(
     filters: Filters,
     verbose: bool,
 ) -> str | None:
+    """Import s3://tripdata `.zip` files."""
     etags = get_etags(f's3://{BKT}/')
     updates = []
     for key, etag in etags.items():
