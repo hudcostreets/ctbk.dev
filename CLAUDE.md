@@ -39,6 +39,9 @@ This installs the `ctbk` command with CLI entry points.
 
 ### Python Data Processing
 ```bash
+# Process a new month of data (using update.sh)
+./update.sh 202506
+
 # Generate "station-pairs-json" data, locally, for all months
 ctbk station-pairs-json create
 
@@ -102,7 +105,20 @@ npm run screenshots # Generate screenshots
 - **No test automation**: Actions focus on ETL and deployment only
 
 ### Monthly Data Updates
-The system automatically polls for new Citi Bike data monthly and processes through the entire pipeline when found.
+The system automatically polls for new Citi Bike data monthly and processes through the entire pipeline when found. The `update.sh` script shows the complete sequence of commands to process a new month:
+
+```bash
+ctbk norm create $month        # Normalize tripdata CSVs
+ctbk cons create $month        # Consolidate parquet files
+ctbk smh create -gil $month    # Station metadata (id+lat/lng)
+ctbk smh create -gin $month    # Station metadata (id+name)
+ctbk agg create -ge -ac $month # Aggregate by station end, count
+ctbk agg create -gse -ac $month # Aggregate by start+end stations, count
+ctbk agg create -g ymrgtb -acd $month # Aggregate by year/month/region/gender/type/bike
+ctbk sm create $month          # Station modes (canonical info)
+ctbk spj create $month         # Station pair JSONs
+ctbk ymrgtb-cd -f             # Update dashboard JSON
+```
 
 ## Development Notes
 
