@@ -285,6 +285,28 @@ class NormalizedMonth(MonthDirTables):
         self.name_type = name_type
         super().__init__(ym)
 
+    # DVX integration
+
+    @property
+    def cmd(self) -> str:
+        """CLI command that produces this normalized month."""
+        return f"ctbk norm create {self.ym}"
+
+    def dep_artifacts(self):
+        """Return TripdataMonth artifacts as dependencies."""
+        from dvx.run.artifact import Artifact
+
+        artifacts = []
+        for region in get_regions(self.ym):
+            tripdata = TripdataMonth(ym=self.ym, region=region, name_type=self.name_type)
+            # Load artifact from existing .dvc file (tripdata zips are imported/leaf nodes)
+            artifact = Artifact.from_dvc(tripdata.path)
+            if artifact is None:
+                # Fallback: create artifact with just the path
+                artifact = Artifact(path=tripdata.path)
+            artifacts.append(artifact)
+        return artifacts
+
     def normalized_region(self, region: Region) -> Tables:
         ym = self.ym
         src = TripdataMonth(ym=ym, region=region, name_type=self.name_type)

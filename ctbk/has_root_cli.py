@@ -6,7 +6,7 @@ from typing import Optional
 
 import utz
 from click import option, Group, argument
-from utz import decos, YM, run
+from utz import decos, YM, run, err
 from utz.case import dash_case
 from utz.cli import count
 
@@ -71,6 +71,8 @@ class HasRootCLI(Tasks, ABC):
         group_cls: type[Group] = None,
         urls: bool = True,
         create: bool = True,
+        prep: bool = True,
+        dvx_run: bool = True,
     ):
         cmd_decos = cmd_decos or []
 
@@ -109,6 +111,44 @@ class HasRootCLI(Tasks, ABC):
                         msg = f"`{' '.join(argv)}`"
                         run('git', 'commit', '-m', msg)
                     run('dvc', 'push', *children)
+
+        if prep:
+            @cmd(help="Generate .dvc specs with computation provenance (DVX prep phase)")
+            @decos(create_decos or [])
+            def prep(**kwargs):
+                tasks = cls(**kwargs)
+                children = tasks.children
+                for child in children:
+                    artifact = child.to_artifact()
+                    dvc_path = artifact.write_dvc()
+                    err(f"Wrote {dvc_path}")
+
+        if dvx_run:
+            @group.command('run', cls=group_cls, help="Execute stale computations via DVX (run phase)")
+            @decos(cmd_decos)
+            @decos(create_decos or [])
+            @option('-n', '--dry-run', is_flag=True, help="Show what would be executed without running")
+            @option('-f', '--force', is_flag=True, help="Force re-run even if fresh")
+            def run_cmd(dry_run: bool, force: bool, **kwargs):
+                from dvx.run.artifact import materialize
+
+                tasks = cls(**kwargs)
+                children = tasks.children
+                artifacts = [child.to_artifact() for child in children]
+
+                if dry_run:
+                    from dvx.run.dvc_files import is_output_fresh
+                    from pathlib import Path
+                    for artifact in artifacts:
+                        fresh, reason = is_output_fresh(Path(artifact.path))
+                        status = "fresh" if fresh else f"stale ({reason})"
+                        err(f"{artifact.path}: {status}")
+                else:
+                    computed = materialize(artifacts, force=force)
+                    if computed:
+                        err(f"Computed {len(computed)} artifact(s)")
+                    else:
+                        err("All artifacts are fresh")
 
     @classmethod
     def cli(
