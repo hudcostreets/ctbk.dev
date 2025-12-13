@@ -23,23 +23,27 @@ Consider diverging from DVC format to create a cleaner, minimal DVX spec:
 
 ### Minimal DVX Spec
 
-Proposed minimal format:
+Current format (DVC-compatible, provenance in `meta.computation`):
 ```yaml
-# output info
 outs:
-- md5: <hash>
-  size: <bytes>
-  path: <relative_path>
-
-# provenance (optional for leaf nodes / imports)
-computation:
-  cmd: "ctbk norm create 202501"
-  deps:
-    - path: ../tripdata/202501-citibike-tripdata.zip.dvc
-      md5: <hash_from_that_dvc>
+- md5: 8a6c7c6a8e4dbf9f20a8204ee043ce8a.dir
+  size: 92626204
+  nfiles: 2
+  path: '202501'
+meta:
+  computation:
+    cmd: ctbk norm create 202501
+    code_ref: 1d91406d40b09f6349c2f66999f9878e38fc5893
+    deps:
+      s3/tripdata/202501-citibike-tripdata.zip: 26fe8d7a296d0c00035dbf816b27fb92
+      s3/tripdata/JC-202501-citibike-tripdata.csv.zip: c41d27cc15e7991259b7f8d738f85306
 ```
 
-For imported/external data (leaf nodes), no `computation` block - just `outs`.
+Key points:
+- `.dir` suffix on hash for directories (DVC convention)
+- `nfiles` for directories
+- `meta.computation` instead of top-level `computation` (DVC rejects unknown top-level keys)
+- For imported/external data (leaf nodes), no `meta` block - just `outs`.
 
 ---
 
