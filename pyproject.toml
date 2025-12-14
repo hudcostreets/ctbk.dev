@@ -1,0 +1,54 @@
+[project]
+name = "ctbk"
+dynamic = ["version"]
+description = "NYC Citi Bike trip data pipeline and visualization"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "aiobotocore>=2.22.0",
+    "awscli>=1.38.3",
+    "boto3>=1.37.3",
+    "botocore>=1.37.3",
+    "click>=8.2.1",
+    "dvc-s3>=3.2.2",
+    "fsspec>=2025.5.1",
+    "geopy>=2.4.1",
+    "graphviz>=0.20.3",
+    "gzip-stream>=1.2.0",
+    "html_dsl>=0.5.0",
+    "kaleido>=0.2.1",
+    "lxml>=5.4.0",
+    "numpy>=2.2.6",
+    # Pinned for byte-reproducible parquet output
+    "pandas==2.2.3",
+    "plotly>=6.1.2",
+    # Pinned for byte-reproducible parquet output
+    "pyarrow==17.0.0",
+    "python-dateutil>=2.9.0.post0",
+    "s3fs>=2025.5.1",
+    "SQLAlchemy>=2.0.41",
+    "utz>=0.20.0",
+    "dvx",
+]
+
+[tool.uv.sources]
+dvx = { path = "../dvx", editable = true }
+
+[project.scripts]
+ctbk = "ctbk.cli.main:main"
+yms = "ctbk.cli.yms:yms"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ctbk"]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+]
