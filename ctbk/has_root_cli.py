@@ -93,7 +93,7 @@ class HasRootCLI(Tasks, ABC):
         if create:
             @cmd(help="Create selected datasets")
             @decos(create_decos or [])
-            @count('-G', '--no-git', help="0x: `dvc add` and `git commit` created/modified `.dvc` files; 1x: `dvc add` but don't `git commit`; 2x: don't `dvc add` or `git commit`")
+            @count('-G', '--no-git', help="0x: `dvc add`, `git commit`, `dvc push`; 1x: `dvc add`, `dvc push` (no commit); 2x: skip all")
             def create(
                 no_git: int,
                 **kwargs,
