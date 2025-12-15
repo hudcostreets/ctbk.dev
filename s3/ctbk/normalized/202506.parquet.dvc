@@ -5,7 +5,7 @@ outs:
 meta:
   computation:
     cmd: ctbk cons create 202506
-    code_ref: b6e9002f07d3c2451a2e4ae97b3a69f118c056d0
+    code_ref: 3baaad37d2883e2edf1cf1b092c3e707e556b4e1
     deps:
       s3/ctbk/normalized/202506/202505_202506.parquet: c9be1f36b528f5ae68864c0a2160fd72
       s3/ctbk/normalized/202506/202506_202506.parquet: c30a210106616d93d0cbd92d4ef73403

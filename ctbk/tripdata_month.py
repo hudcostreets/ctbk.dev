@@ -65,6 +65,8 @@ class TripdataMonth(DvcBlob):
             return f'{self.name}-citbike-tripdata.csv.zip'  # Typo: "citbike"
         elif self.name == 'JC-201708':
             return f'{self.name} citibike-tripdata.csv.zip'  # Typo: " citibike" (space)
+        elif self.name == 'JC-202510':
+            return f'{self.name}-citibike-tripdata.zip'  # Missing ".csv" segment
         elif self.region == 'JC':
             return f'{self.name}-citibike-tripdata.csv.zip'  # JC files have extra ".csv" segment
         elif self.region == 'NYC' and self.ym.y <= 2023:
