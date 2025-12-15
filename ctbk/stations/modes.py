@@ -93,6 +93,21 @@ class ModesMonthJson(MonthTable):
     def url(self):
         return f'{self.dir}/{self.ym}/stations.json'
 
+    @property
+    def cmd(self) -> str:
+        return f"ctbk sm create {self.ym}"
+
+    def dep_artifacts(self):
+        # Depends on StationMetaHist(in), StationMetaHist(il), AggregatedMonth(e,c)
+        smh_in = StationMetaHist(self.ym, 'in')
+        smh_il = StationMetaHist(self.ym, 'il')
+        agg_ec = AggregatedMonth(self.ym, 'e', 'c')
+        return [
+            smh_in.to_artifact(),
+            smh_il.to_artifact(),
+            agg_ec.to_artifact(),
+        ]
+
     @staticmethod
     def get_mode_sketch(df):
         n = len(df)

@@ -54,6 +54,16 @@ class StationMetaHist(MonthTable):
     def url(self) -> str:
         return f'{self.dir}/{self.group_by_keys.label}_{self.ym}.parquet'
 
+    @property
+    def cmd(self) -> str:
+        return f"ctbk smh create -g {self.group_by_keys.label} {self.ym}"
+
+    def dep_artifacts(self):
+        from dvx.run.artifact import Artifact
+        cons_path = f's3/ctbk/normalized/{self.ym}.parquet'
+        artifact = Artifact.from_dvc(cons_path)
+        return [artifact] if artifact else []
+
     def _df(self) -> DataFrame:
         src = ConsolidatedMonth(self.ym)
         df = src.read()

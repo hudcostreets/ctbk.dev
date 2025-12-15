@@ -19,6 +19,19 @@ class StationPairsJson(MonthTable):
     def url(self):
         return f'{self.dir}/{self.ym}/se_c.json'
 
+    @property
+    def cmd(self) -> str:
+        return f"ctbk spj create {self.ym}"
+
+    def dep_artifacts(self):
+        # Depends on ModesMonthJson (for id2idx) and AggregatedMonth(se,c)
+        mmj = ModesMonthJson(self.ym)
+        agg_sec = AggregatedMonth(self.ym, 'se', 'c')
+        return [
+            mmj.to_artifact(),
+            agg_sec.to_artifact(),
+        ]
+
     def _df(self) -> DataFrame:
         mmj = ModesMonthJson(self.ym)
         id2idx = mmj.id2idx
