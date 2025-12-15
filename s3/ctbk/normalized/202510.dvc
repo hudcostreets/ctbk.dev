@@ -1,0 +1,8 @@
+outs:
+- path: '202510'
+meta:
+  computation:
+    cmd: ctbk norm create 202510
+    code_ref: b6e9002f07d3c2451a2e4ae97b3a69f118c056d0
+    deps:
+      s3/tripdata/202510-citibike-tripdata.zip: 13359e91ae30df17495ee6a9518f2c2d

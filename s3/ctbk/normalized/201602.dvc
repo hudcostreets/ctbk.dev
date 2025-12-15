@@ -2,5 +2,11 @@ outs:
 - md5: 6e2f1f246a2d5ff10bea63c8e2e8937f.dir
   size: 13646664
   nfiles: 2
-  hash: md5
   path: '201602'
+meta:
+  computation:
+    cmd: ctbk norm create 201602
+    code_ref: b6e9002f07d3c2451a2e4ae97b3a69f118c056d0
+    deps:
+      s3/tripdata/2016-citibike-tripdata.zip: a18d5376bcbc99caaef4800108f6223b
+      s3/tripdata/JC-201602-citibike-tripdata.csv.zip: f348433da2c7ecb9c3728230efb9bbb7

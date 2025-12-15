@@ -99,6 +99,76 @@ class ConsolidatedMonth(MonthTable):
         super().__init__(ym)
 
     @property
+    def cmd(self) -> str:
+        """CLI command that produces this consolidated month."""
+        return f"ctbk cons create {self.ym}"
+
+    def dep_artifacts(self):
+        """Return dependency artifacts for consolidated month.
+
+        Consolidated parquet for month M includes all rides *ending* in M,
+        which can come from any normalized directory (rides from earlier months
+        that span into M). Uses glob to discover actual parquet files.
+
+        Returns file-level Artifacts for each parquet file, with hashes resolved
+        from the parent directory's DVC manifest. This provides fine-grained
+        invalidation - only changes to the specific parquet files trigger rebuild,
+        not changes to unrelated files in the same directory.
+
+        For 202001-202101: also includes v0 parquets for backfilling.
+
+        Raises:
+            RuntimeError: If the normalized directory for this month doesn't exist.
+        """
+        from dvx.run.artifact import Artifact
+        from os.path import exists
+        from ctbk.util.ym import GENESIS
+
+        ym = self.ym
+        base_dir = self.dir  # s3/ctbk/normalized
+
+        # ALL normalized directories from GENESIS to this month must exist.
+        # Upstream data can have arbitrary month mappings - any tripdata month
+        # could theoretically contain rides ending in any other month.
+        missing = []
+        for check_ym in GENESIS.until(ym + 1):
+            check_dir = f'{base_dir}/{check_ym}'
+            if not exists(check_dir):
+                missing.append(str(check_ym))
+
+        if missing:
+            raise RuntimeError(
+                f"Cannot prep consolidated {ym}: {len(missing)} normalized directories missing. "
+                f"Missing: {', '.join(missing[:5])}{'...' if len(missing) > 5 else ''}. "
+                f"Run `ctbk norm create` for these months first."
+            )
+
+        # Find all parquets with rides ending in this month
+        # Pattern: s3/ctbk/normalized/*/20*_{ym}.parquet
+        pqt_pattern = f'{base_dir}/20*/20*_{ym}.parquet'
+        pqt_paths = sorted(glob(pqt_pattern))
+
+        artifacts = []
+        for pqt_path in pqt_paths:
+            # Artifact.from_dvc now handles files inside DVC-tracked directories:
+            # it walks up to find the parent .dvc file and looks up the file hash
+            # from the directory manifest
+            artifact = Artifact.from_dvc(pqt_path)
+            if artifact and artifact not in artifacts:
+                artifacts.append(artifact)
+
+        # For 202001-202101: add v0 parquets for backfilling
+        if ym.y >= 2020 and ym <= YM(202101):
+            v0_pattern = f'{base_dir}/v0/20*/20*_{ym}.parquet'
+            v0_paths = sorted(glob(v0_pattern))
+            for pqt_path in v0_paths:
+                artifact = Artifact.from_dvc(pqt_path)
+                if artifact and artifact not in artifacts:
+                    artifacts.append(artifact)
+
+        return artifacts
+
+    @property
     def save_kwargs(self):
         return dict(write_kwargs=dict(index=False, engine=self.engine))
 

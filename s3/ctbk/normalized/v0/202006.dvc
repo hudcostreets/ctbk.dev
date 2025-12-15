@@ -2,5 +2,10 @@ outs:
 - md5: afe39c2cb1fee48d481859b459c85c00.dir
   size: 50151954
   nfiles: 2
-  hash: md5
   path: '202006'
+meta:
+  computation:
+    cmd: ctbk partition run 202006
+    code_ref: b6e9002f07d3c2451a2e4ae97b3a69f118c056d0
+    deps:
+      s3/ctbk/normalized/v0/202006.parquet: e3804ad9b49695d202894cf4c5c7e62d

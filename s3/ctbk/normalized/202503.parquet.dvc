@@ -1,5 +1,11 @@
 outs:
 - md5: e61f38088204d114c34640cd278c993c
   size: 137649507
-  hash: md5
   path: 202503.parquet
+meta:
+  computation:
+    cmd: ctbk cons create 202503
+    code_ref: b6e9002f07d3c2451a2e4ae97b3a69f118c056d0
+    deps:
+      s3/ctbk/normalized/202503/202502_202503.parquet: cf5f7b4a1461fea2fba7b459e457912e
+      s3/ctbk/normalized/202503/202503_202503.parquet: 0eee8e775c7e22b46d54c00ede47e80e
