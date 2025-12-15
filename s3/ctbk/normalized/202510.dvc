@@ -1,5 +1,9 @@
 outs:
 - path: '202510'
+  md5: f3940e36edc08923d04a7103ac395c90.dir
+  size: 204645817
+  nfiles: 2
+  hash: md5
 meta:
   computation:
     cmd: ctbk norm create 202510
