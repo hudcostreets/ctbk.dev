@@ -6,11 +6,11 @@ from typing import Optional
 
 import utz
 from click import option, Group, argument
-from utz import decos, YM, run, err
+from utz import decos, YM, err
 from utz.case import dash_case
-from utz.cli import count
 
 from ctbk.cli.base import ctbk, StableCommandOrder
+from ctbk.cli.workflow import Workflow, workflow_option, run_workflow
 from ctbk.task import Task
 from ctbk.tasks import Tasks
 from ctbk.util import GENESIS
@@ -93,24 +93,24 @@ class HasRootCLI(Tasks, ABC):
         if create:
             @cmd(help="Create selected datasets")
             @decos(create_decos or [])
-            @count('-G', '--no-git', help="0x: `dvc add`, `git commit`, `dvc push`; 1x: `dvc add`, `dvc push` (no commit); 2x: skip all")
+            @workflow_option
             def create(
-                no_git: int,
+                workflow: int,
                 **kwargs,
             ):
                 tasks = cls(**kwargs)
                 tasks.create()
-                if no_git < 2:
-                    children = [ child.url for child in tasks.children ]
-                    run('dvc', 'add', *children)
-                    if no_git < 1:
-                        argv = sys.argv
-                        ctbk, *args = argv
-                        if basename(ctbk) == 'ctbk':
-                            argv = ['ctbk', *args]
-                        msg = f"`{' '.join(argv)}`"
-                        run('git', 'commit', '-m', msg)
-                    run('dvc', 'push', *children)
+
+                # Build commit message from command line
+                argv = sys.argv
+                ctbk_cmd, *args = argv
+                if basename(ctbk_cmd) == 'ctbk':
+                    argv = ['ctbk', *args]
+                commit_msg = f"`{' '.join(argv)}`"
+
+                # Run workflow steps
+                paths = [child.url for child in tasks.children]
+                run_workflow(paths, workflow, commit_msg)
 
         if prep:
             @cmd(help="Generate .dvc specs with computation provenance (DVX prep phase)")
@@ -129,7 +129,9 @@ class HasRootCLI(Tasks, ABC):
             @decos(create_decos or [])
             @option('-n', '--dry-run', is_flag=True, help="Show what would be executed without running")
             @option('-f', '--force', is_flag=True, help="Force re-run even if fresh")
-            def run_cmd(dry_run: bool, force: bool, **kwargs):
+            @option('-j', '--jobs', type=int, default=1, help="Number of parallel jobs (-1 for CPU count)")
+            @workflow_option
+            def run_cmd(dry_run: bool, force: bool, jobs: int, workflow: int, **kwargs):
                 from dvx.run.artifact import materialize
 
                 tasks = cls(**kwargs)
@@ -144,9 +146,23 @@ class HasRootCLI(Tasks, ABC):
                         status = "fresh" if fresh else f"stale ({reason})"
                         err(f"{artifact.path}: {status}")
                 else:
-                    computed = materialize(artifacts, force=force)
+                    # Level 0 = compute only (no .dvc update)
+                    # Level 1+ = update .dvc files
+                    update_dvc = workflow >= Workflow.ADD
+                    computed = materialize(artifacts, force=force, parallel=jobs, update_dvc=update_dvc)
+
                     if computed:
                         err(f"Computed {len(computed)} artifact(s)")
+
+                        # Run higher workflow levels (git add, commit, push, etc.)
+                        if workflow >= Workflow.COMMIT:
+                            argv = sys.argv
+                            ctbk_cmd, *args = argv
+                            if basename(ctbk_cmd) == 'ctbk':
+                                argv = ['ctbk', *args]
+                            commit_msg = f"`{' '.join(argv)}`"
+                            paths = [a.path for a in computed]
+                            run_workflow(paths, workflow, commit_msg)
                     else:
                         err("All artifacts are fresh")
 

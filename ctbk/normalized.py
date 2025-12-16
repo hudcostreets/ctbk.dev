@@ -289,8 +289,11 @@ class NormalizedMonth(MonthDirTables):
 
     @property
     def cmd(self) -> str:
-        """CLI command that produces this normalized month."""
-        return f"ctbk norm create {self.ym}"
+        """CLI command that produces this normalized month.
+
+        Uses -w0 to skip workflow operations (for parallel execution safety).
+        """
+        return f"ctbk norm create -w0 {self.ym}"
 
     def dep_artifacts(self):
         """Return TripdataMonth artifacts as dependencies."""
