@@ -1,5 +1,12 @@
 outs:
 - md5: 89161feb95b6381291f70e45d8bee1e4
   size: 56841
-  hash: md5
   path: stations.json
+meta:
+  computation:
+    cmd: ctbk sm create 201701
+    code_ref: b021cbecaa302046014ebae471d8a1cc3053ee70
+    deps:
+      s3/ctbk/stations/meta_hists/in_201701.parquet: 336d9dde74337de9a5b91fc1e52303bc
+      s3/ctbk/stations/meta_hists/il_201701.parquet: a9f45a3cb117643edcb43214884081a2
+      s3/ctbk/aggregated/e_c_201701.parquet: cd6672b861d5b18c7edb05f3c72b27f6

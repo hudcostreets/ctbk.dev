@@ -5,6 +5,6 @@ outs:
 meta:
   computation:
     cmd: ctbk agg create -g e -a c 202507
-    code_ref: 8a03df005fb5b34956ac0b33ad51266955a5666e
+    code_ref: b021cbecaa302046014ebae471d8a1cc3053ee70
     deps:
       s3/ctbk/normalized/202507.parquet: 745fb36373491901fb4210c3298a6c63

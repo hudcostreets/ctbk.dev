@@ -14,14 +14,28 @@ This is **ctbk.dev** - a data pipeline and visualization dashboard for NYC Citi 
 
 ### Data Pipeline Flow
 ```
-TripdataZips (s3://tripdata) → TripdataCsvs → NormalizedMonths → AggregatedMonths → StationModes → StationPairJsons
+TripdataZips (s3://tripdata) → NormalizedMonths → ConsolidatedMonths → AggregatedMonths → StationModes → StationPairJsons
 ```
 
 The pipeline processes raw Citi Bike `.csv.zip` files through multiple stages:
 1. **Extraction**: Download and unzip CSVs from public S3 bucket
-2. **Normalization**: Merge NYC/JC regions, harmonize columns 
-3. **Aggregation**: Generate histograms by various dimensions (time, station, user type, etc.)
-4. **Station metadata**: Compute canonical station info and ride counts between station pairs
+2. **Normalization**: Merge NYC/JC regions, harmonize columns, split by (source, start, end) months
+3. **Consolidation**: Combine all records ending in a given month into a single parquet
+4. **Aggregation**: Generate histograms by various dimensions (time, station, user type, etc.)
+5. **Station metadata**: Compute canonical station info and ride counts between station pairs
+
+### Normalized vs Consolidated Structure
+The `s3/ctbk/normalized/` directory contains two types of DVC-tracked outputs per month:
+
+- **`YYYYMM/`** (directory): Output of `ctbk norm create`, contains parquet files split by source month
+  - Example: `202006/202005_202006.parquet` = rides from May 2020 tripdata that ended in June 2020
+  - Tracked by `YYYYMM.dvc`
+
+- **`YYYYMM.parquet`** (single file): Output of `ctbk cons create`, the canonical consolidated month
+  - Combines all records from any normalized directory that end in this month
+  - Tracked by `YYYYMM.parquet.dvc`
+
+**Special case**: Months 202001-202101 have additional "v0" input data (`normalized/v0/`) used for backfilling older columns (Gender, Birth Year, Bike ID) that were removed in 202102
 
 ### Key Directories
 - `/ctbk/` - Python package with CLI and data processing logic

@@ -1,5 +1,10 @@
 outs:
 - md5: 8b32ba0484b68f9e0cd5005fe4b39fd9
   size: 14317
-  hash: md5
   path: in_201602.parquet
+meta:
+  computation:
+    cmd: ctbk smh create -g in 201602
+    code_ref: b021cbecaa302046014ebae471d8a1cc3053ee70
+    deps:
+      s3/ctbk/normalized/201602.parquet: 460d5194e3b9c80519775d8ee618c3ec

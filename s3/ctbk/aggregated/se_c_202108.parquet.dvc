@@ -1,5 +1,10 @@
 outs:
 - md5: f4d9fb652aeb0596122022e1c8e4a052
   size: 922973
-  hash: md5
   path: se_c_202108.parquet
+meta:
+  computation:
+    cmd: ctbk agg create -g se -a c 202108
+    code_ref: b021cbecaa302046014ebae471d8a1cc3053ee70
+    deps:
+      s3/ctbk/normalized/202108.parquet: 5574d90be099d68d3bddd70717c8e38d

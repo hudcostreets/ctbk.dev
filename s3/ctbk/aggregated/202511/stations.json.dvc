@@ -5,7 +5,7 @@ outs:
 meta:
   computation:
     cmd: ctbk sm create 202511
-    code_ref: 8a03df005fb5b34956ac0b33ad51266955a5666e
+    code_ref: b021cbecaa302046014ebae471d8a1cc3053ee70
     deps:
       s3/ctbk/stations/meta_hists/in_202511.parquet: 95b453b26d42eac8a1a2bc87d6617af5
       s3/ctbk/stations/meta_hists/il_202511.parquet: 2ddff4e8c18f00349aa9fc8a73f828f2

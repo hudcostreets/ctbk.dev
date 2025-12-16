@@ -1,5 +1,10 @@
 outs:
 - md5: 171814d95c82c67b52056dbedd4fea4d
   size: 5884
-  hash: md5
   path: ymrgtb_cd_202304.parquet
+meta:
+  computation:
+    cmd: ctbk agg create -g ymrgtb -a cd 202304
+    code_ref: b021cbecaa302046014ebae471d8a1cc3053ee70
+    deps:
+      s3/ctbk/normalized/202304.parquet: 95bf76837d79227f8b7a231c1cd3977b

@@ -5,7 +5,7 @@ outs:
 meta:
   computation:
     cmd: ctbk spj create 202510
-    code_ref: 8a03df005fb5b34956ac0b33ad51266955a5666e
+    code_ref: b021cbecaa302046014ebae471d8a1cc3053ee70
     deps:
       s3/ctbk/aggregated/202510/stations.json: 8c5dcd1c4b30f90f068883184641dba7
       s3/ctbk/aggregated/se_c_202510.parquet: 23d8ac789a9467fb63895eaf9cd0d1e6
