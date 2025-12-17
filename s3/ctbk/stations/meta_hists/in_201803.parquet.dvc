@@ -2,6 +2,7 @@ outs:
 - md5: c1b4dcd14eb4fbbf252e9df3131995bc
   size: 21088
   path: in_201803.parquet
+  hash: md5
 meta:
   computation:
     cmd: ctbk smh create -g in 201803

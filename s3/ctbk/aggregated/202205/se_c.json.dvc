@@ -2,6 +2,7 @@ outs:
 - md5: fd84b26c352098473731d1c64e584d2d
   size: 3592206
   path: se_c.json
+  hash: md5
 meta:
   computation:
     cmd: ctbk spj create 202205

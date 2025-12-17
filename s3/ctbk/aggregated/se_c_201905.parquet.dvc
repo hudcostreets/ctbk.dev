@@ -2,6 +2,7 @@ outs:
 - md5: 93bc2a8e6702a6f8db8c047e435f2672
   size: 436466
   path: se_c_201905.parquet
+  hash: md5
 meta:
   computation:
     cmd: ctbk agg create -g se -a c 201905

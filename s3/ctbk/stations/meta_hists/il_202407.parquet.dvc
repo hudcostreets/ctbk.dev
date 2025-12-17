@@ -2,6 +2,7 @@ outs:
 - md5: 542507e91b4d9832422517ebbf532a59
   size: 420779
   path: il_202407.parquet
+  hash: md5
 meta:
   computation:
     cmd: ctbk smh create -g il 202407

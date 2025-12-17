@@ -2,6 +2,7 @@ outs:
 - md5: da14ef12befc28a9e1b9f8aae9d4be7b
   size: 162745
   path: stations.json
+  hash: md5
 meta:
   computation:
     cmd: ctbk sm create 202210

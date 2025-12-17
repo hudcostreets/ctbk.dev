@@ -2,6 +2,7 @@ outs:
 - md5: 6eaa84726b9521be2780bf5ee7e06745
   size: 40613080
   path: 201706.parquet
+  hash: md5
 meta:
   computation:
     cmd: ctbk cons create 201706

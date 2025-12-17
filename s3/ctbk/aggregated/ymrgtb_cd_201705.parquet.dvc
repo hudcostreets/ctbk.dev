@@ -2,6 +2,7 @@ outs:
 - md5: 863f0a6457a7c1d255bce296298804ff
   size: 6464
   path: ymrgtb_cd_201705.parquet
+  hash: md5
 meta:
   computation:
     cmd: ctbk agg create -g ymrgtb -a cd 201705

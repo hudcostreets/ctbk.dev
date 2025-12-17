@@ -2,6 +2,7 @@ outs:
 - md5: a59799e282fe59641999c0aa5ff1e5f2
   size: 20157
   path: e_c_202205.parquet
+  hash: md5
 meta:
   computation:
     cmd: ctbk agg create -g e -a c 202205
