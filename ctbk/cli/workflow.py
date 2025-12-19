@@ -74,20 +74,17 @@ def run_workflow(
     from pathlib import Path
     from utz import run, err
 
-    from dvx.run.artifact import Artifact
-
     level = Workflow.from_value(workflow)
 
     if level < Workflow.ADD:
         return  # Nothing to do
 
-    # Level 1+: dvx add (compute hash, update .dvc)
+    # Level 1+: dvx add (compute hash, add to cache, update .dvc)
     for path in paths:
         p = Path(path)
         if p.exists():
-            artifact = Artifact.from_path(p)
-            dvc_path = artifact.write_dvc()
-            err(f"Updated {dvc_path}")
+            run('dvx', 'add', str(p))
+            err(f"Added {p}")
         else:
             err(f"Warning: {path} does not exist, skipping dvx add")
 
