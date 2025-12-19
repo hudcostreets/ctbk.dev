@@ -20,10 +20,10 @@ dependencies = [
     "lxml>=5.4.0",
     "numpy>=2.2.6",
     # Pinned for byte-reproducible parquet output
-    "pandas==2.2.3",
+    "pandas==2.3.3",
     "plotly>=6.1.2",
     # Pinned for byte-reproducible parquet output
-    "pyarrow==17.0.0",
+    "pyarrow==22.0.0",
     "python-dateutil>=2.9.0.post0",
     "s3fs>=2025.5.1",
     "SQLAlchemy>=2.0.41",

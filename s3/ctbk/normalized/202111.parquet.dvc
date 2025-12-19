@@ -1,21 +1,9 @@
 outs:
-- md5: 1f3e703aad4dbba187648034d0ee7da4
-  size: 91429989
-  path: 202111.parquet
+- md5: f150b1d54f407ae8a2dd30dfa5979f02
+  size: 91002064
   hash: md5
+  path: 202111.parquet
 meta:
   computation:
     cmd: ctbk cons create 202111
-    code_ref: b6e9002f07d3c2451a2e4ae97b3a69f118c056d0
-    deps:
-      s3/ctbk/normalized/202109/202109_202111.parquet: 40e8ac2ad0a0472ab94cb49b6e8ae466
-      s3/ctbk/normalized/202110/202110_202111.parquet: e725f54044f8589300a9e83af3b463d5
-      s3/ctbk/normalized/202111/202003_202111.parquet: f9467acfb3cd8c9538babf2a66de7f90
-      s3/ctbk/normalized/202111/202007_202111.parquet: 72397d7772f1b0abd3aebef30de4cfbf
-      s3/ctbk/normalized/202111/202008_202111.parquet: 085ca20ffc0674f2d9f8c6619d0c428c
-      s3/ctbk/normalized/202111/202010_202111.parquet: c151bbba53dbd677c0c4119978738311
-      s3/ctbk/normalized/202111/202011_202111.parquet: d62d7960e6f0834d2ab671dbabcb46a4
-      s3/ctbk/normalized/202111/202104_202111.parquet: 3e549c5c78745dd26f20460bbac45efd
-      s3/ctbk/normalized/202111/202107_202111.parquet: 9e8d8e0ce228c6e93e91625e8f46cbaa
-      s3/ctbk/normalized/202111/202110_202111.parquet: bd45966deab836b93d9a277f6f373463
-      s3/ctbk/normalized/202111/202111_202111.parquet: 2817d7a03d21bcca0e8f2776c0c74892
+    code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b

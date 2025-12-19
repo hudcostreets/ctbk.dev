@@ -1,11 +1,11 @@
 outs:
 - md5: d8dea7add5ecada1607b4c51b2ca93c7
   size: 48189
-  path: in_202308.parquet
   hash: md5
+  path: in_202308.parquet
 meta:
   computation:
     cmd: ctbk smh create -g in 202308
-    code_ref: b021cbecaa302046014ebae471d8a1cc3053ee70
+    code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      s3/ctbk/normalized/202308.parquet: 4307267edb950c4e7db229fbab3a3477
+      s3/ctbk/normalized/202308.parquet: 2747b5503b2adb67bc1d6ef0f86efd28

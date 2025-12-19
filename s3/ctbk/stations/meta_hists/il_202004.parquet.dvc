@@ -1,11 +1,11 @@
 outs:
 - md5: ab320349fcf9c4a0552015997e8cfd76
   size: 43756
-  path: il_202004.parquet
   hash: md5
+  path: il_202004.parquet
 meta:
   computation:
     cmd: ctbk smh create -g il 202004
-    code_ref: b021cbecaa302046014ebae471d8a1cc3053ee70
+    code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      s3/ctbk/normalized/202004.parquet: c99e7c2553e645d8a3a73162b8d54ddb
+      s3/ctbk/normalized/202004.parquet: 1961572b757f25ec692999cc45891cd3

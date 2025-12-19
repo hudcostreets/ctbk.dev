@@ -1,25 +1,25 @@
 outs:
-- md5: 2bdf200b9a489f117d19ce485041b7e4
-  size: 49366173
-  path: 202012.parquet
+- md5: 630eb3f28ca0551064d5a87fa1282b76
+  size: 49151680
   hash: md5
+  path: 202012.parquet
 meta:
   computation:
     cmd: ctbk cons create 202012
     code_ref: b6e9002f07d3c2451a2e4ae97b3a69f118c056d0
     deps:
-      s3/ctbk/normalized/202011/202011_202012.parquet: c2aa3d175813f2251bc4aacaf232b3b5
-      s3/ctbk/normalized/202012/201908_202012.parquet: 69c9a0b54fdb68fb229872b303e27b7b
-      s3/ctbk/normalized/202012/201909_202012.parquet: ffdf4b263f6ea6507add17648a79865f
-      s3/ctbk/normalized/202012/202001_202012.parquet: 04b556eff2f507ff0e8738f08e965b2e
-      s3/ctbk/normalized/202012/202004_202012.parquet: 912154075d2fb0cfe0579d002924c243
-      s3/ctbk/normalized/202012/202005_202012.parquet: f738d5dd8a879f81ea7b25a2dad433c7
-      s3/ctbk/normalized/202012/202006_202012.parquet: 8cd21620a76c9afaf0cb366fbf4000ae
-      s3/ctbk/normalized/202012/202007_202012.parquet: 6925c69aecf7bd4bef48ee916c0ce122
-      s3/ctbk/normalized/202012/202008_202012.parquet: 87480c29b44cbd282949300cf9642d60
-      s3/ctbk/normalized/202012/202009_202012.parquet: 8b63c2ed2c8b26a1153d1b09d0e1d85a
-      s3/ctbk/normalized/202012/202010_202012.parquet: 7f0b9b1d92b47214b4e9649ce32ae28f
-      s3/ctbk/normalized/202012/202011_202012.parquet: 7a423ebd3adc2bf06d0b4266843ef5cb
-      s3/ctbk/normalized/202012/202012_202012.parquet: deab6b2d3228cd562c1ecf3d6b85fd8d
-      s3/ctbk/normalized/v0/202011/202011_202012.parquet: 1a99979f7a0e3b02c10a1c47a191444b
-      s3/ctbk/normalized/v0/202012/202012_202012.parquet: 350524694bb5eb7ae40c3edf2cb341a6
+      s3/ctbk/normalized/202011/202011_202012.parquet: e4cecf476575b22868da82d318fe5ac0
+      s3/ctbk/normalized/202012/201908_202012.parquet: 40b4176d4f0a560978ca259673524542
+      s3/ctbk/normalized/202012/201909_202012.parquet: 0721a23792698edb2fb77560cb0ab603
+      s3/ctbk/normalized/202012/202001_202012.parquet: 593e3ee8cd7accb425364bc18f3c6898
+      s3/ctbk/normalized/202012/202004_202012.parquet: 108e640c8b9cd034b7ab6bf23e32d3b5
+      s3/ctbk/normalized/202012/202005_202012.parquet: ecfa132af782988af02e4eacbd8e9c84
+      s3/ctbk/normalized/202012/202006_202012.parquet: 3b1146cf9daaf7084ab239fd1e6711f3
+      s3/ctbk/normalized/202012/202007_202012.parquet: 40be08049cd674970b69f0195ae0f996
+      s3/ctbk/normalized/202012/202008_202012.parquet: c7b2c9d08422ba6072966a32611f3688
+      s3/ctbk/normalized/202012/202009_202012.parquet: 876af3b13df1d0f982a089c8e39ca693
+      s3/ctbk/normalized/202012/202010_202012.parquet: af342b67007fb76374e346e809c7610b
+      s3/ctbk/normalized/202012/202011_202012.parquet: 5b9e144b76bf0f5cf43d870ed71c3c8b
+      s3/ctbk/normalized/202012/202012_202012.parquet: 41dc2a71bd5453eaacad0dafbef9e351
+      s3/ctbk/normalized/v0/202011/202011_202012.parquet: 1d66e82db26d430d7ff781694c0b6acb
+      s3/ctbk/normalized/v0/202012/202012_202012.parquet: d923879aa1c3a7a4cadc4c7c77c3b3bd

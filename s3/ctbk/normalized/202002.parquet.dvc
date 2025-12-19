@@ -1,22 +1,22 @@
 outs:
-- md5: de10950cb53baf0d1c1180dde951db30
-  size: 51468055
-  path: 202002.parquet
+- md5: b1a39d315dba4e28c621eb60d3a0f033
+  size: 51243688
   hash: md5
+  path: 202002.parquet
 meta:
   computation:
     cmd: ctbk cons create 202002
     code_ref: b6e9002f07d3c2451a2e4ae97b3a69f118c056d0
     deps:
-      s3/ctbk/normalized/202001/202001_202002.parquet: 136e7456a9badcd1d9046e08a424e6b4
-      s3/ctbk/normalized/202002/201906_202002.parquet: bb7412b06868159ffb80bc36edce4ada
-      s3/ctbk/normalized/202002/201907_202002.parquet: 2bfc00e499a42c032d2d33c759439440
-      s3/ctbk/normalized/202002/201908_202002.parquet: 795021b536088d2f5342315e6b041ef5
-      s3/ctbk/normalized/202002/201909_202002.parquet: cabaaaaf18523f540f45b03bc325bf86
-      s3/ctbk/normalized/202002/201910_202002.parquet: 18374572d690286bbfc1d54fe5ce94a1
-      s3/ctbk/normalized/202002/201911_202002.parquet: 7587c1dec0c4d1e2e5e3d41922db4c47
-      s3/ctbk/normalized/202002/201912_202002.parquet: 2a883056cc1ca0089016cfe70bbe6e35
-      s3/ctbk/normalized/202002/202001_202002.parquet: 887a772ad88e8a868a63947fe63f4626
-      s3/ctbk/normalized/202002/202002_202002.parquet: 3af8513da1499c6e5f58c859a0eef332
-      s3/ctbk/normalized/v0/202001/202001_202002.parquet: 44ea8f4daa1ceea5d1610e6d210b0c03
-      s3/ctbk/normalized/v0/202002/202002_202002.parquet: e1893671388d46ae8f0f5ad52c36a414
+      s3/ctbk/normalized/202001/202001_202002.parquet: 08d6edbd072707ef633b546ba26f0216
+      s3/ctbk/normalized/202002/201906_202002.parquet: 953500d2cf8350b3e33f7a4a36f24471
+      s3/ctbk/normalized/202002/201907_202002.parquet: 79c59160f94ab808afefbdf3ca4ed6a0
+      s3/ctbk/normalized/202002/201908_202002.parquet: 7b2e6a12c937a57d7fbf9076d3e5bda4
+      s3/ctbk/normalized/202002/201909_202002.parquet: 72e17c50b48596cbb3bade5ede871356
+      s3/ctbk/normalized/202002/201910_202002.parquet: 939f2168dc7329e88b1f725de795ad5f
+      s3/ctbk/normalized/202002/201911_202002.parquet: bcb468366807156efbad24b1c3e5eda2
+      s3/ctbk/normalized/202002/201912_202002.parquet: bb6c19677a8106ce27fffa241d62d8b6
+      s3/ctbk/normalized/202002/202001_202002.parquet: b3a975e3ec8377ee011b920481a800cd
+      s3/ctbk/normalized/202002/202002_202002.parquet: 181bd4ddb5f69ebe1a17f9abf3192f43
+      s3/ctbk/normalized/v0/202001/202001_202002.parquet: 312cb0bf30d985c3b734040b11010c24
+      s3/ctbk/normalized/v0/202002/202002_202002.parquet: c329f60b8a16c707d59f2eba00260ae0

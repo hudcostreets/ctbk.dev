@@ -1,12 +1,9 @@
 outs:
-- md5: 7c7735b88cbaaf67cfe7c03de9543201
-  size: 21962518
-  path: 201408.parquet
+- md5: 421ace8740b51aa3d81ba3b180331111
+  size: 21945828
   hash: md5
+  path: 201408.parquet
 meta:
   computation:
     cmd: ctbk cons create 201408
-    code_ref: b6e9002f07d3c2451a2e4ae97b3a69f118c056d0
-    deps:
-      s3/ctbk/normalized/201407/201407_201408.parquet: b4755648c5e852aa807eaa2e29598493
-      s3/ctbk/normalized/201408/201408_201408.parquet: 2a56b657a91efbb6c9f7f4f948a18ebb
+    code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b

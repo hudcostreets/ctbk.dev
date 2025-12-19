@@ -1,9 +1,9 @@
 outs:
-- md5: e11ed77d73816c4e42858952b5b94f07
-  size: 87906870
-  path: 202502.parquet
+- md5: e6a631d955c75b2f5358328b8d21a29e
+  size: 87500698
   hash: md5
+  path: 202502.parquet
 meta:
   computation:
     cmd: ctbk cons create 202502
-    code_ref: b6e9002f07d3c2451a2e4ae97b3a69f118c056d0
+    code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b

@@ -1,11 +1,11 @@
 outs:
 - md5: 800f699237f7ae59278807793c95503d
   size: 10585
-  path: e_c_201806.parquet
   hash: md5
+  path: e_c_201806.parquet
 meta:
   computation:
     cmd: ctbk agg create -g e -a c 201806
-    code_ref: b021cbecaa302046014ebae471d8a1cc3053ee70
+    code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      s3/ctbk/normalized/201806.parquet: c9044c72d37fd1ae6f3ccbb40b192b35
+      s3/ctbk/normalized/201806.parquet: 53963d578035e5eaeb4cf456e9e99a7a

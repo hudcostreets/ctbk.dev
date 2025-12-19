@@ -1,9 +1,8 @@
 outs:
-- md5: 55558689550796b601682a56394b546b.dir
-  size: 28503066
-  nfiles: 2
-  path: '202003'
+- md5: 2ea72e7b4acfd7bf63ff1c0d222e2760.dir
+  size: 28490905
   hash: md5
+  path: '202003'
 meta:
   computation:
     cmd: ctbk partition run 202003

@@ -1,13 +1,12 @@
 outs:
-- md5: 2c3261e53fd290051e82f30b79f80932.dir
-  size: 152443966
-  nfiles: 6
-  path: '202206'
+- md5: 62dcadb003e5a579390eb54965d93351.dir
+  size: 151755762
   hash: md5
+  path: '202206'
 meta:
   computation:
     cmd: ctbk norm create -w0 202206
-    code_ref: 42fc788e39e528db99722f843efd752d03c88571
+    code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
       s3/tripdata/2022-citibike-tripdata.zip: e84686fa629c88f15bbaf791c6db07f8
       s3/tripdata/JC-202206-citibike-tripdata.csv.zip: 7e77070b6dfc601e300933a3f1aa3e67
