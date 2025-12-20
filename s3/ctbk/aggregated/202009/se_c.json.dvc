@@ -9,4 +9,4 @@ meta:
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
       s3/ctbk/aggregated/202009/stations.json: 1f1dbd61e4df3aa9e226603a4c5e7da9
-      s3/ctbk/aggregated/se_c_202009.parquet: 826bb785ee424f3e7620deb684364db1
+      s3/ctbk/aggregated/se_c_202009.parquet: ff89e27f6360d49915edbe5f4d8eceb5

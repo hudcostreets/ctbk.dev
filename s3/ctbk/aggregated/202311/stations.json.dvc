@@ -8,6 +8,6 @@ meta:
     cmd: ctbk sm create 202311
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      s3/ctbk/stations/meta_hists/in_202311.parquet: 54739e3bfe69ba1c707be9819f581db1
-      s3/ctbk/stations/meta_hists/il_202311.parquet: 527d0bd4e3e111c3847a2366ed031100
-      s3/ctbk/aggregated/e_c_202311.parquet: 8777d99325721eecb1df3136d4542907
+      s3/ctbk/stations/meta_hists/in_202311.parquet: 743471c7ceeb5d0cb4745b04fcd49dfc
+      s3/ctbk/stations/meta_hists/il_202311.parquet: c3750ce588630803980fd6aae0f8e6bf
+      s3/ctbk/aggregated/e_c_202311.parquet: 2a2c0c172dab346251649a8dd30c4e9e

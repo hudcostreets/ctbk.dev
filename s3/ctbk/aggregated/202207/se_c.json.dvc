@@ -8,5 +8,5 @@ meta:
     cmd: ctbk spj create 202207
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      s3/ctbk/aggregated/202207/stations.json: cc54241a6f2de13abc8c69ed8c46002f
-      s3/ctbk/aggregated/se_c_202207.parquet: 559de29b68c06e5f784117dc9fa9bcf0
+      s3/ctbk/aggregated/202207/stations.json: da764ee1df1f97944519437a35e928b0
+      s3/ctbk/aggregated/se_c_202207.parquet: 0e5c1376f60c9a4ed1bf1e4be50e7ed9
