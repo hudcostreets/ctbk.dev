@@ -1,6 +1,6 @@
 outs:
-- md5: 5366f121c2f528ce1174fb13ababce1c
-  size: 6569
+- md5: fa276f11f358be2c506f60a37f0d17e5
+  size: 6036
   hash: md5
   path: ymrgtb_cd_202207.parquet
 meta:

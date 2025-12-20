@@ -1,6 +1,6 @@
 outs:
-- md5: a5cfd6501afa6c547ee98416649294bc
-  size: 24503
+- md5: 00d1a478749f480e0c4f778771221472
+  size: 24269
   hash: md5
   path: in_202004.parquet
 meta:

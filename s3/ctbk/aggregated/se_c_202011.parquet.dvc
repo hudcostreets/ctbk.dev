@@ -1,6 +1,6 @@
 outs:
-- md5: 2d64e564c1cc02cf032e69d9d3fda807
-  size: 625881
+- md5: d0ff3dda9a90c835342b30d0deb27eee
+  size: 625316
   hash: md5
   path: se_c_202011.parquet
 meta:

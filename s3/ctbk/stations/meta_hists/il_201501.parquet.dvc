@@ -1,6 +1,6 @@
 outs:
-- md5: 91297fbb4b429ff9d42303816ca70c9b
-  size: 12440
+- md5: 94cce4ff46e2fcee55a6d4f23ca88840
+  size: 12188
   hash: md5
   path: il_201501.parquet
 meta:
