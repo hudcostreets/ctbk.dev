@@ -3,7 +3,7 @@ import 'leaflet/dist/leaflet.css'
 import { useEffect, useMemo, useState } from 'react'
 import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
 import { Link } from 'react-router-dom'
-import css from "../../pages/stations.module.css"
+import css from "../stations.module.css"
 
 const MANIFEST_URL = '/assets/station-urls.json'
 const DEFAULT_CENTER: [number, number] = [40.758, -73.965]

@@ -4,7 +4,7 @@ import { Data } from 'plotly.js'
 import { ReactNode, useEffect, useMemo, useState } from 'react'
 import Plot from 'react-plotly.js'
 import { Link, useLocation } from 'react-router-dom'
-import css from "../../pages/index.module.css"
+import css from "../index.module.css"
 import controlCss from "../controls.module.css"
 import { Checkbox } from "../components/Checkbox"
 import { Checklist } from "../components/Checklist"
