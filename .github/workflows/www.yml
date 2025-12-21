@@ -31,7 +31,10 @@ jobs:
         run: pnpm install
       - name: Build
         working-directory: www
-        run: pnpm build
+        run: |
+          pnpm build
+          # Copy index.html to 404.html for GHP SPA routing
+          cp dist/index.html dist/404.html
       - name: Serve and generate screenshots
         working-directory: www
         run: |

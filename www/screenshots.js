@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import program from 'commander'
+import { program } from 'commander'
 import puppeteer from 'puppeteer'
 
 const DEFAULT_INITIAL_LOAD_SELECTOR = '.plotly svg rect'
@@ -33,7 +33,7 @@ console.log("host:", host, "includes:", include);
   const screens = {
     'ctbk-rides': { query: '', height: 540, },
     'ctbk-nj': { query: '?r=jh', },
-    'ctbk-stations': { query: 'stations?lat=40.732&lng=-74.025&z=13.5&s=HB102', width: 800, height: 800, selector: '.leaflet-lines-pane svg path', preScreenshotSleep: 500, },
+    'ctbk-stations': { query: 'stations?lat=40.732&lng=-74.025&z=13.5&s=HB102', width: 800, height: 800, selector: '.leaflet-container', preScreenshotSleep: 2000, },
     'ctbk-ride-minutes-by-gender': { query: '?y=m&s=g&pct=&g=mf&d=1406-2102', },
     'ctbk-rides-by-user': { query: '?s=u&pct=', },
     'ctbk-ebike-minutes': { query: '?y=m&s=b&rt=ce&d=2002-', },
