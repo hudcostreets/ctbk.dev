@@ -1,0 +1,9 @@
+{
+  "ctbk-rides": { "query": "", "height": 540 },
+  "ctbk-nj": { "query": "?r=jh" },
+  "ctbk-stations": { "query": "stations?lat=40.737&lng=-74.029&z=13.5&s=HB106", "width": 800, "height": 800, "selector": ".leaflet-lines-pane path", "preScreenshotSleep": 2000 },
+  "ctbk-ride-minutes-by-gender": { "query": "?y=m&s=g&pct=&g=mf&d=1406-2102" },
+  "ctbk-rides-by-user": { "query": "?s=u&pct=" },
+  "ctbk-ebike-minutes": { "query": "?y=m&s=b&rt=ce&d=2002-" },
+  "ctbk-ebike-minutes-by-user": { "query": "?y=m&s=u&rt=e&d=2002-" }
+}

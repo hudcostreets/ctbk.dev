@@ -11,6 +11,7 @@
     "@mui/material": "^6.1.9",
     "@rdub/base": "0.7.9",
     "@rdub/icons": "0.1.0",
+    "@rdub/screenshots": "https://gitlab.com/api/v4/projects/77258162/repository/archive.tar.gz?sha=8ae7838",
     "@rdub/use-url-params": "github:runsascoded/use-url-params#15e54b3003e14cd31b5704ec0dce117737ef8709",
     "bootstrap": "^4.6.2",
     "d3-color": "^3.1.0",
@@ -34,19 +35,17 @@
     "@types/react-dom": "^18.2.18",
     "@types/react-plotly.js": "^2.6.3",
     "@vitejs/plugin-react": "^4.3.4",
-    "commander": "^14.0.2",
-    "puppeteer": "^24.34.0",
     "serve": "^14.2.5",
     "typescript": "^5.7.0",
-    "vite": "^6.0.0",
-    "yaml": "^2.8.2"
+    "vite": "^6.0.0"
   },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint .",
-    "tc": "tsc"
+    "tc": "tsc",
+    "screenshots": "screenshots -c screenshots.json -o public/screenshots -s '.plotly svg rect' -l 30000"
   },
   "repository": {
     "type": "git",

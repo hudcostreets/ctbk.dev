@@ -43,7 +43,7 @@ jobs:
           SERVER_PID=$!
           sleep 2
           # Generate screenshots
-          node screenshots.js -h localhost:8080 -l 120000
+          pnpm screenshots -h localhost:8080 -l 120000
           # Stop server
           kill $SERVER_PID
       - name: Push + re-run, if screenshots changed
