@@ -17,15 +17,24 @@
     height: 100%;
 }
 
-.title {
-    margin: 0.2em 1.5em;
-    text-align: center;
-    line-height: 1.15;
-    font-size: 2rem;
+.titleContainer {
     position: fixed;
     top: 0;
     z-index: 1000;
+    text-align: center;
+    margin: 0.2em 1.5em;
+}
+
+.title {
+    line-height: 1.15;
+    font-size: 2rem;
     color: white;
+}
+
+.subtitle {
+    font-size: 1.3rem;
+    color: #ddd;
+    margin-top: 0.1em;
 }
 
 .homeMap {

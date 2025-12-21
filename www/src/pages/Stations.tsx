@@ -235,13 +235,8 @@ export default function Stations() {
     return new Date(year, m - 1).toLocaleDateString('default', { month: 'short', year: 'numeric' })
   }, [month])
 
-  const title = useMemo(() => {
-    let t = `Citi Bike rides by station, ${monthLabel}`
-    if (selectedId && stations?.[selectedId]) {
-      t += ` — ${stations[selectedId].name}`
-    }
-    return t
-  }, [monthLabel, selectedId, stations])
+  const title = `Citi Bike rides by station, ${monthLabel}`
+  const subtitle = selectedId && stations?.[selectedId] ? stations[selectedId].name : null
 
   if (error) {
     return (
@@ -278,7 +273,10 @@ export default function Stations() {
           <MapEvents setLat={setLat} setLng={setLng} setZoom={setZoom} />
         </MapContainer>
         {loading && <div className={css.loading}>Loading...</div>}
-        <div className={css.title}>{title}</div>
+        <div className={css.titleContainer}>
+          <div className={css.title}>{title}</div>
+          {subtitle && <div className={css.subtitle}>{subtitle}</div>}
+        </div>
       </main>
     </div>
   )
