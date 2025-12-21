@@ -24,8 +24,8 @@ importers:
         specifier: 0.1.0
         version: 0.1.0(@types/react@18.3.27)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@rdub/use-url-params':
-        specifier: link:../../../js/use-url-params
-        version: link:../../../js/use-url-params
+        specifier: github:runsascoded/use-url-params#e701adf682091b89ef7d69f0a75a7dd375f63002
+        version: https://codeload.github.com/runsascoded/use-url-params/tar.gz/e701adf682091b89ef7d69f0a75a7dd375f63002(react@18.3.1)
       bootstrap:
         specifier: ^4.6.2
         version: 4.6.2(jquery@3.7.1)(popper.js@1.16.1)
@@ -574,6 +574,12 @@ packages:
     peerDependencies:
       react: ^18
       react-dom: ^18
+
+  '@rdub/use-url-params@https://codeload.github.com/runsascoded/use-url-params/tar.gz/e701adf682091b89ef7d69f0a75a7dd375f63002':
+    resolution: {tarball: https://codeload.github.com/runsascoded/use-url-params/tar.gz/e701adf682091b89ef7d69f0a75a7dd375f63002}
+    version: 0.1.2-dist.246ed81
+    peerDependencies:
+      react: ^18.0.0
 
   '@react-leaflet/core@2.1.0':
     resolution: {integrity: sha512-Qk7Pfu8BSarKGqILj4x7bCSZ1pjuAPZ+qmRwH5S7mDS91VSbVVsJSrW4qA+GPrro8t69gFYVMWb1Zc4yFmPiVg==}
@@ -3184,6 +3190,10 @@ snapshots:
       - '@mui/material-pigment-css'
       - '@types/react'
       - supports-color
+
+  '@rdub/use-url-params@https://codeload.github.com/runsascoded/use-url-params/tar.gz/e701adf682091b89ef7d69f0a75a7dd375f63002(react@18.3.1)':
+    dependencies:
+      react: 18.3.1
 
   '@react-leaflet/core@2.1.0(leaflet@1.9.4)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
     dependencies:

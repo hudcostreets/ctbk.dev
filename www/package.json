@@ -1,55 +1,55 @@
 {
-    "name": "ctbk.dev",
-    "homepage": "https://ctbk.dev",
-    "version": "0.2.0",
-    "license": "MIT",
-    "author": "Ryan Williams <ryan@runsascoded.com",
-    "type": "module",
-    "dependencies": {
-        "@emotion/react": "^11.13.5",
-        "@emotion/styled": "^11.13.5",
-        "@mui/material": "^6.1.9",
-        "@rdub/base": "0.7.9",
-        "@rdub/icons": "0.1.0",
-        "@rdub/use-url-params": "link:../../../js/use-url-params",
-        "bootstrap": "^4.6.2",
-        "d3-color": "^3.1.0",
-        "danfojs": "^1.1.2",
-        "leaflet": "^1.9.4",
-        "lodash": "^4.17.21",
-        "moment": "^2.30.1",
-        "plotly.js": "^2.29.0",
-        "react": "^18.2.0",
-        "react-dom": "^18.2.0",
-        "react-leaflet": "^4.2.1",
-        "react-markdown": "^7.1.2",
-        "react-plotly.js": "^2.6.0",
-        "react-router-dom": "^6.28.0"
-    },
-    "devDependencies": {
-        "@types/leaflet": "^1.9.8",
-        "@types/lodash": "^4.14.202",
-        "@types/plotly.js": "^2.29.0",
-        "@types/react": "^18.2.52",
-        "@types/react-dom": "^18.2.18",
-        "@types/react-plotly.js": "^2.6.3",
-        "@vitejs/plugin-react": "^4.3.4",
-        "typescript": "^5.7.0",
-        "vite": "^6.0.0",
-        "yaml": "^2.8.2"
-    },
-    "scripts": {
-        "dev": "vite",
-        "build": "vite build",
-        "preview": "vite preview",
-        "lint": "eslint .",
-        "tc": "tsc"
-    },
-    "repository": {
-        "type": "git",
-        "url": "https://github.com/hudcostreets/ctbk.dev"
-    },
-    "bugs": {
-        "url": "https://github.com/hudcostreets/ctbk.dev/issues"
-    }
+  "name": "ctbk.dev",
+  "homepage": "https://ctbk.dev",
+  "version": "0.2.0",
+  "license": "MIT",
+  "author": "Ryan Williams <ryan@runsascoded.com",
+  "type": "module",
+  "dependencies": {
+    "@emotion/react": "^11.13.5",
+    "@emotion/styled": "^11.13.5",
+    "@mui/material": "^6.1.9",
+    "@rdub/base": "0.7.9",
+    "@rdub/icons": "0.1.0",
+    "@rdub/use-url-params": "github:runsascoded/use-url-params#e701adf682091b89ef7d69f0a75a7dd375f63002",
+    "bootstrap": "^4.6.2",
+    "d3-color": "^3.1.0",
+    "danfojs": "^1.1.2",
+    "leaflet": "^1.9.4",
+    "lodash": "^4.17.21",
+    "moment": "^2.30.1",
+    "plotly.js": "^2.29.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-leaflet": "^4.2.1",
+    "react-markdown": "^7.1.2",
+    "react-plotly.js": "^2.6.0",
+    "react-router-dom": "^6.28.0"
+  },
+  "devDependencies": {
+    "@types/leaflet": "^1.9.8",
+    "@types/lodash": "^4.14.202",
+    "@types/plotly.js": "^2.29.0",
+    "@types/react": "^18.2.52",
+    "@types/react-dom": "^18.2.18",
+    "@types/react-plotly.js": "^2.6.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "yaml": "^2.8.2"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "tc": "tsc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hudcostreets/ctbk.dev"
+  },
+  "bugs": {
+    "url": "https://github.com/hudcostreets/ctbk.dev/issues"
+  }
 }
