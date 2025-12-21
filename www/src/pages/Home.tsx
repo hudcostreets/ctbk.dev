@@ -318,7 +318,8 @@ export default function Home() {
     )
   }
 
-  const showLegendValue = showLegend === null ? stackBy !== 'None' : showLegend
+  // Show legend by default when stacking OR when rolling averages are visible
+  const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
   const gridcolor = "#ddd"
 
   const layout = {
