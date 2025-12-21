@@ -1,5 +1,6 @@
 // Data types for Citi Bike dashboard
-import type { Param } from "@rdub/use-url-params"
+// Re-export codeParam and codesParam from UUP for use in Home.tsx
+export { codeParam, codesParam } from "@rdub/use-url-params"
 
 export type Region = 'NYC' | 'JC' | 'HOB'
 export const Regions: Region[] = ['JC', 'HOB', 'NYC']
@@ -83,51 +84,6 @@ export const stackKeyDict: { [k in StackBy]: string[] } = {
 }
 
 export const toYM = (d: Date) => `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}`
-
-// Custom param for single-select with short codes
-export function singleCodeParam<T extends string>(
-  defaultValue: T,
-  codeMap: [T, string][],
-): Param<T> {
-  const valueToCode = new Map(codeMap)
-  const codeToValue = new Map(codeMap.map(([v, c]) => [c, v]))
-
-  return {
-    encode(value: T): string | undefined {
-      if (value === defaultValue) return undefined
-      return valueToCode.get(value) || value
-    },
-    decode(encoded: string | undefined): T {
-      if (!encoded) return defaultValue
-      return codeToValue.get(encoded) || defaultValue
-    },
-  }
-}
-
-// Custom param for multi-select with short codes
-export function multiCodeParam<T extends string>(
-  allValues: T[],
-  codeMap: [T, string][],
-  separator: string = ''
-): Param<T[]> {
-  const valueToCode = new Map(codeMap)
-  const codeToValue = new Map(codeMap.map(([v, c]) => [c, v]))
-
-  return {
-    encode(values: T[]): string | undefined {
-      // If all values selected, return undefined (default)
-      if (values.length === allValues.length && allValues.every(v => values.includes(v))) {
-        return undefined
-      }
-      return values.map(v => valueToCode.get(v) || v).join(separator)
-    },
-    decode(encoded: string | undefined): T[] {
-      if (!encoded) return [...allValues]
-      const codes = separator ? encoded.split(separator) : encoded.split('')
-      return codes.map(c => codeToValue.get(c)).filter((v): v is T => v !== undefined)
-    },
-  }
-}
 
 // Rolling average calculation for arrays
 export function rollingAvg(arr: (number | null)[], n: number): (number | null)[] {

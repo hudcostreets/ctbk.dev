@@ -20,7 +20,7 @@ import {
   GenderRollingAvgCutoff,
   Genders,
   Int2Gender,
-  multiCodeParam,
+  codesParam,
   NormalizeRideableType,
   RegionQueryStrings,
   Regions,
@@ -29,7 +29,7 @@ import {
   RideableTypes,
   rollingAvg,
   Row,
-  singleCodeParam,
+  codeParam,
   StackBy,
   StackByQueryStrings,
   stackKeyDict,
@@ -94,13 +94,13 @@ export default function Home() {
 
   // URL parameters with short code encoding (matching original Next.js version)
   // Note: params are re-read on each render, location dependency ensures this happens on navigation
-  const [yAxis, setYAxis] = useUrlParam('y', singleCodeParam<YAxis>('Rides', YAxisQueryStrings))
-  const [stackBy, setStackBy] = useUrlParam('s', singleCodeParam<StackBy>('None', StackByQueryStrings))
+  const [yAxis, setYAxis] = useUrlParam('y', codeParam<YAxis>('Rides', YAxisQueryStrings))
+  const [stackBy, setStackBy] = useUrlParam('s', codeParam<StackBy>('None', StackByQueryStrings))
   const [stackRelative, setStackRelative] = useUrlParam('pct', boolParam)
-  const [regions, setRegions] = useUrlParam('r', multiCodeParam(Regions, RegionQueryStrings))
-  const [userTypes, setUserTypes] = useUrlParam('u', multiCodeParam(UserTypes, UserTypeQueryStrings))
-  const [genders, setGenders] = useUrlParam('g', multiCodeParam(Genders, GenderQueryStrings))
-  const [rideableTypes, setRideableTypes] = useUrlParam('rt', multiCodeParam(RideableTypes, RideableTypeChars))
+  const [regions, setRegions] = useUrlParam('r', codesParam(Regions, RegionQueryStrings))
+  const [userTypes, setUserTypes] = useUrlParam('u', codesParam(UserTypes, UserTypeQueryStrings))
+  const [genders, setGenders] = useUrlParam('g', codesParam(Genders, GenderQueryStrings))
+  const [rideableTypes, setRideableTypes] = useUrlParam('rt', codesParam(RideableTypes, RideableTypeChars))
   const [dateRange, setDateRange] = useUrlParam('d', dateRangeParam())
   const [rollingAvgs, setRollingAvgs] = useUrlParam('avg', numberArrayParam([12]))
   const [showLegend, setShowLegend] = useState<boolean | null>(null)
