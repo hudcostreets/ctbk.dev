@@ -367,7 +367,7 @@ export default function Home() {
           data={traces}
           layout={layout}
           useResizeHandler
-          style={{ width: '100%', aspectRatio: '768 / 410' }}
+          style={{ width: '100%', aspectRatio: '768 / 450' }}
           config={{ displayModeBar: false }}
         />
 
