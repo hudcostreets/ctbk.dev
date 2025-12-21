@@ -44,7 +44,8 @@
 }
 .title {
     font-size: 2em;
-    font-weight: normal;
+    font-weight: 500;
+    /*letter-spacing: -0.02em;*/
     margin-top: 0.2em;
     margin-bottom: 0.1em;
 }

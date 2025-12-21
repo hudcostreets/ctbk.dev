@@ -162,8 +162,8 @@ export default function Home() {
   }, [regions, rideableTypes, userTypes, stackPercents, stackBy])
 
   // Filter and aggregate data
-  const { traces } = useMemo(() => {
-    if (!data) return { traces: [] }
+  const { traces, months } = useMemo(() => {
+    if (!data) return { traces: [], months: [] }
 
     // Filter data
     const filtered = data.filter(row =>
@@ -295,7 +295,7 @@ export default function Home() {
       }
     }
 
-    return { traces: [...barTraces, ...rollingTraces] as Data[] }
+    return { traces: [...barTraces, ...rollingTraces] as Data[], months }
   }, [data, yAxis, stackBy, stackPercents, regions, userTypes, genders, rideableTypes, start, end, rollingAvgs, yHoverLabel, hovertemplate])
 
   if (loading) {
@@ -320,7 +320,7 @@ export default function Home() {
 
   // Show legend by default when stacking OR when rolling averages are visible
   const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
-  const gridcolor = "#ddd"
+  const gridcolor = "#ccc"
 
   const layout = {
     autosize: true,
@@ -335,9 +335,13 @@ export default function Home() {
       traceorder: 'normal' as const,
     },
     xaxis: {
-      tickfont: { size: 14 },
+      type: 'category' as const,
+      tickfont: { size: 12 },
       titlefont: { size: 14 },
-      tickformat: "%b '%y",
+      tickangle: -45,
+      tickmode: 'array' as const,
+      tickvals: months.filter(m => m.endsWith('-01')),
+      ticktext: months.filter(m => m.endsWith('-01')).map(m => `'${m.slice(2, 4)}`),
       gridcolor,
     },
     yaxis: {
