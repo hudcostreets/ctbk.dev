@@ -53,5 +53,8 @@
   },
   "bugs": {
     "url": "https://github.com/hudcostreets/ctbk.dev/issues"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["puppeteer"]
   }
 }

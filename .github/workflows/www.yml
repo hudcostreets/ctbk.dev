@@ -24,11 +24,14 @@ jobs:
       - name: Cache Puppeteer
         uses: actions/cache@v4
         with:
-          key: puppeteer-${{ runner.os }}
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('www/pnpm-lock.yaml') }}
           path: ~/.cache/puppeteer
       - name: Install
         working-directory: www
         run: pnpm install
+      - name: Ensure Chrome for Puppeteer
+        working-directory: www
+        run: for f in node_modules/.pnpm/puppeteer@*/node_modules/puppeteer/install.mjs; do node "$f"; done
       - name: Build
         working-directory: www
         run: |
