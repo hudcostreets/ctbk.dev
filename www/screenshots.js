@@ -33,12 +33,13 @@ console.log("host:", host, "includes:", include);
   const screens = {
     'ctbk-rides': { query: '', height: 540, },
     'ctbk-nj': { query: '?r=jh', },
-    'ctbk-stations': { query: 'stations.html?ll=40.732_-74.025&z=13.5&ss=HB102', width: 800, height: 800, selector: '.leaflet-lines-pane svg path', preScreenshotSleep: 500, },
+    'ctbk-stations': { query: 'stations?lat=40.732&lng=-74.025&z=13.5&s=HB102', width: 800, height: 800, selector: '.leaflet-lines-pane svg path', preScreenshotSleep: 500, },
     'ctbk-ride-minutes-by-gender': { query: '?y=m&s=g&pct=&g=mf&d=1406-2102', },
     'ctbk-rides-by-user': { query: '?s=u&pct=', },
     'ctbk-ebike-minutes': { query: '?y=m&s=b&rt=ce&d=2002-', },
     'ctbk-ebike-minutes-by-user': { query: '?y=m&s=u&rt=e&d=2002-', },
-    'plot-fallback': { query: '?dl=1', download: true },
+    // TODO: implement ?dl=1 download feature in Vite version
+    // 'plot-fallback': { query: '?dl=1', download: true },
   }
 
   const browser = await puppeteer.launch({ headless: 'new', args: ["--no-sandbox"], })

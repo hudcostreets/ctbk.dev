@@ -24,35 +24,25 @@ jobs:
       - name: Cache Puppeteer
         uses: actions/cache@v4
         with:
-          key: puppeteer
+          key: puppeteer-${{ runner.os }}
           path: ~/.cache/puppeteer
       - name: Install
         working-directory: www
-        run: |
-          pnpm install
-          pnpm up puppeteer
-      - name: Install chrome
-        run: pnpx puppeteer browsers install chrome
-      - name: Inspect puppeteer cache
-        run: tree -L 3 ~/.cache/puppeteer
-      - name: Check for puppeteer install script
-        run: ls -l www/node_modules/.pnpm/puppeteer*
-      - name: Inspect puppeteer cache
-        run: tree -L 3 ~/.cache/puppeteer
+        run: pnpm install
       - name: Build
         working-directory: www
-        run: |
-          pnpm run build
-          touch out/.nojekyll
-      - name: Serve Files
-        uses: Eun/http-server-action@v1.0.6
-        with:
-          directory: www/out
-          index-files: |
-            ["index.html", "index.htm"]
-      - name: Regenerate screenshots
+        run: pnpm build
+      - name: Serve and generate screenshots
         working-directory: www
-        run: node screenshots.js -h localhost:8080 -l 120000
+        run: |
+          # Start server in background (serve with SPA fallback)
+          pnpm exec serve dist -l 8080 -s &
+          SERVER_PID=$!
+          sleep 2
+          # Generate screenshots
+          node screenshots.js -h localhost:8080 -l 120000
+          # Stop server
+          kill $SERVER_PID
       - name: Push + re-run, if screenshots changed
         id: screenshots
         run: |
@@ -70,9 +60,9 @@ jobs:
               git push origin HEAD:main
               echo "REGENERATED=true" >> $GITHUB_OUTPUT
           fi
-      - name: Deploy to GH Page
-        uses: JamesIves/github-pages-deploy-action@4.1.1
+      - name: Deploy to GH Pages
+        uses: JamesIves/github-pages-deploy-action@v4
         if: steps.screenshots.outputs.REGENERATED != 'true'
         with:
           branch: ghp
-          folder: www/out
+          folder: www/dist
