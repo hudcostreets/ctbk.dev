@@ -52,7 +52,7 @@ console.log("host:", host, "includes:", include);
       continue
     }
     width = width || 800
-    height = height || 580
+    height = height || 560
     loadTimeout = loadTimeout || defaultLoadTimeout
     downloadSleep = downloadSleep || defaultDownloadSleep
     selector = selector || DEFAULT_INITIAL_LOAD_SELECTOR
