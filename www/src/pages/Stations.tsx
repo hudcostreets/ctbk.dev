@@ -1,13 +1,15 @@
 import { useUrlParam, floatParam, stringParam } from '@rdub/use-url-params'
 import 'leaflet/dist/leaflet.css'
 import { useEffect, useMemo, useState } from 'react'
-import { CircleMarker, MapContainer, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
+import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
 import { Link } from 'react-router-dom'
 import css from "../../pages/stations.module.css"
 
 const MANIFEST_URL = '/assets/station-urls.json'
 const DEFAULT_CENTER: [number, number] = [40.758, -73.965]
 const DEFAULT_ZOOM = 12
+
+const { sqrt, max } = Math
 
 type StationValue = {
   name: string
@@ -21,6 +23,14 @@ type Manifest = {
   stations: Record<string, string>
   pairs: Record<string, string>
   latestMonth: string
+}
+
+function getMetersPerPixel(map: L.Map): number {
+  const center = map.getCenter()
+  const metersPerDegree = 111320 * Math.cos(center.lat * Math.PI / 180)
+  const bounds = map.getBounds()
+  const degreesPerPixel = (bounds.getEast() - bounds.getWest()) / map.getSize().x
+  return metersPerDegree * degreesPerPixel
 }
 
 function StationMarkers({
@@ -39,80 +49,108 @@ function StationMarkers({
 
   const selectedStation = selectedId ? stations[selectedId] : undefined
 
-  // Calculate line weights based on zoom
-  const mPerPx = useMemo(() => {
-    const center = map.getCenter()
-    const metersPerDegree = 111320 * Math.cos(center.lat * Math.PI / 180)
-    const bounds = map.getBounds()
-    const degreesPerPixel = (bounds.getEast() - bounds.getWest()) / map.getSize().x
-    return metersPerDegree * degreesPerPixel
-  }, [map, zoom])
+  // Calculate meters per pixel based on zoom
+  const mPerPx = useMemo(() => getMetersPerPixel(map), [map, zoom])
 
   // Render destination lines when a station is selected
   const lines = useMemo(() => {
     if (!selectedStation || !selectedId || !pairCounts) return null
+    if (!(selectedId in pairCounts)) {
+      console.log(`${selectedId} not found among ${Object.keys(pairCounts).length} stations`)
+      return null
+    }
     const counts = pairCounts[selectedId]
-    if (!counts) return null
+    const maxCount = max(...Object.values(counts))
+    const src = selectedStation
 
-    const maxCount = Math.max(...Object.values(counts))
-    const srcLat = selectedStation.lat
-    const srcLng = selectedStation.lng
+    return (
+      <Pane name="lines" className={css.lines}>
+        {Object.entries(counts).map(([dstId, count]) => {
+          const dst = stations[dstId]
+          if (!dst) return null
 
-    return Object.entries(counts).map(([dstId, count]) => {
-      const dst = stations[dstId]
-      if (!dst) return null
+          const weight = max(0.7, (count / maxCount) * sqrt(src.ends) / mPerPx)
 
-      const weight = Math.max(0.7, (count / maxCount) * Math.sqrt(selectedStation.ends) / mPerPx)
+          return (
+            <Polyline
+              key={`${selectedId}-${dstId}-${zoom}`}
+              positions={[[src.lat, src.lng], [dst.lat, dst.lng]]}
+              color="red"
+              weight={weight}
+              opacity={0.7}
+            >
+              <Tooltip sticky>
+                {src.name} → {dst.name}: {count}
+              </Tooltip>
+            </Polyline>
+          )
+        })}
+      </Pane>
+    )
+  }, [selectedStation, selectedId, pairCounts, stations, mPerPx, zoom])
 
-      return (
-        <Polyline
-          key={`${selectedId}-${dstId}`}
-          positions={[[srcLat, srcLng], [dst.lat, dst.lng]]}
-          color="red"
-          weight={weight}
-          opacity={0.7}
+  // Render selected station on top
+  const selectedCircle = useMemo(() => {
+    if (!selectedStation || !selectedId) return null
+    const radius = sqrt(selectedStation.ends)
+    if (isNaN(radius)) return null
+
+    return (
+      <Pane name="selected" className={css.selected}>
+        <Circle
+          key={selectedId}
+          center={{ lat: selectedStation.lat, lng: selectedStation.lng }}
+          color="yellow"
+          radius={radius}
+          bubblingMouseEvents={false}
+          eventHandlers={{
+            click: () => setSelectedId(undefined),
+          }}
         >
-          <Tooltip sticky>
-            {selectedStation.name} → {dst.name}: {count}
+          <Tooltip className={css.tooltip} sticky permanent pane="selected">
+            <p>{selectedStation.name}: {selectedStation.ends.toLocaleString()}</p>
           </Tooltip>
-        </Polyline>
-      )
-    })
-  }, [selectedStation, selectedId, pairCounts, stations, mPerPx])
+        </Circle>
+      </Pane>
+    )
+  }, [selectedStation, selectedId, setSelectedId])
 
   // Render station circles
   const circles = useMemo(() => {
-    const maxEnds = Math.max(...Object.values(stations).map(s => s.ends))
+    return (
+      <Pane name="circles" className={css.circles}>
+        {Object.entries(stations).map(([id, station]) => {
+          if (id === selectedId) return null
+          const radius = sqrt(station.ends)
+          if (isNaN(radius)) return null
 
-    return Object.entries(stations).map(([id, station]) => {
-      const isSelected = id === selectedId
-      const radius = Math.max(3, Math.sqrt(station.ends / maxEnds) * 20)
-
-      return (
-        <CircleMarker
-          key={id}
-          center={[station.lat, station.lng]}
-          radius={radius}
-          pathOptions={{
-            color: isSelected ? 'red' : 'blue',
-            fillColor: isSelected ? 'red' : 'blue',
-            fillOpacity: 0.6,
-            weight: isSelected ? 3 : 1,
-          }}
-          eventHandlers={{
-            click: () => setSelectedId(isSelected ? undefined : id),
-          }}
-        >
-          <Tooltip>
-            {station.name}: {station.ends.toLocaleString()} rides
-          </Tooltip>
-        </CircleMarker>
-      )
-    })
+          return (
+            <Circle
+              key={id}
+              center={{ lat: station.lat, lng: station.lng }}
+              color="orange"
+              radius={radius}
+              bubblingMouseEvents={false}
+              eventHandlers={{
+                click: () => setSelectedId(id),
+                mouseover: () => {
+                  if (id !== selectedId) setSelectedId(id)
+                },
+              }}
+            >
+              <Tooltip className={css.tooltip} sticky>
+                <p>{station.name}: {station.ends.toLocaleString()}</p>
+              </Tooltip>
+            </Circle>
+          )
+        })}
+      </Pane>
+    )
   }, [stations, selectedId, setSelectedId])
 
   return (
     <>
+      {selectedCircle}
       {lines}
       {circles}
     </>
@@ -197,6 +235,14 @@ export default function Stations() {
     return new Date(year, m - 1).toLocaleDateString('default', { month: 'short', year: 'numeric' })
   }, [month])
 
+  const title = useMemo(() => {
+    let t = `Citi Bike rides by station, ${monthLabel}`
+    if (selectedId && stations?.[selectedId]) {
+      t += ` — ${stations[selectedId].name}`
+    }
+    return t
+  }, [monthLabel, selectedId, stations])
+
   if (error) {
     return (
       <div className={css.container}>
@@ -218,8 +264,8 @@ export default function Stations() {
           scrollWheelZoom
         >
           <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            attribution='&copy; <a href="https://stadiamaps.com/" target="_blank">Stadia Maps</a>, &copy; <a href="https://openmaptiles.org/" target="_blank">OpenMapTiles</a> &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>'
+            url="https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png"
           />
           {stations && (
             <StationMarkers
@@ -232,10 +278,7 @@ export default function Stations() {
           <MapEvents setLat={setLat} setLng={setLng} setZoom={setZoom} />
         </MapContainer>
         {loading && <div className={css.loading}>Loading...</div>}
-        <div className={css.title}>
-          Citi Bike rides by station, {monthLabel}
-          {selectedId && stations?.[selectedId] && ` — ${stations[selectedId].name}`}
-        </div>
+        <div className={css.title}>{title}</div>
       </main>
     </div>
   )

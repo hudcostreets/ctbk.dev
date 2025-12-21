@@ -47,3 +47,15 @@
 .tooltip p {
     margin-bottom: 0;
 }
+
+.loading {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(255, 255, 255, 0.9);
+    padding: 1em 2em;
+    border-radius: 8px;
+    font-size: 1.5rem;
+    z-index: 1001;
+}
