@@ -322,6 +322,34 @@ export default function Home() {
   const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
   const gridcolor = "#ccc"
 
+  // Adaptive tick intervals based on date range
+  const totalMonths = months.length
+  let tickMonths: string[]
+  let tickLabels: string[]
+
+  if (totalMonths <= 24) {
+    // ≤2 years: quarterly ticks (Jan, Apr, Jul, Oct)
+    tickMonths = months.filter(m => m.endsWith('-01') || m.endsWith('-04') || m.endsWith('-07') || m.endsWith('-10'))
+    tickLabels = tickMonths.map(m => {
+      const mo = m.slice(5, 7)
+      const yr = m.slice(2, 4)
+      const moName = mo === '01' ? 'Jan' : mo === '04' ? 'Apr' : mo === '07' ? 'Jul' : 'Oct'
+      return `${moName} '${yr}`
+    })
+  } else if (totalMonths <= 48) {
+    // ≤4 years: semi-annual ticks (Jan, Jul)
+    tickMonths = months.filter(m => m.endsWith('-01') || m.endsWith('-07'))
+    tickLabels = tickMonths.map(m => {
+      const mo = m.slice(5, 7)
+      const yr = m.slice(2, 4)
+      return mo === '01' ? `'${yr}` : `Jul '${yr}`
+    })
+  } else {
+    // >4 years: annual ticks (Jan only)
+    tickMonths = months.filter(m => m.endsWith('-01'))
+    tickLabels = tickMonths.map(m => `'${m.slice(2, 4)}`)
+  }
+
   const layout = {
     autosize: true,
     barmode: 'stack' as const,
@@ -340,8 +368,8 @@ export default function Home() {
       titlefont: { size: 14 },
       tickangle: -45,
       tickmode: 'array' as const,
-      tickvals: months.filter(m => m.endsWith('-01')),
-      ticktext: months.filter(m => m.endsWith('-01')).map(m => `'${m.slice(2, 4)}`),
+      tickvals: tickMonths,
+      ticktext: tickLabels,
       gridcolor,
     },
     yaxis: {
@@ -519,6 +547,7 @@ export default function Home() {
               <img src="/assets/s3.png" alt="S3" className={css.icon} style={{ width: '2em', marginRight: '1em' }} />
             </a>
             Author: <a href="https://bsky.app/profile/runsascoded.com" target="_blank" rel="noopener noreferrer">
+              <img src="/assets/bsky.png" alt="Bluesky" className={css.icon} style={{ width: '2em', marginRight: '0.3em' }} />
               @runsascoded
             </a>
           </div>
