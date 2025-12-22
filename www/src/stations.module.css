@@ -22,19 +22,30 @@
     top: 0;
     z-index: 1000;
     text-align: center;
-    margin: 0.2em 1.5em;
+    margin: 0.3em 1em;
 }
 
 .title {
+    display: inline-block;
     line-height: 1.15;
     font-size: 2rem;
-    color: white;
+    padding: 0.2em 0.6em 0.1em;
+    color: #222;
+    background: rgba(255, 255, 255, 0.75);
+    border-radius: 100px;
+    backdrop-filter: blur(4px);
 }
 
 .subtitle {
-    font-size: 1.3rem;
-    color: #ddd;
-    margin-top: 0.1em;
+    display: block;
+    width: fit-content;
+    margin: 0.3em auto 0;
+    font-size: 1.6rem;
+    padding: 0.15em 0.5em;
+    color: #222;
+    background: rgba(255, 255, 255, 0.75);
+    border-radius: 100px;
+    backdrop-filter: blur(4px);
 }
 
 .homeMap {
@@ -75,18 +86,39 @@
 }
 
 .monthSelect :global(.MuiSelect-select) {
-    font-size: 2rem;
-    color: white;
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+    color: inherit;
     padding: 0;
     padding-right: 24px !important;
 }
 
 .monthSelect :global(.MuiSelect-icon) {
-    color: white;
-    top: calc(50% - 0.6em);
+    color: inherit;
+    top: calc(50% - 0.5em);
 }
 
 .monthSelect :global(.MuiInput-root) {
-    font-size: inherit;
+    font-size: 1.85rem;
+    top: -0.05rem;
     color: inherit;
+}
+
+.tileStyleControl {
+    position: fixed;
+    bottom: 24px;
+    right: 10px;
+    z-index: 1000;
+    background: rgba(255, 255, 255, 0.9);
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
+.tileStyleSelect {
+    font-size: 0.875rem;
+}
+
+.tileStyleSelect :global(.MuiSelect-select) {
+    padding: 2px 24px 2px 4px !important;
 }

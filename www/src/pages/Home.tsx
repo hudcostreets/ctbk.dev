@@ -104,6 +104,14 @@ export default function Home() {
   const [dateRange, setDateRange] = useUrlParam('d', dateRangeParam())
   const [rollingAvgs, setRollingAvgs] = useUrlParam('avg', numberArrayParam([12]))
   const [showLegend, setShowLegend] = useState<boolean | null>(null)
+  const [windowWidth, setWindowWidth] = useState(() => typeof window !== 'undefined' ? window.innerWidth : 800)
+
+  // Update window width on resize
+  useEffect(() => {
+    const handleResize = () => setWindowWidth(window.innerWidth)
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
 
   // Fetch data on mount
   useEffect(() => {
@@ -322,13 +330,21 @@ export default function Home() {
   const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
   const gridcolor = "#ccc"
 
-  // Adaptive tick intervals based on date range
+  // Adaptive tick intervals based on date range AND viewport width
   const totalMonths = months.length
+  // Estimate max ticks that fit comfortably (~50px per tick with rotation)
+  const estimatedPlotWidth = windowWidth * 0.9
+  const maxTicks = Math.floor(estimatedPlotWidth / 50)
+
   let tickMonths: string[]
   let tickLabels: string[]
 
-  if (totalMonths <= 24) {
-    // ≤2 years: quarterly ticks (Jan, Apr, Jul, Oct)
+  // Choose tick interval based on both date range and available space
+  const quarterlyTicks = Math.ceil(totalMonths / 3)
+  const semiAnnualTicks = Math.ceil(totalMonths / 6)
+
+  if (quarterlyTicks <= maxTicks && totalMonths <= 60) {
+    // Quarterly ticks (Jan, Apr, Jul, Oct) - if they fit and ≤5 years
     tickMonths = months.filter(m => m.endsWith('-01') || m.endsWith('-04') || m.endsWith('-07') || m.endsWith('-10'))
     tickLabels = tickMonths.map(m => {
       const mo = m.slice(5, 7)
@@ -336,16 +352,16 @@ export default function Home() {
       const moName = mo === '01' ? 'Jan' : mo === '04' ? 'Apr' : mo === '07' ? 'Jul' : 'Oct'
       return `${moName} '${yr}`
     })
-  } else if (totalMonths <= 48) {
-    // ≤4 years: semi-annual ticks (Jan, Jul)
+  } else if (semiAnnualTicks <= maxTicks && totalMonths <= 144) {
+    // Semi-annual ticks (Jan, Jul) with consistent month prefix
     tickMonths = months.filter(m => m.endsWith('-01') || m.endsWith('-07'))
     tickLabels = tickMonths.map(m => {
       const mo = m.slice(5, 7)
       const yr = m.slice(2, 4)
-      return mo === '01' ? `'${yr}` : `Jul '${yr}`
+      return mo === '01' ? `Jan '${yr}` : `Jul '${yr}`
     })
   } else {
-    // >4 years: annual ticks (Jan only)
+    // Annual ticks (Jan only)
     tickMonths = months.filter(m => m.endsWith('-01'))
     tickLabels = tickMonths.map(m => `'${m.slice(2, 4)}`)
   }
@@ -382,7 +398,7 @@ export default function Home() {
     },
     paper_bgcolor: 'rgba(0,0,0,0)',
     plot_bgcolor: 'rgba(0,0,0,0)',
-    margin: { t: 0, r: 0, b: 40, l: 0 },
+    margin: { t: 0, r: 0, b: 60, l: 0 },
   }
 
   const dateRangeButtons: (DateRange & string)[] = ["1y", "2y", "3y", "4y", "5y", "All"]
@@ -399,7 +415,7 @@ export default function Home() {
           data={traces}
           layout={layout}
           useResizeHandler
-          style={{ width: '100%', aspectRatio: '768 / 450' }}
+          className={css.plot}
           config={{ displayModeBar: false }}
         />
 

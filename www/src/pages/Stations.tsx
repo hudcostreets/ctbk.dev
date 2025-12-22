@@ -12,11 +12,60 @@ const DEFAULT_ZOOM = 12
 
 const { sqrt, max } = Math
 
-/** Format YYYYMM to "MMM YYYY" */
+// Tile layer styles
+type TileStyle = {
+  name: string
+  url: string
+  attribution: string
+}
+
+const TILE_STYLES: Record<string, TileStyle> = {
+  dark: {
+    name: 'Dark',
+    url: 'https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png',
+    attribution: '&copy; <a href="https://stadiamaps.com/" target="_blank">Stadia Maps</a>, &copy; <a href="https://openmaptiles.org/" target="_blank">OpenMapTiles</a> &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>',
+  },
+  light: {
+    name: 'Light',
+    url: 'https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png',
+    attribution: '&copy; <a href="https://stadiamaps.com/" target="_blank">Stadia Maps</a>, &copy; <a href="https://openmaptiles.org/" target="_blank">OpenMapTiles</a> &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>',
+  },
+  osm: {
+    name: 'OSM',
+    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  },
+}
+
+const DEFAULT_TILE_CODE = 'd'
+
+// Short codes for URL params
+const TILE_SHORT_CODES: [string, string][] = [
+  ['d', 'dark'],
+  ['l', 'light'],
+  ['o', 'osm'],
+]
+
+// Map codes to style names (includes full names for backwards compatibility)
+const TILE_CODES: Record<string, string> = Object.fromEntries([
+  ...TILE_SHORT_CODES,
+  ...TILE_SHORT_CODES.map(([, name]) => [name, name]),  // Accept full names too
+])
+
+// Colors based on tile style (light vs dark backgrounds)
+type TileColors = { circle: string; selected: string; line: string; title: string }
+const TILE_COLORS: Record<string, TileColors> = {
+  dark: { circle: 'orange', selected: 'yellow', line: 'red', title: 'white' },
+  light: { circle: '#d35400', selected: '#c0392b', line: '#8e44ad', title: '#222' },
+  osm: { circle: '#d35400', selected: '#c0392b', line: '#8e44ad', title: '#222' },
+}
+
+/** Format YYYYMM to "MMM 'YY" */
 function formatMonth(yyyymm: string): string {
-  const year = parseInt(yyyymm.substring(0, 4))
+  const year = yyyymm.substring(2, 4)
   const m = parseInt(yyyymm.substring(4))
-  return new Date(year, m - 1).toLocaleDateString('default', { month: 'short', year: 'numeric' })
+  const monthName = new Date(2000, m - 1).toLocaleDateString('default', { month: 'short' })
+  return `${monthName} '${year}`
 }
 
 type StationValue = {
@@ -46,11 +95,13 @@ function StationMarkers({
   selectedId,
   setSelectedId,
   pairCounts,
+  colors,
 }: {
   stations: Stations
   selectedId: string | undefined
   setSelectedId: (id: string | undefined) => void
   pairCounts: StationPairCounts | null
+  colors: { circle: string; selected: string; line: string }
 }) {
   const map = useMap()
   const zoom = map.getZoom()
@@ -81,9 +132,9 @@ function StationMarkers({
 
           return (
             <Polyline
-              key={`${selectedId}-${dstId}-${zoom}`}
+              key={`${selectedId}-${dstId}-${zoom}-${colors.line}`}
               positions={[[src.lat, src.lng], [dst.lat, dst.lng]]}
-              color="red"
+              color={colors.line}
               weight={weight}
               opacity={0.7}
             >
@@ -95,7 +146,7 @@ function StationMarkers({
         })}
       </Pane>
     )
-  }, [selectedStation, selectedId, pairCounts, stations, mPerPx, zoom])
+  }, [selectedStation, selectedId, pairCounts, stations, mPerPx, zoom, colors])
 
   // Render selected station on top
   const selectedCircle = useMemo(() => {
@@ -106,9 +157,9 @@ function StationMarkers({
     return (
       <Pane name="selected" className={css.selected}>
         <Circle
-          key={selectedId}
+          key={`${selectedId}-${colors.selected}`}
           center={{ lat: selectedStation.lat, lng: selectedStation.lng }}
-          color="yellow"
+          color={colors.selected}
           radius={radius}
           bubblingMouseEvents={false}
           eventHandlers={{
@@ -121,7 +172,7 @@ function StationMarkers({
         </Circle>
       </Pane>
     )
-  }, [selectedStation, selectedId, setSelectedId])
+  }, [selectedStation, selectedId, setSelectedId, colors])
 
   // Render station circles
   const circles = useMemo(() => {
@@ -134,9 +185,9 @@ function StationMarkers({
 
           return (
             <Circle
-              key={id}
+              key={`${id}-${colors.circle}`}
               center={{ lat: station.lat, lng: station.lng }}
-              color="orange"
+              color={colors.circle}
               radius={radius}
               bubblingMouseEvents={false}
               eventHandlers={{
@@ -154,7 +205,7 @@ function StationMarkers({
         })}
       </Pane>
     )
-  }, [stations, selectedId, setSelectedId])
+  }, [stations, selectedId, setSelectedId, colors])
 
   return (
     <>
@@ -178,6 +229,7 @@ export default function Stations() {
   const [zoom, setZoom] = useUrlParam('z', floatParam(DEFAULT_ZOOM))
   const [selectedId, setSelectedId] = useUrlParam('s', stringParam())
   const [month, setMonth] = useUrlParam('m', stringParam())
+  const [tileCode, setTileCode] = useUrlParam('t', stringParam(DEFAULT_TILE_CODE))
 
   // Load manifest on mount
   useEffect(() => {
@@ -246,6 +298,15 @@ export default function Stations() {
     setMonth(e.target.value)
   }, [setMonth])
 
+  const handleTileCodeChange = useCallback((e: SelectChangeEvent<string>) => {
+    setTileCode(e.target.value)
+  }, [setTileCode])
+
+  // Map code to full style name
+  const tileStyle = TILE_CODES[tileCode || DEFAULT_TILE_CODE] || TILE_CODES[DEFAULT_TILE_CODE]
+  const currentTile = TILE_STYLES[tileStyle]
+  const currentColors = TILE_COLORS[tileStyle]
+
   const subtitle = selectedId && stations?.[selectedId] ? stations[selectedId].name : null
 
   if (error) {
@@ -269,8 +330,9 @@ export default function Stations() {
           scrollWheelZoom
         >
           <TileLayer
-            attribution='&copy; <a href="https://stadiamaps.com/" target="_blank">Stadia Maps</a>, &copy; <a href="https://openmaptiles.org/" target="_blank">OpenMapTiles</a> &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>'
-            url="https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png"
+            key={tileCode}
+            attribution={currentTile.attribution}
+            url={currentTile.url}
           />
           {stations && (
             <StationMarkers
@@ -278,12 +340,27 @@ export default function Stations() {
               selectedId={selectedId}
               setSelectedId={setSelectedId}
               pairCounts={pairCounts}
+              colors={currentColors}
             />
           )}
-          <MapEvents setLat={setLat} setLng={setLng} setZoom={setZoom} />
+          <MapEvents setLat={setLat} setLng={setLng} setZoom={setZoom} setSelectedId={setSelectedId} />
         </MapContainer>
         {loading && <div className={css.loading}>Loading...</div>}
-        <div className={css.titleContainer}>
+        <div className={css.tileStyleControl}>
+          <FormControl variant="standard" size="small">
+            <Select
+              value={tileCode || DEFAULT_TILE_CODE}
+              onChange={handleTileCodeChange}
+              disableUnderline
+              className={css.tileStyleSelect}
+            >
+              {TILE_SHORT_CODES.map(([code, styleName]) => (
+                <MenuItem key={code} value={code}>{TILE_STYLES[styleName].name}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </div>
+        <div className={css.titleContainer} style={{ color: currentColors.title }}>
           <div className={css.title}>
             Citi Bike rides by station,{' '}
             {month && availableMonths.length > 0 ? (
@@ -314,28 +391,37 @@ export default function Stations() {
   )
 }
 
-// Component to sync map position to URL
+// Component to sync map position to URL and handle map clicks
 function MapEvents({
   setLat,
   setLng,
   setZoom,
+  setSelectedId,
 }: {
   setLat: (v: number) => void
   setLng: (v: number) => void
   setZoom: (v: number) => void
+  setSelectedId: (v: string | undefined) => void
 }) {
   const map = useMap()
 
   useEffect(() => {
-    const handler = () => {
+    const moveHandler = () => {
       const center = map.getCenter()
       setLat(Math.round(center.lat * 1000) / 1000)
       setLng(Math.round(center.lng * 1000) / 1000)
       setZoom(map.getZoom())
     }
-    map.on('moveend', handler)
-    return () => { map.off('moveend', handler) }
-  }, [map, setLat, setLng, setZoom])
+    const clickHandler = () => {
+      setSelectedId(undefined)
+    }
+    map.on('moveend', moveHandler)
+    map.on('click', clickHandler)
+    return () => {
+      map.off('moveend', moveHandler)
+      map.off('click', clickHandler)
+    }
+  }, [map, setLat, setLng, setZoom, setSelectedId])
 
   return null
 }
