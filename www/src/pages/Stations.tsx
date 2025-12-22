@@ -1,6 +1,7 @@
+import { FormControl, MenuItem, Select, SelectChangeEvent } from '@mui/material'
 import { useUrlParam, floatParam, stringParam } from '@rdub/use-url-params'
 import 'leaflet/dist/leaflet.css'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
 import { Link } from 'react-router-dom'
 import css from "../stations.module.css"
@@ -10,6 +11,13 @@ const DEFAULT_CENTER: [number, number] = [40.758, -73.965]
 const DEFAULT_ZOOM = 12
 
 const { sqrt, max } = Math
+
+/** Format YYYYMM to "MMM YYYY" */
+function formatMonth(yyyymm: string): string {
+  const year = parseInt(yyyymm.substring(0, 4))
+  const m = parseInt(yyyymm.substring(4))
+  return new Date(year, m - 1).toLocaleDateString('default', { month: 'short', year: 'numeric' })
+}
 
 type StationValue = {
   name: string
@@ -228,14 +236,16 @@ export default function Stations() {
       })
   }, [manifest, month])
 
-  const monthLabel = useMemo(() => {
-    if (!month) return ''
-    const year = parseInt(month.substring(0, 4))
-    const m = parseInt(month.substring(4))
-    return new Date(year, m - 1).toLocaleDateString('default', { month: 'short', year: 'numeric' })
-  }, [month])
+  // Get sorted list of available months (newest first)
+  const availableMonths = useMemo(() => {
+    if (!manifest) return []
+    return Object.keys(manifest.stations).sort().reverse()
+  }, [manifest])
 
-  const title = `Citi Bike rides by station, ${monthLabel}`
+  const handleMonthChange = useCallback((e: SelectChangeEvent<string>) => {
+    setMonth(e.target.value)
+  }, [setMonth])
+
   const subtitle = selectedId && stations?.[selectedId] ? stations[selectedId].name : null
 
   if (error) {
@@ -274,7 +284,29 @@ export default function Stations() {
         </MapContainer>
         {loading && <div className={css.loading}>Loading...</div>}
         <div className={css.titleContainer}>
-          <div className={css.title}>{title}</div>
+          <div className={css.title}>
+            Citi Bike rides by station,{' '}
+            {month && availableMonths.length > 0 ? (
+              <FormControl variant="standard" className={css.monthSelect}>
+                <Select
+                  value={month}
+                  onChange={handleMonthChange}
+                  disableUnderline
+                  MenuProps={{
+                    PaperProps: {
+                      style: { maxHeight: 300 },
+                    },
+                  }}
+                >
+                  {availableMonths.map(m => (
+                    <MenuItem key={m} value={m}>{formatMonth(m)}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            ) : (
+              month ? formatMonth(month) : '...'
+            )}
+          </div>
           {subtitle && <div className={css.subtitle}>{subtitle}</div>}
         </div>
       </main>
