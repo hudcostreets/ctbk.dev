@@ -1,18 +1,27 @@
 import 'bootstrap/dist/css/bootstrap.css'
 import '../styles/globals.css'
 import { KeyboardShortcutsProvider } from '@rdub/use-hotkeys'
-import { ThemeProvider as MuiThemeProvider } from "@mui/material"
-import { StrictMode } from 'react'
+import { ThemeProvider as MuiThemeProvider, createTheme } from "@mui/material"
+import { StrictMode, useMemo } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
-import muiTheme from "./theme"
-import { ThemeProvider } from "./contexts/ThemeContext"
+import { ThemeProvider, useTheme } from "./contexts/ThemeContext"
 import { ShortcutsModalProvider, useShortcutsModal } from "./contexts/ShortcutsModalContext"
 import { ThemeToggle } from "./components/ThemeToggle"
 import { ShortcutsModal } from "./components/ShortcutsModal"
 import { DEFAULT_HOTKEY_MAP } from "./hooks/useKeyboardShortcuts"
 import Home from "./pages/Home"
 import Stations from "./pages/Stations"
+import PipelineMdx from "./pages/Pipeline.mdx"
+import { Box } from "@mui/material"
+
+function Pipeline() {
+  return (
+    <Box sx={{ p: 4, maxWidth: 900, mx: 'auto' }}>
+      <PipelineMdx />
+    </Box>
+  )
+}
 
 function AppContent() {
   const { isOpen, open, close } = useShortcutsModal()
@@ -22,6 +31,7 @@ function AppContent() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/stations" element={<Stations />} />
+        <Route path="/pipeline" element={<Pipeline />} />
       </Routes>
       <ThemeToggle onOpenShortcuts={open} />
       <ShortcutsModal isOpen={isOpen} onClose={close} />
@@ -29,17 +39,32 @@ function AppContent() {
   )
 }
 
+function MuiThemeWrapper({ children }: { children: React.ReactNode }) {
+  const { actualTheme } = useTheme()
+  const muiTheme = useMemo(() => createTheme({
+    palette: {
+      mode: actualTheme,
+    },
+  }), [actualTheme])
+
+  return (
+    <MuiThemeProvider theme={muiTheme}>
+      {children}
+    </MuiThemeProvider>
+  )
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ThemeProvider>
       <KeyboardShortcutsProvider defaults={DEFAULT_HOTKEY_MAP} storageKey="ctbk-hotkeys">
-        <MuiThemeProvider theme={muiTheme}>
+        <MuiThemeWrapper>
           <ShortcutsModalProvider>
             <BrowserRouter>
               <AppContent />
             </BrowserRouter>
           </ShortcutsModalProvider>
-        </MuiThemeProvider>
+        </MuiThemeWrapper>
       </KeyboardShortcutsProvider>
     </ThemeProvider>
   </StrictMode>,

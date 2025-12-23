@@ -1,0 +1,110 @@
+import { PipelineProvider, PipelineStats, StageByKey } from '../components/PipelineContext'
+import { PipelineDiagram } from '../components/PipelineDiagram'
+import { H2, H3 } from '../components/Heading'
+
+# Data Pipeline
+
+<PipelineProvider>
+
+The ctbk data pipeline transforms raw Citi Bike trip data through several processing stages, from raw ZIP archives into analysis-ready aggregations. This page documents each stage and lets you explore the <PipelineStats /> that make up the complete pipeline.
+
+<PipelineDiagram />
+
+<H2 id="source-data">Source Data</H2>
+
+[Citi Bike][citibike] publishes monthly trip data as ZIP files on a public S3 bucket at [`s3://tripdata`][tripdata-index]. Each ZIP contains a CSV with one row per ride, including start/end times, stations, and (historically) user demographics.
+
+<StageByKey stageKey="zip" />
+
+[citibike]: https://citibikenyc.com
+[tripdata-index]: https://tripdata.s3.amazonaws.com/index.html
+
+<H2 id="normalization">Normalization</H2>
+
+The raw ZIPs contain CSVs with inconsistent schemas across years—column names change, new fields are added, and NYC/Jersey City data is published separately. The normalization stage reads the CSVs directly from the ZIPs, harmonizes these differences, merges regions, and produces consistent Parquet files.
+
+Each normalized month directory contains Parquet files split by start and end months. For example, `normalized/202006/202005_202006.parquet` contains rides from the June 2020 tripdata zips that started in May 2020 and ended in June 2020.
+
+<StageByKey stageKey="norm" />
+
+<H2 id="consolidation">Consolidation</H2>
+
+After [normalization], the "consolidation" stage combines all records that *end* in a given month into a single canonical Parquet file. This is the primary representation used for downstream analysis.
+
+<StageByKey stageKey="cons" />
+
+<H3 id="legacy-data">Aside: Legacy Data Preservation</H3>
+
+As of February 2021, Lyft stopped publishing rider demographic data—specifically **Gender**, **Birth Year**, and **Bike ID**. Those fields were also later retroactively scrubbed, back to January 2020.
+
+This is unfortunate for analysis: the original data showed a [notable increase in the proportion
+of women riders][gender-example] during 2020, a trend [observed in other cities][women-biking] as cycling became
+more mainstream and infrastructure improved.
+
+[ctbk.dev] has retained copies of the original 2020-2021 files (before Lyft's retroactive scrubbing) in `normalized/v0/`:
+
+<StageByKey stageKey="v0" />
+
+The original `v0` files are single parquets per month, essentially "consolidated" Parquets from an earlier version of these pipelines. I didn't save the original "tripdata" zip files, so these Parquets are my starting point for reconstructing the original data, and merging it in to the latest version.
+
+To integrate with the main pipeline (which expects normalized files split by source/start/end month), they're "partitioned" into the same structure:
+
+<StageByKey stageKey="partition" />
+
+During [consolidation], for months January 2020 through January 2021, the partitioned `v0` records are joined with the newer (scrubbed) data, to backfill the missing columns. Since there's no canonical join key, the merge uses heuristics—matching on start/end times—which works reliably for most records.
+
+[gender-example]: https://ctbk.dev/?s=g&g=mf&d=1406-2102&y=m&pct&c
+[women-biking]: https://www.peopleforbikes.org/news/more-women-are-biking-than-ever-before
+
+<H2 id="aggregation">Aggregation</H2>
+
+The "aggregation" stage computes histograms over each month's rides, grouping by various dimensions and summing different metrics:
+
+**Grouping keys:**
+- `y` (year), `m` (month), `d` (day), `h` (hour)
+- `r` (region: NYC or JC)
+- `g` (gender), `t` (user type: subscriber or customer)
+- `b` (bike type: classic, electric, or docked)
+- `s` (start station), `e` (end station)
+
+**Sum keys:**
+- `c` (ride count)
+- `d` (total duration in seconds)
+
+For example, `aggregated/se_c_202306.parquet` groups by start and end station, summing ride counts.
+
+<StageByKey stageKey="agg" />
+
+<H2 id="station-metadata">Station Metadata</H2>
+
+Station information (ID, name, latitude/longitude) is embedded in each ride record, but values can vary—stations are renamed, coordinates drift slightly. The station metadata stages compute canonical values.
+
+<H3 id="station-meta-histograms">Station Meta Histograms</H3>
+
+First, we count how often each (station ID, name, lat/lng) tuple appears as start and end stations:
+
+<StageByKey stageKey="smh" />
+
+<H3 id="station-modes">Station Modes</H3>
+
+Then we derive canonical station info:
+- **Name**: most common name for each station ID (the "mode")
+- **Location**: mean of all reported lat/lng values
+
+<StageByKey stageKey="sm" />
+
+<H3 id="station-pair-jsons">Station Pair JSONs</H3>
+
+Finally, we generate JSON files with ride counts between each pair of stations, formatted for efficient web visualization:
+
+<StageByKey stageKey="spj" />
+
+<H2 id="dashboard-data">Dashboard Data</H2>
+
+The `ymrgtb-cd` stage aggregates across all months to produce the JSON consumed by the main dashboard charts—ride counts and durations grouped by year, month, region, gender, user type, and bike type.
+
+</PipelineProvider>
+
+[ctbk.dev]: https://ctbk.dev
+[normalization]: #normalization
+[consolidation]: #consolidation
