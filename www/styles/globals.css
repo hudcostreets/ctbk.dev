@@ -1,9 +1,39 @@
+/* CSS Variables for theming */
+:root {
+  --bg-primary: #f5f7fa;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f8f9fa;
+  --text-primary: #333333;
+  --text-secondary: #7f8c8d;
+  --border-primary: #ecf0f1;
+  --border-secondary: #dee2e6;
+  --shadow: rgba(0, 0, 0, 0.1);
+  --plot-bg: white;
+  --plot-grid: #ccc;
+}
+
+[data-theme="dark"] {
+  --bg-primary: #1a1a1a;
+  --bg-secondary: #2d2d2d;
+  --bg-tertiary: #3a3a3a;
+  --text-primary: #e0e0e0;
+  --text-secondary: #b0b0b0;
+  --border-primary: #404040;
+  --border-secondary: #505050;
+  --shadow: rgba(0, 0, 0, 0.3);
+  --plot-bg: #2d2d2d;
+  --plot-grid: #505050;
+}
+
 html,
 body {
   padding: 0;
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Oxygen,
   Ubuntu, Cantarell, Fira Sans, Droid Sans, Helvetica Neue, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 a {

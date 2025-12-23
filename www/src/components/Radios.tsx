@@ -1,3 +1,4 @@
+import { Tooltip } from "@mui/material"
 import { ReactNode } from "react"
 import css from "../controls.module.css"
 
@@ -9,13 +10,15 @@ type Option<T> = {
 
 export function Radios<T extends string>({
   label,
+  tooltip,
   options,
   choice,
   cb,
   nowrap = true,
   children,
 }: {
-  label: string
+  label: string | ReactNode
+  tooltip?: ReactNode
   options: (Option<T> | T)[]
   choice: T
   cb: (choice: T) => void
@@ -31,7 +34,7 @@ export function Radios<T extends string>({
       <label key={name} className={nowrap ? css.nowrap : ""}>
         <input
           type="radio"
-          name={label + "-" + name}
+          name={typeof label === 'string' ? label + "-" + name : name}
           value={name}
           checked={name === choice}
           disabled={disabled}
@@ -42,11 +45,17 @@ export function Radios<T extends string>({
     )
   })
 
+  const header = tooltip ? (
+    <Tooltip title={tooltip} placement="top" arrow>
+      <span style={{ cursor: 'help' }}>{label}</span>
+    </Tooltip>
+  ) : label
+
   return (
     <div className={css.control}>
-      <div className={css.controlHeader}>{label}</div>
+      <div className={css.controlHeader}>{header}</div>
       <div
-        id={label}
+        id={typeof label === 'string' ? label : undefined}
         className={css.subControl}
         onChange={(e: React.ChangeEvent<HTMLInputElement>) => cb(e.target.value as T)}
       >

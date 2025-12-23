@@ -1,0 +1,133 @@
+.backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  backdrop-filter: blur(2px);
+}
+
+.modal {
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px var(--shadow);
+  max-width: 500px;
+  width: 90%;
+  max-height: 80vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+  color: var(--text-primary);
+}
+
+.closeBtn {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.closeBtn:hover {
+  color: var(--text-primary);
+}
+
+.content {
+  padding: 1rem 1.5rem;
+  overflow-y: auto;
+}
+
+.group {
+  margin-bottom: 1.5rem;
+}
+
+.group:last-child {
+  margin-bottom: 0;
+}
+
+.group h3 {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table td {
+  padding: 0.4rem 0;
+}
+
+.description {
+  color: var(--text-primary);
+}
+
+.keys {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.kbd {
+  display: inline-block;
+  padding: 0.2rem 0.5rem;
+  margin-left: 0.25rem;
+  font-family: monospace;
+  font-size: 0.875rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  color: var(--text-primary);
+  min-width: 1.5rem;
+  text-align: center;
+}
+
+.modifier {
+  font-size: 0.75rem;
+  margin-right: 0.1rem;
+}
+
+.footer {
+  padding: 1rem 1.5rem;
+  border-top: 1px solid var(--border-primary);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.resetBtn {
+  background: none;
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px;
+  padding: 0.4rem 0.8rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.resetBtn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}

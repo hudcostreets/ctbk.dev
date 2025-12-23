@@ -8,8 +8,12 @@ import css from "../index.module.css"
 import controlCss from "../controls.module.css"
 import { Checkbox } from "../components/Checkbox"
 import { Checklist } from "../components/Checklist"
+import { HotkeyHint, HotkeyLabel } from "../components/HotkeyLabel"
 import { Radios } from "../components/Radios"
+import { useShortcutsModal } from "../contexts/ShortcutsModalContext"
+import { useTheme } from "../contexts/ThemeContext"
 import { darken } from "../colors"
+import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts"
 import { DateRange, DateRange2Dates, dateRangeParam } from "../date-range"
 import {
   annualizedPercents,
@@ -87,6 +91,7 @@ export const RideableTypesExample = "/?y=m&s=b&rt=ce&d=2002-"
 export default function Home() {
   // useLocation triggers re-render on URL change (React Router Link navigation)
   useLocation()
+  const { actualTheme } = useTheme()
 
   const [data, setData] = useState<ProcessedRow[] | null>(null)
   const [loading, setLoading] = useState(true)
@@ -103,8 +108,31 @@ export default function Home() {
   const [rideableTypes, setRideableTypes] = useUrlParam('rt', codesParam(RideableTypes, RideableTypeChars))
   const [dateRange, setDateRange] = useUrlParam('d', dateRangeParam())
   const [rollingAvgs, setRollingAvgs] = useUrlParam('avg', numberArrayParam([12]))
+  const [controlsOpen, setControlsOpen] = useUrlParam('c', boolParam, true)  // Default to open
+  const [hideControls] = useUrlParam('nc', boolParam)  // For screenshots
   const [showLegend, setShowLegend] = useState<boolean | null>(null)
   const [windowWidth, setWindowWidth] = useState(() => typeof window !== 'undefined' ? window.innerWidth : 800)
+
+  // Keyboard shortcuts
+  const { open: openShortcutsModal } = useShortcutsModal()
+  useKeyboardShortcuts({
+    setDateRange,
+    setStackBy,
+    setYAxis,
+    setRollingAvgs,
+    rollingAvgs,
+    setStackRelative,
+    stackRelative,
+    openShortcutsModal,
+    setRegions,
+    regions,
+    setUserTypes,
+    userTypes,
+    setGenders,
+    genders,
+    setRideableTypes,
+    rideableTypes,
+  })
 
   // Update window width on resize
   useEffect(() => {
@@ -146,8 +174,14 @@ export default function Home() {
 
   // Derived values
   const stackPercents = stackRelative && stackBy !== 'None'
-  const hovertemplate = stackPercents ? "%{y:.0%}" : "%{y:,.0f}"
+  const isStacked = stackBy !== 'None'
   const { hoverLabel: yHoverLabel, title } = yAxisLabelDict[yAxis]
+
+  // Theme-based colors (needed for trace generation)
+  const isDark = actualTheme === 'dark'
+  const rollingAvgColor = isDark ? '#e0e0e0' : 'black'
+  const lineOutlineColor = isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.15)'
+  const lineDarkenFactor = isDark ? 0.6 : 0.75
 
   // Subtitle
   const subtitle = useMemo(() => {
@@ -212,17 +246,22 @@ export default function Home() {
       .filter(key => stackBy === 'None' || months.some(m => grouped[m]?.[key]))
       .map(stackVal => {
         const name = stackVal || yHoverLabel
+        const customdata: [number, number][] = []
         const y = months.map(m => {
           const val = grouped[m]?.[stackVal] || 0
-          if (stackPercents) {
-            const total = Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
-            return total ? val / total : 0
-          }
-          return val
+          const total = Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
+          const pct = total ? val / total : 0
+          customdata.push([val, pct])
+          return stackPercents ? pct : val
         })
+        // Show both count and percentage when stacked, just count when not stacked
+        const hovertemplate = isStacked
+          ? '%{customdata[0]:,.0f} (%{customdata[1]:.0%})<extra></extra>'
+          : '%{customdata[0]:,.0f}<extra></extra>'
         return {
           x: months,
           y,
+          customdata,
           name,
           type: 'bar' as const,
           marker: { color: colors[stackVal] || colors[''] },
@@ -244,14 +283,27 @@ export default function Home() {
         const avgY = rollingAvg(totals, 12)
         // Log annualized percents
         annualizedPercents(months, avgY).forEach(p => console.log(annualPercentStr(p)))
+        // Shadow trace (thicker, contrasting color for outline effect)
+        rollingTraces.push({
+          x: months,
+          y: avgY as (number | null)[],
+          name: '12mo avg (outline)',
+          type: 'scatter',
+          mode: 'lines',
+          line: { color: lineOutlineColor, width: 7 },
+          hoverinfo: 'skip',
+          showlegend: false,
+          legendrank: 100,
+        })
+        // Main trace
         rollingTraces.push({
           x: months,
           y: avgY as (number | null)[],
           name: '12mo avg',
           type: 'scatter',
           mode: 'lines',
-          line: { color: 'black', width: 4 },
-          hovertemplate,
+          line: { color: rollingAvgColor, width: 4 },
+          hovertemplate: '%{y:,.0f}<extra></extra>',
           legendrank: 101,
         })
       } else {
@@ -270,33 +322,51 @@ export default function Home() {
             }
 
             const clampedMonths = months.filter(m => m < effectiveEnd)
-            // Use percentages when stackPercents is true, raw values otherwise
-            const values = clampedMonths.map(m => {
+            // Compute both raw values and percentages for customdata
+            const rawValues = clampedMonths.map(m => grouped[m]?.[stackVal] || 0)
+            const pctValues = clampedMonths.map(m => {
               const val = grouped[m]?.[stackVal] || 0
-              if (stackPercents) {
-                const total = Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
-                return total ? val / total : 0
-              }
-              return val
+              const total = Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
+              return total ? val / total : 0
             })
-            const avgY = rollingAvg(values, 12)
+            const avgRaw = rollingAvg(rawValues, 12)
+            const avgPct = rollingAvg(pctValues, 12)
+            const avgY = stackPercents ? avgPct : avgRaw
+            // Combine into customdata for tooltips
+            const customdata = avgRaw.map((raw, i) => [raw, avgPct[i]])
 
             // Log annualized percents (use raw values for growth calculation)
             if (!stackPercents) {
-              annualizedPercents(clampedMonths, avgY).forEach(p =>
+              annualizedPercents(clampedMonths, avgRaw).forEach(p =>
                 console.log(`${stackVal}: ${annualPercentStr(p)}`)
               )
             }
 
-            const color = darken(colors[stackVal] || colors[''], 0.75)
+            const baseColor = colors[stackVal] || colors['']
+            // HOB's light blue gets lost against JC's purple bars, so keep it unchanged
+            const color = stackVal === 'HOB' ? baseColor : darken(baseColor, lineDarkenFactor)
+            // Shadow trace (thicker, contrasting color for outline effect)
             rollingTraces.push({
               x: clampedMonths,
               y: avgY as (number | null)[],
+              name: `${stackVal} (12mo outline)`,
+              type: 'scatter',
+              mode: 'lines',
+              line: { color: lineOutlineColor, width: 7 },
+              hoverinfo: 'skip',
+              showlegend: false,
+              legendrank: 100 + 2 * (legendRanks[stackVal] || 0),
+            })
+            // Main trace - show both count and percentage in tooltip
+            rollingTraces.push({
+              x: clampedMonths,
+              y: avgY as (number | null)[],
+              customdata,
               name: `${stackVal} (12mo)`,
               type: 'scatter',
               mode: 'lines',
               line: { color, width: 4 },
-              hovertemplate,
+              hovertemplate: '%{customdata[0]:,.0f} (%{customdata[1]:.0%})<extra></extra>',
               legendrank: 101 + 2 * (legendRanks[stackVal] || 0),
             })
           })
@@ -304,7 +374,7 @@ export default function Home() {
     }
 
     return { traces: [...barTraces, ...rollingTraces] as Data[], months }
-  }, [data, yAxis, stackBy, stackPercents, regions, userTypes, genders, rideableTypes, start, end, rollingAvgs, yHoverLabel, hovertemplate])
+  }, [data, yAxis, stackBy, stackPercents, isStacked, regions, userTypes, genders, rideableTypes, start, end, rollingAvgs, yHoverLabel, rollingAvgColor, lineOutlineColor, lineDarkenFactor])
 
   if (loading) {
     return (
@@ -328,7 +398,8 @@ export default function Home() {
 
   // Show legend by default when stacking OR when rolling averages are visible
   const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
-  const gridcolor = "#ccc"
+  const gridcolor = isDark ? '#505050' : '#ccc'
+  const tickcolor = isDark ? '#e0e0e0' : '#333'
 
   // Adaptive tick intervals based on date range AND viewport width
   const totalMonths = months.length
@@ -377,10 +448,11 @@ export default function Home() {
       yanchor: 'top' as const,
       orientation: 'h' as const,
       traceorder: 'normal' as const,
+      font: { color: tickcolor },
     },
     xaxis: {
       type: 'category' as const,
-      tickfont: { size: 12 },
+      tickfont: { size: 12, color: tickcolor },
       titlefont: { size: 14 },
       tickangle: -45,
       tickmode: 'array' as const,
@@ -391,7 +463,7 @@ export default function Home() {
     yaxis: {
       automargin: true,
       gridcolor,
-      tickfont: { size: 14 },
+      tickfont: { size: 14, color: tickcolor },
       titlefont: { size: 14 },
       tickformat: stackPercents ? '.0%' : undefined,
       range: stackPercents ? [0, 1.01] : undefined,
@@ -419,8 +491,13 @@ export default function Home() {
           config={{ displayModeBar: false }}
         />
 
+        {!hideControls && (
         <div className={css.row}>
-          <details className={css.controls}>
+          <details
+            className={css.controls}
+            open={controlsOpen}
+            onToggle={(e) => setControlsOpen((e.target as HTMLDetailsElement).open)}
+          >
             <summary><span className={css.settingsGear}>⚙</span>️</summary>
 
             {/* Date range controls */}
@@ -439,8 +516,14 @@ export default function Home() {
 
             <Checklist
               label="Region"
+              tooltip={<HotkeyHint prefix="" items={[
+                { key: 'J', label: 'JC' },
+                { key: 'H', label: 'HOB' },
+                { key: 'N', label: 'NYC' },
+              ]} />}
               data={Regions.map(region => ({
                 name: region,
+                label: <HotkeyLabel text={region} hotkey={region === 'JC' ? 'J' : region === 'HOB' ? 'H' : 'N'} />,
                 data: region,
                 checked: regions.includes(region),
               }))}
@@ -449,12 +532,19 @@ export default function Home() {
 
             <Radios
               label="Stack by"
+              tooltip={<HotkeyHint prefix="" items={[
+                { key: 'n', label: 'None' },
+                { key: 'r', label: 'Region' },
+                { key: 'u', label: 'User Type' },
+                { key: 'g', label: 'Gender' },
+                { key: 'b', label: 'Bike Type' },
+              ]} />}
               options={[
-                "None",
-                "Region",
-                "User Type",
-                { label: GenderLabel(1), data: "Gender" },
-                { label: "Bike Type", data: "Rideable Type" },
+                { label: <HotkeyLabel text="None" hotkey="n" />, data: "None" },
+                { label: <HotkeyLabel text="Region" hotkey="r" />, data: "Region" },
+                { label: <HotkeyLabel text="User Type" hotkey="u" />, data: "User Type" },
+                { label: <HotkeyLabel text="Gender" hotkey="g">{GenderLabel(1)}</HotkeyLabel>, data: "Gender" },
+                { label: <HotkeyLabel text="Bike Type" hotkey="b" />, data: "Rideable Type" },
               ]}
               cb={setStackBy}
               choice={stackBy}
@@ -480,15 +570,27 @@ export default function Home() {
 
             <Radios
               label="Y Axis"
-              options={["Rides", { label: "Minutes", data: "Ride minutes" }]}
+              tooltip={<HotkeyHint prefix="" items={[
+                { key: 'y', label: 'Rides' },
+                { key: 'm', label: 'Minutes' },
+              ]} />}
+              options={[
+                { label: <HotkeyLabel text="Rides" hotkey="y" />, data: "Rides" },
+                { label: <HotkeyLabel text="Minutes" hotkey="m" />, data: "Ride minutes" },
+              ]}
               cb={setYAxis}
               choice={yAxis}
             />
 
             <Checklist
               label="User Type"
+              tooltip={<HotkeyHint prefix="" items={[
+                { key: 'A', label: 'Annual' },
+                { key: 'D', label: 'Daily' },
+              ]} />}
               data={UserTypes.map(userType => ({
                 name: userType,
+                label: <HotkeyLabel text={userType} hotkey={userType === 'Annual' ? 'A' : 'D'} />,
                 data: userType,
                 checked: userTypes.includes(userType),
               }))}
@@ -497,25 +599,36 @@ export default function Home() {
 
             <Checklist
               label={GenderLabel(2)}
+              tooltip={<HotkeyHint prefix="" items={[
+                { key: 'M', label: 'Men' },
+                { key: 'W', label: 'Women' },
+                { key: 'G', label: 'Unknown' },
+              ]} />}
               data={[
-                { name: 'Men', data: 'Men' as Gender, checked: genders.includes('Men') },
-                { name: 'Women', data: 'Women' as Gender, checked: genders.includes('Women') },
-                { name: 'Unknown', data: 'Unknown' as Gender, checked: genders.includes('Unknown') },
+                { name: 'Men', label: <HotkeyLabel text="Men" hotkey="M" />, data: 'Men' as Gender, checked: genders.includes('Men') },
+                { name: 'Women', label: <HotkeyLabel text="Women" hotkey="W" />, data: 'Women' as Gender, checked: genders.includes('Women') },
+                { name: 'Unknown', label: <>Unknown <kbd>G</kbd></>, data: 'Unknown' as Gender, checked: genders.includes('Unknown') },
               ]}
               cb={setGenders}
             />
 
             <Checklist
               label="Bike Type"
+              tooltip={<HotkeyHint prefix="" items={[
+                { key: 'C', label: 'Classic' },
+                { key: 'E', label: 'Electric' },
+                { key: 'B', label: 'Unknown' },
+              ]} />}
               data={[
-                { name: 'Classic', data: 'Classic' as RideableType, checked: rideableTypes.includes('Classic') },
-                { name: 'Electric', data: 'Electric' as RideableType, checked: rideableTypes.includes('Electric') },
-                { name: 'Unknown', data: 'Unknown' as RideableType, checked: rideableTypes.includes('Unknown') },
+                { name: 'Classic', label: <HotkeyLabel text="Classic" hotkey="C" />, data: 'Classic' as RideableType, checked: rideableTypes.includes('Classic') },
+                { name: 'Electric', label: <HotkeyLabel text="Electric" hotkey="E" />, data: 'Electric' as RideableType, checked: rideableTypes.includes('Electric') },
+                { name: 'Unknown', label: <>Unknown <kbd>B</kbd></>, data: 'Unknown' as RideableType, checked: rideableTypes.includes('Unknown') },
               ]}
               cb={setRideableTypes}
             />
           </details>
         </div>
+        )}
 
         <hr />
 

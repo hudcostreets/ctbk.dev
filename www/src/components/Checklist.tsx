@@ -1,8 +1,10 @@
+import { Tooltip } from "@mui/material"
 import { ReactNode } from "react"
 import css from "../controls.module.css"
 
 type CheckboxData<T> = {
   name: string
+  label?: ReactNode
   data: T
   checked?: boolean
   disabled?: boolean
@@ -10,12 +12,14 @@ type CheckboxData<T> = {
 
 export function Checklist<T>({
   label,
+  tooltip,
   data,
   cb,
   nowrap = true,
   children,
 }: {
   label: string | ReactNode
+  tooltip?: ReactNode
   data: CheckboxData<T>[]
   cb: (ts: T[]) => void
   nowrap?: boolean
@@ -45,7 +49,7 @@ export function Checklist<T>({
   }
 
   const labels = data.map((d) => {
-    const { name, disabled } = d
+    const { name, label: itemLabel, disabled } = d
     const checked = state[name].checked
     return (
       <label key={name} className={nowrap ? css.nowrap : ""}>
@@ -57,14 +61,20 @@ export function Checklist<T>({
           disabled={disabled}
           onChange={onChange}
         />
-        {name}
+        {itemLabel ?? name}
       </label>
     )
   })
 
+  const header = tooltip ? (
+    <Tooltip title={tooltip} placement="top" arrow>
+      <span style={{ cursor: 'help' }}>{label}</span>
+    </Tooltip>
+  ) : label
+
   return (
     <div className={css.control}>
-      <div className={css.controlHeader}>{label}</div>
+      <div className={css.controlHeader}>{header}</div>
       <div className={css.subControl}>{labels}</div>
       {children}
     </div>

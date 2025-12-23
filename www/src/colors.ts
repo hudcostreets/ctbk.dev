@@ -11,3 +11,15 @@ export function darken(c: string, f = 0.5): string {
       .join("")
   )
 }
+
+export function lighten(c: string, f = 0.5): string {
+  return (
+    "#" +
+    [c.substring(1, 3), c.substring(3, 5), c.substring(5, 7)]
+      .map((s) => {
+        const val = parseInt(s, 16)
+        return pad(Math.round(val + (255 - val) * f), 2)
+      })
+      .join("")
+  )
+}

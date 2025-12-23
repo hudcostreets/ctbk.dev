@@ -12,6 +12,7 @@
     "@rdub/base": "0.7.9",
     "@rdub/icons": "0.1.0",
     "@rdub/screenshots": "https://gitlab.com/api/v4/projects/77258162/repository/archive.tar.gz?sha=8ae7838",
+    "@rdub/use-hotkeys": "^0.2.0",
     "@rdub/use-url-params": "github:runsascoded/use-url-params#15e54b3003e14cd31b5704ec0dce117737ef8709",
     "bootstrap": "^4.6.2",
     "d3-color": "^3.1.0",
@@ -22,6 +23,7 @@
     "plotly.js": "^2.29.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-icons": "^5.5.0",
     "react-leaflet": "^4.2.1",
     "react-markdown": "^7.1.2",
     "react-plotly.js": "^2.6.0",
@@ -55,6 +57,8 @@
     "url": "https://github.com/hudcostreets/ctbk.dev/issues"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["puppeteer"]
+    "onlyBuiltDependencies": [
+      "puppeteer"
+    ]
   }
 }
