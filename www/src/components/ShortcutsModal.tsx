@@ -1,5 +1,6 @@
 import { useKeyboardShortcutsContext } from '@rdub/use-hotkeys'
 import { HOTKEY_DESCRIPTIONS, HOTKEY_GROUPS } from '../hooks/useKeyboardShortcuts'
+import { ShiftIcon, CommandIcon } from './icons'
 import css from './ShortcutsModal.module.css'
 
 interface ShortcutsModalProps {
@@ -27,14 +28,17 @@ export function ShortcutsModal({ isOpen, onClose }: ShortcutsModalProps) {
 
   // Render a key combination nicely
   const renderKey = (key: string) => {
-    const upper = key.toUpperCase()
-    if (upper.startsWith('META+')) {
-      return <><span className={css.modifier}>&#8984;</span>{upper.replace('META+', '')}</>
+    if (key.startsWith('meta+') || key.startsWith('META+')) {
+      return <><CommandIcon className={css.modifierIcon} />{key.slice(5).toUpperCase()}</>
     }
-    if (upper.startsWith('SHIFT+')) {
-      return <><span className={css.modifier}>&#8679;</span>{upper.replace('SHIFT+', '')}</>
+    if (key.startsWith('shift+') || key.startsWith('SHIFT+')) {
+      return <><ShiftIcon className={css.modifierIcon} />{key.slice(6).toUpperCase()}</>
     }
-    return upper
+    // Single uppercase letter = shift modifier needed
+    if (key.length === 1 && key >= 'A' && key <= 'Z') {
+      return <><ShiftIcon className={css.modifierIcon} />{key}</>
+    }
+    return key.toUpperCase()
   }
 
   return (

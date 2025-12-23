@@ -161,6 +161,8 @@
     margin-bottom: 5em;
     .icon {
         width: 2em;
+        height: 2em;
         margin-right: 1em;
+        vertical-align: middle;
     }
 }

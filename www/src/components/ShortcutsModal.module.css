@@ -105,9 +105,12 @@
   text-align: center;
 }
 
-.modifier {
-  font-size: 0.75rem;
-  margin-right: 0.1rem;
+.modifierIcon {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  margin-right: 0.2rem;
+  vertical-align: -0.1em;
 }
 
 .footer {

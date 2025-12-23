@@ -39,8 +39,8 @@ export const DEFAULT_HOTKEY_MAP: HotkeyMap = {
   'u': 'stack:usertype',
   'g': 'stack:gender',
   'b': 'stack:biketype',
-  // Y-axis
-  'y': 'yaxis:rides',
+  // Y-axis (i for rIdes, m for Minutes)
+  'i': 'yaxis:rides',
   'm': 'yaxis:minutes',
   // Toggles
   'l': 'toggle:avg',
@@ -55,11 +55,11 @@ export const DEFAULT_HOTKEY_MAP: HotkeyMap = {
   // Gender toggles (uppercase)
   'M': 'gender:men',
   'W': 'gender:women',
-  'G': 'gender:unknown',
+  'U': 'gender:unknown',
   // Bike type toggles (uppercase)
   'C': 'bike:classic',
   'E': 'bike:electric',
-  'B': 'bike:unknown',
+  'O': 'bike:unknown',
   // Modal
   '?': 'modal:shortcuts',
   'meta+/': 'modal:shortcuts',

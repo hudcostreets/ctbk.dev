@@ -4,11 +4,11 @@ import { Data } from 'plotly.js'
 import { ReactNode, useEffect, useMemo, useState } from 'react'
 import Plot from 'react-plotly.js'
 import { Link, useLocation } from 'react-router-dom'
+import { GitHubIcon, S3Icon, BlueskyIcon, PipelineIcon } from "../components/icons"
 import css from "../index.module.css"
 import controlCss from "../controls.module.css"
 import { Checkbox } from "../components/Checkbox"
 import { Checklist } from "../components/Checklist"
-import { HotkeyHint, HotkeyLabel } from "../components/HotkeyLabel"
 import { Radios } from "../components/Radios"
 import { useShortcutsModal } from "../contexts/ShortcutsModalContext"
 import { useTheme } from "../contexts/ThemeContext"
@@ -516,14 +516,9 @@ export default function Home() {
 
             <Checklist
               label="Region"
-              tooltip={<HotkeyHint prefix="" items={[
-                { key: 'J', label: 'JC' },
-                { key: 'H', label: 'HOB' },
-                { key: 'N', label: 'NYC' },
-              ]} />}
               data={Regions.map(region => ({
                 name: region,
-                label: <HotkeyLabel text={region} hotkey={region === 'JC' ? 'J' : region === 'HOB' ? 'H' : 'N'} />,
+                label: region,
                 data: region,
                 checked: regions.includes(region),
               }))}
@@ -532,19 +527,12 @@ export default function Home() {
 
             <Radios
               label="Stack by"
-              tooltip={<HotkeyHint prefix="" items={[
-                { key: 'n', label: 'None' },
-                { key: 'r', label: 'Region' },
-                { key: 'u', label: 'User Type' },
-                { key: 'g', label: 'Gender' },
-                { key: 'b', label: 'Bike Type' },
-              ]} />}
               options={[
-                { label: <HotkeyLabel text="None" hotkey="n" />, data: "None" },
-                { label: <HotkeyLabel text="Region" hotkey="r" />, data: "Region" },
-                { label: <HotkeyLabel text="User Type" hotkey="u" />, data: "User Type" },
-                { label: <HotkeyLabel text="Gender" hotkey="g">{GenderLabel(1)}</HotkeyLabel>, data: "Gender" },
-                { label: <HotkeyLabel text="Bike Type" hotkey="b" />, data: "Rideable Type" },
+                { label: "None", data: "None" },
+                { label: "Region", data: "Region" },
+                { label: "User Type", data: "User Type" },
+                { label: <>{GenderLabel(1)}</>, data: "Gender" },
+                { label: "Bike Type", data: "Rideable Type" },
               ]}
               cb={setStackBy}
               choice={stackBy}
@@ -570,13 +558,9 @@ export default function Home() {
 
             <Radios
               label="Y Axis"
-              tooltip={<HotkeyHint prefix="" items={[
-                { key: 'y', label: 'Rides' },
-                { key: 'm', label: 'Minutes' },
-              ]} />}
               options={[
-                { label: <HotkeyLabel text="Rides" hotkey="y" />, data: "Rides" },
-                { label: <HotkeyLabel text="Minutes" hotkey="m" />, data: "Ride minutes" },
+                { label: "Rides", data: "Rides" },
+                { label: "Minutes", data: "Ride minutes" },
               ]}
               cb={setYAxis}
               choice={yAxis}
@@ -584,13 +568,9 @@ export default function Home() {
 
             <Checklist
               label="User Type"
-              tooltip={<HotkeyHint prefix="" items={[
-                { key: 'A', label: 'Annual' },
-                { key: 'D', label: 'Daily' },
-              ]} />}
               data={UserTypes.map(userType => ({
                 name: userType,
-                label: <HotkeyLabel text={userType} hotkey={userType === 'Annual' ? 'A' : 'D'} />,
+                label: userType,
                 data: userType,
                 checked: userTypes.includes(userType),
               }))}
@@ -599,30 +579,20 @@ export default function Home() {
 
             <Checklist
               label={GenderLabel(2)}
-              tooltip={<HotkeyHint prefix="" items={[
-                { key: 'M', label: 'Men' },
-                { key: 'W', label: 'Women' },
-                { key: 'G', label: 'Unknown' },
-              ]} />}
               data={[
-                { name: 'Men', label: <HotkeyLabel text="Men" hotkey="M" />, data: 'Men' as Gender, checked: genders.includes('Men') },
-                { name: 'Women', label: <HotkeyLabel text="Women" hotkey="W" />, data: 'Women' as Gender, checked: genders.includes('Women') },
-                { name: 'Unknown', label: <>Unknown <kbd>G</kbd></>, data: 'Unknown' as Gender, checked: genders.includes('Unknown') },
+                { name: 'Men', label: 'Men', data: 'Men' as Gender, checked: genders.includes('Men') },
+                { name: 'Women', label: 'Women', data: 'Women' as Gender, checked: genders.includes('Women') },
+                { name: 'Unknown', label: 'Unknown', data: 'Unknown' as Gender, checked: genders.includes('Unknown') },
               ]}
               cb={setGenders}
             />
 
             <Checklist
               label="Bike Type"
-              tooltip={<HotkeyHint prefix="" items={[
-                { key: 'C', label: 'Classic' },
-                { key: 'E', label: 'Electric' },
-                { key: 'B', label: 'Unknown' },
-              ]} />}
               data={[
-                { name: 'Classic', label: <HotkeyLabel text="Classic" hotkey="C" />, data: 'Classic' as RideableType, checked: rideableTypes.includes('Classic') },
-                { name: 'Electric', label: <HotkeyLabel text="Electric" hotkey="E" />, data: 'Electric' as RideableType, checked: rideableTypes.includes('Electric') },
-                { name: 'Unknown', label: <>Unknown <kbd>B</kbd></>, data: 'Unknown' as RideableType, checked: rideableTypes.includes('Unknown') },
+                { name: 'Classic', label: 'Classic', data: 'Classic' as RideableType, checked: rideableTypes.includes('Classic') },
+                { name: 'Electric', label: 'Electric', data: 'Electric' as RideableType, checked: rideableTypes.includes('Electric') },
+                { name: 'Unknown', label: 'Unknown', data: 'Unknown' as RideableType, checked: rideableTypes.includes('Unknown') },
               ]}
               cb={setRideableTypes}
             />
@@ -670,14 +640,16 @@ export default function Home() {
 
           <div className={css.footer}>
             Code: <a href="https://github.com/hudcostreets/ctbk.dev" target="_blank" rel="noopener noreferrer">
-              <img src="/assets/gh.png" alt="GitHub" className={css.icon} style={{ width: '2em', marginRight: '1em' }} />
+              <GitHubIcon className={css.icon} />
             </a>
             Data: <a href="https://s3.amazonaws.com/ctbk/index.html" target="_blank" rel="noopener noreferrer">
-              <img src="/assets/s3.png" alt="S3" className={css.icon} style={{ width: '2em', marginRight: '1em' }} />
+              <S3Icon className={css.icon} />
             </a>
+            Pipeline: <Link to="/pipeline">
+              <PipelineIcon className={css.icon} />
+            </Link>
             Author: <a href="https://bsky.app/profile/runsascoded.com" target="_blank" rel="noopener noreferrer">
-              <img src="/assets/bsky.png" alt="Bluesky" className={css.icon} style={{ width: '2em', marginRight: '0.3em' }} />
-              @runsascoded
+              <BlueskyIcon className={css.icon} />
             </a>
           </div>
         </div>
