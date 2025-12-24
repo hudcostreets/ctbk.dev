@@ -8,43 +8,35 @@ This roadmap covers major feature areas for ctbk.dev, organized by dependencies 
 
 ## Phase 1: Foundation & Quick Wins
 
-### 1.1 Hotkeys Integration
-**Complexity:** Low | **Dependencies:** None
+### 1.1 Hotkeys Integration ✅
+**Complexity:** Low | **Dependencies:** None | **Status:** Complete
 
-Add keyboard shortcuts using `@rdub/use-hotkeys`:
+Added keyboard shortcuts using `@rdub/use-hotkeys`:
 
-**Home page:**
+**Home page:** ✅
 - `1-5` / `a` - Date range buttons (1y, 2y, 3y, 4y, 5y, All)
-- `r` - Cycle regions
-- `s` - Cycle stack-by options
-- `y` - Toggle Y axis (Rides/Minutes)
-- `l` - Toggle legend
-- `?` - Show shortcuts modal
+- `n/r/u/g/b` - Stack by None/Region/User Type/Gender/Bike Type
+- `i/m` - Y axis (Rides/Minutes)
+- `l` - Toggle 12mo average
+- `p` - Toggle stack %
+- `?` / `⌘/` - Show shortcuts modal
+- Shift+letter toggles for Region (J/H/N), User Type (A/D), Gender (M/W/U), Bike Type (C/E/O)
 
-**Stations page:**
+**Stations page:** ✅
 - `←/→` - Previous/next month
 - `Esc` - Deselect station
 - `m` - Open month selector dropdown
+- `?` / `⌘/` - Show shortcuts modal
 
-**Implementation:**
-```bash
-pnpm add @rdub/use-hotkeys
-```
-- Wrap app in `KeyboardShortcutsProvider`
-- Define hotkey map similar to awair
-- Add `ShortcutsModal` component
+### 1.2 Month Selector Dropdown ✅
+**Complexity:** Low | **Dependencies:** None | **Status:** Complete
 
-### 1.2 Month Selector Dropdown
-**Complexity:** Low | **Dependencies:** None
+MUI Select dropdown on /stations with all available months from manifest.
 
-Replace text month display with dropdown on /stations:
-- Dropdown of all available months (from manifest)
-- Optionally: month range selector for aggregated views
+### 1.3 Screenshots Package Refactor ✅
+**Complexity:** Low | **Dependencies:** `@rdub/screenshots` package | **Status:** Complete
 
-### 1.3 Screenshots Package Refactor
-**Complexity:** Low | **Dependencies:** `@rdub/screenshots` package
-
-Replace local `screenshots.js` with shared package.
+Using `@rdub/screenshots` package from GitLab.
 
 ---
 

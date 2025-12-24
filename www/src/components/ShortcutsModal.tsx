@@ -1,7 +1,41 @@
 import { useKeyboardShortcutsContext } from '@rdub/use-hotkeys'
+import { useLocation } from 'react-router-dom'
 import { HOTKEY_DESCRIPTIONS, HOTKEY_GROUPS } from '../hooks/useKeyboardShortcuts'
+import { STATIONS_HOTKEY_DESCRIPTIONS, STATIONS_HOTKEY_GROUPS } from '../hooks/useStationsKeyboardShortcuts'
 import { ShiftIcon, CommandIcon } from './icons'
 import css from './ShortcutsModal.module.css'
+
+// Map routes to their action prefixes (modal:* is shared)
+const ROUTE_ACTION_PREFIXES: Record<string, string[]> = {
+  '/': ['date', 'stack', 'yaxis', 'toggle', 'region', 'user', 'gender', 'bike', 'modal'],
+  '/stations': ['month', 'station', 'modal'],
+}
+
+// Get descriptions and groups for a specific route
+function getRouteShortcuts(pathname: string) {
+  const prefixes = ROUTE_ACTION_PREFIXES[pathname]
+  if (!prefixes) {
+    // For unknown routes (like /pipeline), don't show any shortcuts
+    return { descriptions: {}, groups: {} }
+  }
+
+  const descriptions: Record<string, string> = {}
+  const groups: Record<string, string> = {}
+
+  // Add Home page shortcuts if applicable
+  if (pathname === '/') {
+    Object.assign(descriptions, HOTKEY_DESCRIPTIONS)
+    Object.assign(groups, HOTKEY_GROUPS)
+  }
+
+  // Add Stations page shortcuts if applicable
+  if (pathname === '/stations') {
+    Object.assign(descriptions, STATIONS_HOTKEY_DESCRIPTIONS)
+    Object.assign(groups, STATIONS_HOTKEY_GROUPS)
+  }
+
+  return { descriptions, groups }
+}
 
 interface ShortcutsModalProps {
   isOpen: boolean
@@ -10,19 +44,24 @@ interface ShortcutsModalProps {
 
 export function ShortcutsModal({ isOpen, onClose }: ShortcutsModalProps) {
   const shortcutsState = useKeyboardShortcutsContext()
+  const { pathname } = useLocation()
 
   if (!isOpen) return null
+
+  // Get route-specific shortcuts
+  const { descriptions, groups } = getRouteShortcuts(pathname)
 
   // Group shortcuts by prefix
   const groupedShortcuts: Record<string, Array<{ action: string; description: string; keys: string[] }>> = {}
 
-  for (const [action, description] of Object.entries(HOTKEY_DESCRIPTIONS)) {
+  for (const [action, description] of Object.entries(descriptions)) {
+    const keys = shortcutsState.getBindingsForAction(action)
+    if (keys.length === 0) continue
     const prefix = action.split(':')[0]
-    const groupName = HOTKEY_GROUPS[prefix] || 'Other'
+    const groupName = groups[prefix] || 'Other'
     if (!groupedShortcuts[groupName]) {
       groupedShortcuts[groupName] = []
     }
-    const keys = shortcutsState.getBindingsForAction(action)
     groupedShortcuts[groupName].push({ action, description, keys })
   }
 

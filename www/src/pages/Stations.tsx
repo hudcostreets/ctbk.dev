@@ -1,9 +1,11 @@
 import { FormControl, MenuItem, Select, SelectChangeEvent } from '@mui/material'
 import { useUrlParam, floatParam, stringParam } from '@rdub/use-url-params'
 import 'leaflet/dist/leaflet.css'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
 import { Link } from 'react-router-dom'
+import { useShortcutsModal } from '../contexts/ShortcutsModalContext'
+import { useStationsKeyboardShortcuts } from '../hooks/useStationsKeyboardShortcuts'
 import css from "../stations.module.css"
 
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -222,6 +224,7 @@ export default function Stations() {
   const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const monthSelectRef = useRef<HTMLSelectElement>(null)
 
   // URL parameters
   const [lat, setLat] = useUrlParam('lat', floatParam(DEFAULT_CENTER[0]))
@@ -293,6 +296,17 @@ export default function Stations() {
     if (!manifest) return []
     return Object.keys(manifest.stations).sort().reverse()
   }, [manifest])
+
+  // Keyboard shortcuts
+  const { open: openShortcutsModal } = useShortcutsModal()
+  useStationsKeyboardShortcuts({
+    month,
+    setMonth,
+    availableMonths,
+    setSelectedId,
+    openShortcutsModal,
+    monthSelectRef,
+  })
 
   const handleMonthChange = useCallback((e: SelectChangeEvent<string>) => {
     setMonth(e.target.value)
@@ -366,6 +380,7 @@ export default function Stations() {
             {month && availableMonths.length > 0 ? (
               <FormControl variant="standard" className={css.monthSelect}>
                 <Select
+                  inputRef={monthSelectRef}
                   value={month}
                   onChange={handleMonthChange}
                   disableUnderline

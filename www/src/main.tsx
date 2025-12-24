@@ -10,6 +10,13 @@ import { ShortcutsModalProvider, useShortcutsModal } from "./contexts/ShortcutsM
 import { ThemeToggle } from "./components/ThemeToggle"
 import { ShortcutsModal } from "./components/ShortcutsModal"
 import { DEFAULT_HOTKEY_MAP } from "./hooks/useKeyboardShortcuts"
+import { STATIONS_HOTKEY_MAP } from "./hooks/useStationsKeyboardShortcuts"
+
+// Merge all page hotkey maps for the global provider
+const ALL_HOTKEY_MAP = {
+  ...DEFAULT_HOTKEY_MAP,
+  ...STATIONS_HOTKEY_MAP,
+}
 import Home from "./pages/Home"
 import Stations from "./pages/Stations"
 import PipelineMdx from "./pages/Pipeline.mdx"
@@ -57,7 +64,7 @@ function MuiThemeWrapper({ children }: { children: React.ReactNode }) {
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ThemeProvider>
-      <KeyboardShortcutsProvider defaults={DEFAULT_HOTKEY_MAP} storageKey="ctbk-hotkeys">
+      <KeyboardShortcutsProvider defaults={ALL_HOTKEY_MAP} storageKey="ctbk-hotkeys">
         <MuiThemeWrapper>
           <ShortcutsModalProvider>
             <BrowserRouter>
