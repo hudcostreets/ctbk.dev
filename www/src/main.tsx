@@ -4,10 +4,11 @@ import { KeyboardShortcutsProvider } from '@rdub/use-hotkeys'
 import { ThemeProvider as MuiThemeProvider, createTheme } from "@mui/material"
 import { StrictMode, useMemo } from 'react'
 import { createRoot } from 'react-dom/client'
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext"
 import { ShortcutsModalProvider, useShortcutsModal } from "./contexts/ShortcutsModalContext"
 import { ThemeToggle } from "./components/ThemeToggle"
+import { TileStyleButton } from "./components/TileStyleButton"
 import { ShortcutsModal } from "./components/ShortcutsModal"
 import { DEFAULT_HOTKEY_MAP } from "./hooks/useKeyboardShortcuts"
 import { STATIONS_HOTKEY_MAP } from "./hooks/useStationsKeyboardShortcuts"
@@ -32,6 +33,8 @@ function Pipeline() {
 
 function AppContent() {
   const { isOpen, open, close } = useShortcutsModal()
+  const { pathname } = useLocation()
+  const isStationsPage = pathname === '/stations'
 
   return (
     <>
@@ -40,7 +43,9 @@ function AppContent() {
         <Route path="/stations" element={<Stations />} />
         <Route path="/pipeline" element={<Pipeline />} />
       </Routes>
-      <ThemeToggle onOpenShortcuts={open} />
+      <ThemeToggle onOpenShortcuts={open}>
+        {isStationsPage && <TileStyleButton />}
+      </ThemeToggle>
       <ShortcutsModal isOpen={isOpen} onClose={close} />
     </>
   )

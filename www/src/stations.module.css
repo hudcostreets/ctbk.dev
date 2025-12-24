@@ -104,27 +104,3 @@
     top: -0.05rem;
     color: inherit;
 }
-
-.tileStyleControl {
-    position: fixed;
-    bottom: 24px;
-    right: 10px;
-    z-index: 1100;
-    background: rgba(255, 255, 255, 0.9);
-    border-radius: 4px;
-    padding: 4px 8px;
-}
-
-.tileStyleSelect {
-    font-size: 0.875rem;
-    color: #333;
-}
-
-.tileStyleSelect :global(.MuiSelect-select) {
-    padding: 2px 24px 2px 4px !important;
-    color: #333;
-}
-
-.tileStyleSelect :global(.MuiSelect-icon) {
-    color: #333;
-}

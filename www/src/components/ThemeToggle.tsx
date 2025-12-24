@@ -4,11 +4,15 @@ import { MdBrightnessAuto, MdLightMode, MdDarkMode } from 'react-icons/md'
 import { useTheme } from '../contexts/ThemeContext'
 import css from './ThemeToggle.module.css'
 
+// Export button class for child components
+export const buttonClass = css.button
+
 interface ThemeToggleProps {
   onOpenShortcuts?: () => void
+  children?: React.ReactNode
 }
 
-export function ThemeToggle({ onOpenShortcuts }: ThemeToggleProps) {
+export function ThemeToggle({ onOpenShortcuts, children }: ThemeToggleProps) {
   const { theme, setTheme } = useTheme()
   const [isVisible, setIsVisible] = useState(false)
   const [isHovering, setIsHovering] = useState(false)
@@ -87,6 +91,7 @@ export function ThemeToggle({ onOpenShortcuts }: ThemeToggleProps) {
       onMouseLeave={() => setIsHovering(false)}
     >
       <div className={`${css.controls} ${showControls ? css.visible : ''}`}>
+        {children}
         {onOpenShortcuts && !isMobile && (
           <button
             className={css.button}

@@ -232,7 +232,7 @@ export default function Stations() {
   const [zoom, setZoom] = useUrlParam('z', floatParam(DEFAULT_ZOOM))
   const [selectedId, setSelectedId] = useUrlParam('s', stringParam())
   const [month, setMonth] = useUrlParam('m', stringParam())
-  const [tileCode, setTileCode] = useUrlParam('t', stringParam(DEFAULT_TILE_CODE))
+  const [tileCode] = useUrlParam('t', stringParam(DEFAULT_TILE_CODE))
 
   // Load manifest on mount
   useEffect(() => {
@@ -312,10 +312,6 @@ export default function Stations() {
     setMonth(e.target.value)
   }, [setMonth])
 
-  const handleTileCodeChange = useCallback((e: SelectChangeEvent<string>) => {
-    setTileCode(e.target.value)
-  }, [setTileCode])
-
   // Map code to full style name
   const tileStyle = TILE_CODES[tileCode || DEFAULT_TILE_CODE] || TILE_CODES[DEFAULT_TILE_CODE]
   const currentTile = TILE_STYLES[tileStyle]
@@ -360,20 +356,6 @@ export default function Stations() {
           <MapEvents setLat={setLat} setLng={setLng} setZoom={setZoom} setSelectedId={setSelectedId} />
         </MapContainer>
         {loading && <div className={css.loading}>Loading...</div>}
-        <div className={css.tileStyleControl}>
-          <FormControl variant="standard" size="small">
-            <Select
-              value={tileCode || DEFAULT_TILE_CODE}
-              onChange={handleTileCodeChange}
-              disableUnderline
-              className={css.tileStyleSelect}
-            >
-              {TILE_SHORT_CODES.map(([code, styleName]) => (
-                <MenuItem key={code} value={code}>{TILE_STYLES[styleName].name}</MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-        </div>
         <div className={css.titleContainer} style={{ color: currentColors.title }}>
           <div className={css.title}>
             Citi Bike rides by station,{' '}
