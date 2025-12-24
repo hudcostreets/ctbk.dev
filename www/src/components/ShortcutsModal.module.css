@@ -115,6 +115,11 @@
   border-color: var(--accent-primary);
 }
 
+.kbd.empty {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
 .kbd.editing {
   position: relative;
   border-color: #2196f3;

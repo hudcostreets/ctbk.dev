@@ -1,6 +1,6 @@
 import { useKeyboardShortcutsContext, useRecordHotkey, formatCombination } from '@rdub/use-hotkeys'
 import type { KeyCombinationDisplay } from '@rdub/use-hotkeys'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { HOTKEY_DESCRIPTIONS, HOTKEY_GROUPS } from '../hooks/useKeyboardShortcuts'
 import { STATIONS_HOTKEY_DESCRIPTIONS, STATIONS_HOTKEY_GROUPS } from '../hooks/useStationsKeyboardShortcuts'
@@ -37,8 +37,38 @@ export function ShortcutsModal({ isOpen, onClose }: ShortcutsModalProps) {
   const [editingAction, setEditingAction] = useState<string | null>(null)
   const [timeoutAnimKey, setTimeoutAnimKey] = useState(0)
 
+  // Ref to track if we're switching to another action (to prevent cancel)
+  const switchingToActionRef = useRef<string | null>(null)
+
+  // Ref to track the current editing action for capture callbacks
+  // (avoids closure capture issues with useEventCallback)
+  const editingActionRef = useRef<string | null>(null)
+
   // Get route-specific shortcuts (computed early for conflict detection)
   const { descriptions, groups } = useMemo(() => getRouteShortcuts(pathname), [pathname])
+
+  // Build flat list of actions in display order (for Tab navigation)
+  const actionList = useMemo(() => {
+    const groupedShortcuts: Record<string, string[]> = {}
+
+    for (const action of Object.keys(descriptions)) {
+      const prefix = action.split(':')[0]
+      const groupName = groups[prefix] || 'Other'
+      if (!groupedShortcuts[groupName]) {
+        groupedShortcuts[groupName] = []
+      }
+      groupedShortcuts[groupName].push(action)
+    }
+
+    // Flatten in display order (Other last)
+    const orderedGroups = Object.keys(groupedShortcuts).sort((a, b) => {
+      if (a === 'Other') return 1
+      if (b === 'Other') return -1
+      return 0
+    })
+
+    return orderedGroups.flatMap(g => groupedShortcuts[g])
+  }, [descriptions, groups])
 
   // Compute route-specific conflicts (only flag conflicts between actions on THIS route)
   const routeConflicts = useMemo(() => {
@@ -59,35 +89,107 @@ export function ShortcutsModal({ isOpen, onClose }: ShortcutsModalProps) {
 
   const handleCapture = useCallback(
     (_sequence: unknown, display: KeyCombinationDisplay) => {
-      if (editingAction) {
-        shortcutsState.setBinding(editingAction, display.id)
-        setEditingAction(null)
+      // Read from ref to avoid closure capture issues with useEventCallback
+      const action = editingActionRef.current
+      if (action) {
+        // Use setBinding to replace (not add) - enforces max one sequence per action
+        shortcutsState.setBinding(action, display.id)
+        // Only clear editing if we're not switching to another action
+        if (!switchingToActionRef.current) {
+          editingActionRef.current = null
+          setEditingAction(null)
+        }
       }
     },
-    [editingAction, shortcutsState],
+    [shortcutsState],
   )
 
   const handleCancel = useCallback(() => {
-    setEditingAction(null)
+    // Only clear if we're not switching to another action
+    if (!switchingToActionRef.current) {
+      editingActionRef.current = null
+      setEditingAction(null)
+    }
   }, [])
 
-  const { isRecording, startRecording, cancel, pendingKeys, activeKeys } = useRecordHotkey({
+  // Handle Tab: advance to next action
+  const handleTab = useCallback(() => {
+    if (!editingAction) return
+
+    const currentIdx = actionList.indexOf(editingAction)
+    if (currentIdx === -1) return
+
+    const nextIdx = (currentIdx + 1) % actionList.length
+    const nextAction = actionList[nextIdx]
+
+    // Mark that we're switching (to prevent cancel from clearing)
+    switchingToActionRef.current = nextAction
+    editingActionRef.current = nextAction
+    setEditingAction(nextAction)
+
+    // Clear the switching flag after a tick
+    setTimeout(() => {
+      switchingToActionRef.current = null
+    }, 0)
+  }, [editingAction, actionList])
+
+  // Handle Shift+Tab: go to previous action
+  const handleShiftTab = useCallback(() => {
+    if (!editingAction) return
+
+    const currentIdx = actionList.indexOf(editingAction)
+    if (currentIdx === -1) return
+
+    const prevIdx = (currentIdx - 1 + actionList.length) % actionList.length
+    const prevAction = actionList[prevIdx]
+
+    // Mark that we're switching (to prevent cancel from clearing)
+    switchingToActionRef.current = prevAction
+    editingActionRef.current = prevAction
+    setEditingAction(prevAction)
+
+    // Clear the switching flag after a tick
+    setTimeout(() => {
+      switchingToActionRef.current = null
+    }, 0)
+  }, [editingAction, actionList])
+
+  const { isRecording, startRecording, cancel, commit, pendingKeys, activeKeys } = useRecordHotkey({
     onCapture: handleCapture,
     onCancel: handleCancel,
+    onTab: handleTab,
+    onShiftTab: handleShiftTab,
   })
 
   const startEditing = useCallback(
     (action: string) => {
+      editingActionRef.current = action
       setEditingAction(action)
       startRecording()
     },
     [startRecording],
   )
 
-  const cancelEditing = useCallback(() => {
-    cancel()
-    setEditingAction(null)
-  }, [cancel])
+  // Handle clicking another entry during recording
+  const handleEntryClick = useCallback(
+    (action: string) => {
+      if (isRecording && editingAction && action !== editingAction) {
+        // Commit current edit (if pending keys) and switch to new action
+        switchingToActionRef.current = action
+        // The pending keys will be submitted by the timeout, or we cancel
+        cancel() // This triggers handleCancel but switchingToActionRef prevents clearing
+        editingActionRef.current = action
+        setEditingAction(action)
+        startRecording()
+        setTimeout(() => {
+          switchingToActionRef.current = null
+        }, 0)
+      } else if (!isRecording) {
+        startEditing(action)
+      }
+    },
+    [isRecording, editingAction, cancel, startRecording, startEditing],
+  )
 
   // Restart timeout animation when pendingKeys changes
   useEffect(() => {
@@ -103,11 +205,6 @@ export function ShortcutsModal({ isOpen, onClose }: ShortcutsModalProps) {
 
   // Group shortcuts by prefix (include all actions, even those without bindings)
   const groupedShortcuts: Record<string, Array<{ action: string; description: string; keys: string[] }>> = {}
-
-  // Debug: log bindings for relevant actions
-  const stackNoneKeys = shortcutsState.getBindingsForAction('stack:none')
-  const regionNycKeys = shortcutsState.getBindingsForAction('region:nyc')
-  console.log('ShortcutsModal bindings:', { 'stack:none': stackNoneKeys, 'region:nyc': regionNycKeys })
 
   for (const [action, description] of Object.entries(descriptions)) {
     const keys = shortcutsState.getBindingsForAction(action)
@@ -155,9 +252,10 @@ export function ShortcutsModal({ isOpen, onClose }: ShortcutsModalProps) {
         className={css.modal}
         onClick={(e) => {
           e.stopPropagation() // Prevent closing modal
-          // Cancel editing if clicking on empty space (not on a kbd or button)
+          // Commit/cancel editing if clicking on empty space (not on a kbd or button)
+          // If there are pending keys, commit them; otherwise cancel
           if (isRecording && !(e.target as HTMLElement).closest('kbd, button')) {
-            cancelEditing()
+            commit()
           }
         }}
         role="dialog"
@@ -196,7 +294,7 @@ export function ShortcutsModal({ isOpen, onClose }: ShortcutsModalProps) {
                         <td className={css.description}>{description}</td>
                         <td className={css.keys}>
                           {isEditing ? (
-                            <kbd className={`${css.kbd} ${css.editing}`} onClick={cancelEditing}>
+                            <kbd className={`${css.kbd} ${css.editing}`} onClick={commit}>
                               {getRecordingDisplay()}
                               {showTimeoutBar && (
                                 <span
@@ -208,11 +306,11 @@ export function ShortcutsModal({ isOpen, onClose }: ShortcutsModalProps) {
                             </kbd>
                           ) : keys.length === 0 ? (
                             <kbd
-                              className={`${css.kbd} ${css.clickable}`}
-                              onClick={() => startEditing(action)}
+                              className={`${css.kbd} ${css.clickable} ${css.empty}`}
+                              onClick={() => handleEntryClick(action)}
                               title="Click to set keybinding"
                             >
-                              -
+                              ∅
                             </kbd>
                           ) : (
                             keys.map((key, i) => {
@@ -222,7 +320,7 @@ export function ShortcutsModal({ isOpen, onClose }: ShortcutsModalProps) {
                                 <kbd
                                   key={i}
                                   className={classes}
-                                  onClick={() => !isRecording && startEditing(action)}
+                                  onClick={() => handleEntryClick(action)}
                                   title={isConflict ? 'Conflict! Click to change' : 'Click to change'}
                                 >
                                   {renderKey(key)}

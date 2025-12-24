@@ -111,6 +111,7 @@ export default function Home() {
   const [controlsOpen, setControlsOpen] = useUrlParam('c', boolParam, true)  // Default to open
   const [hideControls] = useUrlParam('nc', boolParam)  // For screenshots
   const [showLegend, setShowLegend] = useState<boolean | null>(null)
+  const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
   const [windowWidth, setWindowWidth] = useState(() => typeof window !== 'undefined' ? window.innerWidth : 800)
 
   // Keyboard shortcuts
@@ -123,6 +124,8 @@ export default function Home() {
     rollingAvgs,
     setStackRelative,
     stackRelative,
+    setShowLegend,
+    showLegendValue,
     openShortcutsModal,
     setControlsOpen,
     controlsOpen,
@@ -399,8 +402,6 @@ export default function Home() {
     )
   }
 
-  // Show legend by default when stacking OR when rolling averages are visible
-  const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
   const gridcolor = isDark ? '#505050' : '#ccc'
   const tickcolor = isDark ? '#e0e0e0' : '#333'
 

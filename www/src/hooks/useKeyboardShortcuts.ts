@@ -11,6 +11,8 @@ interface UseKeyboardShortcutsProps {
   rollingAvgs: number[]
   setStackRelative: (relative: boolean) => void
   stackRelative: boolean
+  setShowLegend: (show: boolean | null) => void
+  showLegendValue: boolean
   openShortcutsModal: () => void
   setControlsOpen: (open: boolean) => void
   controlsOpen: boolean
@@ -27,7 +29,6 @@ interface UseKeyboardShortcutsProps {
 }
 
 // Default hotkey map: key combination -> action name
-// Uses shift+key for toggles to avoid conflicting with lowercase stack-by keys
 export const DEFAULT_HOTKEY_MAP: HotkeyMap = {
   // Date ranges
   '1': 'date:1y',
@@ -35,37 +36,38 @@ export const DEFAULT_HOTKEY_MAP: HotkeyMap = {
   '3': 'date:3y',
   '4': 'date:4y',
   '5': 'date:5y',
-  'a': 'date:all',
-  // Stack by (lowercase)
-  'n': 'stack:none',
+  'x': 'date:all',
+  // Stack by
+  '-': 'stack:none',
   'r': 'stack:region',
   'u': 'stack:usertype',
   'g': 'stack:gender',
   'b': 'stack:biketype',
-  // Y-axis (i for rIdes, m for Minutes)
-  'i': 'yaxis:rides',
-  'm': 'yaxis:minutes',
+  // Y-axis
+  'shift+r': 'yaxis:rides',
+  'shift+m': 'yaxis:minutes',
   // Toggles
-  'l': 'toggle:avg',
+  'l': 'toggle:legend',
+  'A': 'toggle:avg',
   'p': 'toggle:percent',
-  's': 'toggle:settings',
-  // Theme toggle
+  // Other
+  's': 'other:settings',
   't': 'other:theme',
-  // Region toggles (uppercase = shift+key)
-  'J': 'region:jc',
-  'H': 'region:hob',
-  'N': 'region:nyc',
-  // User type toggles
-  'A': 'user:annual',
-  'D': 'user:daily',
+  // Region toggles (lowercase)
+  'j': 'region:jc',
+  'h': 'region:hob',
+  'n': 'region:nyc',
+  // User type toggles (lowercase)
+  'a': 'user:annual',
+  'd': 'user:daily',
   // Gender toggles
-  'M': 'gender:men',
-  'W': 'gender:women',
-  'U': 'gender:unknown',
+  'm': 'gender:men',
+  'w': 'gender:women',
+  'shift+g': 'gender:unknown',
   // Bike type toggles
-  'C': 'bike:classic',
-  'E': 'bike:electric',
-  'O': 'bike:unknown',
+  'c': 'bike:classic',
+  'e': 'bike:electric',
+  'o': 'bike:unknown',
   // Modal
   '?': 'modal:shortcuts',
   'meta+/': 'modal:shortcuts',
@@ -90,10 +92,11 @@ export const HOTKEY_DESCRIPTIONS: Record<string, string> = {
   'yaxis:rides': 'Rides',
   'yaxis:minutes': 'Minutes',
   // Toggles
+  'toggle:legend': 'Legend',
   'toggle:avg': '12mo average',
   'toggle:percent': 'Stack %',
-  'toggle:settings': 'Settings panel',
   // Other
+  'other:settings': 'Open/Close controls',
   'other:theme': 'Theme (system/light/dark)',
   // Region toggles
   'region:jc': 'Toggle JC',
@@ -148,6 +151,8 @@ export function useKeyboardShortcuts({
   rollingAvgs,
   setStackRelative,
   stackRelative,
+  setShowLegend,
+  showLegendValue,
   openShortcutsModal,
   setControlsOpen,
   controlsOpen,
@@ -179,9 +184,10 @@ export function useKeyboardShortcuts({
     'yaxis:rides': () => setYAxis('Rides'),
     'yaxis:minutes': () => setYAxis('Ride minutes'),
     // Toggles
+    'toggle:legend': () => setShowLegend(!showLegendValue),
     'toggle:avg': () => setRollingAvgs(rollingAvgs.includes(12) ? [] : [12]),
     'toggle:percent': () => setStackRelative(!stackRelative),
-    'toggle:settings': () => setControlsOpen(!controlsOpen),
+    'other:settings': () => setControlsOpen(!controlsOpen),
     'other:theme': toggleTheme,
     // Region toggles
     'region:jc': () => setRegions(toggleItem(regions, 'JC')),
@@ -200,7 +206,7 @@ export function useKeyboardShortcuts({
     'bike:unknown': () => setRideableTypes(toggleItem(rideableTypes, 'Unknown')),
     // Modal
     'modal:shortcuts': openShortcutsModal,
-  }), [setDateRange, setStackBy, setYAxis, setRollingAvgs, rollingAvgs, setStackRelative, stackRelative, openShortcutsModal, setControlsOpen, controlsOpen, toggleTheme, setRegions, regions, setUserTypes, userTypes, setGenders, genders, setRideableTypes, rideableTypes])
+  }), [setDateRange, setStackBy, setYAxis, setRollingAvgs, rollingAvgs, setStackRelative, stackRelative, setShowLegend, showLegendValue, openShortcutsModal, setControlsOpen, controlsOpen, toggleTheme, setRegions, regions, setUserTypes, userTypes, setGenders, genders, setRideableTypes, rideableTypes])
 
   return useRegisteredHotkeys(handlers, { sequenceTimeout: 1000 })
 }
