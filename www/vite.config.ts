@@ -16,7 +16,8 @@ export default defineConfig({
     outDir: 'dist',
   },
   server: {
-    port: 3000,
+    port: 3456,
+    strictPort: true,
   },
   optimizeDeps: {
     exclude: ['@rdub/use-hotkeys'],

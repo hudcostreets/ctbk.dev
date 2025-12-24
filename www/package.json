@@ -33,6 +33,7 @@
     "react-router-dom": "^6.28.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.57.0",
     "@types/leaflet": "^1.9.8",
     "@types/lodash": "^4.14.202",
     "@types/plotly.js": "^2.29.0",
@@ -45,12 +46,15 @@
     "vite": "^6.0.0"
   },
   "scripts": {
+    "clean": "rm -rf node_modules/.vite",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint .",
     "tc": "tsc",
-    "screenshots": "screenshots -c screenshots.json -o public/screenshots -s '.plotly svg rect' -l 30000"
+    "screenshots": "screenshots -c screenshots.json -o public/screenshots -s '.plotly svg rect' -l 30000",
+    "test": "playwright test",
+    "test:ui": "playwright test --ui"
   },
   "repository": {
     "type": "git",

@@ -1,5 +1,3 @@
-dist
-node_modules
-out
-.next
-next-env.d.ts
+chrome
+playwright-report
+test-results
