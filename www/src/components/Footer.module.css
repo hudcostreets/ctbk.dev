@@ -1,0 +1,12 @@
+.footer {
+  margin-top: 2em;
+  margin-bottom: 3em;
+  text-align: center;
+}
+
+.icon {
+  width: 2em;
+  height: 2em;
+  margin-right: 1em;
+  vertical-align: middle;
+}

@@ -4,7 +4,9 @@ import 'leaflet/dist/leaflet.css'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
 import { Link } from 'react-router-dom'
+import { StationSearch } from '../components/StationSearch'
 import { useShortcutsModal } from '../contexts/ShortcutsModalContext'
+import { useTheme } from '../contexts/ThemeContext'
 import { useStationsKeyboardShortcuts } from '../hooks/useStationsKeyboardShortcuts'
 import css from "../stations.module.css"
 
@@ -224,6 +226,7 @@ export default function Stations() {
   const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [isSearchOpen, setIsSearchOpen] = useState(false)
   const monthSelectRef = useRef<HTMLSelectElement>(null)
 
   // URL parameters
@@ -299,12 +302,17 @@ export default function Stations() {
 
   // Keyboard shortcuts
   const { open: openShortcutsModal } = useShortcutsModal()
+  const { toggleTheme } = useTheme()
+  const openSearch = useCallback(() => setIsSearchOpen(true), [])
+  const closeSearch = useCallback(() => setIsSearchOpen(false), [])
   useStationsKeyboardShortcuts({
     month,
     setMonth,
     availableMonths,
     setSelectedId,
     openShortcutsModal,
+    openSearch,
+    toggleTheme,
     monthSelectRef,
   })
 
@@ -356,9 +364,17 @@ export default function Stations() {
           <MapEvents setLat={setLat} setLng={setLng} setZoom={setZoom} setSelectedId={setSelectedId} />
         </MapContainer>
         {loading && <div className={css.loading}>Loading...</div>}
+        {stations && (
+          <StationSearch
+            isOpen={isSearchOpen}
+            onClose={closeSearch}
+            stations={stations}
+            onSelect={setSelectedId}
+          />
+        )}
         <div className={css.titleContainer} style={{ color: currentColors.title }}>
           <div className={css.title}>
-            Citi Bike rides by station,{' '}
+            <Link to="/" className={css.homeLink}>Citi Bike</Link> rides by station,{' '}
             {month && availableMonths.length > 0 ? (
               <FormControl variant="standard" className={css.monthSelect}>
                 <Select

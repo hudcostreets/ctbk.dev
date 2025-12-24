@@ -12,21 +12,42 @@ import { TileStyleButton } from "./components/TileStyleButton"
 import { ShortcutsModal } from "./components/ShortcutsModal"
 import { DEFAULT_HOTKEY_MAP } from "./hooks/useKeyboardShortcuts"
 import { STATIONS_HOTKEY_MAP } from "./hooks/useStationsKeyboardShortcuts"
+import type { HotkeyMap } from "@rdub/use-hotkeys"
+
+// Merge hotkey maps, combining conflicting keys into arrays
+function mergeHotkeyMaps(...maps: HotkeyMap[]): HotkeyMap {
+  const result: HotkeyMap = {}
+  for (const map of maps) {
+    for (const [key, action] of Object.entries(map)) {
+      if (result[key]) {
+        // Key already exists - merge actions
+        const existing = result[key]
+        const existingActions = Array.isArray(existing) ? existing : [existing]
+        const newActions = Array.isArray(action) ? action : [action]
+        // Combine unique actions
+        const combined = [...new Set([...existingActions, ...newActions])]
+        result[key] = combined.length === 1 ? combined[0] : combined
+      } else {
+        result[key] = action
+      }
+    }
+  }
+  return result
+}
 
 // Merge all page hotkey maps for the global provider
-const ALL_HOTKEY_MAP = {
-  ...DEFAULT_HOTKEY_MAP,
-  ...STATIONS_HOTKEY_MAP,
-}
+const ALL_HOTKEY_MAP = mergeHotkeyMaps(DEFAULT_HOTKEY_MAP, STATIONS_HOTKEY_MAP)
 import Home from "./pages/Home"
 import Stations from "./pages/Stations"
 import PipelineMdx from "./pages/Pipeline.mdx"
 import { Box } from "@mui/material"
+import { Footer } from "./components/Footer"
 
 function Pipeline() {
   return (
     <Box sx={{ p: 4, maxWidth: 900, mx: 'auto' }}>
       <PipelineMdx />
+      <Footer showHome showPipeline={false} />
     </Box>
   )
 }

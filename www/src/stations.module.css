@@ -36,6 +36,14 @@
     backdrop-filter: blur(4px);
 }
 
+.homeLink {
+    color: inherit;
+    text-decoration: none;
+}
+.homeLink:hover {
+    text-decoration: underline;
+}
+
 .subtitle {
     display: block;
     width: fit-content;

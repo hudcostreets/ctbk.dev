@@ -91,7 +91,7 @@ export const RideableTypesExample = "/?y=m&s=b&rt=ce&d=2002-"
 export default function Home() {
   // useLocation triggers re-render on URL change (React Router Link navigation)
   useLocation()
-  const { actualTheme } = useTheme()
+  const { actualTheme, toggleTheme } = useTheme()
 
   const [data, setData] = useState<ProcessedRow[] | null>(null)
   const [loading, setLoading] = useState(true)
@@ -124,6 +124,9 @@ export default function Home() {
     setStackRelative,
     stackRelative,
     openShortcutsModal,
+    setControlsOpen,
+    controlsOpen,
+    toggleTheme,
     setRegions,
     regions,
     setUserTypes,
@@ -409,6 +412,7 @@ export default function Home() {
 
   let tickMonths: string[]
   let tickLabels: string[]
+  let tickFormat: 'quarterly' | 'semiannual' | 'annual'
 
   // Choose tick interval based on both date range and available space
   const quarterlyTicks = Math.ceil(totalMonths / 3)
@@ -416,6 +420,7 @@ export default function Home() {
 
   if (quarterlyTicks <= maxTicks && totalMonths <= 60) {
     // Quarterly ticks (Jan, Apr, Jul, Oct) - if they fit and ≤5 years
+    tickFormat = 'quarterly'
     tickMonths = months.filter(m => m.endsWith('-01') || m.endsWith('-04') || m.endsWith('-07') || m.endsWith('-10'))
     tickLabels = tickMonths.map(m => {
       const mo = m.slice(5, 7)
@@ -425,6 +430,7 @@ export default function Home() {
     })
   } else if (semiAnnualTicks <= maxTicks && totalMonths <= 144) {
     // Semi-annual ticks (Jan, Jul) with consistent month prefix
+    tickFormat = 'semiannual'
     tickMonths = months.filter(m => m.endsWith('-01') || m.endsWith('-07'))
     tickLabels = tickMonths.map(m => {
       const mo = m.slice(5, 7)
@@ -433,6 +439,7 @@ export default function Home() {
     })
   } else {
     // Annual ticks (Jan only)
+    tickFormat = 'annual'
     tickMonths = months.filter(m => m.endsWith('-01'))
     tickLabels = tickMonths.map(m => `'${m.slice(2, 4)}`)
   }
@@ -470,7 +477,8 @@ export default function Home() {
     },
     paper_bgcolor: 'rgba(0,0,0,0)',
     plot_bgcolor: 'rgba(0,0,0,0)',
-    margin: { t: 0, r: 0, b: 60, l: 0 },
+    // Bottom margin varies by tick label length: annual "'YY" needs less room than "MMM 'YY"
+    margin: { t: 0, r: 0, b: tickFormat === 'annual' ? 40 : 70, l: 0 },
   }
 
   const dateRangeButtons: (DateRange & string)[] = ["1y", "2y", "3y", "4y", "5y", "All"]

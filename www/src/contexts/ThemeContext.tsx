@@ -1,11 +1,12 @@
-import { createContext, ReactNode, useContext, useEffect, useState } from 'react'
+import { createContext, ReactNode, useCallback, useContext, useEffect, useState } from 'react'
 
-type Theme = 'light' | 'dark' | 'system'
+export type Theme = 'light' | 'dark' | 'system'
 
 interface ThemeContextType {
   theme: Theme
   actualTheme: 'light' | 'dark'
   setTheme: (theme: Theme) => void
+  toggleTheme: () => void
 }
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined)
@@ -21,6 +22,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   })
 
   const actualTheme = theme === 'system' ? systemTheme : theme
+
+  const toggleTheme = useCallback(() => {
+    // Cycle: system -> light -> dark -> system
+    const next: Record<Theme, Theme> = { system: 'light', light: 'dark', dark: 'system' }
+    setTheme(next[theme])
+  }, [theme])
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
@@ -38,7 +45,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }, [theme, actualTheme])
 
   return (
-    <ThemeContext.Provider value={{ theme, actualTheme, setTheme }}>
+    <ThemeContext.Provider value={{ theme, actualTheme, setTheme, toggleTheme }}>
       {children}
     </ThemeContext.Provider>
   )

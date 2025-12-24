@@ -12,6 +12,9 @@ interface UseKeyboardShortcutsProps {
   setStackRelative: (relative: boolean) => void
   stackRelative: boolean
   openShortcutsModal: () => void
+  setControlsOpen: (open: boolean) => void
+  controlsOpen: boolean
+  toggleTheme: () => void
   // Checkbox toggles
   setRegions: (regions: Region[]) => void
   regions: Region[]
@@ -24,7 +27,7 @@ interface UseKeyboardShortcutsProps {
 }
 
 // Default hotkey map: key combination -> action name
-// Uses case-sensitivity: lowercase for stack-by, uppercase for toggles
+// Uses shift+key for toggles to avoid conflicting with lowercase stack-by keys
 export const DEFAULT_HOTKEY_MAP: HotkeyMap = {
   // Date ranges
   '1': 'date:1y',
@@ -45,18 +48,21 @@ export const DEFAULT_HOTKEY_MAP: HotkeyMap = {
   // Toggles
   'l': 'toggle:avg',
   'p': 'toggle:percent',
-  // Region toggles (uppercase)
+  's': 'toggle:settings',
+  // Theme toggle
+  't': 'other:theme',
+  // Region toggles (uppercase = shift+key)
   'J': 'region:jc',
   'H': 'region:hob',
   'N': 'region:nyc',
-  // User type toggles (uppercase)
+  // User type toggles
   'A': 'user:annual',
   'D': 'user:daily',
-  // Gender toggles (uppercase)
+  // Gender toggles
   'M': 'gender:men',
   'W': 'gender:women',
   'U': 'gender:unknown',
-  // Bike type toggles (uppercase)
+  // Bike type toggles
   'C': 'bike:classic',
   'E': 'bike:electric',
   'O': 'bike:unknown',
@@ -86,6 +92,9 @@ export const HOTKEY_DESCRIPTIONS: Record<string, string> = {
   // Toggles
   'toggle:avg': '12mo average',
   'toggle:percent': 'Stack %',
+  'toggle:settings': 'Settings panel',
+  // Other
+  'other:theme': 'Theme (system/light/dark)',
   // Region toggles
   'region:jc': 'Toggle JC',
   'region:hob': 'Toggle HOB',
@@ -116,20 +125,17 @@ export const HOTKEY_GROUPS: Record<string, string> = {
   'gender': 'Gender',
   'bike': 'Bike Type',
   'modal': 'Other',
+  'other': 'Other',
 }
 
 // Helper to toggle an item in an array (at least one must remain)
-function toggleItem<T>(arr: T[], item: T, allItems: T[]): T[] {
+function toggleItem<T>(arr: T[], item: T): T[] {
   if (arr.includes(item)) {
     // Don't remove if it's the only one
     if (arr.length > 1) {
       return arr.filter(x => x !== item)
     }
     return arr
-  }
-  // If all are selected (or this is the only one not selected), just select this one
-  if (arr.length === allItems.length - 1) {
-    return [item]
   }
   return [...arr, item]
 }
@@ -143,6 +149,9 @@ export function useKeyboardShortcuts({
   setStackRelative,
   stackRelative,
   openShortcutsModal,
+  setControlsOpen,
+  controlsOpen,
+  toggleTheme,
   setRegions,
   regions,
   setUserTypes,
@@ -172,24 +181,26 @@ export function useKeyboardShortcuts({
     // Toggles
     'toggle:avg': () => setRollingAvgs(rollingAvgs.includes(12) ? [] : [12]),
     'toggle:percent': () => setStackRelative(!stackRelative),
+    'toggle:settings': () => setControlsOpen(!controlsOpen),
+    'other:theme': toggleTheme,
     // Region toggles
-    'region:jc': () => setRegions(toggleItem(regions, 'JC', ['JC', 'HOB', 'NYC'])),
-    'region:hob': () => setRegions(toggleItem(regions, 'HOB', ['JC', 'HOB', 'NYC'])),
-    'region:nyc': () => setRegions(toggleItem(regions, 'NYC', ['JC', 'HOB', 'NYC'])),
+    'region:jc': () => setRegions(toggleItem(regions, 'JC')),
+    'region:hob': () => setRegions(toggleItem(regions, 'HOB')),
+    'region:nyc': () => setRegions(toggleItem(regions, 'NYC')),
     // User type toggles
-    'user:annual': () => setUserTypes(toggleItem(userTypes, 'Annual', ['Annual', 'Daily'])),
-    'user:daily': () => setUserTypes(toggleItem(userTypes, 'Daily', ['Annual', 'Daily'])),
+    'user:annual': () => setUserTypes(toggleItem(userTypes, 'Annual')),
+    'user:daily': () => setUserTypes(toggleItem(userTypes, 'Daily')),
     // Gender toggles
-    'gender:men': () => setGenders(toggleItem(genders, 'Men', ['Men', 'Women', 'Unknown'])),
-    'gender:women': () => setGenders(toggleItem(genders, 'Women', ['Men', 'Women', 'Unknown'])),
-    'gender:unknown': () => setGenders(toggleItem(genders, 'Unknown', ['Men', 'Women', 'Unknown'])),
+    'gender:men': () => setGenders(toggleItem(genders, 'Men')),
+    'gender:women': () => setGenders(toggleItem(genders, 'Women')),
+    'gender:unknown': () => setGenders(toggleItem(genders, 'Unknown')),
     // Bike type toggles
-    'bike:classic': () => setRideableTypes(toggleItem(rideableTypes, 'Classic', ['Classic', 'Electric', 'Unknown'])),
-    'bike:electric': () => setRideableTypes(toggleItem(rideableTypes, 'Electric', ['Classic', 'Electric', 'Unknown'])),
-    'bike:unknown': () => setRideableTypes(toggleItem(rideableTypes, 'Unknown', ['Classic', 'Electric', 'Unknown'])),
+    'bike:classic': () => setRideableTypes(toggleItem(rideableTypes, 'Classic')),
+    'bike:electric': () => setRideableTypes(toggleItem(rideableTypes, 'Electric')),
+    'bike:unknown': () => setRideableTypes(toggleItem(rideableTypes, 'Unknown')),
     // Modal
     'modal:shortcuts': openShortcutsModal,
-  }), [setDateRange, setStackBy, setYAxis, setRollingAvgs, rollingAvgs, setStackRelative, stackRelative, openShortcutsModal, setRegions, regions, setUserTypes, userTypes, setGenders, genders, setRideableTypes, rideableTypes])
+  }), [setDateRange, setStackBy, setYAxis, setRollingAvgs, rollingAvgs, setStackRelative, stackRelative, openShortcutsModal, setControlsOpen, controlsOpen, toggleTheme, setRegions, regions, setUserTypes, userTypes, setGenders, genders, setRideableTypes, rideableTypes])
 
   return useRegisteredHotkeys(handlers, { sequenceTimeout: 1000 })
 }
