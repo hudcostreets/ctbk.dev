@@ -266,7 +266,7 @@ export default function Home() {
         })
         // Show both count and percentage when stacked, just count when not stacked
         const hovertemplate = isStacked
-          ? '%{customdata[0]:,.0f} (%{customdata[1]:.0%})<extra></extra>'
+          ? `${name}: %{customdata[0]:,.0f} (%{customdata[1]:.0%})<extra></extra>`
           : '%{customdata[0]:,.0f}<extra></extra>'
         return {
           x: months,
@@ -313,7 +313,7 @@ export default function Home() {
           type: 'scatter',
           mode: 'lines',
           line: { color: rollingAvgColor, width: 4 },
-          hovertemplate: '%{y:,.0f}<extra></extra>',
+          hovertemplate: '12mo avg: %{y:,.0f}<extra></extra>',
           legendrank: 101,
         })
       } else {
@@ -341,9 +341,24 @@ export default function Home() {
             })
             const avgRaw = rollingAvg(rawValues, 12)
             const avgPct = rollingAvg(pctValues, 12)
-            const avgY = stackPercents ? avgPct : avgRaw
-            // Combine into customdata for tooltips
-            const customdata = avgRaw.map((raw, i) => [raw, avgPct[i]])
+
+            // Find first and last months with actual data for this series
+            const firstDataIdx = rawValues.findIndex(v => v > 0)
+            let lastDataIdx = -1
+            for (let i = rawValues.length - 1; i >= 0; i--) {
+              if (rawValues[i] > 0) { lastDataIdx = i; break }
+            }
+
+            // Null out rolling avg where series hasn't started (need 12 months of data) or has ended
+            const avgY = (stackPercents ? avgPct : avgRaw).map((v, i) => {
+              // Need 12 months of data before showing rolling avg (firstDataIdx + 11)
+              if (firstDataIdx < 0 || i < firstDataIdx + 11) return null
+              // Don't show after series ends
+              if (i > lastDataIdx) return null
+              return v
+            })
+            // Combine into customdata for tooltips (null where avgY is null)
+            const customdata = avgRaw.map((raw, i) => avgY[i] === null ? null : [raw, avgPct[i]])
 
             // Log annualized percents (use raw values for growth calculation)
             if (!stackPercents) {
@@ -371,12 +386,12 @@ export default function Home() {
             rollingTraces.push({
               x: clampedMonths,
               y: avgY as (number | null)[],
-              customdata,
+              customdata: customdata as any,
               name: `${stackVal} (12mo)`,
               type: 'scatter',
               mode: 'lines',
               line: { color, width: 4 },
-              hovertemplate: '%{customdata[0]:,.0f} (%{customdata[1]:.0%})<extra></extra>',
+              hovertemplate: `${stackVal} (12mo): %{customdata[0]:,.0f} (%{customdata[1]:.0%})<extra></extra>`,
               legendrank: 101 + 2 * (legendRanks[stackVal] || 0),
             })
           })
