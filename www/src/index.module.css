@@ -1,7 +1,7 @@
 .container {
     padding: 0;
     margin: auto;
-    max-width: 50em;
+    max-width: 60em;
 }
 
 .row {
@@ -57,6 +57,8 @@
 .controls {
     width: 100%;
     margin-top: -2em;
+    position: relative;
+    z-index: 10;
 }
 .controls > summary {
     margin-bottom: 0.3em;
@@ -118,6 +120,10 @@
 .plot {
     width: 100%;
     aspect-ratio: 768 / 450;
+}
+/* Force crisp pixel boundaries for bars to avoid subpixel aliasing */
+.plot :global(rect) {
+    shape-rendering: crispEdges;
 }
 
 /* Responsive aspect ratio for narrower viewports */

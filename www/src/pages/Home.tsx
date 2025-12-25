@@ -283,7 +283,10 @@ export default function Home() {
           customdata,
           name,
           type: 'bar' as const,
-          marker: { color: colors[stackVal] || colors[''] },
+          marker: {
+            color: colors[stackVal] || colors[''],
+            line: { color: isDark ? 'rgba(0,0,0,1)' : 'rgba(255,255,255,1)', width: .5 },
+          },
           hovertemplate,
           legendrank: 100 + 2 * (legendRanks[stackVal] || 0),
         }
@@ -477,6 +480,8 @@ export default function Home() {
   const layout = {
     autosize: true,
     barmode: 'stack' as const,
+    bargap: 0,  // No gaps - use marker.line for visual separation instead
+    dragmode: false as const,  // Disable drag pan/zoom
     showlegend: showLegendValue,
     hovermode: 'x' as const,
     legend: {
@@ -526,7 +531,7 @@ export default function Home() {
           layout={layout}
           useResizeHandler
           className={css.plot}
-          config={{ displayModeBar: false }}
+          config={{ displayModeBar: false, scrollZoom: false }}
         />
 
         {!hideControls && (
