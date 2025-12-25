@@ -9,6 +9,8 @@ export const RegionQueryStrings: [Region, string][] = [['HOB', 'h'], ['NYC', 'n'
 export type UserType = 'Annual' | 'Daily'
 export const UserTypes: UserType[] = ['Annual', 'Daily']
 export const UserTypeQueryStrings: [UserType, string][] = [['Annual', 'a'], ['Daily', 'd']]
+// Display names: internal 'Annual'/'Daily' map to 'Member'/'Customer' for clarity
+export const UserTypeDisplayNames: { [u in UserType]: string } = { 'Annual': 'Member', 'Daily': 'Customer' }
 
 export type Gender = 'Men' | 'Women' | 'Unknown'
 export const Genders: Gender[] = ['Men', 'Women', 'Unknown']

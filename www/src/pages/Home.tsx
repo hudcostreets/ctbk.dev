@@ -4,7 +4,7 @@ import { Data } from 'plotly.js'
 import { ReactNode, useEffect, useMemo, useState } from 'react'
 import Plot from 'react-plotly.js'
 import { Link, useLocation } from 'react-router-dom'
-import { GitHubIcon, S3Icon, BlueskyIcon } from "../components/icons"
+import { GitHubIcon, S3Icon, BlueskyIcon } from "@/components/icons"
 import css from "../index.module.css"
 import controlCss from "../controls.module.css"
 import { Checkbox } from "../components/Checkbox"
@@ -39,6 +39,7 @@ import {
   stackKeyDict,
   toYM,
   UnknownRideableCutoff,
+  UserTypeDisplayNames,
   UserTypeQueryStrings,
   UserTypes,
   YAxis,
@@ -200,7 +201,7 @@ export default function Home() {
     }
     if (userTypes.length && userTypes.length < UserTypes.length) {
       const [userType] = userTypes
-      parts.push({ Annual: 'Annual members', Daily: 'Daily customers' }[userType] || userType)
+      parts.push(`${UserTypeDisplayNames[userType]}s`)
     }
     const byName = stackBy === 'None' ? undefined : (stackBy === 'Rideable Type' ? 'Bike Type' : stackBy)
     if (stackPercents && byName) parts.push(`% by ${byName}`)
@@ -248,10 +249,16 @@ export default function Home() {
     const legendRanks: Record<string, number> = {}
     stackKeys.forEach((k, i) => { legendRanks[k] = -i })
 
+    // Map internal values to display names (for User Type)
+    const getDisplayName = (val: string) =>
+      stackBy === 'User Type' && val in UserTypeDisplayNames
+        ? UserTypeDisplayNames[val as keyof typeof UserTypeDisplayNames]
+        : val
+
     const barTraces = stackKeys
       .filter(key => stackBy === 'None' || months.some(m => grouped[m]?.[key]))
       .map(stackVal => {
-        const name = stackVal || yHoverLabel
+        const name = getDisplayName(stackVal) || yHoverLabel
         const customdata: ([number, number] | null)[] = []
         const y = months.map(m => {
           const val = grouped[m]?.[stackVal] || 0
@@ -370,11 +377,12 @@ export default function Home() {
             const baseColor = colors[stackVal] || colors['']
             // HOB's light blue gets lost against JC's purple bars, so keep it unchanged
             const color = stackVal === 'HOB' ? baseColor : darken(baseColor, lineDarkenFactor)
+            const displayName = getDisplayName(stackVal)
             // Shadow trace (thicker, contrasting color for outline effect)
             rollingTraces.push({
               x: clampedMonths,
               y: avgY as (number | null)[],
-              name: `${stackVal} (12mo outline)`,
+              name: `${displayName} (12mo outline)`,
               type: 'scatter',
               mode: 'lines',
               line: { color: lineOutlineColor, width: 7 },
@@ -387,11 +395,11 @@ export default function Home() {
               x: clampedMonths,
               y: avgY as (number | null)[],
               customdata: customdata as any,
-              name: `${stackVal} (12mo)`,
+              name: `${displayName} (12mo)`,
               type: 'scatter',
               mode: 'lines',
               line: { color, width: 4 },
-              hovertemplate: `${stackVal} (12mo): %{customdata[0]:,.0f} (%{customdata[1]:.0%})<extra></extra>`,
+              hovertemplate: `${displayName} (12mo): %{customdata[0]:,.0f} (%{customdata[1]:.0%})<extra></extra>`,
               legendrank: 101 + 2 * (legendRanks[stackVal] || 0),
             })
           })
@@ -498,7 +506,7 @@ export default function Home() {
     paper_bgcolor: 'rgba(0,0,0,0)',
     plot_bgcolor: 'rgba(0,0,0,0)',
     // Bottom margin varies by tick label length: annual "'YY" needs less room than "MMM 'YY"
-    margin: { t: 0, r: 0, b: tickFormat === 'annual' ? 40 : 70, l: 0 },
+    margin: { t: 0, r: 0, b: tickFormat === 'annual' ? 40 : 70, l: 0, },
   }
 
   const dateRangeButtons: (DateRange & string)[] = ["1y", "2y", "3y", "4y", "5y", "All"]
@@ -598,7 +606,7 @@ export default function Home() {
               label="User Type"
               data={UserTypes.map(userType => ({
                 name: userType,
-                label: userType,
+                label: UserTypeDisplayNames[userType],
                 data: userType,
                 checked: userTypes.includes(userType),
               }))}
@@ -637,7 +645,7 @@ export default function Home() {
           <ul>
             <li><Link to="/?r=jh">JC + Hoboken</Link> (<Link to="/?r=jh&s=r">stacked</Link>)</li>
             <li><Link to="/?y=m&s=g&pct=&g=mf&d=1406-2102">Ride minute %'s, Men vs. Women</Link>, Jun '14 – Jan '21</li>
-            <li><Link to="/?s=u&pct=">Annual vs. daily user %'s</Link></li>
+            <li><Link to="/?s=u&pct=">Member vs. customer %'s</Link></li>
             <li><Link to={RideableTypesExample}>Classic / E-bike ride minutes</Link> (<Link to={`${RideableTypesExample}&pct`}>stacked</Link>)</li>
             <li><Link to="/">Default view (system-wide rides over time)</Link></li>
           </ul>

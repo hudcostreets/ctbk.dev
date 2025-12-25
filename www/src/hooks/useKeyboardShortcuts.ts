@@ -103,8 +103,8 @@ export const HOTKEY_DESCRIPTIONS: Record<string, string> = {
   'region:hob': 'Toggle HOB',
   'region:nyc': 'Toggle NYC',
   // User type toggles
-  'user:annual': 'Toggle Annual',
-  'user:daily': 'Toggle Daily',
+  'user:annual': 'Toggle Member',
+  'user:daily': 'Toggle Customer',
   // Gender toggles
   'gender:men': 'Toggle Men',
   'gender:women': 'Toggle Women',

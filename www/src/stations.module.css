@@ -29,6 +29,7 @@
     display: inline-block;
     line-height: 1.15;
     font-size: 2rem;
+    letter-spacing: -0.05rem;
     padding: 0.2em 0.6em 0.1em;
     color: #222;
     background: rgba(255, 255, 255, 0.75);
