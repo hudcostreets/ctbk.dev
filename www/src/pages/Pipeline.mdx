@@ -35,11 +35,14 @@ After [normalization], the "consolidation" stage combines all records that *end*
 
 <H3 id="legacy-data">Aside: Legacy Data Preservation</H3>
 
-As of February 2021, Lyft stopped publishing rider demographic data—specifically **Gender**, **Birth Year**, and **Bike ID**. Those fields were also later retroactively scrubbed, back to January 2020.
+Several data-quality changes occurred around February 2021 (presumably as part of [the Lyft acquisition][lyft-acquisition]):
 
-This is unfortunate for analysis: the original data showed a [notable increase in the proportion
-of women riders][gender-example] during 2020, a trend [observed in other cities][women-biking] as cycling became
-more mainstream and infrastructure improved.
+- **Gender/demographics removed**: Lyft stopped publishing **Gender**, **Birth Year**, and **Bike ID**. Those fields were also later retroactively scrubbed, back to January 2020. This is unfortunate: the original data showed a [notable increase in the proportion of women riders][gender-example] during 2020, a trend [observed in other cities][women-biking].
+- **E-bike data timing**: JC/HOB e-bike data only begins February 2021 (vs. January 2020 for NYC). See [this example][ebike-example].
+- **User type naming**: The values changed from "Annual"/"Daily" to "member"/"casual". This site normalizes them to the former names.
+
+[lyft-acquisition]: https://www.lyft.com/blog/posts/lyft-becomes-americas-largest-bikeshare-service
+[ebike-example]: https://ctbk.dev/?s=b&b=ce&r=jh&y=m&d=2001-
 
 [ctbk.dev] has retained copies of the original 2020-2021 files (before Lyft's retroactive scrubbing) in `normalized/v0/`:
 

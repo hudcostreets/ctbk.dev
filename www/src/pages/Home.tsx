@@ -4,7 +4,7 @@ import { Data } from 'plotly.js'
 import { ReactNode, useEffect, useMemo, useState } from 'react'
 import Plot from 'react-plotly.js'
 import { Link, useLocation } from 'react-router-dom'
-import { GitHubIcon, S3Icon, BlueskyIcon, PipelineIcon } from "../components/icons"
+import { GitHubIcon, S3Icon, BlueskyIcon } from "../components/icons"
 import css from "../index.module.css"
 import controlCss from "../controls.module.css"
 import { Checkbox } from "../components/Checkbox"
@@ -252,9 +252,13 @@ export default function Home() {
       .filter(key => stackBy === 'None' || months.some(m => grouped[m]?.[key]))
       .map(stackVal => {
         const name = stackVal || yHoverLabel
-        const customdata: [number, number][] = []
+        const customdata: ([number, number] | null)[] = []
         const y = months.map(m => {
           const val = grouped[m]?.[stackVal] || 0
+          if (val === 0) {
+            customdata.push(null)
+            return null
+          }
           const total = Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
           const pct = total ? val / total : 0
           customdata.push([val, pct])
@@ -634,18 +638,8 @@ export default function Home() {
 
           <hr />
 
-          <h3 id="qc">🚧 Data-quality issues 🚧</h3>
-          <p>Several things changed in February 2021 (presumably as part of <a href="https://www.lyft.com/blog/posts/lyft-becomes-americas-largest-bikeshare-service" target="_blank" rel="noopener noreferrer">the Lyft acquisition</a>):</p>
-          <ul>
-            <li>"Gender" information is no longer provided:
-              <ul>
-                <li>All rides are labeled "unknown" starting February 2021</li>
-                <li><Link to="/?y=m&s=g&pct=&g=mf&d=1406-2102">Here's an example showing the available data</Link></li>
-              </ul>
-            </li>
-            <li>JC/HOB e-bike data only begins in Feb '21 (vs. Jan '20 for NYC) (<Link to={RideableTypesExample}>example</Link>)</li>
-            <li>The "User Type" values changed ("Annual" → "member", "Daily" → "casual"); I'm using the former/old values here, they seem equivalent.</li>
-          </ul>
+          <h3 id="pipeline">Data Pipeline</h3>
+          <p>See the <Link to="/pipeline">pipeline documentation</Link> for details on data processing stages, sources, and <Link to="/pipeline#legacy-data">data-quality issues</Link> (e.g. gender data removed in 2021).</p>
 
           <div className={css.footer}>
             Code: <a href="https://github.com/hudcostreets/ctbk.dev" target="_blank" rel="noopener noreferrer">
@@ -654,9 +648,6 @@ export default function Home() {
             Data: <a href="https://s3.amazonaws.com/ctbk/index.html" target="_blank" rel="noopener noreferrer">
               <S3Icon className={css.icon} />
             </a>
-            Pipeline: <Link to="/pipeline">
-              <PipelineIcon className={css.icon} />
-            </Link>
             Author: <a href="https://bsky.app/profile/runsascoded.com" target="_blank" rel="noopener noreferrer">
               <BlueskyIcon className={css.icon} />
             </a>
