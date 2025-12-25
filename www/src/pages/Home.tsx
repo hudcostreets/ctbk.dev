@@ -1,7 +1,7 @@
 import { Tooltip } from "@mui/material"
 import { useUrlParam, boolParam, numberArrayParam } from '@rdub/use-url-params'
-import { Data } from 'plotly.js'
-import { ReactNode, useEffect, useMemo, useState } from 'react'
+import { Data, PlotRelayoutEvent } from 'plotly.js'
+import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
 import Plot from 'react-plotly.js'
 import { Link, useLocation } from 'react-router-dom'
 import { GitHubIcon, S3Icon, BlueskyIcon } from "@/components/icons"
@@ -14,7 +14,7 @@ import { useShortcutsModal } from "../contexts/ShortcutsModalContext"
 import { useTheme } from "../contexts/ThemeContext"
 import { darken } from "../colors"
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts"
-import { DateRange, DateRange2Dates, dateRangeParam } from "../date-range"
+import { DateRange2Dates, dateRangeParam, parseDuration } from "../date-range"
 import {
   annualizedPercents,
   annualPercentStr,
@@ -48,6 +48,20 @@ import {
 } from '../data'
 
 const DATA_URL = '/assets/ymrgtb_cd.json'
+
+// Convert "YYYY-MM" to Date (first day of month)
+function monthToDate(ym: string): Date {
+  const [year, month] = ym.split('-').map(Number)
+  return new Date(year, month - 1, 1)
+}
+
+// Convert Date to "YYYY-MM" string
+function dateToMonth(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
+// Bar width in milliseconds (roughly 25 days to leave gaps between months)
+const BAR_WIDTH_MS = 25 * 24 * 60 * 60 * 1000
 
 type ProcessedRow = Row & {
   m: string
@@ -116,10 +130,12 @@ export default function Home() {
   const [showLegend, setShowLegend] = useState<boolean | null>(null)
   const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
   const [windowWidth, setWindowWidth] = useState(() => typeof window !== 'undefined' ? window.innerWidth : 800)
+  const [snapCounter, setSnapCounter] = useState(0)  // Increment to force Plotly to reset after snap
 
   // Keyboard shortcuts
   const { open: openShortcutsModal } = useShortcutsModal()
   useKeyboardShortcuts({
+    dateRange,
     setDateRange,
     setStackBy,
     setYAxis,
@@ -213,8 +229,8 @@ export default function Home() {
   }, [regions, rideableTypes, userTypes, stackPercents, stackBy])
 
   // Filter and aggregate data
-  const { traces, months } = useMemo(() => {
-    if (!data) return { traces: [], months: [] }
+  const { traces, months, allMonths } = useMemo(() => {
+    if (!data) return { traces: [], months: [], allMonths: [] }
 
     // Filter data by dimension (but NOT by date - we need full history for rolling avg)
     const dimensionFiltered = data.filter(row =>
@@ -261,6 +277,9 @@ export default function Home() {
         ? UserTypeDisplayNames[val as keyof typeof UserTypeDisplayNames]
         : val
 
+    // Convert months to dates for datetime x-axis
+    const monthDates = months.map(monthToDate)
+
     const barTraces = stackKeys
       .filter(key => stackBy === 'None' || months.some(m => grouped[m]?.[key]))
       .map(stackVal => {
@@ -282,8 +301,9 @@ export default function Home() {
           ? `${name}: %{customdata[0]:,.0f} (%{customdata[1]:.0%})<extra></extra>`
           : '%{customdata[0]:,.0f}<extra></extra>'
         return {
-          x: months,
+          x: monthDates,
           y,
+          width: BAR_WIDTH_MS,
           customdata,
           name,
           type: 'bar' as const,
@@ -300,12 +320,14 @@ export default function Home() {
     const show12mo = rollingAvgs.includes(12)
     const rollingTraces: Data[] = []
 
-    if (show12mo) {
+    if (show12mo && months.length > 0) {
       // Helper to filter arrays to visible range
       const visibleStartIdx = allMonths.indexOf(months[0])
       const visibleEndIdx = visibleStartIdx + months.length
 
-      if (stackBy === 'None') {
+      if (visibleStartIdx < 0) {
+        console.warn('Rolling avg: visible months not found in allMonths')
+      } else if (stackBy === 'None') {
         // Single rolling average for total - compute on ALL months
         const allTotals = allMonths.map(m =>
           Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
@@ -319,7 +341,7 @@ export default function Home() {
         annualizedPercents(months, visibleAvgY).forEach(p => console.log(annualPercentStr(p)))
         // Shadow trace (thicker, contrasting color for outline effect)
         rollingTraces.push({
-          x: months,
+          x: monthDates,
           y: visibleAvgY as (number | null)[],
           name: '12mo avg (outline)',
           type: 'scatter',
@@ -331,7 +353,7 @@ export default function Home() {
         })
         // Main trace
         rollingTraces.push({
-          x: months,
+          x: monthDates,
           y: visibleAvgY as (number | null)[],
           name: '12mo avg',
           type: 'scatter',
@@ -387,6 +409,7 @@ export default function Home() {
             // Filter to visible range
             const clampedVisibleStart = allClampedMonths.indexOf(months[0])
             const clampedMonths = allClampedMonths.filter(m => m >= start && m < end && m < effectiveEnd)
+            const clampedDates = clampedMonths.map(monthToDate)
             const avgY = clampedVisibleStart >= 0
               ? allAvgY.slice(clampedVisibleStart, clampedVisibleStart + clampedMonths.length)
               : []
@@ -410,7 +433,7 @@ export default function Home() {
             const displayName = getDisplayName(stackVal)
             // Shadow trace (thicker, contrasting color for outline effect)
             rollingTraces.push({
-              x: clampedMonths,
+              x: clampedDates,
               y: avgY as (number | null)[],
               name: `${displayName} (12mo outline)`,
               type: 'scatter',
@@ -422,7 +445,7 @@ export default function Home() {
             })
             // Main trace - show both count and percentage in tooltip
             rollingTraces.push({
-              x: clampedMonths,
+              x: clampedDates,
               y: avgY as (number | null)[],
               customdata: customdata as any,
               name: `${displayName} (12mo)`,
@@ -436,8 +459,76 @@ export default function Home() {
       }
     }
 
-    return { traces: [...barTraces, ...rollingTraces] as Data[], months }
+    return { traces: [...barTraces, ...rollingTraces] as Data[], months, allMonths }
   }, [data, yAxis, stackBy, stackPercents, isStacked, regions, userTypes, genders, rideableTypes, start, end, rollingAvgs, yHoverLabel, rollingAvgColor, lineOutlineColor, lineDarkenFactor])
+
+  // Compute data bounds for pan constraints
+  const dataBounds = useMemo(() => {
+    if (allMonths.length === 0) return null
+    const firstMonth = allMonths[0]
+    const lastMonth = allMonths[allMonths.length - 1]
+    return {
+      start: monthToDate(firstMonth),
+      end: monthToDate(lastMonth),
+    }
+  }, [allMonths])
+
+  // Handle pan/zoom relayout events - preserve duration, update end date
+  const handleRelayout = useCallback((event: PlotRelayoutEvent) => {
+    const x0 = event['xaxis.range[0]']
+    const x1 = event['xaxis.range[1]']
+
+    if (x0 !== undefined && x1 !== undefined && dataBounds) {
+      // If in "All" mode, snap back - don't allow panning
+      if (dateRange === "All") {
+        setSnapCounter(c => c + 1)
+        return
+      }
+
+      const newEnd = new Date(x1 as unknown as string)
+
+      // Preserve existing duration when panning
+      const durationStr = dateRange.duration
+      const durationMonths = parseDuration(durationStr)
+
+      // Calculate the minimum end date that allows full duration to be shown
+      const minEnd = new Date(dataBounds.start)
+      minEnd.setMonth(minEnd.getMonth() + durationMonths)
+
+      // Clamp end: not before minEnd (so full duration fits), not after dataBounds.end
+      let clampedEnd = newEnd
+      let snapped = false
+      if (clampedEnd < minEnd) {
+        clampedEnd = minEnd
+        snapped = true
+      }
+      if (clampedEnd > dataBounds.end) {
+        clampedEnd = dataBounds.end
+        snapped = true
+      }
+
+      // Check if we're effectively showing all data
+      const fullDurationMonths = (dataBounds.end.getFullYear() - dataBounds.start.getFullYear()) * 12 +
+        (dataBounds.end.getMonth() - dataBounds.start.getMonth())
+      if (durationMonths >= fullDurationMonths) {
+        setDateRange("All")
+        return
+      }
+
+      // Set new date range with preserved duration and clamped end
+      const endMonth = dateToMonth(clampedEnd)
+      const endDate = monthToDate(endMonth)
+      // Add 1 month since our end is exclusive
+      endDate.setMonth(endDate.getMonth() + 1)
+
+      // If we snapped, increment counter to force Plotly to reset
+      if (snapped) {
+        setSnapCounter(c => c + 1)
+      }
+
+      setDateRange({ duration: durationStr, end: endDate })
+    }
+  }, [dataBounds, dateRange, setDateRange])
 
   if (loading) {
     return (
@@ -502,11 +593,24 @@ export default function Home() {
     tickLabels = tickMonths.map(m => `'${m.slice(2, 4)}`)
   }
 
+  // Compute x-axis range with padding
+  const xAxisRange = months.length > 0 ? [
+    new Date(monthToDate(months[0]).getTime() - 15 * 24 * 60 * 60 * 1000),  // 15 days before first
+    new Date(monthToDate(months[months.length - 1]).getTime() + 15 * 24 * 60 * 60 * 1000),  // 15 days after last
+  ] : undefined
+
+  // Generate a revision key that changes when date range changes or when we snap
+  // This forces Plotly to reset its UI state (including pan position) to our specified range
+  const uiRevision = dateRange === "All"
+    ? `All-${snapCounter}`
+    : `${dateRange.duration}-${dateRange.end?.getTime() ?? "present"}-${snapCounter}`
+
   const layout = {
     autosize: true,
     barmode: 'stack' as const,
     bargap: 0,  // No gaps - use marker.line for visual separation instead
-    dragmode: false as const,  // Disable drag - use date range buttons for navigation
+    dragmode: 'pan' as const,  // Enable horizontal panning
+    uirevision: uiRevision,  // Reset UI state when date range changes
     showlegend: showLegendValue,
     hovermode: 'x' as const,
     legend: {
@@ -518,12 +622,13 @@ export default function Home() {
       font: { color: tickcolor },
     },
     xaxis: {
-      type: 'category' as const,
+      type: 'date' as const,
+      range: xAxisRange,
       tickfont: { size: 12, color: tickcolor },
       titlefont: { size: 14 },
       tickangle: -45,
       tickmode: 'array' as const,
-      tickvals: tickMonths,
+      tickvals: tickMonths.map(monthToDate),
       ticktext: tickLabels,
       gridcolor,
     },
@@ -534,6 +639,7 @@ export default function Home() {
       titlefont: { size: 14 },
       tickformat: stackPercents ? '.0%' : undefined,
       range: stackPercents ? [0, 1.01] : undefined,
+      fixedrange: true,  // Lock y-axis, only allow horizontal panning
     },
     paper_bgcolor: 'rgba(0,0,0,0)',
     plot_bgcolor: 'rgba(0,0,0,0)',
@@ -541,7 +647,12 @@ export default function Home() {
     margin: { t: 0, r: 0, b: tickFormat === 'annual' ? 40 : 70, l: 0, },
   }
 
-  const dateRangeButtons: (DateRange & string)[] = ["1y", "2y", "3y", "4y", "5y", "All"]
+  // Duration buttons - clicking sets duration anchored to present
+  const durationButtons = ["1y", "2y", "3y", "4y", "5y"] as const
+  const currentDuration = dateRange === "All" ? null : dateRange.duration
+
+  // Check if a duration button is active (matches current duration)
+  const isDurationActive = (dur: string) => currentDuration === dur
 
   return (
     <div id="plot" className={css.container}>
@@ -557,6 +668,7 @@ export default function Home() {
           useResizeHandler
           className={css.plot}
           config={{ displayModeBar: false, scrollZoom: false }}
+          onRelayout={handleRelayout}
         />
 
         {!hideControls && (
@@ -571,15 +683,21 @@ export default function Home() {
             {/* Date range controls */}
             <div className={`${css.dateControls} ${controlCss.control}`}>
               <label className={controlCss.controlHeader}>Dates</label>
-              {dateRangeButtons.map(dr => (
+              {durationButtons.map(dur => (
                 <input
                   type="button"
-                  key={dr}
-                  value={dr}
-                  className={`${css.dateRangeButton} ${dateRange === dr ? css.activeButton : css.inactiveButton}`}
-                  onClick={() => setDateRange(dr)}
+                  key={dur}
+                  value={dur}
+                  className={`${css.dateRangeButton} ${isDurationActive(dur) ? css.activeButton : css.inactiveButton}`}
+                  onClick={() => setDateRange({ duration: dur, end: dateRange !== "All" ? dateRange.end : undefined })}
                 />
               ))}
+              <input
+                type="button"
+                value="All"
+                className={`${css.dateRangeButton} ${dateRange === "All" ? css.activeButton : css.inactiveButton}`}
+                onClick={() => setDateRange("All")}
+              />
             </div>
 
             <Checklist

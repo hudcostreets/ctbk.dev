@@ -4,6 +4,7 @@ import type { DateRange } from '../date-range'
 import type { Gender, Region, RideableType, StackBy, UserType, YAxis } from '../data'
 
 interface UseKeyboardShortcutsProps {
+  dateRange: DateRange
   setDateRange: (range: DateRange) => void
   setStackBy: (stackBy: StackBy) => void
   setYAxis: (yAxis: YAxis) => void
@@ -144,6 +145,7 @@ function toggleItem<T>(arr: T[], item: T): T[] {
 }
 
 export function useKeyboardShortcuts({
+  dateRange,
   setDateRange,
   setStackBy,
   setYAxis,
@@ -166,13 +168,15 @@ export function useKeyboardShortcuts({
   setRideableTypes,
   rideableTypes,
 }: UseKeyboardShortcutsProps) {
+  // Preserve end date when changing duration (unless currently "All")
+  const currentEnd = dateRange !== "All" ? dateRange.end : undefined
   const handlers = useMemo(() => ({
     // Date ranges
-    'date:1y': () => setDateRange('1y'),
-    'date:2y': () => setDateRange('2y'),
-    'date:3y': () => setDateRange('3y'),
-    'date:4y': () => setDateRange('4y'),
-    'date:5y': () => setDateRange('5y'),
+    'date:1y': () => setDateRange({ duration: '1y', end: currentEnd }),
+    'date:2y': () => setDateRange({ duration: '2y', end: currentEnd }),
+    'date:3y': () => setDateRange({ duration: '3y', end: currentEnd }),
+    'date:4y': () => setDateRange({ duration: '4y', end: currentEnd }),
+    'date:5y': () => setDateRange({ duration: '5y', end: currentEnd }),
     'date:all': () => setDateRange('All'),
     // Stack by
     'stack:none': () => setStackBy('None'),
@@ -206,7 +210,7 @@ export function useKeyboardShortcuts({
     'bike:unknown': () => setRideableTypes(toggleItem(rideableTypes, 'Unknown')),
     // Modal
     'modal:shortcuts': openShortcutsModal,
-  }), [setDateRange, setStackBy, setYAxis, setRollingAvgs, rollingAvgs, setStackRelative, stackRelative, setShowLegend, showLegendValue, openShortcutsModal, setControlsOpen, controlsOpen, toggleTheme, setRegions, regions, setUserTypes, userTypes, setGenders, genders, setRideableTypes, rideableTypes])
+  }), [currentEnd, setDateRange, setStackBy, setYAxis, setRollingAvgs, rollingAvgs, setStackRelative, stackRelative, setShowLegend, showLegendValue, openShortcutsModal, setControlsOpen, controlsOpen, toggleTheme, setRegions, regions, setUserTypes, userTypes, setGenders, genders, setRideableTypes, rideableTypes])
 
   return useRegisteredHotkeys(handlers, { sequenceTimeout: 1000 })
 }
