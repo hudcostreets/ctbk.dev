@@ -216,21 +216,19 @@ export default function Home() {
   const { traces, months } = useMemo(() => {
     if (!data) return { traces: [], months: [] }
 
-    // Filter data
-    const filtered = data.filter(row =>
+    // Filter data by dimension (but NOT by date - we need full history for rolling avg)
+    const dimensionFiltered = data.filter(row =>
       regions.includes(row.Region) &&
       userTypes.includes(row['User Type']) &&
       genders.includes(row.GenderStr) &&
-      rideableTypes.includes(row.RideableTypeStr) &&
-      row.m >= start &&
-      row.m < end
+      rideableTypes.includes(row.RideableTypeStr)
     )
 
-    // Group by month (and optionally stack key)
+    // Group ALL months by (optionally) stack key - needed for rolling avg lookback
     const stackKeys = stackKeyDict[stackBy]
-    const grouped: Record<string, Record<string, number>> = {}
+    const allGrouped: Record<string, Record<string, number>> = {}
 
-    for (const row of filtered) {
+    for (const row of dimensionFiltered) {
       const m = row.m
       let stackVal = ''
       if (stackBy === 'Region') stackVal = row.Region
@@ -239,12 +237,18 @@ export default function Home() {
       else if (stackBy === 'Rideable Type') stackVal = row.RideableTypeStr
 
       const val = row[yAxis]
-      if (!grouped[m]) grouped[m] = {}
-      grouped[m][stackVal] = (grouped[m][stackVal] || 0) + val
+      if (!allGrouped[m]) allGrouped[m] = {}
+      allGrouped[m][stackVal] = (allGrouped[m][stackVal] || 0) + val
     }
 
-    // Convert to sorted arrays
-    const months = Object.keys(grouped).sort()
+    // All months for rolling avg computation
+    const allMonths = Object.keys(allGrouped).sort()
+
+    // Visible months for bar chart display
+    const months = allMonths.filter(m => m >= start && m < end)
+
+    // Use allGrouped for visible range (same data, just filtered view)
+    const grouped = allGrouped
 
     // Build bar traces
     const colors = Colors[stackBy]
@@ -292,23 +296,31 @@ export default function Home() {
         }
       })
 
-    // Rolling average traces
+    // Rolling average traces - computed on ALL data, then filtered to visible range
     const show12mo = rollingAvgs.includes(12)
     const rollingTraces: Data[] = []
 
     if (show12mo) {
+      // Helper to filter arrays to visible range
+      const visibleStartIdx = allMonths.indexOf(months[0])
+      const visibleEndIdx = visibleStartIdx + months.length
+
       if (stackBy === 'None') {
-        // Single rolling average for total
-        const totals = months.map(m =>
+        // Single rolling average for total - compute on ALL months
+        const allTotals = allMonths.map(m =>
           Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
         )
-        const avgY = rollingAvg(totals, 12)
+        const allAvgY = rollingAvg(allTotals, 12)
+
+        // Filter to visible range
+        const visibleAvgY = allAvgY.slice(visibleStartIdx, visibleEndIdx)
+
         // Log annualized percents
-        annualizedPercents(months, avgY).forEach(p => console.log(annualPercentStr(p)))
+        annualizedPercents(months, visibleAvgY).forEach(p => console.log(annualPercentStr(p)))
         // Shadow trace (thicker, contrasting color for outline effect)
         rollingTraces.push({
           x: months,
-          y: avgY as (number | null)[],
+          y: visibleAvgY as (number | null)[],
           name: '12mo avg (outline)',
           type: 'scatter',
           mode: 'lines',
@@ -320,7 +332,7 @@ export default function Home() {
         // Main trace
         rollingTraces.push({
           x: months,
-          y: avgY as (number | null)[],
+          y: visibleAvgY as (number | null)[],
           name: '12mo avg',
           type: 'scatter',
           mode: 'lines',
@@ -335,7 +347,7 @@ export default function Home() {
           : end
 
         stackKeys
-          .filter(key => months.some(m => grouped[m]?.[key]))
+          .filter(key => allMonths.some(m => grouped[m]?.[key]))
           .forEach(stackVal => {
             // For Unknown rideable type, clamp earlier
             let effectiveEnd = clampEnd
@@ -343,10 +355,10 @@ export default function Home() {
               effectiveEnd = UnknownRideableCutoff
             }
 
-            const clampedMonths = months.filter(m => m < effectiveEnd)
-            // Compute both raw values and percentages for customdata
-            const rawValues = clampedMonths.map(m => grouped[m]?.[stackVal] || 0)
-            const pctValues = clampedMonths.map(m => {
+            // Compute on ALL months (up to effectiveEnd)
+            const allClampedMonths = allMonths.filter(m => m < effectiveEnd)
+            const rawValues = allClampedMonths.map(m => grouped[m]?.[stackVal] || 0)
+            const pctValues = allClampedMonths.map(m => {
               const val = grouped[m]?.[stackVal] || 0
               const total = Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
               return total ? val / total : 0
@@ -362,7 +374,7 @@ export default function Home() {
             }
 
             // Null out rolling avg where series hasn't started (need 12 months of data) or has ended
-            const avgY = (stackPercents ? avgPct : avgRaw).map((v, i) => {
+            const allAvgY = (stackPercents ? avgPct : avgRaw).map((v, i) => {
               // Need 12 months of data before showing rolling avg (firstDataIdx + 11)
               if (firstDataIdx < 0 || i < firstDataIdx + 11) return null
               // Don't show after series ends
@@ -370,11 +382,24 @@ export default function Home() {
               return v
             })
             // Combine into customdata for tooltips (null where avgY is null)
-            const customdata = avgRaw.map((raw, i) => avgY[i] === null ? null : [raw, avgPct[i]])
+            const allCustomdata = avgRaw.map((raw, i) => allAvgY[i] === null ? null : [raw, avgPct[i]])
+
+            // Filter to visible range
+            const clampedVisibleStart = allClampedMonths.indexOf(months[0])
+            const clampedMonths = allClampedMonths.filter(m => m >= start && m < end && m < effectiveEnd)
+            const avgY = clampedVisibleStart >= 0
+              ? allAvgY.slice(clampedVisibleStart, clampedVisibleStart + clampedMonths.length)
+              : []
+            const customdata = clampedVisibleStart >= 0
+              ? allCustomdata.slice(clampedVisibleStart, clampedVisibleStart + clampedMonths.length)
+              : []
 
             // Log annualized percents (use raw values for growth calculation)
             if (!stackPercents) {
-              annualizedPercents(clampedMonths, avgRaw).forEach(p =>
+              const visibleAvgRaw = clampedVisibleStart >= 0
+                ? avgRaw.slice(clampedVisibleStart, clampedVisibleStart + clampedMonths.length)
+                : []
+              annualizedPercents(clampedMonths, visibleAvgRaw).forEach(p =>
                 console.log(`${stackVal}: ${annualPercentStr(p)}`)
               )
             }
@@ -481,7 +506,7 @@ export default function Home() {
     autosize: true,
     barmode: 'stack' as const,
     bargap: 0,  // No gaps - use marker.line for visual separation instead
-    dragmode: false as const,  // Disable drag pan/zoom
+    dragmode: false as const,  // Disable drag - use date range buttons for navigation
     showlegend: showLegendValue,
     hovermode: 'x' as const,
     legend: {
@@ -668,7 +693,7 @@ export default function Home() {
           <hr />
 
           <h3 id="pipeline">Data Pipeline</h3>
-          <p>See the <Link to="/pipeline">pipeline documentation</Link> for details on data processing stages, sources, and <Link to="/pipeline#legacy-data">data-quality issues</Link> (e.g. gender data removed in 2021).</p>
+          <p>See the <Link to="/pipeline">pipeline documentation</Link> for details on data processing stages, sources, and <Link to="/pipeline#legacy-data">data-quality issues</Link> (e.g. gender data removed since 2021-02).</p>
 
           <div className={css.footer}>
             Code: <a href="https://github.com/hudcostreets/ctbk.dev" target="_blank" rel="noopener noreferrer">
