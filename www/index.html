@@ -5,6 +5,33 @@
     <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ctbk.dev - Citi Bike Dashboard</title>
+    <!-- Prevent FOUC: set theme and critical CSS before React loads -->
+    <script>
+      (function() {
+        var theme = localStorage.getItem('ctbk-theme') || 'system';
+        var actual = theme;
+        if (theme === 'system') {
+          actual = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        document.documentElement.setAttribute('data-theme', actual);
+      })();
+    </script>
+    <style>
+      :root {
+        --bg-primary: #f5f7fa;
+        --text-primary: #333333;
+      }
+      [data-theme="dark"] {
+        --bg-primary: #1a1a1a;
+        --text-primary: #e0e0e0;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background-color: var(--bg-primary);
+        color: var(--text-primary);
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

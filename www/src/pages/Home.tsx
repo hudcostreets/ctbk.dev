@@ -109,7 +109,9 @@ export default function Home() {
   const [rideableTypes, setRideableTypes] = useUrlParam('rt', codesParam(RideableTypes, RideableTypeChars))
   const [dateRange, setDateRange] = useUrlParam('d', dateRangeParam())
   const [rollingAvgs, setRollingAvgs] = useUrlParam('avg', numberArrayParam([12]))
-  const [controlsOpen, setControlsOpen] = useUrlParam('c', boolParam, true)  // Default to open
+  const [controlsClosed, setControlsClosed] = useUrlParam('cc', boolParam)  // Param present = closed
+  const controlsOpen = !controlsClosed
+  const setControlsOpen = (open: boolean) => setControlsClosed(!open)
   const [hideControls] = useUrlParam('nc', boolParam)  // For screenshots
   const [showLegend, setShowLegend] = useState<boolean | null>(null)
   const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
@@ -640,7 +642,6 @@ export default function Home() {
 
         {/* Usage info */}
         <div className={css.row}>
-          <p>Expand the "⚙️" to filter or stack by region, user type, gender, bike type, or date, or toggle aggregation of rides or total ride minutes.</p>
           <h4>Examples</h4>
           <ul>
             <li><Link to="/?r=jh">JC + Hoboken</Link> (<Link to="/?r=jh&s=r">stacked</Link>)</li>

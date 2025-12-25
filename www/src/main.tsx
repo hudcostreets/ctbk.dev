@@ -2,7 +2,7 @@ import 'bootstrap/dist/css/bootstrap.css'
 import '../styles/globals.css'
 import { KeyboardShortcutsProvider } from '@rdub/use-hotkeys'
 import { ThemeProvider as MuiThemeProvider, createTheme } from "@mui/material"
-import { StrictMode, useMemo } from 'react'
+import { StrictMode, useEffect, useMemo } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext"
@@ -52,10 +52,31 @@ function Pipeline() {
   )
 }
 
+// Scroll to hash anchor on navigation
+function useScrollToHash() {
+  const { hash, pathname } = useLocation()
+  useEffect(() => {
+    if (hash) {
+      // Small delay to ensure DOM is rendered
+      const timer = setTimeout(() => {
+        const el = document.getElementById(hash.slice(1))
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }
+      }, 100)
+      return () => clearTimeout(timer)
+    } else {
+      // Scroll to top on navigation without hash
+      window.scrollTo(0, 0)
+    }
+  }, [hash, pathname])
+}
+
 function AppContent() {
   const { isOpen, open, close } = useShortcutsModal()
   const { pathname } = useLocation()
   const isStationsPage = pathname === '/stations'
+  useScrollToHash()
 
   return (
     <>
