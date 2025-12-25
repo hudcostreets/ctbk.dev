@@ -33,8 +33,8 @@ importers:
         specifier: https://gitlab.com/api/v4/projects/77258162/repository/archive.tar.gz?sha=8ae7838
         version: https://gitlab.com/api/v4/projects/77258162/repository/archive.tar.gz?sha=8ae7838(typescript@5.9.3)
       '@rdub/use-hotkeys':
-        specifier: workspace:*
-        version: link:../../../js/use-hotkeys
+        specifier: ^0.2.1
+        version: 0.2.1(react@18.3.1)
       '@rdub/use-url-params':
         specifier: github:runsascoded/use-url-params#15e54b3003e14cd31b5704ec0dce117737ef8709
         version: https://codeload.github.com/runsascoded/use-url-params/tar.gz/15e54b3003e14cd31b5704ec0dce117737ef8709(react@18.3.1)
@@ -936,6 +936,11 @@ packages:
     resolution: {tarball: https://gitlab.com/api/v4/projects/77258162/repository/archive.tar.gz?sha=8ae7838}
     version: 0.1.0-dist.3904658
     hasBin: true
+
+  '@rdub/use-hotkeys@0.2.1':
+    resolution: {integrity: sha512-AMdVkX2frtcoBDhyGABhkQ6QV01yc7hoe3Fw7Rd7mSihwR4kiICGU+6FqMw2GMs864etu2A4cpNz4AEMDynATw==}
+    peerDependencies:
+      react: '>=18.0.0'
 
   '@rdub/use-url-params@https://codeload.github.com/runsascoded/use-url-params/tar.gz/15e54b3003e14cd31b5704ec0dce117737ef8709':
     resolution: {tarball: https://codeload.github.com/runsascoded/use-url-params/tar.gz/15e54b3003e14cd31b5704ec0dce117737ef8709}
@@ -4903,6 +4908,10 @@ snapshots:
       - supports-color
       - typescript
       - utf-8-validate
+
+  '@rdub/use-hotkeys@0.2.1(react@18.3.1)':
+    dependencies:
+      react: 18.3.1
 
   '@rdub/use-url-params@https://codeload.github.com/runsascoded/use-url-params/tar.gz/15e54b3003e14cd31b5704ec0dce117737ef8709(react@18.3.1)':
     dependencies:

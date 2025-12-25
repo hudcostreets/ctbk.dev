@@ -14,7 +14,7 @@
     "@rdub/base": "0.7.9",
     "@rdub/icons": "0.1.0",
     "@rdub/screenshots": "https://gitlab.com/api/v4/projects/77258162/repository/archive.tar.gz?sha=8ae7838",
-    "@rdub/use-hotkeys": "workspace:*",
+    "@rdub/use-hotkeys": "^0.2.1",
     "@rdub/use-url-params": "github:runsascoded/use-url-params#15e54b3003e14cd31b5704ec0dce117737ef8709",
     "bootstrap": "^4.6.2",
     "d3-color": "^3.1.0",
