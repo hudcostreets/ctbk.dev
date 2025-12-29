@@ -11,8 +11,19 @@ interface ThemeContextType {
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined)
 
+// Check URL param for theme override (?theme=light or ?theme=dark)
+function getUrlThemeOverride(): Theme | null {
+  const params = new URLSearchParams(window.location.search)
+  const theme = params.get('theme')
+  if (theme === 'light' || theme === 'dark') return theme
+  return null
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<Theme>(() => {
+    // URL param takes precedence over localStorage
+    const urlTheme = getUrlThemeOverride()
+    if (urlTheme) return urlTheme
     const stored = localStorage.getItem('ctbk-theme')
     return (stored as Theme) || 'system'
   })

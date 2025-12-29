@@ -8,7 +8,10 @@
     <!-- Prevent FOUC: set theme and critical CSS before React loads -->
     <script>
       (function() {
-        var theme = localStorage.getItem('ctbk-theme') || 'system';
+        // Check URL param first (?theme=light or ?theme=dark)
+        var params = new URLSearchParams(window.location.search);
+        var urlTheme = params.get('theme');
+        var theme = (urlTheme === 'light' || urlTheme === 'dark') ? urlTheme : localStorage.getItem('ctbk-theme') || 'system';
         var actual = theme;
         if (theme === 'system') {
           actual = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';

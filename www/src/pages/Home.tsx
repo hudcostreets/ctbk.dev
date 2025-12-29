@@ -14,7 +14,7 @@ import { useShortcutsModal } from "../contexts/ShortcutsModalContext"
 import { useTheme } from "../contexts/ThemeContext"
 import { darken } from "../colors"
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts"
-import { DateRange2Dates, dateRangeParam, parseDuration } from "../date-range"
+import { DateRange2Dates, dateRangeParam, parseDuration, isDurationBased, isExplicitRange, formatDuration } from "../date-range"
 import {
   annualizedPercents,
   annualPercentStr,
@@ -126,7 +126,7 @@ export default function Home() {
   const [controlsClosed, setControlsClosed] = useUrlParam('cc', boolParam)  // Param present = closed
   const controlsOpen = !controlsClosed
   const setControlsOpen = (open: boolean) => setControlsClosed(!open)
-  const [hideControls] = useUrlParam('nc', boolParam)  // For screenshots
+  const [screenshotMode] = useUrlParam('screenshot', boolParam)  // Hides gear/controls for screenshots
   const [showLegend, setShowLegend] = useState<boolean | null>(null)
   const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
   const [windowWidth, setWindowWidth] = useState(() => typeof window !== 'undefined' ? window.innerWidth : 800)
@@ -487,9 +487,21 @@ export default function Home() {
 
       const newEnd = new Date(x1 as unknown as string)
 
-      // Preserve existing duration when panning
-      const durationStr = dateRange.duration
-      const durationMonths = parseDuration(durationStr)
+      // Get duration - preserve existing or compute from explicit range
+      let durationMonths: number
+      let durationStr: string
+      if (isDurationBased(dateRange)) {
+        durationStr = dateRange.duration
+        durationMonths = parseDuration(durationStr)
+      } else if (isExplicitRange(dateRange)) {
+        // Compute duration from explicit range, then convert to duration-based for panning
+        const explicitEnd = dateRange.end || dataBounds.end
+        durationMonths = (explicitEnd.getFullYear() - dateRange.start.getFullYear()) * 12 +
+          (explicitEnd.getMonth() - dateRange.start.getMonth())
+        durationStr = formatDuration(durationMonths)
+      } else {
+        return // Shouldn't happen
+      }
 
       // Calculate the minimum end date that allows full duration to be shown
       const minEnd = new Date(dataBounds.start)
@@ -601,9 +613,14 @@ export default function Home() {
 
   // Generate a revision key that changes when date range changes or when we snap
   // This forces Plotly to reset its UI state (including pan position) to our specified range
-  const uiRevision = dateRange === "All"
-    ? `All-${snapCounter}`
-    : `${dateRange.duration}-${dateRange.end?.getTime() ?? "present"}-${snapCounter}`
+  const uiRevision = (() => {
+    if (dateRange === "All") return `All-${snapCounter}`
+    if (isDurationBased(dateRange)) {
+      return `dur-${dateRange.duration}-${dateRange.end?.getTime() ?? "present"}-${snapCounter}`
+    }
+    // Explicit range
+    return `exp-${dateRange.start.getTime()}-${dateRange.end?.getTime() ?? "present"}-${snapCounter}`
+  })()
 
   const layout = {
     autosize: true,
@@ -649,7 +666,9 @@ export default function Home() {
 
   // Duration buttons - clicking sets duration anchored to present
   const durationButtons = ["1y", "2y", "3y", "4y", "5y"] as const
-  const currentDuration = dateRange === "All" ? null : dateRange.duration
+  const currentDuration = dateRange === "All" ? null
+    : isDurationBased(dateRange) ? dateRange.duration
+    : null  // Explicit ranges don't have a fixed duration button
 
   // Check if a duration button is active (matches current duration)
   const isDurationActive = (dur: string) => currentDuration === dur
@@ -671,7 +690,7 @@ export default function Home() {
           onRelayout={handleRelayout}
         />
 
-        {!hideControls && (
+        {!screenshotMode && (
         <div className={css.row}>
           <details
             className={css.controls}
@@ -689,7 +708,13 @@ export default function Home() {
                   key={dur}
                   value={dur}
                   className={`${css.dateRangeButton} ${isDurationActive(dur) ? css.activeButton : css.inactiveButton}`}
-                  onClick={() => setDateRange({ duration: dur, end: dateRange !== "All" ? dateRange.end : undefined })}
+                  onClick={() => {
+                    // Preserve end from current range (whether duration-based or explicit)
+                    const currentEnd = dateRange === "All" ? undefined
+                      : isDurationBased(dateRange) ? dateRange.end
+                      : dateRange.end  // explicit range
+                    setDateRange({ duration: dur, end: currentEnd })
+                  }}
                 />
               ))}
               <input

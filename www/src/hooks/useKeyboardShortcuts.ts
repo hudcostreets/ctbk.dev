@@ -1,6 +1,6 @@
 import { useRegisteredHotkeys, type HotkeyMap } from '@rdub/use-hotkeys'
 import { useMemo } from 'react'
-import type { DateRange } from '../date-range'
+import { type DateRange, isDurationBased } from '../date-range'
 import type { Gender, Region, RideableType, StackBy, UserType, YAxis } from '../data'
 
 interface UseKeyboardShortcutsProps {
@@ -169,7 +169,10 @@ export function useKeyboardShortcuts({
   rideableTypes,
 }: UseKeyboardShortcutsProps) {
   // Preserve end date when changing duration (unless currently "All")
-  const currentEnd = dateRange !== "All" ? dateRange.end : undefined
+  // Works for both duration-based and explicit ranges
+  const currentEnd = dateRange === "All" ? undefined
+    : isDurationBased(dateRange) ? dateRange.end
+    : dateRange.end  // explicit range
   const handlers = useMemo(() => ({
     // Date ranges
     'date:1y': () => setDateRange({ duration: '1y', end: currentEnd }),

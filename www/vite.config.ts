@@ -19,4 +19,7 @@ export default defineConfig({
     port: 3456,
     strictPort: true,
   },
-  })
+    optimizeDeps: {
+    exclude: ['@rdub/use-hotkeys'],
+  },
+})
