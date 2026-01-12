@@ -29,7 +29,7 @@
     "react-markdown": "^7.1.2",
     "react-plotly.js": "^2.6.0",
     "react-router-dom": "^6.28.0",
-    "use-kbd": "github:runsascoded/use-kbd#8ee51d186234e1f5d11c7ac03d7aefb72aaba557"
+    "use-kbd": "^0.6.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",
