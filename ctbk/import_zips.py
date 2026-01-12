@@ -76,7 +76,10 @@ def import_zips(
     etags = get_etags(f's3://{BKT}/')
     updates = []
     for key, etag in etags.items():
-        if not filters(key):
+        # Only import .zip files by default
+        if not key.endswith('.zip'):
+            continue
+        if filters and not filters(key):
             err(f"Skipping {key}")
             continue
         blob = Blob(BKT, key)
