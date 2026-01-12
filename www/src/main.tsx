@@ -1,7 +1,7 @@
 import 'bootstrap/dist/css/bootstrap.css'
 import 'use-kbd/styles.css'
 import '../styles/globals.css'
-import { HotkeysProvider, ShortcutsModal, Omnibar, LookupModal, useHotkeysContext } from 'use-kbd'
+import { HotkeysProvider, ShortcutsModal, Omnibar, LookupModal, SequenceModal, useHotkeysContext } from 'use-kbd'
 import { ThemeProvider as MuiThemeProvider, createTheme } from "@mui/material"
 import { StrictMode, useMemo } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -53,6 +53,7 @@ function AppContent() {
       />
       <Omnibar />
       <LookupModal />
+      <SequenceModal />
     </>
   )
 }
