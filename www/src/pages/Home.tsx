@@ -645,6 +645,7 @@ export default function Home() {
       tickvals: tickMonths.map(monthToDate),
       ticktext: tickLabels,
       gridcolor,
+      hoverformat: '%b %Y',  // Show "Dec 2025" instead of "Dec 1, 2025"
     },
     yaxis: {
       automargin: true,
