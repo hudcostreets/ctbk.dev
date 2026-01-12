@@ -29,9 +29,6 @@ importers:
       '@rdub/icons':
         specifier: 0.1.0
         version: 0.1.0(@types/react@18.3.27)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-      '@rdub/screenshots':
-        specifier: https://gitlab.com/api/v4/projects/77258162/repository/archive.tar.gz?sha=8ae7838
-        version: https://gitlab.com/api/v4/projects/77258162/repository/archive.tar.gz?sha=8ae7838(typescript@5.9.3)
       '@rdub/use-url-params':
         specifier: github:runsascoded/use-url-params#15e54b3003e14cd31b5704ec0dce117737ef8709
         version: https://codeload.github.com/runsascoded/use-url-params/tar.gz/15e54b3003e14cd31b5704ec0dce117737ef8709(react@18.3.1)
@@ -108,6 +105,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^4.3.4
         version: 4.7.0(vite@6.4.1(@types/node@25.0.3)(terser@5.44.1)(yaml@2.8.2))
+      scrns:
+        specifier: ^0.2.1
+        version: 0.2.1(typescript@5.9.3)
       serve:
         specifier: ^14.2.5
         version: 14.2.5
@@ -886,11 +886,6 @@ packages:
       react: ^18
       react-dom: ^18
 
-  '@rdub/screenshots@https://gitlab.com/api/v4/projects/77258162/repository/archive.tar.gz?sha=8ae7838':
-    resolution: {tarball: https://gitlab.com/api/v4/projects/77258162/repository/archive.tar.gz?sha=8ae7838}
-    version: 0.1.0-dist.3904658
-    hasBin: true
-
   '@rdub/use-url-params@https://codeload.github.com/runsascoded/use-url-params/tar.gz/15e54b3003e14cd31b5704ec0dce117737ef8709':
     resolution: {tarball: https://codeload.github.com/runsascoded/use-url-params/tar.gz/15e54b3003e14cd31b5704ec0dce117737ef8709}
     version: 0.1.2-dist.c669da0
@@ -1562,8 +1557,8 @@ packages:
     resolution: {integrity: sha512-Sg0xJUNDU1sJNGdfGWhVHX0kkZ+HWcvmVymJbj6NSgZZmW/8S9Y2HQ5euytnIgakgxN6papOAWiwDo1ctFDcoQ==}
     hasBin: true
 
-  basic-ftp@5.0.5:
-    resolution: {integrity: sha512-4Bcg1P8xhUuqcii/S0Z9wiHIrQVPMermM1any+MX5GeGD7faD3/msQUDGLol9wOcz4/jbg/WJnGqoJF6LiBdtg==}
+  basic-ftp@5.1.0:
+    resolution: {integrity: sha512-RkaJzeJKDbaDWTIPiJwubyljaEPwpVWkm9Rt5h9Nd6h7tEXTJ3VB4qxdZBioV7JO5yLUaOKwz7vDOzlncUsegw==}
     engines: {node: '>=10.0.0'}
 
   binary-search-bounds@2.0.5:
@@ -3909,6 +3904,10 @@ packages:
     resolution: {integrity: sha512-eflK8wEtyOE6+hsaRVPxvUKYCpRgzLqDTb8krvAsRIwOGlHoSgYLgBXoubGgLd2fT41/OUYdb48v4k4WWHQurA==}
     engines: {node: '>= 10.13.0'}
 
+  scrns@0.2.1:
+    resolution: {integrity: sha512-DfGUWAiZ7f6EUuur290Tvo7c7/VNQHHdhImwCd805FXRmrxwe3KY9cOLV4AbNjlcmnPoAxbB1r63vuusva47Ww==}
+    hasBin: true
+
   seedrandom@3.0.5:
     resolution: {integrity: sha512-8OwmbklUNzwezjGInmZ+2clQmExQPvomqjL7LFqOYqtmuxRgQYqOD3mHaU+MvZn5FLUeVxVfQjwLZW/n/JFuqg==}
 
@@ -4576,8 +4575,8 @@ packages:
   wrappy@1.0.2:
     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
 
-  ws@8.18.3:
-    resolution: {integrity: sha512-PEIGCY5tSlUt50cqyMXfCzX+oOPqN0vuGqWzbcJ2xvnkzkq46oOpz7dQaTDBdfICb4N14+GARUDw2XV2N4tvzg==}
+  ws@8.19.0:
+    resolution: {integrity: sha512-blAT2mjOEIi0ZzruJfIhb3nps74PRWTCz1IjglWEEpQl5XS/UNama6u2/rjFkDDouqr4L67ry+1aGIALViWjDg==}
     engines: {node: '>=10.0.0'}
     peerDependencies:
       bufferutil: ^4.0.1
@@ -5389,19 +5388,6 @@ snapshots:
       - '@types/react'
       - supports-color
 
-  '@rdub/screenshots@https://gitlab.com/api/v4/projects/77258162/repository/archive.tar.gz?sha=8ae7838(typescript@5.9.3)':
-    dependencies:
-      commander: 12.1.0
-      puppeteer: 23.11.1(typescript@5.9.3)
-    transitivePeerDependencies:
-      - bare-abort-controller
-      - bare-buffer
-      - bufferutil
-      - react-native-b4a
-      - supports-color
-      - typescript
-      - utf-8-validate
-
   '@rdub/use-url-params@https://codeload.github.com/runsascoded/use-url-params/tar.gz/15e54b3003e14cd31b5704ec0dce117737ef8709(react@18.3.1)':
     dependencies:
       react: 18.3.1
@@ -6130,7 +6116,7 @@ snapshots:
 
   baseline-browser-mapping@2.9.11: {}
 
-  basic-ftp@5.0.5: {}
+  basic-ftp@5.1.0: {}
 
   binary-search-bounds@2.0.5: {}
 
@@ -7233,7 +7219,7 @@ snapshots:
 
   get-uri@6.0.5:
     dependencies:
-      basic-ftp: 5.0.5
+      basic-ftp: 5.1.0
       data-uri-to-buffer: 6.0.2
       debug: 4.4.3
     transitivePeerDependencies:
@@ -8825,7 +8811,7 @@ snapshots:
       debug: 4.4.3
       devtools-protocol: 0.0.1367902
       typed-query-selector: 2.12.0
-      ws: 8.18.3
+      ws: 8.19.0
     transitivePeerDependencies:
       - bare-abort-controller
       - bare-buffer
@@ -9223,6 +9209,19 @@ snapshots:
       ajv: 8.17.1
       ajv-formats: 2.1.1(ajv@8.17.1)
       ajv-keywords: 5.1.0(ajv@8.17.1)
+
+  scrns@0.2.1(typescript@5.9.3):
+    dependencies:
+      commander: 12.1.0
+      puppeteer: 23.11.1(typescript@5.9.3)
+    transitivePeerDependencies:
+      - bare-abort-controller
+      - bare-buffer
+      - bufferutil
+      - react-native-b4a
+      - supports-color
+      - typescript
+      - utf-8-validate
 
   seedrandom@3.0.5: {}
 
@@ -10042,7 +10041,7 @@ snapshots:
 
   wrappy@1.0.2: {}
 
-  ws@8.18.3: {}
+  ws@8.19.0: {}
 
   xlsx@https://cdn.sheetjs.com/xlsx-0.19.3/xlsx-0.19.3.tgz: {}
 
