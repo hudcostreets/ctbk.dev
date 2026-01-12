@@ -82,6 +82,11 @@ class TripdataMonth(DvcBlob):
     def path(self) -> str:
         return self.zip_path
 
+    @property
+    def url(self) -> str:
+        """Alias for zip_path, for compatibility with TripdataZip."""
+        return self.zip_path
+
     def zip_csv_fds(self) -> Iterator[IO]:
         """Return a read fd for the single CSV in the source .zip."""
         # src = self.src
