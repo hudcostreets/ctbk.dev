@@ -89,3 +89,24 @@ jobs:
       - run: dvc pull s3/ctbk/aggregated/ymrgtb_cd_20*.parquet.dvc
       - run: ctbk ymrgtb-cd -f
       - run: python -m ctbk.gha_update -Bpush-www -Pwww -Pmain -u "GitHub Actions" -e github@actions www/public/assets/ymrgtb_cd.json
+  station_urls_json:
+    name: Write `station-urls.json` used by www
+    needs: station_pair_jsons
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GITHUB_REF }}
+          fetch-depth: 0
+          ssh-key: ${{ secrets.WWW_DEPLOY_KEY }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.11.8
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: pip install -e .
+      - run: cd www && npm install yaml
+      - run: node www/scripts/gen-station-urls.js
+      - run: python -m ctbk.gha_update -Bpush-www -Pwww -Pmain -u "GitHub Actions" -e github@actions www/public/assets/station-urls.json
