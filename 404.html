@@ -5,8 +5,38 @@
     <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ctbk.dev - Citi Bike Dashboard</title>
-    <script type="module" crossorigin src="/assets/index-Bimcadto.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DbyVJBUB.css">
+    <!-- Prevent FOUC: set theme and critical CSS before React loads -->
+    <script>
+      (function() {
+        // Check URL param first (?theme=light or ?theme=dark)
+        var params = new URLSearchParams(window.location.search);
+        var urlTheme = params.get('theme');
+        var theme = (urlTheme === 'light' || urlTheme === 'dark') ? urlTheme : localStorage.getItem('ctbk-theme') || 'system';
+        var actual = theme;
+        if (theme === 'system') {
+          actual = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        document.documentElement.setAttribute('data-theme', actual);
+      })();
+    </script>
+    <style>
+      :root {
+        --bg-primary: #f5f7fa;
+        --text-primary: #333333;
+      }
+      [data-theme="dark"] {
+        --bg-primary: #1a1a1a;
+        --text-primary: #e0e0e0;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background-color: var(--bg-primary);
+        color: var(--text-primary);
+      }
+    </style>
+    <script type="module" crossorigin src="/assets/index-gIJRxwQ6.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BRg7oWNq.css">
   </head>
   <body>
     <div id="root"></div>
