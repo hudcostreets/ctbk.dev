@@ -7,6 +7,7 @@ import { Link } from 'react-router-dom'
 import { StationSearch } from '../components/StationSearch'
 import { useTheme } from '../contexts/ThemeContext'
 import { useStationsKeyboardShortcuts } from '../hooks/useStationsKeyboardShortcuts'
+import { useStationsOmnibarEndpoint } from '../hooks/useStationsOmnibarEndpoint'
 import css from "../stations.module.css"
 
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -322,6 +323,13 @@ export default function Stations() {
     openSearch,
     toggleTheme,
     monthSelectRef,
+  })
+
+  // Register omnibar endpoint for station search (uses already-loaded data)
+  useStationsOmnibarEndpoint({
+    stations: stations || {},
+    onSelect: setSelectedId,
+    enabled: !!stations,
   })
 
   const handleMonthChange = useCallback((e: SelectChangeEvent<string>) => {
