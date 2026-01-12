@@ -25,8 +25,8 @@ export function useStationsOmnibarEndpoint({
   onSelect,
   enabled = true,
 }: UseStationsOmnibarEndpointProps) {
-  const fetch = useCallback(
-    async (query: string, _signal: AbortSignal, pagination: { offset: number; limit: number }) => {
+  const filter = useCallback(
+    (query: string, pagination: { offset: number; limit: number }) => {
       const stationEntries = Object.entries(stations)
 
       let filtered: [string, StationValue][]
@@ -70,7 +70,7 @@ export function useStationsOmnibarEndpoint({
   )
 
   useOmnibarEndpoint('stations', {
-    fetch,
+    filter,
     group: 'Stations',
     priority: 100, // High priority so stations appear first
     pageSize: 10,
