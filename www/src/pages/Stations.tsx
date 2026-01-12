@@ -5,7 +5,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
 import { Link } from 'react-router-dom'
 import { StationSearch } from '../components/StationSearch'
-import { useShortcutsModal } from '../contexts/ShortcutsModalContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useStationsKeyboardShortcuts } from '../hooks/useStationsKeyboardShortcuts'
 import css from "../stations.module.css"
@@ -301,7 +300,6 @@ export default function Stations() {
   }, [manifest])
 
   // Keyboard shortcuts
-  const { open: openShortcutsModal } = useShortcutsModal()
   const { toggleTheme } = useTheme()
   const openSearch = useCallback(() => setIsSearchOpen(true), [])
   const closeSearch = useCallback(() => setIsSearchOpen(false), [])
@@ -310,7 +308,6 @@ export default function Stations() {
     setMonth,
     availableMonths,
     setSelectedId,
-    openShortcutsModal,
     openSearch,
     toggleTheme,
     monthSelectRef,

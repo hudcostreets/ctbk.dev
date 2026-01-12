@@ -1,7 +1,18 @@
-import { useRegisteredHotkeys, type HotkeyMap } from '@rdub/use-hotkeys'
-import { useMemo } from 'react'
+import { useAction } from 'use-kbd'
+import { useNavigate } from 'react-router-dom'
 import { type DateRange, isDurationBased } from '../date-range'
 import type { Gender, Region, RideableType, StackBy, UserType, YAxis } from '../data'
+
+// Example preset URLs
+const PRESETS = {
+  default: '/',
+  jcHoboken: '/?r=jh',
+  jcHobokenStacked: '/?r=jh&s=r',
+  genderMinutes: '/?y=m&s=g&pct=&g=mf&d=1406-2102',
+  memberCustomer: '/?s=u&pct=',
+  bikeTypes: '/?y=m&s=b&rt=ce&d=2002-',
+  bikeTypesStacked: '/?y=m&s=b&rt=ce&d=2002-&pct',
+} as const
 
 interface UseKeyboardShortcutsProps {
   dateRange: DateRange
@@ -14,7 +25,6 @@ interface UseKeyboardShortcutsProps {
   stackRelative: boolean
   setShowLegend: (show: boolean | null) => void
   showLegendValue: boolean
-  openShortcutsModal: () => void
   setControlsOpen: (open: boolean) => void
   controlsOpen: boolean
   toggleTheme: () => void
@@ -27,109 +37,6 @@ interface UseKeyboardShortcutsProps {
   genders: Gender[]
   setRideableTypes: (rideableTypes: RideableType[]) => void
   rideableTypes: RideableType[]
-}
-
-// Default hotkey map: key combination -> action name
-export const DEFAULT_HOTKEY_MAP: HotkeyMap = {
-  // Date ranges
-  '1': 'date:1y',
-  '2': 'date:2y',
-  '3': 'date:3y',
-  '4': 'date:4y',
-  '5': 'date:5y',
-  'x': 'date:all',
-  // Stack by
-  '-': 'stack:none',
-  'r': 'stack:region',
-  'u': 'stack:usertype',
-  'g': 'stack:gender',
-  'b': 'stack:biketype',
-  // Y-axis
-  'shift+r': 'yaxis:rides',
-  'shift+m': 'yaxis:minutes',
-  // Toggles
-  'l': 'toggle:legend',
-  'A': 'toggle:avg',
-  'p': 'toggle:percent',
-  // Other
-  's': 'other:settings',
-  't': 'other:theme',
-  // Region toggles (lowercase)
-  'j': 'region:jc',
-  'h': 'region:hob',
-  'n': 'region:nyc',
-  // User type toggles (lowercase)
-  'a': 'user:annual',
-  'd': 'user:daily',
-  // Gender toggles
-  'm': 'gender:men',
-  'w': 'gender:women',
-  'shift+g': 'gender:unknown',
-  // Bike type toggles
-  'c': 'bike:classic',
-  'e': 'bike:electric',
-  'o': 'bike:unknown',
-  // Modal
-  '?': 'modal:shortcuts',
-  'meta+/': 'modal:shortcuts',
-} as const
-
-// Descriptions for keyboard shortcuts modal
-export const HOTKEY_DESCRIPTIONS: Record<string, string> = {
-  // Date ranges
-  'date:1y': '1 year',
-  'date:2y': '2 years',
-  'date:3y': '3 years',
-  'date:4y': '4 years',
-  'date:5y': '5 years',
-  'date:all': 'All time',
-  // Stack by
-  'stack:none': 'No stacking',
-  'stack:region': 'By region',
-  'stack:usertype': 'By user type',
-  'stack:gender': 'By gender',
-  'stack:biketype': 'By bike type',
-  // Y-axis
-  'yaxis:rides': 'Rides',
-  'yaxis:minutes': 'Minutes',
-  // Toggles
-  'toggle:legend': 'Legend',
-  'toggle:avg': '12mo average',
-  'toggle:percent': 'Stack %',
-  // Other
-  'other:settings': 'Open/Close controls',
-  'other:theme': 'Theme (system/light/dark)',
-  // Region toggles
-  'region:jc': 'Toggle JC',
-  'region:hob': 'Toggle HOB',
-  'region:nyc': 'Toggle NYC',
-  // User type toggles
-  'user:annual': 'Toggle Member',
-  'user:daily': 'Toggle Customer',
-  // Gender toggles
-  'gender:men': 'Toggle Men',
-  'gender:women': 'Toggle Women',
-  'gender:unknown': 'Toggle Unknown',
-  // Bike type toggles
-  'bike:classic': 'Toggle Classic',
-  'bike:electric': 'Toggle Electric',
-  'bike:unknown': 'Toggle Unknown',
-  // Modal
-  'modal:shortcuts': 'This dialog',
-}
-
-// Group names for shortcuts modal
-export const HOTKEY_GROUPS: Record<string, string> = {
-  'date': 'Date Range',
-  'stack': 'Stack By',
-  'yaxis': 'Y-Axis',
-  'toggle': 'Toggles',
-  'region': 'Region',
-  'user': 'User Type',
-  'gender': 'Gender',
-  'bike': 'Bike Type',
-  'modal': 'Other',
-  'other': 'Other',
 }
 
 // Helper to toggle an item in an array (at least one must remain)
@@ -155,7 +62,6 @@ export function useKeyboardShortcuts({
   stackRelative,
   setShowLegend,
   showLegendValue,
-  openShortcutsModal,
   setControlsOpen,
   controlsOpen,
   toggleTheme,
@@ -173,47 +79,61 @@ export function useKeyboardShortcuts({
   const currentEnd = dateRange === "All" ? undefined
     : isDurationBased(dateRange) ? dateRange.end
     : dateRange.end  // explicit range
-  const handlers = useMemo(() => ({
-    // Date ranges
-    'date:1y': () => setDateRange({ duration: '1y', end: currentEnd }),
-    'date:2y': () => setDateRange({ duration: '2y', end: currentEnd }),
-    'date:3y': () => setDateRange({ duration: '3y', end: currentEnd }),
-    'date:4y': () => setDateRange({ duration: '4y', end: currentEnd }),
-    'date:5y': () => setDateRange({ duration: '5y', end: currentEnd }),
-    'date:all': () => setDateRange('All'),
-    // Stack by
-    'stack:none': () => setStackBy('None'),
-    'stack:region': () => setStackBy('Region'),
-    'stack:usertype': () => setStackBy('User Type'),
-    'stack:gender': () => setStackBy('Gender'),
-    'stack:biketype': () => setStackBy('Rideable Type'),
-    // Y-axis
-    'yaxis:rides': () => setYAxis('Rides'),
-    'yaxis:minutes': () => setYAxis('Ride minutes'),
-    // Toggles
-    'toggle:legend': () => setShowLegend(!showLegendValue),
-    'toggle:avg': () => setRollingAvgs(rollingAvgs.includes(12) ? [] : [12]),
-    'toggle:percent': () => setStackRelative(!stackRelative),
-    'other:settings': () => setControlsOpen(!controlsOpen),
-    'other:theme': toggleTheme,
-    // Region toggles
-    'region:jc': () => setRegions(toggleItem(regions, 'JC')),
-    'region:hob': () => setRegions(toggleItem(regions, 'HOB')),
-    'region:nyc': () => setRegions(toggleItem(regions, 'NYC')),
-    // User type toggles
-    'user:annual': () => setUserTypes(toggleItem(userTypes, 'Annual')),
-    'user:daily': () => setUserTypes(toggleItem(userTypes, 'Daily')),
-    // Gender toggles
-    'gender:men': () => setGenders(toggleItem(genders, 'Men')),
-    'gender:women': () => setGenders(toggleItem(genders, 'Women')),
-    'gender:unknown': () => setGenders(toggleItem(genders, 'Unknown')),
-    // Bike type toggles
-    'bike:classic': () => setRideableTypes(toggleItem(rideableTypes, 'Classic')),
-    'bike:electric': () => setRideableTypes(toggleItem(rideableTypes, 'Electric')),
-    'bike:unknown': () => setRideableTypes(toggleItem(rideableTypes, 'Unknown')),
-    // Modal
-    'modal:shortcuts': openShortcutsModal,
-  }), [currentEnd, setDateRange, setStackBy, setYAxis, setRollingAvgs, rollingAvgs, setStackRelative, stackRelative, setShowLegend, showLegendValue, openShortcutsModal, setControlsOpen, controlsOpen, toggleTheme, setRegions, regions, setUserTypes, userTypes, setGenders, genders, setRideableTypes, rideableTypes])
 
-  return useRegisteredHotkeys(handlers, { sequenceTimeout: 1000 })
+  // Date ranges
+  useAction('date:1y', { label: '1 year', group: 'Date Range', defaultBindings: ['1'], handler: () => setDateRange({ duration: '1y', end: currentEnd }) })
+  useAction('date:2y', { label: '2 years', group: 'Date Range', defaultBindings: ['2'], handler: () => setDateRange({ duration: '2y', end: currentEnd }) })
+  useAction('date:3y', { label: '3 years', group: 'Date Range', defaultBindings: ['3'], handler: () => setDateRange({ duration: '3y', end: currentEnd }) })
+  useAction('date:4y', { label: '4 years', group: 'Date Range', defaultBindings: ['4'], handler: () => setDateRange({ duration: '4y', end: currentEnd }) })
+  useAction('date:5y', { label: '5 years', group: 'Date Range', defaultBindings: ['5'], handler: () => setDateRange({ duration: '5y', end: currentEnd }) })
+  useAction('date:all', { label: 'All time', group: 'Date Range', defaultBindings: ['x'], handler: () => setDateRange('All') })
+
+  // Stack by (s prefix for sequences)
+  useAction('stack:none', { label: 'Stack: none', group: 'Stack By', defaultBindings: ['s -', 's n'], handler: () => setStackBy('None') })
+  useAction('stack:region', { label: 'Stack by region', group: 'Stack By', defaultBindings: ['s r'], handler: () => setStackBy('Region') })
+  useAction('stack:usertype', { label: 'Stack by user type', group: 'Stack By', defaultBindings: ['s u'], handler: () => setStackBy('User Type') })
+  useAction('stack:gender', { label: 'Stack by gender', group: 'Stack By', defaultBindings: ['s g'], handler: () => setStackBy('Gender') })
+  useAction('stack:biketype', { label: 'Stack by bike type', group: 'Stack By', defaultBindings: ['s b'], handler: () => setStackBy('Rideable Type') })
+
+  // Y-axis
+  useAction('yaxis:rides', { label: 'Y-axis: ride count', group: 'Y-Axis', defaultBindings: ['shift+r'], handler: () => setYAxis('Rides') })
+  useAction('yaxis:minutes', { label: 'Y-axis: ride minutes', group: 'Y-Axis', defaultBindings: ['shift+m'], handler: () => setYAxis('Ride minutes') })
+
+  // Toggles (shift+ prefix)
+  useAction('toggle:legend', { label: 'Toggle legend', group: 'Toggles', defaultBindings: ['shift+l'], handler: () => setShowLegend(!showLegendValue) })
+  useAction('toggle:avg', { label: 'Toggle 12mo rolling average', group: 'Toggles', defaultBindings: ['shift+a'], handler: () => setRollingAvgs(rollingAvgs.includes(12) ? [] : [12]) })
+  useAction('toggle:percent', { label: 'Toggle stack % (relative)', group: 'Toggles', defaultBindings: ['shift+p'], handler: () => setStackRelative(!stackRelative) })
+
+  // Other (shift+ prefix)
+  useAction('other:settings', { label: 'Toggle controls panel', group: 'Other', defaultBindings: ['shift+c'], handler: () => setControlsOpen(!controlsOpen) })
+  useAction('other:theme', { label: 'Cycle theme (system/light/dark)', group: 'Other', defaultBindings: ['shift+t'], handler: toggleTheme })
+
+  // Region toggles
+  useAction('region:jc', { label: 'Toggle region: Jersey City', group: 'Region', defaultBindings: ['j'], handler: () => setRegions(toggleItem(regions, 'JC')) })
+  useAction('region:hob', { label: 'Toggle region: Hoboken', group: 'Region', defaultBindings: ['h'], handler: () => setRegions(toggleItem(regions, 'HOB')) })
+  useAction('region:nyc', { label: 'Toggle region: NYC', group: 'Region', defaultBindings: ['n'], handler: () => setRegions(toggleItem(regions, 'NYC')) })
+
+  // User type toggles
+  useAction('user:annual', { label: 'Toggle user: member (annual)', group: 'User Type', defaultBindings: ['a'], handler: () => setUserTypes(toggleItem(userTypes, 'Annual')) })
+  useAction('user:daily', { label: 'Toggle user: customer (daily)', group: 'User Type', defaultBindings: ['d'], handler: () => setUserTypes(toggleItem(userTypes, 'Daily')) })
+
+  // Gender toggles
+  useAction('gender:men', { label: 'Toggle gender: men', group: 'Gender', defaultBindings: ['m'], handler: () => setGenders(toggleItem(genders, 'Men')) })
+  useAction('gender:women', { label: 'Toggle gender: women', group: 'Gender', defaultBindings: ['w'], handler: () => setGenders(toggleItem(genders, 'Women')) })
+  useAction('gender:unknown', { label: 'Toggle gender: unknown', group: 'Gender', defaultBindings: ['u'], handler: () => setGenders(toggleItem(genders, 'Unknown')) })
+
+  // Bike type toggles
+  useAction('bike:classic', { label: 'Toggle bike: classic', group: 'Bike Type', defaultBindings: ['c'], handler: () => setRideableTypes(toggleItem(rideableTypes, 'Classic')) })
+  useAction('bike:electric', { label: 'Toggle bike: electric (e-bike)', group: 'Bike Type', defaultBindings: ['e'], handler: () => setRideableTypes(toggleItem(rideableTypes, 'Electric')) })
+  useAction('bike:unknown', { label: 'Toggle bike: unknown', group: 'Bike Type', defaultBindings: ['o'], handler: () => setRideableTypes(toggleItem(rideableTypes, 'Unknown')) })
+
+  // Example presets (no default bindings - omnibar only)
+  const navigate = useNavigate()
+  useAction('preset:default', { label: 'Preset: default view (all rides)', group: 'Presets', defaultBindings: [], handler: () => navigate(PRESETS.default) })
+  useAction('preset:jc-hoboken', { label: 'Preset: JC + Hoboken', group: 'Presets', defaultBindings: [], handler: () => navigate(PRESETS.jcHoboken) })
+  useAction('preset:jc-hoboken-stacked', { label: 'Preset: JC + Hoboken (stacked by region)', group: 'Presets', defaultBindings: [], handler: () => navigate(PRESETS.jcHobokenStacked) })
+  useAction('preset:gender-minutes', { label: 'Preset: ride minutes, men vs women', group: 'Presets', defaultBindings: [], handler: () => navigate(PRESETS.genderMinutes) })
+  useAction('preset:member-customer', { label: 'Preset: member vs customer %', group: 'Presets', defaultBindings: [], handler: () => navigate(PRESETS.memberCustomer) })
+  useAction('preset:bike-types', { label: 'Preset: classic vs e-bike minutes', group: 'Presets', defaultBindings: [], handler: () => navigate(PRESETS.bikeTypes) })
+  useAction('preset:bike-types-stacked', { label: 'Preset: classic vs e-bike (stacked %)', group: 'Presets', defaultBindings: [], handler: () => navigate(PRESETS.bikeTypesStacked) })
 }

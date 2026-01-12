@@ -10,7 +10,6 @@ import controlCss from "../controls.module.css"
 import { Checkbox } from "../components/Checkbox"
 import { Checklist } from "../components/Checklist"
 import { Radios } from "../components/Radios"
-import { useShortcutsModal } from "../contexts/ShortcutsModalContext"
 import { useTheme } from "../contexts/ThemeContext"
 import { darken } from "../colors"
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts"
@@ -133,7 +132,6 @@ export default function Home() {
   const [snapCounter, setSnapCounter] = useState(0)  // Increment to force Plotly to reset after snap
 
   // Keyboard shortcuts
-  const { open: openShortcutsModal } = useShortcutsModal()
   useKeyboardShortcuts({
     dateRange,
     setDateRange,
@@ -145,7 +143,6 @@ export default function Home() {
     stackRelative,
     setShowLegend,
     showLegendValue,
-    openShortcutsModal,
     setControlsOpen,
     controlsOpen,
     toggleTheme,

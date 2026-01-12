@@ -1,42 +1,15 @@
 import 'bootstrap/dist/css/bootstrap.css'
+import 'use-kbd/styles.css'
 import '../styles/globals.css'
-import { KeyboardShortcutsProvider } from '@rdub/use-hotkeys'
+import { HotkeysProvider, ShortcutsModal, Omnibar, LookupModal, useHotkeysContext } from 'use-kbd'
 import { ThemeProvider as MuiThemeProvider, createTheme } from "@mui/material"
-import { StrictMode, useEffect, useMemo } from 'react'
+import { StrictMode, useMemo } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext"
-import { ShortcutsModalProvider, useShortcutsModal } from "./contexts/ShortcutsModalContext"
 import { ThemeToggle } from "./components/ThemeToggle"
 import { TileStyleButton } from "./components/TileStyleButton"
-import { ShortcutsModal } from "./components/ShortcutsModal"
-import { DEFAULT_HOTKEY_MAP } from "./hooks/useKeyboardShortcuts"
-import { STATIONS_HOTKEY_MAP } from "./hooks/useStationsKeyboardShortcuts"
-import type { HotkeyMap } from "@rdub/use-hotkeys"
-
-// Merge hotkey maps, combining conflicting keys into arrays
-function mergeHotkeyMaps(...maps: HotkeyMap[]): HotkeyMap {
-  const result: HotkeyMap = {}
-  for (const map of maps) {
-    for (const [key, action] of Object.entries(map)) {
-      if (result[key]) {
-        // Key already exists - merge actions
-        const existing = result[key]
-        const existingActions = Array.isArray(existing) ? existing : [existing]
-        const newActions = Array.isArray(action) ? action : [action]
-        // Combine unique actions
-        const combined = [...new Set([...existingActions, ...newActions])]
-        result[key] = combined.length === 1 ? combined[0] : combined
-      } else {
-        result[key] = action
-      }
-    }
-  }
-  return result
-}
-
-// Merge all page hotkey maps for the global provider
-const ALL_HOTKEY_MAP = mergeHotkeyMaps(DEFAULT_HOTKEY_MAP, STATIONS_HOTKEY_MAP)
+import { useScrollToHash } from "./hooks/useScrollToHash"
 import Home from "./pages/Home"
 import Stations from "./pages/Stations"
 import PipelineMdx from "./pages/Pipeline.mdx"
@@ -52,28 +25,8 @@ function Pipeline() {
   )
 }
 
-// Scroll to hash anchor on navigation
-function useScrollToHash() {
-  const { hash, pathname } = useLocation()
-  useEffect(() => {
-    if (hash) {
-      // Small delay to ensure DOM is rendered
-      const timer = setTimeout(() => {
-        const el = document.getElementById(hash.slice(1))
-        if (el) {
-          el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-        }
-      }, 100)
-      return () => clearTimeout(timer)
-    } else {
-      // Scroll to top on navigation without hash
-      window.scrollTo(0, 0)
-    }
-  }, [hash, pathname])
-}
-
 function AppContent() {
-  const { isOpen, open, close } = useShortcutsModal()
+  const { isModalOpen, closeModal, openModal } = useHotkeysContext()
   const { pathname } = useLocation()
   const isStationsPage = pathname === '/stations'
   useScrollToHash()
@@ -85,10 +38,16 @@ function AppContent() {
         <Route path="/stations" element={<Stations />} />
         <Route path="/pipeline" element={<Pipeline />} />
       </Routes>
-      <ThemeToggle onOpenShortcuts={open}>
+      <ThemeToggle onOpenShortcuts={openModal}>
         {isStationsPage && <TileStyleButton />}
       </ThemeToggle>
-      <ShortcutsModal isOpen={isOpen} onClose={close} />
+      <ShortcutsModal
+        isOpen={isModalOpen}
+        onClose={closeModal}
+        editable
+      />
+      <Omnibar />
+      <LookupModal />
     </>
   )
 }
@@ -111,15 +70,13 @@ function MuiThemeWrapper({ children }: { children: React.ReactNode }) {
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ThemeProvider>
-      <KeyboardShortcutsProvider defaults={ALL_HOTKEY_MAP} storageKey="ctbk-hotkeys">
+      <HotkeysProvider>
         <MuiThemeWrapper>
-          <ShortcutsModalProvider>
-            <BrowserRouter>
-              <AppContent />
-            </BrowserRouter>
-          </ShortcutsModalProvider>
+          <BrowserRouter>
+            <AppContent />
+          </BrowserRouter>
         </MuiThemeWrapper>
-      </KeyboardShortcutsProvider>
+      </HotkeysProvider>
     </ThemeProvider>
   </StrictMode>,
 )
