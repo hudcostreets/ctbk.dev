@@ -10,9 +10,10 @@ export const buttonClass = css.button
 interface ThemeToggleProps {
   onOpenShortcuts?: () => void
   children?: React.ReactNode
+  hideThemeButton?: boolean
 }
 
-export function ThemeToggle({ onOpenShortcuts, children }: ThemeToggleProps) {
+export function ThemeToggle({ onOpenShortcuts, children, hideThemeButton }: ThemeToggleProps) {
   const { theme, setTheme } = useTheme()
   const [isVisible, setIsVisible] = useState(false)
   const [isHovering, setIsHovering] = useState(false)
@@ -102,14 +103,16 @@ export function ThemeToggle({ onOpenShortcuts, children }: ThemeToggleProps) {
             <FaKeyboard />
           </button>
         )}
-        <button
-          className={css.button}
-          onClick={cycleTheme}
-          title={`Theme: ${getThemeLabel()}`}
-          aria-label={`Current theme: ${getThemeLabel()}. Click to cycle themes.`}
-        >
-          <span className={css.icon}>{getThemeIcon()}</span>
-        </button>
+        {!hideThemeButton && (
+          <button
+            className={css.button}
+            onClick={cycleTheme}
+            title={`Theme: ${getThemeLabel()}`}
+            aria-label={`Current theme: ${getThemeLabel()}. Click to cycle themes.`}
+          >
+            <span className={css.icon}>{getThemeIcon()}</span>
+          </button>
+        )}
       </div>
     </div>
   )

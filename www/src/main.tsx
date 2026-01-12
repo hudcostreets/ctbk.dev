@@ -8,7 +8,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext"
 import { ThemeToggle } from "./components/ThemeToggle"
-import { TileStyleButton } from "./components/TileStyleButton"
+import { HomeButton, ThemeTileToggle } from "./components/TileStyleButton"
 import { useScrollToHash } from "./hooks/useScrollToHash"
 import Home from "./pages/Home"
 import Stations from "./pages/Stations"
@@ -38,8 +38,13 @@ function AppContent() {
         <Route path="/stations" element={<Stations />} />
         <Route path="/pipeline" element={<Pipeline />} />
       </Routes>
-      <ThemeToggle onOpenShortcuts={openModal}>
-        {isStationsPage && <TileStyleButton />}
+      <ThemeToggle onOpenShortcuts={openModal} hideThemeButton={isStationsPage}>
+        {isStationsPage && (
+          <>
+            <HomeButton />
+            <ThemeTileToggle />
+          </>
+        )}
       </ThemeToggle>
       <ShortcutsModal
         isOpen={isModalOpen}

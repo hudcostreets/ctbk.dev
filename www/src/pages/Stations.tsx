@@ -40,9 +40,10 @@ const TILE_STYLES: Record<string, TileStyle> = {
   },
 }
 
-const DEFAULT_TILE_CODE = 'd'
+const DEFAULT_TILE_CODE = 'a'
 
 // Short codes for URL params
+// 'a' = auto (follows theme), 'd'/'l' = explicit dark/light, 'o' = OSM
 const TILE_SHORT_CODES: [string, string][] = [
   ['d', 'dark'],
   ['l', 'light'],
@@ -54,6 +55,16 @@ const TILE_CODES: Record<string, string> = Object.fromEntries([
   ...TILE_SHORT_CODES,
   ...TILE_SHORT_CODES.map(([, name]) => [name, name]),  // Accept full names too
 ])
+
+// Resolve tile code to style name, handling 'auto' mode
+function resolveTileStyle(tileCode: string | undefined, actualTheme: 'light' | 'dark'): string {
+  const code = tileCode || DEFAULT_TILE_CODE
+  // 'a' = auto: follow theme
+  if (code === 'a' || code === 'auto') {
+    return actualTheme === 'dark' ? 'dark' : 'light'
+  }
+  return TILE_CODES[code] || TILE_CODES[DEFAULT_TILE_CODE] || 'dark'
+}
 
 // Colors based on tile style (light vs dark backgrounds)
 type TileColors = { circle: string; selected: string; line: string; title: string }
@@ -300,7 +311,7 @@ export default function Stations() {
   }, [manifest])
 
   // Keyboard shortcuts
-  const { toggleTheme } = useTheme()
+  const { toggleTheme, actualTheme } = useTheme()
   const openSearch = useCallback(() => setIsSearchOpen(true), [])
   const closeSearch = useCallback(() => setIsSearchOpen(false), [])
   useStationsKeyboardShortcuts({
@@ -317,8 +328,8 @@ export default function Stations() {
     setMonth(e.target.value)
   }, [setMonth])
 
-  // Map code to full style name
-  const tileStyle = TILE_CODES[tileCode || DEFAULT_TILE_CODE] || TILE_CODES[DEFAULT_TILE_CODE]
+  // Map code to full style name (handles 'auto' mode by using actualTheme)
+  const tileStyle = resolveTileStyle(tileCode, actualTheme)
   const currentTile = TILE_STYLES[tileStyle]
   const currentColors = TILE_COLORS[tileStyle]
 
