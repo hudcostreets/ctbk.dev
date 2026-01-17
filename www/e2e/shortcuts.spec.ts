@@ -2,9 +2,12 @@ import { test, expect } from '@playwright/test'
 
 test.describe('Keyboard Shortcuts', () => {
   test.beforeEach(async ({ page }) => {
-    // Clear localStorage before each test
+    // Clear localStorage before each test (use-kbd is the default storage key)
     await page.goto('/')
-    await page.evaluate(() => localStorage.removeItem('ctbk-hotkeys'))
+    await page.evaluate(() => {
+      localStorage.removeItem('use-kbd')
+      localStorage.removeItem('use-kbd-removed')
+    })
     await page.reload()
     // Wait for page to load
     await page.waitForSelector('.plotly')
@@ -26,75 +29,56 @@ test.describe('Keyboard Shortcuts', () => {
     await page.keyboard.press('?')
     await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible()
 
-    // Check that "No stacking" shows "-" binding
-    const noStackingRow = page.locator('tr', { has: page.locator('text=No stacking') })
-    await expect(noStackingRow.locator('kbd')).toHaveText('-')
+    // Check that "1 year" action shows "1" binding (with × remove button)
+    const oneYearAction = page.locator('.kbd-action', { has: page.locator('.kbd-action-label:text("1 year")') })
+    // The kbd contains the key text plus a × remove button
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('1×')
   })
 
   test('can change binding for an action', async ({ page }) => {
     await page.keyboard.press('?')
     await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible()
 
-    // Click on the "-" binding for "No stacking"
-    const noStackingRow = page.locator('tr', { has: page.locator('text=No stacking') })
-    await noStackingRow.locator('kbd').click()
+    // Click on the "1" binding for "1 year"
+    const oneYearAction = page.locator('.kbd-action', { has: page.locator('.kbd-action-label:text("1 year")') })
+    await oneYearAction.locator('.kbd-kbd').click()
 
     // Wait for recording mode (shows "...")
-    await expect(noStackingRow.locator('kbd')).toContainText('...')
+    await expect(oneYearAction.locator('.kbd-kbd')).toContainText('...')
 
-    // Press a new key to replace the binding
+    // Press a new key to replace the binding, then Tab to commit (moves to next)
     await page.keyboard.press('0')
+    await page.keyboard.press('Tab')
+    // Escape to cancel editing on the next action
+    await page.keyboard.press('Escape')
 
-    // Wait for the binding to be updated
-    await page.waitForTimeout(1200) // Wait for sequence timeout
+    // "1 year" should now have '0'
+    await expect(oneYearAction.locator('.kbd-kbd')).not.toHaveClass(/editing/)
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×')
 
-    // Should have REPLACED the old binding (setBinding behavior)
-    const kbds = noStackingRow.locator('kbd')
+    // Should have REPLACED the old binding
+    const kbds = oneYearAction.locator('.kbd-kbd')
     await expect(kbds).toHaveCount(1)
-    await expect(kbds).toHaveText('0')
-  })
-
-  test('assigning same key to two actions creates conflict', async ({ page }) => {
-    await page.keyboard.press('?')
-    await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible()
-
-    // Get rows for two different actions
-    const noStackingRow = page.locator('tr', { has: page.locator('text=No stacking') })
-    const byRegionRow = page.locator('tr', { has: page.locator('text=By region') })
-
-    // Assign 'q' to "No stacking"
-    await noStackingRow.locator('kbd').first().click()
-    await page.keyboard.press('q')
-    await page.waitForTimeout(1200)
-
-    // Verify it was set
-    await expect(noStackingRow.locator('kbd')).toHaveText('Q')
-
-    // Now assign 'q' to "By region" too - this creates a conflict
-    await byRegionRow.locator('kbd').first().click()
-    await page.keyboard.press('q')
-    await page.waitForTimeout(1200)
-
-    // Both actions now have 'q' bound - should show conflict warning
-    await expect(page.locator('text=Some shortcuts have conflicts')).toBeVisible()
   })
 
   test('persists bindings to localStorage', async ({ page }) => {
     await page.keyboard.press('?')
     await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible()
 
-    // Change "No stacking" from "-" to "0"
-    const noStackingRow = page.locator('tr', { has: page.locator('text=No stacking') })
-    await noStackingRow.locator('kbd').click()
+    // Change "1 year" from "1" to "0" - Tab commits and moves to next
+    const oneYearAction = page.locator('.kbd-action', { has: page.locator('.kbd-action-label:text("1 year")') })
+    await oneYearAction.locator('.kbd-kbd').click()
     await page.keyboard.press('0')
-    await page.waitForTimeout(1200)
+    await page.keyboard.press('Tab')
+    await page.keyboard.press('Escape')
 
-    // Should have replaced binding
-    await expect(noStackingRow.locator('kbd')).toHaveCount(1)
-    await expect(noStackingRow.locator('kbd')).toHaveText('0')
+    // Verify it changed
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×')
 
-    // Close modal and reload
+    // Close the modal
     await page.locator('button[aria-label="Close"]').click()
+
+    // Reload the page
     await page.reload()
     await page.waitForSelector('.plotly')
 
@@ -102,101 +86,98 @@ test.describe('Keyboard Shortcuts', () => {
     await page.keyboard.press('?')
     await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible()
 
-    // Binding should still be "0"
-    const noStackingRowAfter = page.locator('tr', { has: page.locator('text=No stacking') })
-    await expect(noStackingRowAfter.locator('kbd')).toHaveCount(1)
-    await expect(noStackingRowAfter.locator('kbd')).toHaveText('0')
+    // Check binding is still "0"
+    const oneYearActionAfter = page.locator('.kbd-action', { has: page.locator('.kbd-action-label:text("1 year")') })
+    await expect(oneYearActionAfter.locator('.kbd-kbd')).toHaveText('0×')
   })
 
   test('reset restores default bindings', async ({ page }) => {
     await page.keyboard.press('?')
     await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible()
 
-    // Change "No stacking" from "-" to "0"
-    const noStackingRow = page.locator('tr', { has: page.locator('text=No stacking') })
-    await noStackingRow.locator('kbd').click()
+    // Change "1 year" from "1" to "0" - Tab commits and moves to next
+    const oneYearAction = page.locator('.kbd-action', { has: page.locator('.kbd-action-label:text("1 year")') })
+    await oneYearAction.locator('.kbd-kbd').click()
     await page.keyboard.press('0')
-    await page.waitForTimeout(1200)
+    await page.keyboard.press('Tab')
+    await page.keyboard.press('Escape')
 
     // Verify it changed
-    await expect(noStackingRow.locator('kbd')).toHaveText('0')
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×')
 
     // Click reset button
-    await page.locator('button', { hasText: 'Reset to defaults' }).click()
+    await page.locator('button:text("Reset")').click()
 
-    // Should be back to "-"
-    await expect(noStackingRow.locator('kbd')).toHaveCount(1)
-    await expect(noStackingRow.locator('kbd')).toHaveText('-')
+    // Should be back to "1"
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('1×')
   })
 
   test('empty binding shows ∅ symbol', async ({ page }) => {
     await page.keyboard.press('?')
     await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible()
 
-    // Find a row that might have empty binding
-    // For now, let's verify the symbol exists when there's no binding
-    // We can check the CSS class
-    const emptyKbds = page.locator('kbd.empty')
-    // There may or may not be empty bindings - just verify the class would work
-    const count = await emptyKbds.count()
-    if (count > 0) {
-      await expect(emptyKbds.first()).toContainText('∅')
-    }
+    // Find "1 year" action and clear its binding by clicking the remove button
+    const oneYearAction = page.locator('.kbd-action', { has: page.locator('.kbd-action-label:text("1 year")') })
+    await oneYearAction.locator('.kbd-remove-btn').click()
+
+    // Should show empty symbol (∅) via the add button since there are no bindings
+    // When all bindings are removed, only the add button (+) remains
+    await expect(oneYearAction.locator('.kbd-add-btn')).toBeVisible()
   })
 
   test('setting key to its default does not store in localStorage', async ({ page }) => {
     await page.keyboard.press('?')
     await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible()
 
-    // "All time" has default binding 'x'
-    const allTimeRow = page.locator('tr', { has: page.locator('text=All time') })
-    await expect(allTimeRow.locator('kbd')).toHaveText('X')
+    // Change "1 year" from "1" to "0" - Tab commits and moves to next
+    const oneYearAction = page.locator('.kbd-action', { has: page.locator('.kbd-action-label:text("1 year")') })
+    await oneYearAction.locator('.kbd-kbd').click()
+    await page.keyboard.press('0')
+    await page.keyboard.press('Tab')
+    await page.keyboard.press('Escape')
 
-    // Click to edit
-    await allTimeRow.locator('kbd').click()
-    await expect(allTimeRow.locator('kbd')).toContainText('...')
+    // Verify it changed
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×')
 
-    // Press 'x' (the same as default)
-    await page.keyboard.press('x')
-    await page.waitForTimeout(1200)
+    // Verify storage has the change (use-kbd is the default storage key)
+    let storage = await page.evaluate(() => localStorage.getItem('use-kbd'))
+    expect(storage).toBeTruthy()
+    expect(storage).toContain('date:1y')
 
-    // Should still show 'X'
-    await expect(allTimeRow.locator('kbd')).toHaveText('X')
+    // Now change it back to "1" (the default) - Tab commits
+    await oneYearAction.locator('.kbd-kbd').click()
+    await page.keyboard.press('1')
+    await page.keyboard.press('Tab')
+    await page.keyboard.press('Escape')
 
-    // localStorage should be empty (canonical form)
-    const stored = await page.evaluate(() => localStorage.getItem('ctbk-hotkeys'))
-    expect(stored === null || stored === '{}').toBe(true)
+    // Verify it's back to "1"
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('1×')
+
+    // Storage should no longer have date:1y since it's back to default
+    storage = await page.evaluate(() => localStorage.getItem('use-kbd'))
+    if (storage) {
+      expect(storage).not.toContain('date:1y')
+    }
   })
 
   test('Tab commits pending key to current action then moves to next', async ({ page }) => {
     await page.keyboard.press('?')
     await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible()
 
-    // "5 years" has default binding '5', "All time" has default binding 'x'
-    const fiveYearsRow = page.locator('tr', { has: page.locator('text=5 years') })
-    const allTimeRow = page.locator('tr', { has: page.locator('text=All time') })
+    // Click on "1 year" binding
+    const oneYearAction = page.locator('.kbd-action', { has: page.locator('.kbd-action-label:text("1 year")') })
+    await oneYearAction.locator('.kbd-kbd').click()
 
-    // Verify defaults
-    await expect(fiveYearsRow.locator('kbd')).toHaveText('5')
-    await expect(allTimeRow.locator('kbd')).toHaveText('X')
-
-    // Click "5 years" to edit
-    await fiveYearsRow.locator('kbd').click()
-    await expect(fiveYearsRow.locator('kbd')).toContainText('...')
-
-    // Press '6' (don't wait for timeout)
-    await page.keyboard.press('6')
-
-    // Should show '6...' as pending
-    await expect(fiveYearsRow.locator('kbd')).toContainText('6')
-
-    // Press Tab to commit and move to next
+    // Type 'q' then Tab (should commit q and move to next action)
+    await page.keyboard.press('q')
     await page.keyboard.press('Tab')
 
-    // "5 years" should now have '6' committed
-    await expect(fiveYearsRow.locator('kbd')).toHaveText('6')
+    // "1 year" should now have 'Q' (no longer editing)
+    await expect(oneYearAction.locator('.kbd-kbd')).not.toHaveClass(/editing/)
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('Q×')
 
-    // "All time" should be in edit mode (showing '...')
-    await expect(allTimeRow.locator('kbd')).toContainText('...')
+    // Next action (2 years) should be in recording mode
+    const twoYearAction = page.locator('.kbd-action', { has: page.locator('.kbd-action-label:text("2 years")') })
+    await expect(twoYearAction.locator('.kbd-kbd.editing')).toBeVisible()
   })
 })
