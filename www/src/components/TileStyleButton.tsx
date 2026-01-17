@@ -1,7 +1,7 @@
 import { FaHome, FaMap } from 'react-icons/fa'
 import { MdLightMode, MdDarkMode } from 'react-icons/md'
 import { Link } from 'react-router-dom'
-import { useUrlParam, stringParam } from '@rdub/use-url-params'
+import { useUrlParam, stringParam } from 'use-prms'
 import { useTheme } from '../contexts/ThemeContext'
 import { buttonClass } from './ThemeToggle'
 

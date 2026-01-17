@@ -1,6 +1,6 @@
 // Data types for Citi Bike dashboard
 // Re-export codeParam and codesParam from UUP for use in Home.tsx
-export { codeParam, codesParam } from "@rdub/use-url-params"
+export { codeParam, codesParam } from "use-prms"
 
 export type Region = 'NYC' | 'JC' | 'HOB'
 export const Regions: Region[] = ['JC', 'HOB', 'NYC']

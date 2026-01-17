@@ -1,5 +1,5 @@
 import { Tooltip } from "@mui/material"
-import { useUrlParam, boolParam, numberArrayParam } from '@rdub/use-url-params'
+import { useUrlParam, boolParam, numberArrayParam } from 'use-prms'
 import { Data, PlotRelayoutEvent } from 'plotly.js'
 import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
 import Plot from 'react-plotly.js'

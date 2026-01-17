@@ -13,7 +13,7 @@
     "@mui/material": "^6.1.9",
     "@rdub/base": "0.7.9",
     "@rdub/icons": "0.1.0",
-    "@rdub/use-url-params": "github:runsascoded/use-url-params#15e54b3003e14cd31b5704ec0dce117737ef8709",
+    "use-prms": "^0.2.0",
     "bootstrap": "^4.6.2",
     "d3-color": "^3.1.0",
     "danfojs": "^1.1.2",

@@ -1,5 +1,5 @@
 import moment from "moment"
-import type { Param } from "@rdub/use-url-params"
+import type { Param } from "use-prms"
 
 // DateRange can be:
 // - "All" for full data range

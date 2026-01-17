@@ -1,5 +1,5 @@
 import { FormControl, MenuItem, Select, SelectChangeEvent } from '@mui/material'
-import { useUrlParam, floatParam, stringParam } from '@rdub/use-url-params'
+import { useUrlParam, floatParam, stringParam } from 'use-prms'
 import 'leaflet/dist/leaflet.css'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
