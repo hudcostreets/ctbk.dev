@@ -1,7 +1,7 @@
 import { FaHome, FaMap } from 'react-icons/fa'
 import { MdLightMode, MdDarkMode } from 'react-icons/md'
 import { Link } from 'react-router-dom'
-import { useUrlParam, stringParam } from 'use-prms'
+import { useUrlState, stringParam } from 'use-prms'
 import { useTheme } from '../contexts/ThemeContext'
 import { buttonClass } from './ThemeToggle'
 
@@ -15,7 +15,7 @@ const TILE_NAMES: Record<string, string> = {
 // Cycles: Light → Dark → OSM → Light...
 export function ThemeTileToggle() {
   const { actualTheme, setTheme } = useTheme()
-  const [tileCode, setTileCode] = useUrlParam('t', stringParam('a'))
+  const [tileCode, setTileCode] = useUrlState('t', stringParam('a'))
 
   // Determine current state: light, dark, or osm
   const isOsm = tileCode === 'o'
@@ -66,7 +66,7 @@ export function ThemeTileToggle() {
 
 // Standalone tile toggle (for backwards compatibility or separate use)
 export function TileStyleButton() {
-  const [tileCode, setTileCode] = useUrlParam('t', stringParam('a'))
+  const [tileCode, setTileCode] = useUrlState('t', stringParam('a'))
   const isOsm = tileCode === 'o'
 
   const toggle = () => setTileCode(isOsm ? 'a' : 'o')

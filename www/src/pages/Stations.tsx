@@ -1,5 +1,5 @@
 import { FormControl, MenuItem, Select, SelectChangeEvent } from '@mui/material'
-import { useUrlParam, floatParam, stringParam } from 'use-prms'
+import { useUrlState, floatParam, stringParam } from 'use-prms'
 import 'leaflet/dist/leaflet.css'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
@@ -241,12 +241,12 @@ export default function Stations() {
   const monthSelectRef = useRef<HTMLSelectElement>(null)
 
   // URL parameters
-  const [lat, setLat] = useUrlParam('lat', floatParam(DEFAULT_CENTER[0]))
-  const [lng, setLng] = useUrlParam('lng', floatParam(DEFAULT_CENTER[1]))
-  const [zoom, setZoom] = useUrlParam('z', floatParam(DEFAULT_ZOOM))
-  const [selectedId, setSelectedId] = useUrlParam('s', stringParam())
-  const [month, setMonth] = useUrlParam('m', stringParam())
-  const [tileCode] = useUrlParam('t', stringParam(DEFAULT_TILE_CODE))
+  const [lat, setLat] = useUrlState('lat', floatParam(DEFAULT_CENTER[0]))
+  const [lng, setLng] = useUrlState('lng', floatParam(DEFAULT_CENTER[1]))
+  const [zoom, setZoom] = useUrlState('z', floatParam(DEFAULT_ZOOM))
+  const [selectedId, setSelectedId] = useUrlState('s', stringParam())
+  const [month, setMonth] = useUrlState('m', stringParam())
+  const [tileCode] = useUrlState('t', stringParam(DEFAULT_TILE_CODE))
 
   // Load manifest on mount
   useEffect(() => {

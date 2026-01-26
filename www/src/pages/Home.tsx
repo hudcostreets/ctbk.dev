@@ -1,5 +1,5 @@
 import { Tooltip } from "@mui/material"
-import { useUrlParam, boolParam, numberArrayParam } from 'use-prms'
+import { useUrlState, boolParam, numberArrayParam } from 'use-prms'
 import { Data, PlotRelayoutEvent } from 'plotly.js'
 import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
 import Plot from 'react-plotly.js'
@@ -113,19 +113,19 @@ export default function Home() {
 
   // URL parameters with short code encoding (matching original Next.js version)
   // Note: params are re-read on each render, location dependency ensures this happens on navigation
-  const [yAxis, setYAxis] = useUrlParam('y', codeParam<YAxis>('Rides', YAxisQueryStrings))
-  const [stackBy, setStackBy] = useUrlParam('s', codeParam<StackBy>('None', StackByQueryStrings))
-  const [stackRelative, setStackRelative] = useUrlParam('pct', boolParam)
-  const [regions, setRegions] = useUrlParam('r', codesParam(Regions, RegionQueryStrings))
-  const [userTypes, setUserTypes] = useUrlParam('u', codesParam(UserTypes, UserTypeQueryStrings))
-  const [genders, setGenders] = useUrlParam('g', codesParam(Genders, GenderQueryStrings))
-  const [rideableTypes, setRideableTypes] = useUrlParam('rt', codesParam(RideableTypes, RideableTypeChars))
-  const [dateRange, setDateRange] = useUrlParam('d', dateRangeParam())
-  const [rollingAvgs, setRollingAvgs] = useUrlParam('avg', numberArrayParam([12]))
-  const [controlsClosed, setControlsClosed] = useUrlParam('cc', boolParam)  // Param present = closed
+  const [yAxis, setYAxis] = useUrlState('y', codeParam<YAxis>('Rides', YAxisQueryStrings))
+  const [stackBy, setStackBy] = useUrlState('s', codeParam<StackBy>('None', StackByQueryStrings))
+  const [stackRelative, setStackRelative] = useUrlState('pct', boolParam)
+  const [regions, setRegions] = useUrlState('r', codesParam(Regions, RegionQueryStrings))
+  const [userTypes, setUserTypes] = useUrlState('u', codesParam(UserTypes, UserTypeQueryStrings))
+  const [genders, setGenders] = useUrlState('g', codesParam(Genders, GenderQueryStrings))
+  const [rideableTypes, setRideableTypes] = useUrlState('rt', codesParam(RideableTypes, RideableTypeChars))
+  const [dateRange, setDateRange] = useUrlState('d', dateRangeParam())
+  const [rollingAvgs, setRollingAvgs] = useUrlState('avg', numberArrayParam([12]))
+  const [controlsClosed, setControlsClosed] = useUrlState('cc', boolParam)  // Param present = closed
   const controlsOpen = !controlsClosed
   const setControlsOpen = (open: boolean) => setControlsClosed(!open)
-  const [screenshotMode] = useUrlParam('screenshot', boolParam)  // Hides gear/controls for screenshots
+  const [screenshotMode] = useUrlState('screenshot', boolParam)  // Hides gear/controls for screenshots
   const [showLegend, setShowLegend] = useState<boolean | null>(null)
   const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
   const [windowWidth, setWindowWidth] = useState(() => typeof window !== 'undefined' ? window.innerWidth : 800)

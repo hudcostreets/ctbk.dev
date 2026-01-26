@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
-import { FaKeyboard } from 'react-icons/fa'
+import { FaKeyboard, FaSearch } from 'react-icons/fa'
 import { MdBrightnessAuto, MdLightMode, MdDarkMode } from 'react-icons/md'
+import { SearchTrigger } from 'use-kbd'
 import { useTheme } from '../contexts/ThemeContext'
 import css from './ThemeToggle.module.css'
 
@@ -17,17 +18,11 @@ export function ThemeToggle({ onOpenShortcuts, children, hideThemeButton }: Them
   const { theme, setTheme } = useTheme()
   const [isVisible, setIsVisible] = useState(false)
   const [isHovering, setIsHovering] = useState(false)
-  const [isMobile, setIsMobile] = useState(false)
   const lastScrollY = useRef(0)
   const hideTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Detect mobile on mount
-  useEffect(() => {
-    const checkMobile = () => setIsMobile(window.innerWidth < 768)
-    checkMobile()
-    window.addEventListener('resize', checkMobile)
-    return () => window.removeEventListener('resize', checkMobile)
-  }, [])
+  // Detect touch-only devices (no hover capability = no keyboard)
+  const canHover = typeof window !== 'undefined' && window.matchMedia('(hover: hover)').matches
 
   useEffect(() => {
     const handleScroll = () => {
@@ -93,15 +88,21 @@ export function ThemeToggle({ onOpenShortcuts, children, hideThemeButton }: Them
     >
       <div className={`${css.controls} ${showControls ? css.visible : ''}`}>
         {children}
-        {onOpenShortcuts && !isMobile && (
-          <button
-            className={css.button}
-            onClick={onOpenShortcuts}
-            title="Keyboard shortcuts (?)"
-            aria-label="Show keyboard shortcuts"
-          >
-            <FaKeyboard />
-          </button>
+        {canHover ? (
+          onOpenShortcuts && (
+            <button
+              className={css.button}
+              onClick={onOpenShortcuts}
+              title="Keyboard shortcuts (?)"
+              aria-label="Show keyboard shortcuts"
+            >
+              <FaKeyboard />
+            </button>
+          )
+        ) : (
+          <SearchTrigger className={css.button} ariaLabel="Search actions">
+            <FaSearch />
+          </SearchTrigger>
         )}
         {!hideThemeButton && (
           <button
