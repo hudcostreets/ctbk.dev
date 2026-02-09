@@ -75,11 +75,11 @@ importers:
         specifier: ^6.28.0
         version: 6.30.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       use-kbd:
-        specifier: github:runsascoded/use-kbd#d51354bbde2bf134570d81a5f8eee69ed730c0d8
-        version: https://codeload.github.com/runsascoded/use-kbd/tar.gz/d51354bbde2bf134570d81a5f8eee69ed730c0d8(react@18.3.1)
+        specifier: github:runsascoded/use-kbd#caa1afd04827fe79ff3f313cd7e01b2c08372f78
+        version: https://codeload.github.com/runsascoded/use-kbd/tar.gz/caa1afd04827fe79ff3f313cd7e01b2c08372f78(react@18.3.1)
       use-prms:
-        specifier: github:runsascoded/use-prms#02cc318949e4f13541ada227c0d27efa58e5436d
-        version: https://codeload.github.com/runsascoded/use-prms/tar.gz/02cc318949e4f13541ada227c0d27efa58e5436d(react@18.3.1)
+        specifier: github:runsascoded/use-prms#cf28edc59fea41899aca2ada69499cd11604f60e
+        version: https://codeload.github.com/runsascoded/use-prms/tar.gz/cf28edc59fea41899aca2ada69499cd11604f60e(react@18.3.1)
     devDependencies:
       '@playwright/test':
         specifier: ^1.57.0
@@ -4410,9 +4410,9 @@ packages:
   uri-js@4.4.1:
     resolution: {integrity: sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==}
 
-  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/d51354bbde2bf134570d81a5f8eee69ed730c0d8:
-    resolution: {tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/d51354bbde2bf134570d81a5f8eee69ed730c0d8}
-    version: 0.8.0-dist.2ae6d8e
+  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/caa1afd04827fe79ff3f313cd7e01b2c08372f78:
+    resolution: {tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/caa1afd04827fe79ff3f313cd7e01b2c08372f78}
+    version: 0.8.0-dist.1f011ad
     peerDependencies:
       react: '>=18.0.0'
 
@@ -4423,9 +4423,9 @@ packages:
       react: '>=18'
       react-dom: '>=18'
 
-  use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/02cc318949e4f13541ada227c0d27efa58e5436d:
-    resolution: {tarball: https://codeload.github.com/runsascoded/use-prms/tar.gz/02cc318949e4f13541ada227c0d27efa58e5436d}
-    version: 0.4.0-dist.30d764a
+  use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/cf28edc59fea41899aca2ada69499cd11604f60e:
+    resolution: {tarball: https://codeload.github.com/runsascoded/use-prms/tar.gz/cf28edc59fea41899aca2ada69499cd11604f60e}
+    version: 0.4.0-dist.1d591ca
     peerDependencies:
       react: ^18.0.0
 
@@ -9851,7 +9851,7 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/d51354bbde2bf134570d81a5f8eee69ed730c0d8(react@18.3.1):
+  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/caa1afd04827fe79ff3f313cd7e01b2c08372f78(react@18.3.1):
     dependencies:
       react: 18.3.1
 
@@ -9860,7 +9860,7 @@ snapshots:
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
 
-  use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/02cc318949e4f13541ada227c0d27efa58e5436d(react@18.3.1):
+  use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/cf28edc59fea41899aca2ada69499cd11604f60e(react@18.3.1):
     dependencies:
       react: 18.3.1
 

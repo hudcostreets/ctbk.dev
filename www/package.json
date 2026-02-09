@@ -13,7 +13,7 @@
     "@mui/material": "^6.1.9",
     "@rdub/base": "0.7.9",
     "@rdub/icons": "0.1.0",
-    "use-prms": "github:runsascoded/use-prms#02cc318949e4f13541ada227c0d27efa58e5436d",
+    "use-prms": "github:runsascoded/use-prms#cf28edc59fea41899aca2ada69499cd11604f60e",
     "bootstrap": "^4.6.2",
     "d3-color": "^3.1.0",
     "danfojs": "^1.1.2",
@@ -29,7 +29,7 @@
     "react-markdown": "^7.1.2",
     "react-plotly.js": "^2.6.0",
     "react-router-dom": "^6.28.0",
-    "use-kbd": "github:runsascoded/use-kbd#d51354bbde2bf134570d81a5f8eee69ed730c0d8"
+    "use-kbd": "github:runsascoded/use-kbd#caa1afd04827fe79ff3f313cd7e01b2c08372f78"
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",
