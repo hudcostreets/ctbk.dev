@@ -8,6 +8,7 @@
 !e2e/shortcuts.spec.ts
 !eslint.config.js
 !fix-mime-type.sh
+!gbfs/README.md
 !index.html
 !package.json
 !playwright.config.ts
@@ -84,6 +85,7 @@
 !src/hooks/useKeyboardShortcuts.ts
 !src/hooks/useScrollToHash.ts
 !src/hooks/useStationsKeyboardShortcuts.ts
+!src/hooks/useStationsOmnibarEndpoint.ts
 !src/index.module.css
 !src/main.tsx
 !src/mdx.d.ts
