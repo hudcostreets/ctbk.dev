@@ -12,6 +12,7 @@ ctbk norm create $m
 ctbk cons create $m
 ctbk smh create -gil $m
 ctbk smh create -gin $m
+ctbk station-harmonize create
 ctbk agg create -ge -ac $m
 ctbk agg create -gse -ac $m
 ctbk agg create -g ymrgtb -acd $m
