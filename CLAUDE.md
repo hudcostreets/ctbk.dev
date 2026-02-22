@@ -84,7 +84,7 @@ npm run build       # Production build
 npm run export      # Static site export
 npm run lint        # ESLint
 npm run tc          # TypeScript check
-npm run screenshots # Generate screenshots
+npm run scrns       # Generate screenshots
 ```
 
 ### Testing and Quality

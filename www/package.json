@@ -13,7 +13,6 @@
     "@mui/material": "^6.1.9",
     "@rdub/base": "0.7.9",
     "@rdub/icons": "0.1.0",
-    "use-prms": "github:runsascoded/use-prms#cf28edc59fea41899aca2ada69499cd11604f60e",
     "bootstrap": "^4.6.2",
     "d3-color": "^3.1.0",
     "danfojs": "^1.1.2",
@@ -29,7 +28,8 @@
     "react-markdown": "^7.1.2",
     "react-plotly.js": "^2.6.0",
     "react-router-dom": "^6.28.0",
-    "use-kbd": "github:runsascoded/use-kbd#ef61cfe3ae08b5a29e7a37889c33fdca1db4e03d"
+    "use-kbd": "github:runsascoded/use-kbd#ef61cfe3ae08b5a29e7a37889c33fdca1db4e03d",
+    "use-prms": "github:runsascoded/use-prms#cf28edc59fea41899aca2ada69499cd11604f60e"
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",
@@ -40,7 +40,7 @@
     "@types/react-dom": "^18.2.18",
     "@types/react-plotly.js": "^2.6.3",
     "@vitejs/plugin-react": "^4.3.4",
-    "scrns": "^0.2.1",
+    "scrns": "^0.3.0",
     "serve": "^14.2.5",
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
@@ -53,8 +53,8 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "tc": "tsc",
-    "screenshots": "scrns -c screenshots.json -o public/screenshots -s '.plotly svg rect' -l 30000",
-    "screenshots:docker": "./scripts/docker-screenshots.sh",
+    "scrns": "scrns -o public/screenshots -s '.plotly svg rect' -l 30000 -h localhost:3456",
+    "scrns:docker": "./scripts/docker-screenshots.sh",
     "test": "playwright test",
     "test:ui": "playwright test --ui"
   },

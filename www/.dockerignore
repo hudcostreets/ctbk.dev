@@ -50,10 +50,10 @@
 !public/screenshots/ctbk-rides.png
 !public/screenshots/ctbk-stations.png
 !public/screenshots/plot-fallback.png
-!screenshots.json
 !scripts/docker-screenshots.sh
 !scripts/docker.py
 !scripts/gen-station-urls.js
+!scrns.config.json
 !src/colors.ts
 !src/components/Checkbox.tsx
 !src/components/Checklist.tsx

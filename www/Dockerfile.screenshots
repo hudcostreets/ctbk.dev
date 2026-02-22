@@ -47,4 +47,4 @@ RUN pnpm build
 EXPOSE 8080
 
 # Default command: serve and generate screenshots
-CMD ["sh", "-c", "pnpm exec serve dist -l 8080 -s & sleep 2 && pnpm screenshots -h localhost:8080 -l 120000"]
+CMD ["sh", "-c", "pnpm exec serve dist -l 8080 -s & sleep 2 && pnpm scrns -h localhost:8080 -l 120000"]
