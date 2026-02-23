@@ -25,18 +25,6 @@
   --plot-grid: #505050;
 }
 
-/* Override use-kbd variables with our theme colors */
-:root {
-  --kbd-bg: var(--bg-secondary);
-  --kbd-bg-secondary: var(--bg-tertiary);
-  --kbd-text: var(--text-primary);
-  --kbd-text-secondary: var(--text-secondary);
-  --kbd-border: var(--border-secondary);
-  --kbd-kbd-bg: var(--bg-tertiary);
-  --kbd-kbd-border: var(--border-secondary);
-  --kbd-kbd-text: var(--text-primary);
-}
-
 html,
 body {
   padding: 0;

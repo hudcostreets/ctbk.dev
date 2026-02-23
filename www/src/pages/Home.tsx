@@ -12,7 +12,6 @@ import { Checklist } from "../components/Checklist"
 import { Radios } from "../components/Radios"
 import { useTheme } from "../contexts/ThemeContext"
 import { darken } from "../colors"
-import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts"
 import { DateRange2Dates, dateRangeParam, parseDuration, isDurationBased, isExplicitRange, formatDuration } from "../date-range"
 import {
   annualizedPercents,
@@ -130,31 +129,6 @@ export default function Home() {
   const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
   const [windowWidth, setWindowWidth] = useState(() => typeof window !== 'undefined' ? window.innerWidth : 800)
   const [snapCounter, setSnapCounter] = useState(0)  // Increment to force Plotly to reset after snap
-
-  // Keyboard shortcuts
-  useKeyboardShortcuts({
-    dateRange,
-    setDateRange,
-    setStackBy,
-    setYAxis,
-    setRollingAvgs,
-    rollingAvgs,
-    setStackRelative,
-    stackRelative,
-    setShowLegend,
-    showLegendValue,
-    setControlsOpen,
-    controlsOpen,
-    toggleTheme,
-    setRegions,
-    regions,
-    setUserTypes,
-    userTypes,
-    setGenders,
-    genders,
-    setRideableTypes,
-    rideableTypes,
-  })
 
   // Update window width on resize
   useEffect(() => {
