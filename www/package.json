@@ -28,7 +28,7 @@
     "react-markdown": "^7.1.2",
     "react-plotly.js": "^2.6.0",
     "react-router-dom": "^6.28.0",
-    "use-kbd": "github:runsascoded/use-kbd#ef61cfe3ae08b5a29e7a37889c33fdca1db4e03d",
+    "use-kbd": "^0.10.0",
     "use-prms": "github:runsascoded/use-prms#cf28edc59fea41899aca2ada69499cd11604f60e"
   },
   "devDependencies": {
