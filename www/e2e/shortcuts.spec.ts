@@ -105,8 +105,8 @@ test.describe('Keyboard Shortcuts', () => {
     // Verify it changed
     await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×')
 
-    // Click reset button
-    await page.locator('button:text("Reset")').click()
+    // Click reset button in the footer of the main-page shortcuts modal
+    await page.locator('.kbd-modal-footer button:has-text("Reset")').click()
 
     // Should be back to "1"
     await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('1×')
