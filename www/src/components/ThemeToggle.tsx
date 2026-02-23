@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
+import { FaKeyboard, FaSearch } from 'react-icons/fa'
 import { MdBrightnessAuto, MdLightMode, MdDarkMode } from 'react-icons/md'
+import { SearchTrigger } from 'use-kbd'
 import { useTheme } from '../contexts/ThemeContext'
 import css from './ThemeToggle.module.css'
 
@@ -7,16 +9,20 @@ import css from './ThemeToggle.module.css'
 export const buttonClass = css.button
 
 interface ThemeToggleProps {
+  onOpenShortcuts?: () => void
   children?: React.ReactNode
   hideThemeButton?: boolean
 }
 
-export function ThemeToggle({ children, hideThemeButton }: ThemeToggleProps) {
+export function ThemeToggle({ onOpenShortcuts, children, hideThemeButton }: ThemeToggleProps) {
   const { theme, setTheme } = useTheme()
   const [isVisible, setIsVisible] = useState(false)
   const [isHovering, setIsHovering] = useState(false)
   const lastScrollY = useRef(0)
   const hideTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Detect touch-only devices (no hover capability = no keyboard)
+  const canHover = typeof window !== 'undefined' && window.matchMedia('(hover: hover)').matches
 
   useEffect(() => {
     const handleScroll = () => {
@@ -82,6 +88,22 @@ export function ThemeToggle({ children, hideThemeButton }: ThemeToggleProps) {
     >
       <div className={`${css.controls} ${showControls ? css.visible : ''}`}>
         {children}
+        {canHover ? (
+          onOpenShortcuts && (
+            <button
+              className={css.button}
+              onClick={onOpenShortcuts}
+              title="Keyboard shortcuts (?)"
+              aria-label="Show keyboard shortcuts"
+            >
+              <FaKeyboard />
+            </button>
+          )
+        ) : (
+          <SearchTrigger className={css.button} ariaLabel="Search actions">
+            <FaSearch />
+          </SearchTrigger>
+        )}
         {!hideThemeButton && (
           <button
             className={css.button}

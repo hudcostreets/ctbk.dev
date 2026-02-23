@@ -1,5 +1,7 @@
 import 'bootstrap/dist/css/bootstrap.css'
+import 'use-kbd/styles.css'
 import '../styles/globals.css'
+import { HotkeysProvider, ShortcutsModal, Omnibar, LookupModal, SequenceModal, useHotkeysContext } from 'use-kbd'
 import { ThemeProvider as MuiThemeProvider, createTheme } from "@mui/material"
 import { StrictMode, useMemo } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -24,6 +26,7 @@ function Pipeline() {
 }
 
 function AppContent() {
+  const { isModalOpen, closeModal, openModal } = useHotkeysContext()
   const { pathname } = useLocation()
   const isStationsPage = pathname === '/stations'
   useScrollToHash()
@@ -35,7 +38,7 @@ function AppContent() {
         <Route path="/stations" element={<Stations />} />
         <Route path="/pipeline" element={<Pipeline />} />
       </Routes>
-      <ThemeToggle hideThemeButton={isStationsPage}>
+      <ThemeToggle onOpenShortcuts={openModal} hideThemeButton={isStationsPage}>
         {isStationsPage && (
           <>
             <HomeButton />
@@ -43,6 +46,14 @@ function AppContent() {
           </>
         )}
       </ThemeToggle>
+      <ShortcutsModal
+        isOpen={isModalOpen}
+        onClose={closeModal}
+        editable
+      />
+      <Omnibar />
+      <LookupModal />
+      <SequenceModal />
     </>
   )
 }
@@ -65,11 +76,13 @@ function MuiThemeWrapper({ children }: { children: React.ReactNode }) {
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ThemeProvider>
-      <MuiThemeWrapper>
-        <BrowserRouter>
-          <AppContent />
-        </BrowserRouter>
-      </MuiThemeWrapper>
+      <HotkeysProvider>
+        <MuiThemeWrapper>
+          <BrowserRouter>
+            <AppContent />
+          </BrowserRouter>
+        </MuiThemeWrapper>
+      </HotkeysProvider>
     </ThemeProvider>
   </StrictMode>,
 )

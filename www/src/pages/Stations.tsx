@@ -6,6 +6,8 @@ import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from
 import { Link } from 'react-router-dom'
 import { StationSearch } from '../components/StationSearch'
 import { useTheme } from '../contexts/ThemeContext'
+import { useStationsKeyboardShortcuts } from '../hooks/useStationsKeyboardShortcuts'
+import { useStationsOmnibarEndpoint } from '../hooks/useStationsOmnibarEndpoint'
 import css from "../stations.module.css"
 
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -309,8 +311,26 @@ export default function Stations() {
     return Object.keys(manifest.stations).sort().reverse()
   }, [manifest])
 
-  const { actualTheme } = useTheme()
+  // Keyboard shortcuts
+  const { toggleTheme, actualTheme } = useTheme()
+  const openSearch = useCallback(() => setIsSearchOpen(true), [])
   const closeSearch = useCallback(() => setIsSearchOpen(false), [])
+  useStationsKeyboardShortcuts({
+    month,
+    setMonth,
+    availableMonths,
+    setSelectedId,
+    openSearch,
+    toggleTheme,
+    monthSelectRef,
+  })
+
+  // Register omnibar endpoint for station search (uses already-loaded data)
+  useStationsOmnibarEndpoint({
+    stations: stations || {},
+    onSelect: setSelectedId,
+    enabled: !!stations,
+  })
 
   const handleMonthChange = useCallback((e: SelectChangeEvent<string>) => {
     setMonth(e.target.value)
