@@ -247,6 +247,7 @@ export default function Stations() {
   const [selectedId, setSelectedId] = useUrlState('s', stringParam())
   const [month, setMonth] = useUrlState('m', stringParam())
   const [tileCode] = useUrlState('t', stringParam(DEFAULT_TILE_CODE))
+  const [tileBase] = useUrlState('tileBase', stringParam())
 
   // Load manifest on mount
   useEffect(() => {
@@ -341,6 +342,11 @@ export default function Stations() {
   const currentTile = TILE_STYLES[tileStyle]
   const currentColors = TILE_COLORS[tileStyle]
 
+  // tileBase: serve tiles from local static files instead of CDN (for deterministic screenshots)
+  const tileUrl = tileBase
+    ? `${tileBase}/{z}/{x}/{y}.png`
+    : currentTile.url
+
   const subtitle = selectedId && stations?.[selectedId] ? stations[selectedId].name : null
 
   if (error) {
@@ -364,13 +370,17 @@ export default function Stations() {
           scrollWheelZoom
         >
           <TileLayer
-            key={tileCode}
-            attribution={currentTile.attribution}
-            url={currentTile.url}
+            key={tileBase || tileCode}
+            attribution={tileBase ? '' : currentTile.attribution}
+            url={tileUrl}
             eventHandlers={{
               load: () => {
                 document.querySelector('.leaflet-container')?.setAttribute('data-tiles-loaded', 'true')
               },
+              tileerror: tileBase ? ((e: { tile: HTMLImageElement }) => {
+                console.error(`[tileBase] Missing cached tile: ${e.tile.src}`)
+                document.querySelector('.leaflet-container')?.setAttribute('data-tiles-error', e.tile.src)
+              }) : undefined,
             }}
           />
           {stations && (
