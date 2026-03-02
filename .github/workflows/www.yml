@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - www
+      - scrns-playwright-test
   workflow_dispatch:
 jobs:
   build:
@@ -21,17 +22,17 @@ jobs:
           node-version: 20
           cache: 'pnpm'
           cache-dependency-path: www/pnpm-lock.yaml
-      - name: Cache Puppeteer
+      - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
-          key: puppeteer-${{ runner.os }}-${{ hashFiles('www/pnpm-lock.yaml') }}
-          path: ~/.cache/puppeteer
+          key: playwright-${{ runner.os }}-${{ hashFiles('www/pnpm-lock.yaml') }}
+          path: ~/.cache/ms-playwright
       - name: Install
         working-directory: www
         run: pnpm install
-      - name: Ensure Chrome for Puppeteer
+      - name: Install Playwright Chromium
         working-directory: www
-        run: for f in node_modules/.pnpm/puppeteer@*/node_modules/puppeteer/install.mjs; do node "$f"; done
+        run: npx playwright install --with-deps chromium
       - name: Build
         working-directory: www
         run: |
@@ -46,7 +47,7 @@ jobs:
           SERVER_PID=$!
           sleep 2
           # Generate screenshots
-          pnpm scrns -h localhost:8080 -l 120000
+          pnpm scrns -E playwright -h localhost:8080 -l 120000
           # Stop server
           kill $SERVER_PID
       - name: Push + re-run, if screenshots changed
