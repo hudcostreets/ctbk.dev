@@ -75,8 +75,8 @@ importers:
         specifier: ^6.28.0
         version: 6.30.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       use-kbd:
-        specifier: ^0.10.0
-        version: 0.10.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+        specifier: https://github.com/runsascoded/use-kbd#34745efff8efdfd2c46e3e39d479a708aba704b2
+        version: https://codeload.github.com/runsascoded/use-kbd/tar.gz/34745efff8efdfd2c46e3e39d479a708aba704b2(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       use-prms:
         specifier: github:runsascoded/use-prms#cf28edc59fea41899aca2ada69499cd11604f60e
         version: https://codeload.github.com/runsascoded/use-prms/tar.gz/cf28edc59fea41899aca2ada69499cd11604f60e(react@18.3.1)
@@ -123,6 +123,9 @@ importers:
 
   ../../../js/use-kbd:
     dependencies:
+      debug:
+        specifier: ^4.4.3
+        version: 4.4.3
       react-dom:
         specifier: '>=18.0.0'
         version: 18.3.1(react@18.3.1)
@@ -133,6 +136,9 @@ importers:
       '@rdub/eslint-config':
         specifier: ^0.0.3
         version: 0.0.3(eslint@9.39.2)(typescript@5.9.3)
+      '@types/debug':
+        specifier: ^4.1.12
+        version: 4.1.12
       '@types/react':
         specifier: ^18.3.27
         version: 18.3.27
@@ -4439,8 +4445,9 @@ packages:
   uri-js@4.4.1:
     resolution: {integrity: sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==}
 
-  use-kbd@0.10.0:
-    resolution: {integrity: sha512-2g0nWWWvZfd7JCkQnxydCPgK35QKY6ieQGrP4X52R3CRAqmfJUgaKygKAAAshrpu3EFZdRlLNlcVAKTfxXcVcA==}
+  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/34745efff8efdfd2c46e3e39d479a708aba704b2:
+    resolution: {tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/34745efff8efdfd2c46e3e39d479a708aba704b2}
+    version: 0.10.0-dist.bf02e9e
     peerDependencies:
       react: '>=18.0.0'
       react-dom: '>=18.0.0'
@@ -9912,10 +9919,13 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  use-kbd@0.10.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
+  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/34745efff8efdfd2c46e3e39d479a708aba704b2(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
     dependencies:
+      debug: 4.4.3
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
+    transitivePeerDependencies:
+      - supports-color
 
   use-local-storage-state@19.5.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
     dependencies:

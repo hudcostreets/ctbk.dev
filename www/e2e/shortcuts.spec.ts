@@ -31,8 +31,8 @@ test.describe('Keyboard Shortcuts', () => {
 
     // Check that "1 year" action shows "1" binding (with × remove button)
     const oneYearAction = page.locator('.kbd-action', { has: page.locator('.kbd-action-label:text("1 year")') })
-    // The kbd contains the key text plus a × remove button
-    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('1×')
+    // The kbd contains the key text plus × remove and + add-inline buttons
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('1×+')
   })
 
   test('can change binding for an action', async ({ page }) => {
@@ -54,7 +54,7 @@ test.describe('Keyboard Shortcuts', () => {
 
     // "1 year" should now have '0'
     await expect(oneYearAction.locator('.kbd-kbd')).not.toHaveClass(/editing/)
-    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×')
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×+')
 
     // Should have REPLACED the old binding
     const kbds = oneYearAction.locator('.kbd-kbd')
@@ -73,7 +73,7 @@ test.describe('Keyboard Shortcuts', () => {
     await page.keyboard.press('Escape')
 
     // Verify it changed
-    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×')
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×+')
 
     // Close the modal
     await page.locator('button[aria-label="Close"]').click()
@@ -88,7 +88,7 @@ test.describe('Keyboard Shortcuts', () => {
 
     // Check binding is still "0"
     const oneYearActionAfter = page.locator('.kbd-action', { has: page.locator('.kbd-action-label:text("1 year")') })
-    await expect(oneYearActionAfter.locator('.kbd-kbd')).toHaveText('0×')
+    await expect(oneYearActionAfter.locator('.kbd-kbd')).toHaveText('0×+')
   })
 
   test('reset restores default bindings', async ({ page }) => {
@@ -103,13 +103,13 @@ test.describe('Keyboard Shortcuts', () => {
     await page.keyboard.press('Escape')
 
     // Verify it changed
-    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×')
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×+')
 
     // Click reset button in the footer of the main-page shortcuts modal
     await page.locator('.kbd-modal-footer button:has-text("Reset")').click()
 
     // Should be back to "1"
-    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('1×')
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('1×+')
   })
 
   test('empty binding shows ∅ symbol', async ({ page }) => {
@@ -137,7 +137,7 @@ test.describe('Keyboard Shortcuts', () => {
     await page.keyboard.press('Escape')
 
     // Verify it changed
-    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×')
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('0×+')
 
     // Verify storage has the change (use-kbd is the default storage key)
     let storage = await page.evaluate(() => localStorage.getItem('use-kbd'))
@@ -151,7 +151,7 @@ test.describe('Keyboard Shortcuts', () => {
     await page.keyboard.press('Escape')
 
     // Verify it's back to "1"
-    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('1×')
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('1×+')
 
     // Storage should no longer have date:1y since it's back to default
     storage = await page.evaluate(() => localStorage.getItem('use-kbd'))
@@ -174,7 +174,7 @@ test.describe('Keyboard Shortcuts', () => {
 
     // "1 year" should now have 'Q' (no longer editing)
     await expect(oneYearAction.locator('.kbd-kbd')).not.toHaveClass(/editing/)
-    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('Q×')
+    await expect(oneYearAction.locator('.kbd-kbd')).toHaveText('Q×+')
 
     // Next action (2 years) should be in recording mode
     const twoYearAction = page.locator('.kbd-action', { has: page.locator('.kbd-action-label:text("2 years")') })
