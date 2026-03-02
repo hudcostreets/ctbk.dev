@@ -50,7 +50,14 @@ jobs:
           pnpm scrns -E playwright -h localhost:8080 -l 120000
           # Stop server
           kill $SERVER_PID
+      - name: Upload screenshots as artifact
+        if: github.ref != 'refs/heads/www'
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: www/public/screenshots/
       - name: Push + re-run, if screenshots changed
+        if: github.ref == 'refs/heads/www'
         id: screenshots
         run: |
           if git diff --name-only -- www/public/screenshots | grep -v ctbk-stations; then
@@ -69,7 +76,7 @@ jobs:
           fi
       - name: Deploy to GH Pages
         uses: JamesIves/github-pages-deploy-action@v4
-        if: steps.screenshots.outputs.REGENERATED != 'true'
+        if: github.ref == 'refs/heads/www' && steps.screenshots.outputs.REGENERATED != 'true'
         with:
           branch: ghp
           folder: www/dist
