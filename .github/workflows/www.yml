@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - www
+      - scrns-playwright-test
   workflow_dispatch:
 jobs:
   build:
@@ -21,35 +22,30 @@ jobs:
           node-version: 20
           cache: 'pnpm'
           cache-dependency-path: www/pnpm-lock.yaml
-      - name: Cache Puppeteer
-        uses: actions/cache@v4
-        with:
-          key: puppeteer-${{ runner.os }}-${{ hashFiles('www/pnpm-lock.yaml') }}
-          path: ~/.cache/puppeteer
       - name: Install
         working-directory: www
         run: pnpm install
-      - name: Ensure Chrome for Puppeteer
-        working-directory: www
-        run: for f in node_modules/.pnpm/puppeteer@*/node_modules/puppeteer/install.mjs; do node "$f"; done
       - name: Build
         working-directory: www
         run: |
           pnpm build
           # Copy index.html to 404.html for GHP SPA routing
           cp dist/index.html dist/404.html
-      - name: Serve and generate screenshots
+      - name: Generate screenshots (Playwright in Docker)
         working-directory: www
         run: |
-          # Start server in background (serve with SPA fallback)
-          pnpm exec serve dist -l 8080 -s &
-          SERVER_PID=$!
-          sleep 2
-          # Generate screenshots
-          pnpm scrns -h localhost:8080 -l 120000
-          # Stop server
-          kill $SERVER_PID
+          docker build --platform linux/amd64 -f Dockerfile.screenshots -t ctbk-screenshots .
+          docker run --platform linux/amd64 --name ctbk-screenshots-run ctbk-screenshots
+          docker cp ctbk-screenshots-run:/app/public/screenshots/. public/screenshots/
+          docker rm ctbk-screenshots-run
+      - name: Upload screenshots as artifact
+        if: github.ref != 'refs/heads/www'
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: www/public/screenshots/
       - name: Push + re-run, if screenshots changed
+        if: github.ref == 'refs/heads/www'
         id: screenshots
         run: |
           if git diff --name-only -- www/public/screenshots | grep -v ctbk-stations; then
@@ -68,7 +64,7 @@ jobs:
           fi
       - name: Deploy to GH Pages
         uses: JamesIves/github-pages-deploy-action@v4
-        if: steps.screenshots.outputs.REGENERATED != 'true'
+        if: github.ref == 'refs/heads/www' && steps.screenshots.outputs.REGENERATED != 'true'
         with:
           branch: ghp
           folder: www/dist
