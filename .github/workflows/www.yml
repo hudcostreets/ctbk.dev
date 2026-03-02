@@ -22,34 +22,20 @@ jobs:
           node-version: 20
           cache: 'pnpm'
           cache-dependency-path: www/pnpm-lock.yaml
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          key: playwright-${{ runner.os }}-${{ hashFiles('www/pnpm-lock.yaml') }}
-          path: ~/.cache/ms-playwright
       - name: Install
         working-directory: www
         run: pnpm install
-      - name: Install Playwright Chromium
-        working-directory: www
-        run: npx playwright install --with-deps chromium
       - name: Build
         working-directory: www
         run: |
           pnpm build
           # Copy index.html to 404.html for GHP SPA routing
           cp dist/index.html dist/404.html
-      - name: Serve and generate screenshots
+      - name: Generate screenshots (Playwright in Docker)
         working-directory: www
         run: |
-          # Start server in background (serve with SPA fallback)
-          pnpm exec serve dist -l 8080 -s &
-          SERVER_PID=$!
-          sleep 2
-          # Generate screenshots
-          pnpm scrns -E playwright -h localhost:8080 -l 120000
-          # Stop server
-          kill $SERVER_PID
+          docker build -f Dockerfile.screenshots -t ctbk-screenshots .
+          docker run --rm -v "$PWD/public/screenshots:/app/public/screenshots" ctbk-screenshots
       - name: Upload screenshots as artifact
         if: github.ref != 'refs/heads/www'
         uses: actions/upload-artifact@v4
