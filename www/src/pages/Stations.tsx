@@ -367,6 +367,11 @@ export default function Stations() {
             key={tileCode}
             attribution={currentTile.attribution}
             url={currentTile.url}
+            eventHandlers={{
+              load: () => {
+                document.querySelector('.leaflet-container')?.setAttribute('data-tiles-loaded', 'true')
+              },
+            }}
           />
           {stations && (
             <StationMarkers

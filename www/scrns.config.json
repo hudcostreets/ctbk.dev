@@ -2,7 +2,7 @@
   "ctbk-rides": { "query": "?theme=light&screenshot", "height": 540 },
   "ctbk-og": { "query": "?theme=light&screenshot", "width": 1200, "height": 630 },
   "ctbk-nj": { "query": "?theme=light&screenshot&r=jh" },
-  "ctbk-stations": { "query": "stations?theme=light&lat=40.737&lng=-74.029&z=13.5&s=HB106", "width": 800, "height": 800, "selector": ".leaflet-lines-pane path", "preScreenshotSleep": 2000 },
+  "ctbk-stations": { "query": "stations?theme=light&lat=40.737&lng=-74.029&z=13.5&s=HB106", "width": 800, "height": 800, "selector": ".leaflet-container[data-tiles-loaded] .leaflet-lines-pane path" },
   "ctbk-ride-minutes-by-gender": { "query": "?theme=light&screenshot&y=m&s=g&pct=&g=mf&d=1306-2012" },
   "ctbk-rides-by-user": { "query": "?theme=light&screenshot&s=u&pct=" },
   "ctbk-ebike-minutes": { "query": "?theme=light&screenshot&y=m&s=b&rt=ce&d=2002-" },
