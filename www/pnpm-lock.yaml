@@ -106,8 +106,8 @@ importers:
         specifier: ^4.3.4
         version: 4.7.0(vite@6.4.1(@types/node@25.3.0)(terser@5.46.0)(yaml@2.8.2))
       scrns:
-        specifier: https://gitlab.com/runsascoded/js/scrns/-/archive/f1ec66c32ed6bc4674dd90c1f54c8eaa56e31343/scrns-f1ec66c32ed6bc4674dd90c1f54c8eaa56e31343.tar.gz
-        version: https://gitlab.com/runsascoded/js/scrns/-/archive/f1ec66c32ed6bc4674dd90c1f54c8eaa56e31343/scrns-f1ec66c32ed6bc4674dd90c1f54c8eaa56e31343.tar.gz(playwright@1.57.0)(typescript@5.9.3)
+        specifier: https://gitlab.com/runsascoded/js/scrns/-/archive/90e84ca64c6041e7e68a43851731436c505a044f/scrns-90e84ca64c6041e7e68a43851731436c505a044f.tar.gz
+        version: https://gitlab.com/runsascoded/js/scrns/-/archive/90e84ca64c6041e7e68a43851731436c505a044f/scrns-90e84ca64c6041e7e68a43851731436c505a044f.tar.gz(playwright@1.57.0)(puppeteer@23.11.1(typescript@5.9.3))
       serve:
         specifier: ^14.2.5
         version: 14.2.5
@@ -3354,12 +3354,13 @@ packages:
     resolution: {integrity: sha512-eflK8wEtyOE6+hsaRVPxvUKYCpRgzLqDTb8krvAsRIwOGlHoSgYLgBXoubGgLd2fT41/OUYdb48v4k4WWHQurA==}
     engines: {node: '>= 10.13.0'}
 
-  scrns@https://gitlab.com/runsascoded/js/scrns/-/archive/f1ec66c32ed6bc4674dd90c1f54c8eaa56e31343/scrns-f1ec66c32ed6bc4674dd90c1f54c8eaa56e31343.tar.gz:
-    resolution: {tarball: https://gitlab.com/runsascoded/js/scrns/-/archive/f1ec66c32ed6bc4674dd90c1f54c8eaa56e31343/scrns-f1ec66c32ed6bc4674dd90c1f54c8eaa56e31343.tar.gz}
-    version: 0.3.0-dist.399f883
+  scrns@https://gitlab.com/runsascoded/js/scrns/-/archive/90e84ca64c6041e7e68a43851731436c505a044f/scrns-90e84ca64c6041e7e68a43851731436c505a044f.tar.gz:
+    resolution: {tarball: https://gitlab.com/runsascoded/js/scrns/-/archive/90e84ca64c6041e7e68a43851731436c505a044f/scrns-90e84ca64c6041e7e68a43851731436c505a044f.tar.gz}
+    version: 0.3.0-dist.e4395a9
     hasBin: true
     peerDependencies:
       playwright: '>=1.40'
+      puppeteer: '>=20'
 
   seedrandom@3.0.5:
     resolution: {integrity: sha512-8OwmbklUNzwezjGInmZ+2clQmExQPvomqjL7LFqOYqtmuxRgQYqOD3mHaU+MvZn5FLUeVxVfQjwLZW/n/JFuqg==}
@@ -7841,21 +7842,13 @@ snapshots:
       ajv-formats: 2.1.1(ajv@8.18.0)
       ajv-keywords: 5.1.0(ajv@8.18.0)
 
-  scrns@https://gitlab.com/runsascoded/js/scrns/-/archive/f1ec66c32ed6bc4674dd90c1f54c8eaa56e31343/scrns-f1ec66c32ed6bc4674dd90c1f54c8eaa56e31343.tar.gz(playwright@1.57.0)(typescript@5.9.3):
+  scrns@https://gitlab.com/runsascoded/js/scrns/-/archive/90e84ca64c6041e7e68a43851731436c505a044f/scrns-90e84ca64c6041e7e68a43851731436c505a044f.tar.gz(playwright@1.57.0)(puppeteer@23.11.1(typescript@5.9.3)):
     dependencies:
       commander: 12.1.0
       gifenc: 1.0.3
       playwright: 1.57.0
       pngjs: 7.0.0
       puppeteer: 23.11.1(typescript@5.9.3)
-    transitivePeerDependencies:
-      - bare-abort-controller
-      - bare-buffer
-      - bufferutil
-      - react-native-b4a
-      - supports-color
-      - typescript
-      - utf-8-validate
 
   seedrandom@3.0.5: {}
 
