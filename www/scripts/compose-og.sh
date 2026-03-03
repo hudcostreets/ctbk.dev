@@ -7,7 +7,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 SS=public/screenshots
-OUT="$SS/ctbk-og-mosaic.png"
+OUT="$SS/ctbk-og-mosaic.jpg"
 TMP="${TMPDIR:-/tmp}"
 
 # === Layout constants ===
@@ -50,7 +50,7 @@ magick -size "${W}x${H}" "xc:${BG}" \
   "$TMP/og-map.png"  -geometry "+0+0"       -composite \
   "$TMP/og-p1.png"   -geometry "+${RX}+0"   -composite \
   "$TMP/og-p2.png"   -geometry "+${RX}+${Y2}" -composite \
-  "$OUT"
+  -quality 90 "$OUT"
 
 DIMS=$(identify -format '%wx%h' "$OUT")
 echo "Created $OUT ($DIMS, $(wc -c < "$OUT" | tr -d ' ') bytes)"
