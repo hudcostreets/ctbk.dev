@@ -7,5 +7,9 @@
   "ctbk-ride-minutes-by-gender": { "query": "?theme=light&screenshot&y=m&s=g&pct=&g=mf&d=1306-2012" },
   "ctbk-rides-by-user": { "query": "?theme=light&screenshot&s=u&pct=" },
   "ctbk-ebike-minutes": { "query": "?theme=light&screenshot&y=m&s=b&rt=ce&d=2002-" },
-  "ctbk-ebike-minutes-by-user": { "query": "?theme=light&screenshot&y=m&s=u&rt=e&d=2002-" }
+  "ctbk-ebike-minutes-by-user": { "query": "?theme=light&screenshot&y=m&s=u&rt=e&d=2002-" },
+  "og-rides": { "query": "?theme=dark&cc", "width": 720, "height": 626 },
+  "og-rides-by-user": { "query": "?theme=dark&cc&s=u&pct=", "width": 720, "height": 626 },
+  "og-ebike-minutes": { "query": "?theme=dark&cc&y=m&s=b&rt=ce&d=2002-", "width": 720, "height": 626 },
+  "og-ebike-minutes-by-user": { "query": "?theme=dark&cc&y=m&s=u&rt=e&d=2002-", "width": 720, "height": 626 }
 }
