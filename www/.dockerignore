@@ -48,7 +48,9 @@
 !public/screenshots/ctbk-ride-minutes-by-gender.png
 !public/screenshots/ctbk-rides-by-user.png
 !public/screenshots/ctbk-rides.png
+!public/screenshots/ctbk-og.png
 !public/screenshots/ctbk-stations.png
+!public/tiles/
 !public/screenshots/plot-fallback.png
 !scripts/docker-screenshots.sh
 !scripts/docker.py
