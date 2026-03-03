@@ -34,8 +34,10 @@ jobs:
       - name: Generate screenshots (Playwright in Docker)
         working-directory: www
         run: |
-          docker build -f Dockerfile.screenshots -t ctbk-screenshots .
-          docker run --rm -v "$PWD/public/screenshots:/app/public/screenshots" ctbk-screenshots
+          docker build --platform linux/amd64 -f Dockerfile.screenshots -t ctbk-screenshots .
+          docker run --platform linux/amd64 --name ctbk-screenshots-run ctbk-screenshots
+          docker cp ctbk-screenshots-run:/app/public/screenshots/. public/screenshots/
+          docker rm ctbk-screenshots-run
       - name: Upload screenshots as artifact
         if: github.ref != 'refs/heads/www'
         uses: actions/upload-artifact@v4
