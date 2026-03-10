@@ -568,8 +568,8 @@ export default function Home() {
   const estimatedPlotWidth = windowWidth * 0.9
   const maxTicks = Math.floor(estimatedPlotWidth / 50)
 
-  let tickMonths: string[]
-  let tickLabels: string[]
+  let tickDtick: string
+  let tickAxisFormat: string
   let tickFormat: 'quarterly' | 'semiannual' | 'annual'
 
   // Choose tick interval based on both date range and available space
@@ -579,27 +579,18 @@ export default function Home() {
   if (quarterlyTicks <= maxTicks && totalMonths <= 60) {
     // Quarterly ticks (Jan, Apr, Jul, Oct) - if they fit and ≤5 years
     tickFormat = 'quarterly'
-    tickMonths = months.filter(m => m.endsWith('-01') || m.endsWith('-04') || m.endsWith('-07') || m.endsWith('-10'))
-    tickLabels = tickMonths.map(m => {
-      const mo = m.slice(5, 7)
-      const yr = m.slice(2, 4)
-      const moName = mo === '01' ? 'Jan' : mo === '04' ? 'Apr' : mo === '07' ? 'Jul' : 'Oct'
-      return `${moName} '${yr}`
-    })
+    tickDtick = 'M3'
+    tickAxisFormat = "%b '%y"  // "Jan '26"
   } else if (semiAnnualTicks <= maxTicks && totalMonths <= 144) {
-    // Semi-annual ticks (Jan, Jul) with consistent month prefix
+    // Semi-annual ticks (Jan, Jul)
     tickFormat = 'semiannual'
-    tickMonths = months.filter(m => m.endsWith('-01') || m.endsWith('-07'))
-    tickLabels = tickMonths.map(m => {
-      const mo = m.slice(5, 7)
-      const yr = m.slice(2, 4)
-      return mo === '01' ? `Jan '${yr}` : `Jul '${yr}`
-    })
+    tickDtick = 'M6'
+    tickAxisFormat = "%b '%y"  // "Jan '26"
   } else {
     // Annual ticks (Jan only)
     tickFormat = 'annual'
-    tickMonths = months.filter(m => m.endsWith('-01'))
-    tickLabels = tickMonths.map(m => `'${m.slice(2, 4)}`)
+    tickDtick = 'M12'
+    tickAxisFormat = "'%y"  // "'26"
   }
 
   // Compute x-axis range with padding
@@ -608,15 +599,16 @@ export default function Home() {
     new Date(monthToDate(months[months.length - 1]).getTime() + 15 * 24 * 60 * 60 * 1000),  // 15 days after last
   ] : undefined
 
-  // Generate a revision key that changes when date range changes or when we snap
-  // This forces Plotly to reset its UI state (including pan position) to our specified range
+  // Generate a revision key that changes when date range, y-axis scale, or snap changes
+  // This forces Plotly to reset its UI state (including pan/zoom) to our specified ranges
   const uiRevision = (() => {
-    if (dateRange === "All") return `All-${snapCounter}`
+    const suffix = `${snapCounter}-${stackPercents}-${yAxis}`
+    if (dateRange === "All") return `All-${suffix}`
     if (isDurationBased(dateRange)) {
-      return `dur-${dateRange.duration}-${dateRange.end?.getTime() ?? "present"}-${snapCounter}`
+      return `dur-${dateRange.duration}-${dateRange.end?.getTime() ?? "present"}-${suffix}`
     }
     // Explicit range
-    return `exp-${dateRange.start.getTime()}-${dateRange.end?.getTime() ?? "present"}-${snapCounter}`
+    return `exp-${dateRange.start.getTime()}-${dateRange.end?.getTime() ?? "present"}-${suffix}`
   })()
 
   const layout = {
@@ -641,11 +633,11 @@ export default function Home() {
       tickfont: { size: 12, color: tickcolor },
       titlefont: { size: 14 },
       tickangle: -45,
-      tickmode: 'array' as const,
-      tickvals: tickMonths.map(monthToDate),
-      ticktext: tickLabels,
+      dtick: tickDtick,
+      tick0: '2013-01-01',  // Anchor ticks to January
+      tickformat: tickAxisFormat,
       gridcolor,
-      hoverformat: '%b %Y',  // Show "Dec 2025" instead of "Dec 1, 2025"
+      hoverformat: "%b '%y",  // x-axis hover caret: "Jan '26"
     },
     yaxis: {
       automargin: true,
