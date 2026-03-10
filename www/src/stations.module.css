@@ -113,3 +113,39 @@
     top: -0.05rem;
     color: inherit;
 }
+
+.legend {
+    position: fixed;
+    bottom: 1.5em;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;
+    background: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(4px);
+    border-radius: 8px;
+    padding: 0.5em 1em;
+    min-width: 240px;
+}
+
+:global([data-theme="dark"]) .legend {
+    background: rgba(30, 30, 30, 0.85);
+    color: #eee;
+}
+
+.legendBar {
+    height: 12px;
+    border-radius: 4px;
+    width: 100%;
+}
+
+.legendLabels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    margin-top: 0.25em;
+    color: #444;
+}
+
+:global([data-theme="dark"]) .legendLabels {
+    color: #ccc;
+}

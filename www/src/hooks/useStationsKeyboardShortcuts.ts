@@ -8,6 +8,8 @@ interface UseStationsKeyboardShortcutsProps {
   openSearch: () => void
   toggleTheme: () => void
   monthSelectRef: React.RefObject<HTMLSelectElement | null>
+  colorByAge: boolean
+  setColorByAge: (v: boolean) => void
 }
 
 export function useStationsKeyboardShortcuts({
@@ -18,6 +20,8 @@ export function useStationsKeyboardShortcuts({
   openSearch,
   toggleTheme,
   monthSelectRef,
+  colorByAge,
+  setColorByAge,
 }: UseStationsKeyboardShortcutsProps) {
   // Month navigation
   useAction('month:prev', {
@@ -79,6 +83,13 @@ export function useStationsKeyboardShortcuts({
   })
 
   // Other
+  useAction('stations:color', {
+    label: 'Color by age',
+    group: 'Other',
+    defaultBindings: ['c'],
+    handler: () => setColorByAge(!colorByAge),
+  })
+
   useAction('stations:theme', {
     label: 'Theme (system/light/dark)',
     group: 'Other',

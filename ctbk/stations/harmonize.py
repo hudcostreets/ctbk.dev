@@ -472,6 +472,24 @@ def write_id_map_json(id_map: dict[str, str], path: str):
     err(f"Wrote {path} ({len(sorted_map)} entries)")
 
 
+def write_births_json(
+    id_map: dict[str, str],
+    spans: DataFrame,
+    path: str,
+):
+    """Write station-births.json: maps every historical station ID to its canonical station's birth date (YYMMDD)."""
+    canon_births = spans.groupby('id0')['first'].min()
+    births = {sid: canon_births[cid] for sid, cid in id_map.items() if cid in canon_births.index}
+    sorted_births = dict(sorted(births.items()))
+    parent = dirname(path)
+    if not exists(parent):
+        Path(parent).mkdir(parents=True, exist_ok=True)
+    with open(path, 'w') as f:
+        json.dump(sorted_births, f, separators=(',', ':'))
+        f.write('\n')
+    err(f"Wrote {path} ({len(sorted_births)} entries)")
+
+
 def write_mappings_yaml(spans: DataFrame, path: str):
     """Write station-mappings.yaml with ruamel.yaml (comment-preserving)."""
     from ruamel.yaml import YAML
@@ -588,8 +606,12 @@ class StationHarmonize:
     def yaml_url(self) -> str:
         return join(self.root, DIR, 'station-mappings.yaml')
 
+    @property
+    def births_url(self) -> str:
+        return join(self.root, DIR, 'station-births.json')
+
     def output_urls(self) -> list[str]:
-        return [self.history_url, self.id_map_url, self.yaml_url]
+        return [self.history_url, self.id_map_url, self.yaml_url, self.births_url]
 
     def create(self):
         root = self.root
@@ -648,6 +670,7 @@ class StationHarmonize:
 
         write_id_map_json(id_map, self.id_map_url)
         write_mappings_yaml(spans, self.yaml_url)
+        write_births_json(id_map, spans, self.births_url)
 
         compute_stats(id_map, spans, summary)
 
@@ -674,6 +697,19 @@ def urls():
 def create():
     sh = StationHarmonize()
     sh.create()
+
+
+@station_harmonize.command(help="Generate station-births.json from existing outputs")
+def births():
+    sh = StationHarmonize()
+    if not exists(sh.history_url):
+        raise click.ClickException(f"No station-history.parquet found at {sh.history_url}. Run `create` first.")
+    if not exists(sh.id_map_url):
+        raise click.ClickException(f"No station-id-map.json found at {sh.id_map_url}. Run `create` first.")
+    spans = pd.read_parquet(sh.history_url)
+    with open(sh.id_map_url) as f:
+        id_map = json.load(f)
+    write_births_json(id_map, spans, sh.births_url)
 
 
 @station_harmonize.command(help="Print summary statistics from existing outputs")
