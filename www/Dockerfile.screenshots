@@ -21,4 +21,4 @@ RUN pnpm build
 EXPOSE 8080
 
 # Default command: serve and generate screenshots
-CMD ["sh", "-c", "pnpm exec serve dist -l 8080 -s & sleep 2 && pnpm scrns -E playwright -h localhost:8080 -l 120000"]
+CMD ["sh", "-c", "pnpm exec serve dist -l 8080 -s & sleep 2 && pnpm exec scrns -o public/screenshots -s '.plotly svg rect' -l 30000 -E playwright -h localhost:8080 -l 120000"]
