@@ -44,7 +44,7 @@
     "serve": "^14.2.5",
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
-    "yaml": "^2.8.2"
+    "yaml": "^2.8.3"
   },
   "scripts": {
     "clean": "rm -rf node_modules/.vite",
