@@ -2,9 +2,9 @@ name: Process new month
 on:
   workflow_dispatch:
     inputs:
-      ym:
-        description: "Month (YYYYMM) to process"
-        required: true
+      args:
+        description: "Args to pass to `ctbk` (default: auto-detect month and run `update`)"
+        required: false
   workflow_run:
     workflows: ["Sync tripdata bucket"]
     types: [completed]
@@ -18,7 +18,6 @@ env:
 jobs:
   process:
     runs-on: ubuntu-latest
-    # Only run on workflow_run if the triggering workflow succeeded and pushed new data
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
@@ -28,120 +27,65 @@ jobs:
           fetch-depth: 2
           ssh-key: ${{ secrets.WWW_DEPLOY_KEY }}
 
-      - name: Detect month
-        id: month
+      - name: Detect args
+        id: args
         run: |
-          if [ -n "${{ inputs.ym }}" ]; then
-            echo "ym=${{ inputs.ym }}" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ inputs.args }}" ]; then
+            echo "args=${{ inputs.args }}" >> "$GITHUB_OUTPUT"
           else
-            # Auto-detect from most recent tripdata import commit
+            # Auto-detect month from most recent tripdata import commit
             ym=$(git log -1 --format=%s | sed -n 's/.*\(20[0-9]\{4\}\)-citibike.*/\1/p' | head -1)
             if [ -z "$ym" ]; then
-              echo "No new month detected in recent commits"
+              echo "No new month detected in recent commits; nothing to do"
               exit 0
             fi
-            echo "ym=$ym" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Check if already processed
-        id: check
-        if: steps.month.outputs.ym
-        run: |
-          ym="${{ steps.month.outputs.ym }}"
-          if [ -f "s3/ctbk/normalized/${ym}.dvc" ]; then
-            echo "Month $ym already has normalized DVC file; skipping"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+            if [ -f "s3/ctbk/normalized/${ym}.dvc" ]; then
+              echo "Month $ym already processed; nothing to do"
+              exit 0
+            fi
+            echo "args=update -S -ccda $ym" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/setup-python@v5
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
+        if: steps.args.outputs.args
         with:
           python-version: '3.11'
           cache: pip
 
       - name: Install dependencies
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
+        if: steps.args.outputs.args
         run: pip install -e .
 
       - name: Configure Git
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
+        if: steps.args.outputs.args
         run: |
           git config --global user.name 'GitHub Actions'
           git config --global user.email 'ryan-williams@users.noreply.github.com'
 
-      - name: Pull tripdata zips
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
+      - name: Pull tripdata
+        if: steps.args.outputs.args
         run: |
-          ym="${{ steps.month.outputs.ym }}"
-          dvc pull s3/tripdata/*${ym}*.dvc
-
-      - name: Normalize
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
-        run: ctbk norm create ${{ steps.month.outputs.ym }}
-
-      - name: Consolidate
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
-        run: ctbk cons create ${{ steps.month.outputs.ym }}
-
-      - name: Station meta-hist (lat/lng)
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
-        run: ctbk smh create -gil ${{ steps.month.outputs.ym }}
-
-      - name: Station meta-hist (names)
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
-        run: ctbk smh create -gin ${{ steps.month.outputs.ym }}
-
-      - name: Aggregate (end station, counts)
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
-        run: ctbk agg create -ge -ac ${{ steps.month.outputs.ym }}
-
-      - name: Aggregate (start+end stations, counts)
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
-        run: ctbk agg create -gse -ac ${{ steps.month.outputs.ym }}
-
-      - name: Aggregate (year/month/region/gender/type/bike, counts+durations)
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
-        run: ctbk agg create -g ymrgtb -acd ${{ steps.month.outputs.ym }}
-
-      - name: Station modes
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
-        run: ctbk sm create ${{ steps.month.outputs.ym }}
-
-      - name: Station pair JSONs
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
-        run: ctbk spj create ${{ steps.month.outputs.ym }}
-
-      - name: DVC push new outputs
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
-        run: dvc push
-
-      - name: Commit and push DVC files
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
-        run: |
-          ym="${{ steps.month.outputs.ym }}"
-          find s3/ctbk -name '*.dvc' | xargs git add
-          if git diff --cached --quiet; then
-            echo "No DVC file changes to commit"
-          else
-            git commit -m "Process month $ym"
-            git push
+          # Pull any tripdata zips needed by the command
+          ym=$(echo "${{ steps.args.outputs.args }}" | grep -oE '20[0-9]{4}' | head -1)
+          if [ -n "$ym" ]; then
+            dvc pull s3/tripdata/*${ym}*.dvc || true
           fi
 
-      - name: Update ymrgtb_cd.json
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
-        run: |
-          dvc pull s3/ctbk/aggregated/ymrgtb_cd_20*.parquet.dvc
-          ctbk ymrgtb-cd -f
-          python -m ctbk.gha_update -Bpush-www -Pwww -Pmain -u "GitHub Actions" -e github@actions www/public/assets/ymrgtb_cd.json
+      - name: Pull prior aggregated data
+        if: steps.args.outputs.args
+        run: dvc pull s3/ctbk/aggregated/ymrgtb_cd_20*.parquet.dvc || true
+
+      - name: Run ctbk
+        if: steps.args.outputs.args
+        run: ctbk ${{ steps.args.outputs.args }}
 
       - uses: actions/setup-node@v4
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
+        if: steps.args.outputs.args
         with:
           node-version: 20
 
-      - name: Update station-urls.json
-        if: steps.month.outputs.ym && steps.check.outputs.skip != 'true'
+      - name: Update www assets
+        if: steps.args.outputs.args
         run: |
           cd www && npm install yaml && cd ..
-          node www/scripts/gen-station-urls.js
-          python -m ctbk.gha_update -Bpush-www -Pwww -Pmain -u "GitHub Actions" -e github@actions www/public/assets/station-urls.json
+          python -m ctbk.gha_update -Bpush-www -Pwww -Pmain -u "GitHub Actions" -e github@actions www/public/assets/ymrgtb_cd.json www/public/assets/station-urls.json
