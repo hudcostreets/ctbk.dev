@@ -75,17 +75,19 @@ jobs:
         if: steps.args.outputs.args
         run: dvc pull s3/ctbk/aggregated/ymrgtb_cd_20*.parquet.dvc || true
 
-      - name: Run ctbk
-        if: steps.args.outputs.args
-        run: ctbk ${{ steps.args.outputs.args }}
-
       - uses: actions/setup-node@v4
         if: steps.args.outputs.args
         with:
           node-version: 20
 
-      - name: Update www assets
+      - name: Install Node dependencies
         if: steps.args.outputs.args
-        run: |
-          cd www && npm install yaml && cd ..
-          python -m ctbk.gha_update -Bpush-www -Pwww -Pmain -u "GitHub Actions" -e github@actions www/public/assets/ymrgtb_cd.json www/public/assets/station-urls.json
+        run: cd www && npm install yaml
+
+      - name: Run ctbk
+        if: steps.args.outputs.args
+        run: ctbk ${{ steps.args.outputs.args }}
+
+      - name: Push www assets
+        if: steps.args.outputs.args
+        run: python -m ctbk.gha_update -Bpush-www -Pwww -Pmain -u "GitHub Actions" -e github@actions www/public/assets/ymrgtb_cd.json www/public/assets/station-urls.json
