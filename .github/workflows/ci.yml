@@ -88,6 +88,6 @@ jobs:
         if: steps.args.outputs.args
         run: ctbk ${{ steps.args.outputs.args }}
 
-      - name: Push www assets
+      - name: Deploy to www branch
         if: steps.args.outputs.args
-        run: python -m ctbk.gha_update -Bpush-www -Pwww -Pmain -u "GitHub Actions" -e github@actions www/public/assets/ymrgtb_cd.json www/public/assets/station-urls.json
+        run: git push origin HEAD:www
