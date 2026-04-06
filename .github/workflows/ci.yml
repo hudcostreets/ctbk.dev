@@ -80,9 +80,13 @@ jobs:
         with:
           node-version: 20
 
+      - name: Install pnpm
+        if: steps.args.outputs.args
+        run: npm install -g pnpm
+
       - name: Install Node dependencies
         if: steps.args.outputs.args
-        run: cd www && npm install yaml
+        run: cd www && pnpm install --frozen-lockfile
 
       - name: Run ctbk
         if: steps.args.outputs.args
