@@ -18,6 +18,8 @@ from difflib import SequenceMatcher
 from math import radians, sin, cos, sqrt, atan2
 from os.path import dirname, exists, join
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor
+from time import time
 
 import click
 import numpy as np
@@ -392,6 +394,21 @@ def extract_day_observations(parquet_path: Path) -> DataFrame:
     return grouped
 
 
+def _extract_observations_parallel(parquets: list[Path]) -> DataFrame:
+    """Extract day-level observations from multiple parquets in parallel."""
+    if len(parquets) <= 2:
+        dfs = []
+        for p in parquets:
+            err(f"  Processing {p.name}...")
+            dfs.append(extract_day_observations(p))
+        return pd.concat(dfs, ignore_index=True)
+
+    with ProcessPoolExecutor() as pool:
+        err(f"  Using {pool._max_workers} workers")
+        results = list(pool.map(extract_day_observations, parquets))
+    return pd.concat(results, ignore_index=True)
+
+
 def build_spans(
     observations: DataFrame,
     id_map: dict[str, str],
@@ -511,13 +528,13 @@ def write_mappings_yaml(spans: DataFrame, path: str):
         latest = group.iloc[-1]
         ids = {}
         for _, row in group.iterrows():
-            last = row['last'] if pd.notna(row['last']) else ''
+            last = str(row['last']) if pd.notna(row['last']) else ''
             ids[str(row['id'])] = f"{row['first']}-{last}"
         station = {
-            'name': latest['name'],
+            'name': str(latest['name']) if pd.notna(latest['name']) else '',
             'lat': float(latest['lat']) if pd.notna(latest['lat']) else None,
             'lng': float(latest['lng']) if pd.notna(latest['lng']) else None,
-            'first': str(group['first'].min()),
+            'first': str(group['first'].dropna().min()) if group['first'].notna().any() else '',
             'ids': ids,
         }
         stations[str(id0)] = station
@@ -575,8 +592,11 @@ def compute_stats(
     err(f"Junk/excluded stations: {junk_count}")
     if not spans.empty:
         err(f"Total spans: {len(spans)}")
-        last_max = spans['last'].dropna().max() if spans['last'].notna().any() else '(all active)'
-        err(f"Date range: {spans['first'].min()} - {last_max}")
+        first_notna = spans['first'].dropna().astype(str)
+        last_notna = spans['last'].dropna().astype(str)
+        first_min = first_notna.min() if not first_notna.empty else '?'
+        last_max = last_notna.max() if not last_notna.empty else '(all active)'
+        err(f"Date range: {first_min} - {last_max}")
 
     # Largest clusters
     if multi_id_stations:
@@ -610,10 +630,29 @@ class StationHarmonize:
     def births_url(self) -> str:
         return join(self.root, DIR, 'station-births.json')
 
+    @property
+    def observations_url(self) -> str:
+        return join(self.root, DIR, 'station-observations.parquet')
+
     def output_urls(self) -> list[str]:
         return [self.history_url, self.id_map_url, self.yaml_url, self.births_url]
 
-    def create(self):
+    def _cached_months(self, all_obs: DataFrame) -> set[str]:
+        """Extract YYYYMM months present in cached observations.
+
+        Observations have `date` in YYMMDD format. Convert to YYYYMM:
+        - YY < 50 → 20YY (covers 2013–2049)
+        """
+        yymm = all_obs['date'].str[:4].unique()
+        months = set()
+        for ym in yymm:
+            yy, mm = int(ym[:2]), ym[2:]
+            yyyy = 2000 + yy if yy < 50 else 1900 + yy
+            months.add(f"{yyyy}{mm}")
+        return months
+
+    def create(self, full: bool = False):
+        t0 = time()
         root = self.root
         err(f"Loading meta_hists from {root}...")
         df_in, df_il = load_meta_hists(root)
@@ -630,14 +669,48 @@ class StationHarmonize:
         norm_dir = Path(join(root, f'{BKT}/normalized'))
         cons_parquets = sorted(norm_dir.glob('??????.parquet'))
         if cons_parquets:
-            err(f"Extracting day-level observations from {len(cons_parquets)} consolidated parquets...")
-            obs_dfs = []
-            for p in cons_parquets:
-                err(f"  Processing {p.name}...")
-                obs = extract_day_observations(p)
-                obs_dfs.append(obs)
-            all_obs = pd.concat(obs_dfs, ignore_index=True)
-            err(f"  {len(all_obs)} total observations")
+            obs_path = self.observations_url
+            cached_obs = None
+
+            # Incremental: load cached observations if available
+            if not full and exists(obs_path):
+                err(f"Loading cached observations from {obs_path}...")
+                t_cache = time()
+                cached_obs = pd.read_parquet(obs_path)
+                err(f"  {len(cached_obs)} cached observations (loaded in {time() - t_cache:.1f}s)")
+                cached_months = self._cached_months(cached_obs)
+                new_parquets = [
+                    p for p in cons_parquets
+                    if p.stem not in cached_months
+                ]
+                if new_parquets:
+                    err(f"  {len(new_parquets)} new month(s) to process: {[p.stem for p in new_parquets]}")
+                    t_new = time()
+                    new_obs = _extract_observations_parallel(new_parquets)
+                    all_obs = pd.concat([cached_obs, new_obs], ignore_index=True)
+                    err(f"  {len(new_obs)} new + {len(cached_obs)} cached = {len(all_obs)} total observations ({time() - t_new:.1f}s)")
+                else:
+                    err(f"  No new months to process (all {len(cons_parquets)} months cached)")
+                    all_obs = cached_obs
+            else:
+                if full:
+                    err(f"Full rebuild requested")
+                else:
+                    err(f"No cached observations found; doing full extraction")
+                err(f"Extracting day-level observations from {len(cons_parquets)} consolidated parquets...")
+                t_extract = time()
+                all_obs = _extract_observations_parallel(cons_parquets)
+                err(f"  {len(all_obs)} total observations ({time() - t_extract:.1f}s)")
+
+            # Save observations cache
+            err(f"Saving observations cache to {obs_path}...")
+            t_save = time()
+            parent = dirname(obs_path)
+            if not exists(parent):
+                Path(parent).mkdir(parents=True, exist_ok=True)
+            all_obs.to_parquet(obs_path, index=False)
+            err(f"  Saved ({time() - t_save:.1f}s)")
+
             spans = build_spans(all_obs, id_map)
         else:
             err("No consolidated parquets found; using meta_hist month-level spans")
@@ -657,8 +730,10 @@ class StationHarmonize:
                 spans = spans.sort_values(['id0', 'first', 'id']).reset_index(drop=True)
 
         # Determine which spans are "still active" (last seen in most recent month)
-        most_recent = spans['last'].max()
-        spans.loc[spans['last'] == most_recent, 'last'] = None
+        last_notna = spans['last'].dropna()
+        if not last_notna.empty:
+            most_recent = last_notna.astype(str).max()
+            spans.loc[spans['last'] == most_recent, 'last'] = None
 
         # Write outputs
         err(f"\nWriting {self.history_url}...")
@@ -673,6 +748,7 @@ class StationHarmonize:
         write_births_json(id_map, spans, self.births_url)
 
         compute_stats(id_map, spans, summary)
+        err(f"\nTotal time: {time() - t0:.1f}s")
 
 
 # --- CLI ---
@@ -694,9 +770,10 @@ def urls():
 
 
 @station_harmonize.command(help="Create station history outputs (parquet, JSON, YAML)")
-def create():
+@option('-f', '--full', is_flag=True, help="Force full rebuild, ignoring cached observations")
+def create(full):
     sh = StationHarmonize()
-    sh.create()
+    sh.create(full=full)
 
 
 @station_harmonize.command(help="Generate station-births.json from existing outputs")
