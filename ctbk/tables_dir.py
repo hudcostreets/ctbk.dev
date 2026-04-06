@@ -71,7 +71,7 @@ class TablesDir(Task[Tables], ABC):
         finally:
             if rmdir:
                 err(f"Removing directory {url} after failed write")
-                self.fs.delete(url)  # TODO: remove all directory levels that were created
+                self.fs.rm(url, recursive=True)
             if rm_paths:
                 tmpdir = mkdtemp()
                 err(f"Moving untracked parquets to {tmpdir}: {rm_paths}")
