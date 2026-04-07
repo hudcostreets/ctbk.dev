@@ -1,0 +1,10 @@
+name = "ctbk-gbfs-poller"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+[triggers]
+crons = ["* * * * *"]
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "ctbk"
