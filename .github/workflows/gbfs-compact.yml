@@ -1,7 +1,7 @@
 name: GBFS Daily Compaction
 on:
   schedule:
-    - cron: '15 0 * * *'  # 00:15 UTC (after Worker compacts at 00:05)
+    - cron: '15 0 * * *'  # 00:15 UTC, after all per-minute WALs for yesterday are written
   workflow_dispatch:
     inputs:
       date:
@@ -11,6 +11,11 @@ on:
 jobs:
   compact:
     runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_ENDPOINT_URL: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      AWS_DEFAULT_REGION: auto
     steps:
       - uses: actions/checkout@v4
 
@@ -18,15 +23,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
       - name: Install dependencies
         run: pip install pandas pyarrow
-
-      - name: Install wrangler
-        run: npm install -g wrangler
 
       - name: Determine date
         id: date
@@ -37,32 +35,5 @@ jobs:
             echo "date=$(date -u -d yesterday +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Trigger Worker compaction (if not already done)
-        run: |
-          DATE="${{ steps.date.outputs.date }}"
-          curl -sf "https://ctbk-gbfs-poller.ryan-0dc.workers.dev/compact?date=$DATE" || true
-
-      - name: Download compacted JSON from R2
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          DATE="${{ steps.date.outputs.date }}"
-          mkdir -p gbfs/data/parquet
-          wrangler r2 object get "ctbk/gbfs/status/$DATE.json" --remote --pipe > "gbfs/data/$DATE.json"
-          echo "Downloaded $(wc -c < "gbfs/data/$DATE.json") bytes"
-
-      - name: Convert JSON to parquet
-        run: |
-          DATE="${{ steps.date.outputs.date }}"
-          python3 gbfs/json-to-parquet.py "gbfs/data/$DATE.json" "gbfs/data/parquet/$DATE.parquet"
-
-      - name: Upload parquet to R2
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          DATE="${{ steps.date.outputs.date }}"
-          wrangler r2 object put "ctbk/gbfs/status/$DATE.parquet" \
-            --file "gbfs/data/parquet/$DATE.parquet" --remote
-          ls -lh "gbfs/data/parquet/$DATE.parquet"
+      - name: Compact WAL → parquet
+        run: python3 gbfs/compact-r2.py all ${{ steps.date.outputs.date }}

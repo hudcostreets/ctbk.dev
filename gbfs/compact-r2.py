@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
 """GBFS daily compaction: download WAL from R2, compact to parquet, upload.
 
+Uses AWS CLI with --profile cf (R2's S3-compatible API).
+
 Usage:
-    # Download yesterday's WAL JSONs from R2
     compact-r2.py download 2026-04-07
-
-    # Compact downloaded JSONs to parquet
     compact-r2.py compact 2026-04-07
-
-    # Upload compacted parquet to R2
     compact-r2.py upload 2026-04-07
-
-    # All three steps
     compact-r2.py all 2026-04-07
 """
 import json
+import os
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -25,6 +20,9 @@ import pandas as pd
 
 R2_BUCKET = 'ctbk'
 R2_PREFIX = 'gbfs'
+# Use --profile cf locally; in GHA, AWS_ENDPOINT_URL + env creds handle auth
+AWS_PROFILE = os.environ.get('R2_AWS_PROFILE', 'cf')
+AWS_PROFILE_ARGS = ['--profile', AWS_PROFILE] if 'AWS_ENDPOINT_URL' not in os.environ else []
 
 DATA_DIR = Path(__file__).parent / 'data'
 WAL_DIR = DATA_DIR / 'wal'
@@ -37,57 +35,25 @@ INT16_COLS = [
 ]
 
 
-def r2_get(r2_key: str) -> str | None:
-    """Get an object from R2, return contents or None if not found."""
-    result = subprocess.run(
-        ['wrangler', 'r2', 'object', 'get', f'{R2_BUCKET}/{r2_key}', '--remote', '--pipe'],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0 and result.stdout:
-        return result.stdout
-    return None
-
-
-def r2_put(local_path: Path, r2_key: str):
-    """Upload a file to R2."""
-    result = subprocess.run(
-        ['wrangler', 'r2', 'object', 'put', f'{R2_BUCKET}/{r2_key}',
-         '--file', str(local_path), '--remote'],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(f"Upload failed: {result.stderr}", file=sys.stderr)
-        sys.exit(1)
-
-
-def download_one(args: tuple[str, Path]) -> bool:
-    """Download a single WAL file. Returns True if found."""
-    r2_key, out_path = args
-    content = r2_get(r2_key)
-    if content:
-        out_path.write_text(content)
-        return True
-    return False
-
-
 def download(date_str: str):
-    """Download all WAL JSONs for a date from R2 (parallel)."""
+    """Download all WAL JSONs for a date from R2 via aws s3 sync."""
     out_dir = WAL_DIR / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tasks = []
-    for h in range(24):
-        for m in range(60):
-            time_str = f'{h:02d}-{m:02d}'
-            r2_key = f'{R2_PREFIX}/status/{date_str}/{time_str}.json'
-            out_path = out_dir / f'{time_str}.json'
-            tasks.append((r2_key, out_path))
+    r2_prefix = f's3://{R2_BUCKET}/{R2_PREFIX}/status/{date_str}/'
+    result = subprocess.run(
+        [
+            'aws', 's3', 'sync', r2_prefix, str(out_dir),
+            '--exclude', '*', '--include', '*.json',
+            *AWS_PROFILE_ARGS,
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"Download failed: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
 
-    print(f"Downloading WAL for {date_str} ({len(tasks)} slots, parallel)...")
-    with ThreadPoolExecutor(max_workers=32) as pool:
-        results = list(pool.map(download_one, tasks))
-
-    count = sum(results)
+    count = len(list(out_dir.glob('*.json')))
     print(f"Downloaded {count} WAL files for {date_str}")
     if count == 0:
         print("No WAL files found — is the date correct?", file=sys.stderr)
@@ -142,8 +108,14 @@ def upload(date_str: str):
         print(f"No parquet for {date_str}", file=sys.stderr)
         sys.exit(1)
 
-    r2_key = f'{R2_PREFIX}/status/{date_str}.parquet'
-    r2_put(parquet_path, r2_key)
+    r2_key = f's3://{R2_BUCKET}/{R2_PREFIX}/status/{date_str}.parquet'
+    result = subprocess.run(
+        ['aws', 's3', 'cp', str(parquet_path), r2_key, *AWS_PROFILE_ARGS],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"Upload failed: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
 
     size_kb = parquet_path.stat().st_size / 1024
     print(f"Uploaded to R2: {r2_key} ({size_kb:.1f} KB)")

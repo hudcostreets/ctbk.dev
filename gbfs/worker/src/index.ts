@@ -2,12 +2,11 @@
  * GBFS station status poller — Cloudflare Worker with cron trigger.
  *
  * Fetches Citi Bike station_status.json every minute, writes per-minute
- * parquet-like snapshots to R2. A separate compaction step (or this worker
- * at midnight) consolidates daily WAL into a single file.
+ * JSON snapshots to R2. Daily compaction to parquet is handled by
+ * GHA (gbfs-compact.yml) using compact-r2.py.
  *
  * R2 layout:
  *   gbfs/status/YYYY-MM-DD/HH-MM.json  — per-minute WAL snapshots
- *   gbfs/status/YYYY-MM-DD.json         — compacted daily file
  *   gbfs/info/YYYY-MM-DD.json           — daily station_information
  */
 
@@ -67,7 +66,7 @@ function slimStation(s: Record<string, unknown>): StationStatus {
 	for (const col of KEEP_COLS) {
 		slim[col] = s[col] ?? 0;
 	}
-	return slim as StationStatus;
+	return slim as unknown as StationStatus;
 }
 
 async function pollStatus(bucket: R2Bucket): Promise<void> {
@@ -119,54 +118,10 @@ async function pollInfo(bucket: R2Bucket): Promise<void> {
 	console.log(`Saved station_information → ${key}`);
 }
 
-async function compactDay(bucket: R2Bucket, dateStr: string): Promise<string> {
-	const prefix = `gbfs/status/${dateStr}/`;
-	const listed = await bucket.list({ prefix });
-	if (!listed.objects.length) {
-		return `No WAL files found for ${dateStr}`;
-	}
-
-	const snapshots: { ts: number; polled_at: number; stations: StationStatus[] }[] = [];
-	for (const obj of listed.objects) {
-		const data = await bucket.get(obj.key);
-		if (!data) continue;
-		const record = JSON.parse(await data.text());
-		snapshots.push(record);
-	}
-
-	snapshots.sort((a, b) => a.ts - b.ts);
-
-	// Write compacted file
-	const compactedKey = `gbfs/status/${dateStr}.json`;
-	await bucket.put(compactedKey, JSON.stringify(snapshots), {
-		httpMetadata: { contentType: 'application/json' },
-	});
-
-	// Clean up WAL fragments
-	for (const obj of listed.objects) {
-		await bucket.delete(obj.key);
-	}
-
-	return `Compacted ${dateStr}: ${snapshots.length} snapshots, ${listed.objects.length} WAL files deleted → ${compactedKey}`;
-}
-
-function yesterdayStr(): string {
-	const d = new Date(Date.now() - 86400000);
-	return utcDateStr(d);
-}
-
 export default {
-	async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-		const now = new Date();
+	async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
 		ctx.waitUntil(pollStatus(env.BUCKET));
 		ctx.waitUntil(pollInfo(env.BUCKET));
-
-		// At 00:05 UTC, compact yesterday's WAL
-		if (now.getUTCHours() === 0 && now.getUTCMinutes() === 5) {
-			ctx.waitUntil(
-				compactDay(env.BUCKET, yesterdayStr()).then((msg) => console.log(msg))
-			);
-		}
 	},
 
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -176,11 +131,6 @@ export default {
 			await pollInfo(env.BUCKET);
 			return new Response('OK\n');
 		}
-		if (url.pathname === '/compact') {
-			const dateStr = url.searchParams.get('date') ?? yesterdayStr();
-			const msg = await compactDay(env.BUCKET, dateStr);
-			return new Response(msg + '\n');
-		}
-		return new Response('GBFS poller.\n  POST /poll — trigger poll\n  GET /compact?date=YYYY-MM-DD — compact a day\n', { status: 200 });
+		return new Response('GBFS poller.\n  GET /poll — trigger poll\n');
 	},
 } satisfies ExportedHandler<Env>;
