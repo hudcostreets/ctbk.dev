@@ -3,98 +3,124 @@
 ## Problem
 
 ctbk.dev is a static site that pre-generates all data as JSON/parquet files. This works for aggregate views (monthly ridership charts) but doesn't scale for:
-- Per-station detail pages (2600+ stations × growing availability history)
-- Querying availability data (3.4M rows/day, ~12MB parquet/day in R2)
-- Interactive filtering/aggregation that can't be pre-computed
+- Per-station detail pages (2,600+ stations × trip history)
+- Cross-station queries (top stations by ridership, station search)
+- Station metadata that changes over time (names, capacity)
 
-## Goal
+## Scope — what D1 is (and isn't) for
 
-Add a Cloudflare D1 (edge SQLite) backend for queryable station data. The crashes project (`hccs/crashes`) already uses this pattern — a D1 database populated by a Worker or GHA, queried by the frontend via a Worker API.
+### In scope: station metadata + trip aggregates
+D1 stores queryable structured data that the frontend needs for station pages and search.
+
+### Out of scope: availability time series
+GBFS availability data is served as **static per-station parquet files** from R2, loaded directly in the browser via hyparquet, and aggregated client-side via pltly. No D1 involvement. See `specs/station-detail-pages.md` for that architecture.
+
+### Out of scope: live availability
+Current station availability (for map overlays etc.) comes directly from the per-minute GBFS snapshot (~581 KB JSON), fetched from R2 or cached by a Worker. No D1 involvement.
 
 ## Architecture
 
 ```
-R2 (parquets) → GHA/Worker (ETL) → D1 (SQLite) → Worker API → Frontend
+Station-harmonize outputs  →  GHA  →  D1 (stations, spans)
+Aggregated parquets        →  GHA  →  D1 (trips, pairs)
+                                       ↓
+                              Worker API (ctbk-api)
+                                       ↓
+                                   Frontend
 ```
 
-### What goes in D1
+## What goes in D1
 
 | Table | Source | Update Freq | Rows (est.) |
 |-------|--------|-------------|-------------|
-| `stations` | station-harmonize outputs | Monthly | ~2,600 |
+| `stations` | station-harmonize | Monthly | ~2,600 |
 | `station_spans` | station-history.parquet | Monthly | ~3,700 |
-| `station_availability_hourly` | GBFS daily parquets (aggregated) | Daily | ~57K/day |
 | `station_trips_monthly` | aggregated parquets | Monthly | ~2,600/month |
 | `station_pairs_monthly` | station-pair JSONs | Monthly | ~50K/month |
 
-### What stays in R2/S3
-- Raw per-minute GBFS WAL JSONs (archival, too granular for D1)
-- Full daily GBFS parquets (available for DuckDB-WASM deep-dive if needed)
-- Consolidated trip parquets (source of truth, too large for D1)
+Total size estimate: <100 MB after years. Well within D1 limits.
 
-### Key: Aggregate before loading
-Don't put 3.4M rows/day into D1. Pre-aggregate availability to hourly resolution:
-- Per station per hour: avg/min/max bikes, docks, ebikes; minutes empty; minutes full
-- ~2,360 stations × 24 hours = 56,640 rows/day = ~20M rows/year
-- D1 free tier: 5GB, paid: 5GB included + $0.75/GB. Hourly aggregates fit comfortably.
-
-## Implementation Phases
-
-### Phase 1: Station metadata in D1
-- `stations` table: canonical ID, current name, lat/lng, capacity, open date
-- `station_spans` table: name/ID history from station-harmonize
-- Worker API: `GET /api/stations`, `GET /api/stations/:id`
-- Frontend: station list page, station detail header
-
-### Phase 2: Availability data in D1
-- GHA job (daily, after compaction): read daily parquet from R2, aggregate to hourly, insert into D1
-- `station_availability_hourly` table
-- Worker API: `GET /api/stations/:id/availability?from=&to=`
-- Frontend: availability heatmaps, trend charts on station detail pages
-
-### Phase 3: Trip data in D1
-- Monthly load after `ctbk update`: insert per-station monthly trip counts, top pairs
-- `station_trips_monthly`, `station_pairs_monthly` tables
-- Worker API: `GET /api/stations/:id/trips`
-- Frontend: trip pattern charts on station detail pages
-
-## D1 Schema (Phase 1)
+## D1 Schema
 
 ```sql
 CREATE TABLE stations (
-  id TEXT PRIMARY KEY,           -- canonical station ID (short_name)
-  name TEXT NOT NULL,            -- current name
+  id TEXT PRIMARY KEY,              -- canonical station ID (short_name)
+  name TEXT NOT NULL,               -- current name
   lat REAL, lng REAL,
   capacity INTEGER,
-  station_type TEXT,             -- 'classic' | 'electric'
-  first_seen TEXT,               -- YYYY-MM-DD
+  station_type TEXT,                -- 'classic' | 'electric'
+  first_seen TEXT,                  -- YYYY-MM-DD
   last_seen TEXT,
-  gbfs_station_id TEXT           -- UUID from GBFS, for availability join
+  gbfs_station_id TEXT              -- UUID from GBFS, for availability join
 );
 
 CREATE TABLE station_spans (
-  id TEXT NOT NULL,              -- canonical station ID
-  historical_id TEXT NOT NULL,   -- ID during this span
+  id TEXT NOT NULL,                 -- canonical station ID
+  historical_id TEXT NOT NULL,      -- ID during this span
   name TEXT NOT NULL,
   lat REAL, lng REAL,
-  first_date TEXT,               -- YYYY-MM-DD
+  first_date TEXT,                  -- YYYY-MM-DD
   last_date TEXT,
   FOREIGN KEY (id) REFERENCES stations(id)
 );
 CREATE INDEX idx_spans_id ON station_spans(id);
+
+CREATE TABLE station_trips_monthly (
+  station_id TEXT NOT NULL,
+  ym TEXT NOT NULL,                 -- YYYYMM
+  start_count INTEGER DEFAULT 0,   -- rides starting here
+  end_count INTEGER DEFAULT 0,     -- rides ending here
+  PRIMARY KEY (station_id, ym),
+  FOREIGN KEY (station_id) REFERENCES stations(id)
+);
+
+CREATE TABLE station_pairs_monthly (
+  start_id TEXT NOT NULL,
+  end_id TEXT NOT NULL,
+  ym TEXT NOT NULL,                 -- YYYYMM
+  count INTEGER NOT NULL,
+  PRIMARY KEY (start_id, end_id, ym)
+);
+CREATE INDEX idx_pairs_start ON station_pairs_monthly(start_id, ym);
+CREATE INDEX idx_pairs_end ON station_pairs_monthly(end_id, ym);
 ```
 
-## Relation to Existing Infra
+## Implementation Phases
 
-- **R2 bucket `ctbk`**: already exists, stores GBFS data. D1 reads from here.
-- **`ctbk-gbfs-poller` Worker**: unchanged, writes to R2.
-- **`gbfs-compact.yml` GHA**: produces daily parquets. Add a post-compaction step to load into D1.
-- **New Worker**: `ctbk-api` — serves D1 queries to the frontend.
-- **Frontend**: Add fetch calls to `ctbk-api` Worker for station data.
+### Phase 1: Station metadata
+- Create D1 database, deploy `ctbk-api` Worker
+- Load stations + spans from station-harmonize outputs
+- Worker API: `GET /api/stations`, `GET /api/stations/:id`
+- Frontend: station list page, station detail header/history
+
+### Phase 2: Trip data
+- Monthly load after `ctbk update`: parse aggregated parquets, insert into D1
+- Worker API: `GET /api/stations/:id/trips`, `GET /api/stations/:id/pairs`
+- Frontend: trip pattern charts on station detail pages
+
+### Phase 3: Search + cross-station queries
+- Full-text search on station names
+- Top stations by ridership (queryable from D1)
+- Nearest stations (by lat/lng, using bounding box query)
+
+## Relation to existing infra
+
+- **R2 bucket `ctbk`**: Stores GBFS parquets (availability) and per-station slices. D1 does NOT read from R2.
+- **`ctbk-gbfs-poller` Worker**: Unchanged, writes to R2.
+- **`gbfs-compact.yml` GHA**: Produces daily parquets + per-station slices. No D1 interaction.
+- **New `ctbk-api` Worker**: Serves D1 queries. Lives in this repo at `api/` or `workers/api/`.
+- **Frontend**: Fetches station metadata from `ctbk-api`, availability parquets from R2.
+
+## Precedent: crashes project
+
+The crashes project (`$c/hccs/crashes`) uses D1 successfully:
+- Crash data loaded into D1 via Worker
+- Frontend queries D1 for filtered/aggregated views
+- Follow the same patterns for Worker structure, D1 bindings, auth
 
 ## Open Questions
 
-- Should the API Worker live in this repo (`gbfs/api/`) or a separate repo?
-- D1 database name/binding conventions (follow crashes project pattern?)
-- Auth for write operations (GHA → D1): use Worker with shared secret, or D1 HTTP API?
-- Should we use the same D1 database as crashes, or separate? (Probably separate — different data domains.)
+- Should the API Worker live in this repo (`api/`) or separate?
+- D1 database name/binding conventions — follow crashes pattern?
+- Auth for write operations (GHA → D1): shared secret header, or D1 HTTP API directly?
+- Same D1 database as crashes, or separate? (Probably separate — different data domains)
