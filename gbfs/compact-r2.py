@@ -35,6 +35,19 @@ INT16_COLS = [
 ]
 
 
+def r2_exists(r2_key: str) -> bool:
+    """Check if an object exists in R2."""
+    result = subprocess.run(
+        [
+            'aws', 's3api', 'head-object',
+            '--bucket', R2_BUCKET, '--key', r2_key,
+            *AWS_PROFILE_ARGS,
+        ],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0
+
+
 def download(date_str: str):
     """Download all WAL JSONs for a date from R2 via aws s3 sync."""
     out_dir = WAL_DIR / date_str
@@ -138,6 +151,9 @@ if __name__ == '__main__':
     elif cmd == 'upload':
         upload(date_str)
     elif cmd == 'all':
+        if r2_exists(f'{R2_PREFIX}/status/{date_str}.parquet'):
+            print(f"Already compacted: {date_str}.parquet exists in R2")
+            sys.exit(0)
         download(date_str)
         compact(date_str)
         upload(date_str)
