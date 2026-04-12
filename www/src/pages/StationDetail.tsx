@@ -5,9 +5,19 @@ import StationAvailabilityChart from '../components/StationAvailabilityChart'
 import StationMap, { type Stations, type StationPairCounts } from '../components/StationMap'
 import YmrgtbChart from '../chart/YmrgtbChart'
 import { processData } from '../chart/ymrgtb-traces'
+import { Checkbox } from '../components/Checkbox'
+import { Checklist } from '../components/Checklist'
+import { Radios } from '../components/Radios'
 import { useSmartPolling } from '../hooks/useSmartPolling'
 import { useStationTrips } from '../hooks/useStationTrips'
-import { Regions, UserTypes, Genders, RideableTypes } from '../data'
+import {
+  type StackBy, type YAxis,
+  Regions, UserTypes, Genders, GenderQueryStrings,
+  RideableTypes, RideableTypeChars,
+  UserTypeDisplayNames, UserTypeQueryStrings,
+  codeParam, codesParam,
+} from '../data'
+import { boolParam, numberArrayParam, useUrlState } from 'use-prms'
 
 const API_BASE = 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -97,6 +107,17 @@ export default function StationDetail() {
   // Load monthly trip history from the public DVX cache
   const { rows: tripsRows } = useStationTrips(info?.short_name)
 
+  // Trips-chart controls (per-page URL params)
+  const [tripsYAxis, setTripsYAxis] = useUrlState('ty', codeParam<YAxis>('Rides', [['Rides', 'r'], ['Ride minutes', 'm']]))
+  const [tripsStackBy, setTripsStackBy] = useUrlState('ts', codeParam<StackBy>('Docking', [
+    ['None', 'n'], ['Docking', 'd'], ['User Type', 'u'], ['Gender', 'g'], ['Rideable Type', 'b'],
+  ]))
+  const [tripsStackPercent, setTripsStackPercent] = useUrlState('tpct', boolParam)
+  const [tripsUserTypes, setTripsUserTypes] = useUrlState('tu', codesParam(UserTypes, UserTypeQueryStrings))
+  const [tripsGenders, setTripsGenders] = useUrlState('tg', codesParam(Genders, GenderQueryStrings))
+  const [tripsRideableTypes, setTripsRideableTypes] = useUrlState('trt', codesParam(RideableTypes, RideableTypeChars))
+  const [tripsRollingAvgs, setTripsRollingAvgs] = useUrlState('tavg', numberArrayParam([12]))
+
   // Preprocess rows for the shared `buildTraces` logic.
   // The per-station JSON has no Region column — default to NYC for all rows
   // (each station is in one region; cross-region filtering is a no-op here).
@@ -108,6 +129,7 @@ export default function StationDetail() {
       'User Type': r['User Type'],
       Gender: r.Gender,
       'Rideable Type': r['Rideable Type'],
+      Docking: r.Docking,
     })))
   }, [tripsRows])
 
@@ -272,10 +294,11 @@ export default function StationDetail() {
             <StationMap
               stations={mapStations}
               selectedId={mapShortName}
+              setSelectedId={(sid) => { if (sid && sid !== mapShortName) navigate(`/s/${sid}`) }}
               pairCounts={pairCounts}
               center={mapCenter}
               zoom={15}
-              scrollWheelZoom={false}
+              scrollWheelZoom
               style={{ height: '100%', width: '100%' }}
               overlay={
                 availableMonths.length > 0 && mapMonth ? (
@@ -318,18 +341,77 @@ export default function StationDetail() {
             rows={processedTripsRows}
             style={{ width: '100%', height: 500 }}
             config={{
-              yAxis: 'Rides',
-              stackBy: 'None',
-              stackPercents: false,
-              regions: Regions,
-              userTypes: UserTypes,
-              genders: Genders,
-              rideableTypes: RideableTypes,
+              yAxis: tripsYAxis,
+              stackBy: tripsStackBy,
+              stackPercents: tripsStackPercent,
+              regions: Regions,  // per-station files collapse region; filter is no-op
+              userTypes: tripsUserTypes,
+              genders: tripsGenders,
+              rideableTypes: tripsRideableTypes,
               start: '2013-06',
               end: '2099-01',
-              rollingAvgs: [12],
+              rollingAvgs: tripsRollingAvgs,
             }}
           />
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, mt: 2, fontSize: 13 }}>
+            <Radios
+              label="Stack by"
+              options={[
+                { label: 'None', data: 'None' },
+                { label: 'Docking', data: 'Docking' },
+                { label: 'User Type', data: 'User Type' },
+                { label: 'Bike Type', data: 'Rideable Type' },
+                { label: 'Gender', data: 'Gender' },
+              ]}
+              cb={setTripsStackBy}
+              choice={tripsStackBy}
+            />
+            <Radios
+              label="Y Axis"
+              options={[
+                { label: 'Rides', data: 'Rides' },
+                { label: 'Minutes', data: 'Ride minutes' },
+              ]}
+              cb={setTripsYAxis}
+              choice={tripsYAxis}
+            />
+            <Box>
+              <Checkbox
+                label="12mo avg"
+                checked={tripsRollingAvgs.includes(12)}
+                cb={(v) => setTripsRollingAvgs(v ? [12] : [])}
+              />
+              <Checkbox
+                label="Stack %"
+                checked={tripsStackPercent}
+                cb={setTripsStackPercent}
+              />
+            </Box>
+            <Checklist
+              label="User Type"
+              data={UserTypes.map((ut) => ({
+                name: ut, label: UserTypeDisplayNames[ut], data: ut,
+                checked: tripsUserTypes.includes(ut),
+              }))}
+              cb={setTripsUserTypes}
+            />
+            <Checklist
+              label="Bike Type"
+              data={RideableTypes.map((rt) => ({
+                name: rt, label: rt, data: rt,
+                checked: tripsRideableTypes.includes(rt),
+              }))}
+              cb={setTripsRideableTypes}
+            />
+            <Checklist
+              label="Gender"
+              data={Genders.map((g) => ({
+                name: g, label: g, data: g,
+                checked: tripsGenders.includes(g),
+              }))}
+              cb={setTripsGenders}
+            />
+          </Box>
         </Box>
       )}
     </Box>

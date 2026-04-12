@@ -32,15 +32,20 @@ export const NormalizeRideableType: { [k: string]: RideableType } = {
 }
 export const UnknownRideableCutoff = '2021-02'
 
-export type StackBy = 'None' | 'Region' | 'User Type' | 'Gender' | 'Rideable Type'
-export const StackBys: StackBy[] = ['None', 'Region', 'User Type', 'Gender', 'Rideable Type']
+export type StackBy = 'None' | 'Region' | 'User Type' | 'Gender' | 'Rideable Type' | 'Docking'
+export const StackBys: StackBy[] = ['None', 'Region', 'User Type', 'Gender', 'Rideable Type', 'Docking']
 export const StackByQueryStrings: [StackBy, string][] = [
   ['None', 'n'],
   ['Region', 'r'],
   ['Gender', 'g'],
   ['User Type', 'u'],
   ['Rideable Type', 'b'],
+  ['Docking', 'd'],
 ]
+
+export type Docking = 'start' | 'end'
+export const Dockings: Docking[] = ['start', 'end']
+export const DockingColors: { [d in Docking]: string } = { 'start': '#1976d2', 'end': '#ef6c00' }
 
 export type YAxis = 'Rides' | 'Ride minutes'
 export const YAxes: YAxis[] = ['Rides', 'Ride minutes']
@@ -60,6 +65,7 @@ export type Row = {
   'User Type': UserType
   Gender: number
   'Rideable Type': string
+  Docking?: Docking  // optional: present only in per-station files
 }
 
 export const DEFAULT_COLORS = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A', '#19D3F3', '#FF6692', '#B6E880', '#FF97FF', '#FECB52']
@@ -75,6 +81,7 @@ export const Colors: { [k in StackBy]: { [key: string]: string } } = {
   Gender: GenderColors,
   'User Type': UserTypeColors,
   'Rideable Type': RideableTypeColors,
+  Docking: DockingColors,
 }
 
 export const stackKeyDict: { [k in StackBy]: string[] } = {
@@ -83,6 +90,7 @@ export const stackKeyDict: { [k in StackBy]: string[] } = {
   'Gender': ['Unknown', 'Women', 'Men'],
   'Rideable Type': ['Electric', 'Classic', 'Unknown'],
   'Region': ['JC', 'HOB', 'NYC'],
+  'Docking': ['end', 'start'],
 }
 
 export const toYM = (d: Date) => `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}`

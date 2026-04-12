@@ -125,6 +125,7 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
     else if (stackBy === 'User Type') stackVal = row['User Type']
     else if (stackBy === 'Gender') stackVal = row.GenderStr
     else if (stackBy === 'Rideable Type') stackVal = row.RideableTypeStr
+    else if (stackBy === 'Docking') stackVal = row.Docking ?? ''
 
     const val = row[yAxis]
     if (!allGrouped[m]) allGrouped[m] = {}
