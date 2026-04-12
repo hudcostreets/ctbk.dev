@@ -63,12 +63,19 @@ function smoothRow(r: AvailabilityRow, capacity: number) {
   return { classic, ebikes, docks, disabled, pending, raw_sum: sum }
 }
 
+// Series indices for legend interactions (1-based; 0 is the time series).
+const SERIES_KEYS = ['classic', 'ebike', 'docks', 'disabled', 'pending'] as const
+type SeriesKey = (typeof SERIES_KEYS)[number]
+
 export default function StationAvailabilityChart({ rows, capacity, height = 400 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
   const { actualTheme } = useTheme()
   const [tooltip, setTooltip] = useState<TooltipState | null>(null)
+  // null = all visible. Otherwise set of visible keys (used for solo / hidden).
+  const [visible, setVisible] = useState<Set<SeriesKey> | null>(null)
+  const [hovered, setHovered] = useState<SeriesKey | null>(null)
 
   useEffect(() => {
     if (!containerRef.current || !rows.length) return
@@ -89,14 +96,29 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400 
       raw_sum: r.num_bikes_available + r.num_docks_available + r.num_bikes_disabled + r.num_docks_disabled,
     }))
 
+    // Apply visibility/solo: hidden series contribute 0
+    const isShown = (key: SeriesKey) => visible == null || visible.has(key)
+    const adj = smoothed.map((s) => ({
+      classic: isShown('classic') ? s.classic : 0,
+      ebikes: isShown('ebike') ? s.ebikes : 0,
+      docks: isShown('docks') ? s.docks : 0,
+      disabled: isShown('disabled') ? s.disabled : 0,
+      pending: isShown('pending') ? s.pending : 0,
+      raw_sum: s.raw_sum,
+    }))
+
     // Cumulative bands
-    const s1 = smoothed.map((s) => s.classic)
-    const s2 = smoothed.map((s, i) => s1[i] + s.ebikes)
-    const s3 = smoothed.map((s, i) => s2[i] + s.docks)
-    const s4 = smoothed.map((s, i) => s3[i] + s.disabled)
-    const s5 = smoothed.map((s, i) => s4[i] + s.pending)
+    const s1 = adj.map((s) => s.classic)
+    const s2 = adj.map((s, i) => s1[i] + s.ebikes)
+    const s3 = adj.map((s, i) => s2[i] + s.docks)
+    const s4 = adj.map((s, i) => s3[i] + s.disabled)
+    const s5 = adj.map((s, i) => s4[i] + s.pending)
 
     const data: AlignedData = [x, s1, s2, s3, s4, s5]
+
+    // Hover dimming: when hovered != null, fade other series
+    const dim = (key: SeriesKey, base: string) =>
+      hovered != null && hovered !== key ? base + '40' : base
 
     const stepped = uPlot.paths.stepped!({ align: 1 })
 
@@ -117,17 +139,17 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400 
       legend: { show: false },
       series: [
         { label: 'Time' },
-        { label: 'Classic bikes', stroke: COLORS.classic, fill: COLORS.classic, paths: stepped },
-        { label: 'eBikes',        stroke: COLORS.ebike,    paths: stepped },
-        { label: 'Empty docks',   stroke: COLORS.docks,    paths: stepped },
-        { label: 'Disabled',      stroke: COLORS.disabled, paths: stepped },
-        { label: 'Pending',    stroke: COLORS.pending, paths: stepped },
+        { label: 'Classic bikes', stroke: dim('classic',  COLORS.classic),  fill: dim('classic', COLORS.classic), paths: stepped },
+        { label: 'eBikes',        stroke: dim('ebike',    COLORS.ebike),    paths: stepped },
+        { label: 'Empty docks',   stroke: dim('docks',    COLORS.docks),    paths: stepped },
+        { label: 'Disabled',      stroke: dim('disabled', COLORS.disabled), paths: stepped },
+        { label: 'Pending',       stroke: dim('pending',  COLORS.pending),  paths: stepped },
       ],
       bands: [
-        { series: [2, 1], fill: COLORS.ebike },
-        { series: [3, 2], fill: COLORS.docks },
-        { series: [4, 3], fill: COLORS.disabled },
-        { series: [5, 4], fill: COLORS.pending },
+        { series: [2, 1], fill: dim('ebike',    COLORS.ebike) },
+        { series: [3, 2], fill: dim('docks',    COLORS.docks) },
+        { series: [4, 3], fill: dim('disabled', COLORS.disabled) },
+        { series: [5, 4], fill: dim('pending',  COLORS.pending) },
       ],
       hooks: {
         setCursor: [
@@ -168,15 +190,37 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400 
       plotRef.current = null
       setTooltip(null)
     }
-  }, [rows, capacity, height, actualTheme])
+  }, [rows, capacity, height, actualTheme, visible, hovered])
 
-  const legendItems = [
-    { color: COLORS.classic, label: 'Classic bikes' },
-    { color: COLORS.ebike, label: 'eBikes' },
-    { color: COLORS.docks, label: 'Empty docks' },
-    { color: COLORS.disabled, label: 'Disabled' },
-    { color: COLORS.pending, label: 'Pending' },
+  const legendItems: { key: SeriesKey; color: string; label: string }[] = [
+    { key: 'classic',  color: COLORS.classic,  label: 'Classic bikes' },
+    { key: 'ebike',    color: COLORS.ebike,    label: 'eBikes' },
+    { key: 'docks',    color: COLORS.docks,    label: 'Empty docks' },
+    { key: 'disabled', color: COLORS.disabled, label: 'Disabled' },
+    { key: 'pending',  color: COLORS.pending,  label: 'Pending' },
   ]
+
+  const isShown = (key: SeriesKey) => visible == null || visible.has(key)
+  const onLegendClick = (e: React.MouseEvent, key: SeriesKey) => {
+    e.preventDefault()
+    if (e.shiftKey) {
+      // Shift+click toggles individual series in/out of current set
+      setVisible((v) => {
+        const cur = v ?? new Set(SERIES_KEYS)
+        const next = new Set(cur)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next.size === SERIES_KEYS.length ? null : next
+      })
+    } else {
+      // Click solos. Click a soloed series to restore all.
+      setVisible((v) => {
+        if (v && v.size === 1 && v.has(key)) return null  // restore all
+        return new Set([key])
+      })
+    }
+  }
+  const onLegendDoubleClick = () => setVisible(null)
 
   return (
     <div
@@ -188,24 +232,48 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400 
         className={`station-availability-chart ${actualTheme}`}
         style={{ width: '100%' }}
       />
-      <div style={{
-        display: 'flex',
-        justifyContent: 'center',
-        flexWrap: 'wrap',
-        gap: '8px 16px',
-        padding: '8px 12px',
-        fontSize: 12,
-        color: actualTheme === 'dark' ? '#e0e0e0' : '#222',
-      }}>
-        {legendItems.map((it) => (
-          <div key={it.label} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={{
-              display: 'inline-block', width: 12, height: 12,
-              background: it.color, borderRadius: 2,
-            }} />
-            <span>{it.label}</span>
-          </div>
-        ))}
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'center',
+          flexWrap: 'wrap',
+          gap: '4px 0',  // no horizontal gap; LIs use padding for spacing
+          padding: '8px 12px',
+          fontSize: 12,
+          color: actualTheme === 'dark' ? '#e0e0e0' : '#222',
+          userSelect: 'none',
+        }}
+        onDoubleClick={onLegendDoubleClick}
+        onMouseLeave={() => setHovered(null)}
+        title="Click to solo · Shift-click to toggle · Double-click to reset"
+      >
+        {legendItems.map((it) => {
+          const shown = isShown(it.key)
+          return (
+            <div
+              key={it.key}
+              onClick={(e) => onLegendClick(e, it.key)}
+              onMouseEnter={() => setHovered(it.key)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                cursor: 'pointer',
+                opacity: shown ? 1 : 0.4,
+                padding: '2px 8px',  // wider padding fills horizontal gaps so adjacent LIs touch
+                borderRadius: 3,
+                background: hovered === it.key ? (actualTheme === 'dark' ? '#3a3a3a' : '#f0f0f0') : 'transparent',
+              }}
+            >
+              <span style={{
+                display: 'inline-block', width: 12, height: 12,
+                background: it.color, borderRadius: 2,
+                opacity: shown ? 1 : 0.5,
+              }} />
+              <span style={{ textDecoration: shown ? 'none' : 'line-through' }}>{it.label}</span>
+            </div>
+          )
+        })}
       </div>
       {tooltip && (
         <div
