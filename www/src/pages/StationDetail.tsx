@@ -230,14 +230,21 @@ export default function StationDetail() {
   }, [info?.name, id])
 
   // Redirect to canonical /s/<slug> URL if we landed on a non-canonical form
-  // (covers: old /stations/:id route, UUID, short_name, or stale slug)
+  // (covers: old /stations/:id route, UUID, short_name, or stale slug).
+  // Guard against firing with stale info from the previous station — when the
+  // id changes we null out info first, but React runs effects together and
+  // this effect's `info` snapshot may still be the previous station's until
+  // the next render. So verify info identifies the current URL id.
   useEffect(() => {
     if (!info?.slug || !id) return
+    const matchesCurrentId =
+      info.slug === id || info.short_name === id || info.gbfs_station_id === id
+    if (!matchesCurrentId) return
     const onLegacyRoute = window.location.pathname.startsWith('/stations/')
     if (id !== info.slug || onLegacyRoute) {
       navigate(`/s/${info.slug}${window.location.search}${window.location.hash}`, { replace: true })
     }
-  }, [info?.slug, id, navigate])
+  }, [info, id, navigate])
 
   if (!id) return <Box p={4}><Typography>No station ID in URL</Typography></Box>
 
