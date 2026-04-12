@@ -65,19 +65,57 @@ awair already has mature implementations of several patterns we need:
 
 - **`useSmartPolling`** (`$c/awair/www/src/hooks/useSmartPolling.ts`):
   burst-retry after mtime + exponential backoff + visibility-aware.
+  Already ported verbatim into ctbk — see `specs/live-minute-refresh.md`.
 - **`DevicePoller`** (`$c/awair/www/src/components/DevicePoller.tsx`):
   headless poll orchestrator, only polls when viewing "latest".
 - **`RangeWidthControl`** (`$c/awair/www/src/components/RangeWidthControl.tsx`):
   duration picker (6h/12h/1d/3d/7d/14d/1mo/2mo/3mo/All) + "Latest" toggle.
 - **`timeRangeCodec`** (`$c/awair/www/src/lib/timeRangeCodec.ts`):
   compact URL codec: `[YYMMDD[THHMMSS]][-duration]`
-  (e.g. `251123-3d` = 2025-11-23 minus 3 days).
+  (e.g. `251123-3d` = 2025-11-23 minus 3 days). → **factor into
+  `use-prms`** (see below).
 - **Row-group parquet caching** (`HyparquetSource` / `ParquetCache`):
   HTTP Range Requests for partial parquet reads, `Last-Modified` check
   to detect new data without downloading.
 
-These are strong candidates for factoring. Initial path for ctbk: port
-verbatim, keep APIs stable, extract into shared package later.
+Initial path for ctbk: port verbatim, keep APIs stable, extract into
+shared package later.
+
+### Concrete plan: `timeRangeParam` in `use-prms`
+
+`use-prms` already handles composite URL params (e.g. `llzParam`).
+The time-range codec is pure serde — natural fit for `use-prms` as a
+subpath export (`use-prms/time-range`) to preserve tree-shaking.
+
+Parameterize for granularity so awair + ctbk (+ station subdaily zoom)
+can share:
+
+```ts
+export function timeRangeParam(opts: {
+  granularity?: 'month' | 'day' | 'minute' | 'second'  // default 'minute'
+  durationUnits?: ('y' | 'mo' | 'w' | 'd' | 'h' | 'm')[]
+  defaultRange?: TimeRange
+}): Param<TimeRange>
+```
+
+Usages:
+- awair: `{ granularity: 'minute', durationUnits: ['d', 'h', 'm'] }`
+- ctbk homepage: `{ granularity: 'month', durationUnits: ['y', 'mo'] }`
+  (migrates existing `dateRangeParam`; keep back-compat for old URLs)
+- ctbk station subdaily zoom: same as awair
+
+**Flow**:
+1. Finish ctbk's sub-daily station work with a ctbk-local codec
+   (adapted from awair's)
+2. Side-by-side diff with awair's → extract the actually-common
+   interface into `use-prms/time-range`
+3. Migrate both (+ apvd if applicable)
+
+The visual widget (`RangeWidthControl`) is less shareable (each project
+wants its own preset list / styling). More likely we extract a headless
+`useTimeRange()` hook that manages state + URL sync + helpers
+(`setDuration`, `setLatest`, `zoomIn`, etc.) and let each project style
+its own component around it.
 
 ## Factoring Candidates (from ctbk)
 
