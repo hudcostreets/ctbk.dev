@@ -29,3 +29,21 @@ CREATE TABLE IF NOT EXISTS day_tables (
   created_at INTEGER NOT NULL,     -- unix timestamp
   row_count INTEGER DEFAULT 0      -- updated by loader, optional
 );
+
+-- Stations table: union of all stations ever seen (additive-only).
+-- Sources: station-history.parquet (tripdata corpus), GBFS info JSON.
+-- Never delete — stations that disappear from GBFS still queryable.
+CREATE TABLE IF NOT EXISTS stations (
+  short_name TEXT PRIMARY KEY,     -- canonical, from station-harmonize / GBFS short_name
+  gbfs_station_id TEXT UNIQUE,     -- GBFS UUID; null for tripdata-only historical
+  name TEXT,                       -- current/latest name
+  lat REAL,
+  lon REAL,
+  capacity INTEGER,                -- GBFS only
+  station_type TEXT,               -- GBFS only ('classic' | 'electric')
+  first_seen TEXT,                 -- YYYY-MM-DD (from station-harmonize)
+  last_seen TEXT,
+  in_gbfs INTEGER DEFAULT 0,       -- 1 if seen in latest GBFS feed
+  updated_at INTEGER NOT NULL      -- unix timestamp of last upsert
+);
+CREATE INDEX IF NOT EXISTS idx_stations_gbfs_id ON stations(gbfs_station_id);

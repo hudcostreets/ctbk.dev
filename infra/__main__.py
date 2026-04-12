@@ -52,6 +52,11 @@ gbfs_event_notification = cf.R2BucketEventNotification(
             prefix='gbfs/status/',
             suffix='.json',
         ),
+        cf.R2BucketEventNotificationRuleArgs(
+            actions=['PutObject'],
+            prefix='gbfs/info/',
+            suffix='.json',
+        ),
     ],
 )
 

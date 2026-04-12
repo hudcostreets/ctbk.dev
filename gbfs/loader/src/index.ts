@@ -52,6 +52,60 @@ function dateFromKey(key: string): string | null {
 	return m ? m[1] : null;
 }
 
+/** Detect a station_information snapshot key like "gbfs/info/2026-04-12.json". */
+function isInfoKey(key: string): boolean {
+	return /^gbfs\/info\/\d{4}-\d{2}-\d{2}\.json$/.test(key);
+}
+
+interface InfoStation {
+	station_id: string;       // GBFS UUID
+	short_name?: string;
+	name?: string;
+	lat?: number;
+	lon?: number;
+	capacity?: number;
+	station_type?: string;
+}
+
+interface InfoResponse {
+	data: { stations: InfoStation[] };
+}
+
+/** Upsert all stations from a station_information snapshot.
+ * Marks them in_gbfs=1 and updates GBFS-only fields. Preserves
+ * tripdata-sourced fields via COALESCE in the conflict handler. */
+async function upsertStationsInfo(db: D1Database, info: InfoResponse): Promise<number> {
+	const now = Math.floor(Date.now() / 1000);
+	const stmts = info.data.stations
+		.filter((s) => s.short_name)  // need short_name as the join key
+		.map((s) =>
+			db.prepare(
+				`INSERT INTO stations (short_name, gbfs_station_id, name, lat, lon, capacity, station_type, in_gbfs, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+				 ON CONFLICT(short_name) DO UPDATE SET
+				   gbfs_station_id = excluded.gbfs_station_id,
+				   name            = COALESCE(excluded.name, stations.name),
+				   lat             = COALESCE(excluded.lat, stations.lat),
+				   lon             = COALESCE(excluded.lon, stations.lon),
+				   capacity        = COALESCE(excluded.capacity, stations.capacity),
+				   station_type    = COALESCE(excluded.station_type, stations.station_type),
+				   in_gbfs         = 1,
+				   updated_at      = excluded.updated_at`
+			).bind(
+				s.short_name!,
+				s.station_id,
+				s.name ?? null,
+				s.lat ?? null,
+				s.lon ?? null,
+				s.capacity ?? null,
+				s.station_type ?? null,
+				now,
+			)
+		);
+	await db.batch(stmts);
+	return stmts.length;
+}
+
 function tableNameForDate(dateStr: string): string {
 	return `availability_${dateStr.replace(/-/g, '')}`;
 }
@@ -98,25 +152,40 @@ export default {
 		for (const msg of typed.messages) {
 			try {
 				const key = msg.body.object.key;
+
+				// Per-minute availability JSON
 				const dateStr = dateFromKey(key);
-				if (!dateStr) {
-					console.log(`Ignoring non-WAL key: ${key}`);
+				if (dateStr) {
+					const obj = await env.BUCKET.get(key);
+					if (!obj) {
+						console.warn(`Object missing: ${key}`);
+						msg.ack();
+						continue;
+					}
+					const snap = JSON.parse(await obj.text()) as Snapshot;
+					const table = await ensureTable(env.DB, dateStr);
+					await insertSnapshot(env.DB, table, snap);
+					console.log(`Loaded ${snap.stations.length} rows from ${key} → ${table}`);
 					msg.ack();
 					continue;
 				}
 
-				const obj = await env.BUCKET.get(key);
-				if (!obj) {
-					console.warn(`Object missing: ${key}`);
+				// Daily station_information snapshot
+				if (isInfoKey(key)) {
+					const obj = await env.BUCKET.get(key);
+					if (!obj) {
+						console.warn(`Object missing: ${key}`);
+						msg.ack();
+						continue;
+					}
+					const info = JSON.parse(await obj.text()) as InfoResponse;
+					const n = await upsertStationsInfo(env.DB, info);
+					console.log(`Upserted ${n} stations from ${key}`);
 					msg.ack();
 					continue;
 				}
 
-				const snap = JSON.parse(await obj.text()) as Snapshot;
-				const table = await ensureTable(env.DB, dateStr);
-				await insertSnapshot(env.DB, table, snap);
-
-				console.log(`Loaded ${snap.stations.length} rows from ${key} → ${table}`);
+				console.log(`Ignoring unknown key: ${key}`);
 				msg.ack();
 			} catch (err) {
 				console.error(`Failed to process ${msg.body?.object?.key}:`, err);
