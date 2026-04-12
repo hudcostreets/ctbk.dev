@@ -12,6 +12,7 @@
 interface Env {
 	DB: D1Database;
 	CORS_ORIGIN: string;
+	HOT_DAYS_RETAIN: string;
 }
 
 const COLS = [
@@ -71,7 +72,35 @@ async function getStationDay(
 	}
 }
 
+async function dropOldTables(db: D1Database, retainDays: number): Promise<string> {
+	const cutoff = new Date(Date.now() - retainDays * 86400000).toISOString().slice(0, 10);
+	const old = await db.prepare(
+		`SELECT date, table_name FROM day_tables WHERE date < ?`
+	).bind(cutoff).all();
+
+	const dropped: string[] = [];
+	for (const row of old.results as { date: string; table_name: string }[]) {
+		// Validate table name (defense against injection — should always be availability_YYYYMMDD)
+		if (!/^availability_\d{8}$/.test(row.table_name)) {
+			console.warn(`Skipping suspicious table name: ${row.table_name}`);
+			continue;
+		}
+		await db.exec(`DROP TABLE IF EXISTS ${row.table_name}`);
+		await db.prepare(`DELETE FROM day_tables WHERE date = ?`).bind(row.date).run();
+		dropped.push(row.date);
+	}
+
+	return `Dropped ${dropped.length} day-tables older than ${cutoff}: ${dropped.join(', ')}`;
+}
+
 export default {
+	async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+		const retainDays = parseInt(env.HOT_DAYS_RETAIN, 10);
+		ctx.waitUntil(
+			dropOldTables(env.DB, retainDays).then((msg) => console.log(msg))
+		);
+	},
+
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 

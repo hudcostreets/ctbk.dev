@@ -2,11 +2,16 @@ name = "ctbk-gbfs-api"
 main = "src/index.ts"
 compatibility_date = "2024-09-23"
 
+# Daily at 01:00 UTC: drop D1 day-tables older than HOT_DAYS_RETAIN
+[triggers]
+crons = ["0 1 * * *"]
+
+[vars]
+CORS_ORIGIN = "*"
+HOT_DAYS_RETAIN = "7"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "ctbk-gbfs"
 database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
 
-# Permissive CORS for browser fetch from ctbk.dev
-[vars]
-CORS_ORIGIN = "*"
