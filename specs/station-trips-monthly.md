@@ -132,12 +132,24 @@ Toggleable dim breakdowns (similar to homepage):
 6. Build `StationTripsChart` component (uPlot-based, themed like availability chart)
 7. Wire into `/s/:slug` page below the map
 
-## Controls
+## Controls (Resolved)
 
-Mirror the homepage `ymrgtb` plot: all the same dim toggles (region, user type, bike type, gender), date range selector, stacking modes, etc. The per-station chart is "the homepage plot, filtered to one station".
+The per-station chart is "the homepage plot, filtered to one station" —
+all the same dim toggles (region, user type, bike type, gender), date
+range selector, stacking modes, y-axis, rolling avg, stack %. Factor
+with Home.tsx as shared utilities (see `specs/ymrgtb-chart-factoring.md`
+— to write).
 
-Improvements to the date range widget are tracked separately (arbitrary month-to-month ranges, and eventual day/hour zoom-in for a selected week) — see a forthcoming `specs/date-range-selector.md`.
+- **Date range widget**: enhance beyond the current preset durations to
+  support any-month-to-any-month. Eventually support zoom into sub-daily
+  (day / hour) views for this station — see `specs/station-zoom-subdaily.md`.
+- **Default zoom**: show all data by default; let the user zoom in. The
+  improved date widget should make this painless.
+- **Totals**: yes — small stat block above the chart: total starts, total
+  ends, ratio, possibly avg trips/day.
 
-## Open Questions
+## Data size sanity check
 
-- Should we surface "totals" (total starts, total ends, ratio) somewhere prominent on the page (e.g. a stat block above the chart)?
+Homepage `ymrgtb_cd.json`: 1,681 rows across ~12 years × ~11 dim combos.
+Blown out by station: `1681 × 2,609 stations × 2 sides` ≈ 8.8M upper bound,
+realistically 3–5M (many cells empty). Comfortable in D1 (10 GB limit).
