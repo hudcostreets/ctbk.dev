@@ -57,6 +57,28 @@ a {
   box-sizing: border-box;
 }
 
+/* Leaflet attribution: smaller, less prominent on dark themes */
+.leaflet-control-attribution {
+  font-size: 9px !important;
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+  background: rgba(0, 0, 0, 0.4) !important;
+  color: #ddd !important;
+}
+.leaflet-control-attribution:hover {
+  opacity: 1;
+}
+.leaflet-control-attribution a {
+  color: #aac !important;
+}
+[data-theme="light"] .leaflet-control-attribution {
+  background: rgba(255, 255, 255, 0.6) !important;
+  color: #444 !important;
+}
+[data-theme="light"] .leaflet-control-attribution a {
+  color: #557 !important;
+}
+
 /* uPlot dark theme overrides */
 .station-availability-chart.dark .u-legend {
   color: var(--text-primary);

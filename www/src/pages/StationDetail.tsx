@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { Box, CircularProgress, Typography } from '@mui/material'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
+import StationMap, { type Stations, type StationPairCounts } from '../components/StationMap'
 
 const API_BASE = 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
+const MANIFEST_URL = '/assets/station-urls.json'
 
 interface Row {
   station_id: string
@@ -28,6 +30,7 @@ interface ApiResponse {
 
 interface StationInfo {
   short_name: string
+  slug: string | null
   gbfs_station_id: string | null
   name: string | null
   lat: number | null
@@ -39,11 +42,29 @@ interface StationInfo {
   in_gbfs: number
 }
 
+interface Manifest {
+  stations: Record<string, string>
+  pairs: Record<string, string>
+  latestMonth: string
+}
+
+/** Format YYYYMM → "MMM 'YY" (matches Stations.tsx) */
+function formatMonth(yyyymm: string): string {
+  const yr = yyyymm.substring(2, 4)
+  const m = parseInt(yyyymm.substring(4))
+  const monthName = new Date(2000, m - 1).toLocaleDateString('default', { month: 'short' })
+  return `${monthName} '${yr}`
+}
+
 export default function StationDetail() {
   const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
   const [info, setInfo] = useState<StationInfo | null>(null)
   const [data, setData] = useState<ApiResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [stations, setStations] = useState<Stations | null>(null)
+  const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
+  const [latestMonth, setLatestMonth] = useState<string | null>(null)
 
   useEffect(() => {
     if (!id) return
@@ -65,6 +86,60 @@ export default function StationDetail() {
       .catch((e) => setError(String(e)))
   }, [id])
 
+  // Load manifest + latest-month stations + pair data for the embedded map
+  useEffect(() => {
+    fetch(MANIFEST_URL)
+      .then((r) => r.json())
+      .then((m: Manifest) => {
+        const month = m.latestMonth
+        setLatestMonth(month)
+        const stationsUrl = m.stations[month]
+        const pairsUrl = m.pairs[month]
+        return Promise.all([
+          fetch(stationsUrl).then((r) => r.json()),
+          pairsUrl ? fetch(pairsUrl).then((r) => r.json()) : Promise.resolve(null),
+        ])
+      })
+      .then(([stationsData, pairsData]) => {
+        setStations(stationsData)
+        if (pairsData) {
+          // Pairs use index keys; convert to ID keys
+          const stationIds = Object.keys(stationsData)
+          const idx2id: Record<string, string> = {}
+          stationIds.forEach((sid, idx) => { idx2id[idx.toString()] = sid })
+          const converted: StationPairCounts = {}
+          for (const [srcIdx, dsts] of Object.entries(pairsData as Record<string, Record<string, number>>)) {
+            const srcId = idx2id[srcIdx]
+            if (!srcId) continue
+            converted[srcId] = {}
+            for (const [dstIdx, count] of Object.entries(dsts)) {
+              const dstId = idx2id[dstIdx]
+              if (dstId) converted[srcId][dstId] = count
+            }
+          }
+          setPairCounts(converted)
+        }
+      })
+      .catch((err) => console.warn('Failed to load station map data:', err))
+  }, [])
+
+  // Set document title
+  useEffect(() => {
+    const name = info?.name ?? id
+    document.title = name ? `${name} — ctbk.dev` : 'ctbk.dev'
+    return () => { document.title = 'ctbk.dev - Citi Bike Dashboard' }
+  }, [info?.name, id])
+
+  // Redirect to canonical /s/<slug> URL if we landed on a non-canonical form
+  // (covers: old /stations/:id route, UUID, short_name, or stale slug)
+  useEffect(() => {
+    if (!info?.slug || !id) return
+    const onLegacyRoute = window.location.pathname.startsWith('/stations/')
+    if (id !== info.slug || onLegacyRoute) {
+      navigate(`/s/${info.slug}${window.location.search}${window.location.hash}`, { replace: true })
+    }
+  }, [info?.slug, id, navigate])
+
   if (!id) return <Box p={4}><Typography>No station ID in URL</Typography></Box>
 
   const title = info?.name ?? `Station ${id}`
@@ -73,6 +148,17 @@ export default function StationDetail() {
   if (info?.capacity != null) subtitleParts.push(`${info.capacity} docks`)
   if (info?.station_type) subtitleParts.push(info.station_type)
   if (info?.first_seen) subtitleParts.push(`since ${info.first_seen}`)
+
+  // Use station-history-sourced lat/lon for the map (so the marker matches the
+  // pair-data dataset). Fall back to GBFS info if not yet loaded.
+  const mapStations = stations ?? {}
+  const mapShortName = info?.short_name
+  const mapCenter: [number, number] | null =
+    mapShortName && mapStations[mapShortName]
+      ? [mapStations[mapShortName].lat, mapStations[mapShortName].lng]
+      : info?.lat != null && info?.lon != null
+        ? [info.lat, info.lon]
+        : null
 
   return (
     <Box p={3} maxWidth={1200} mx="auto">
@@ -85,12 +171,9 @@ export default function StationDetail() {
       {info?.lat != null && info?.lon != null && (
         <Typography variant="caption" color="text.secondary" display="block" gutterBottom>
           {info.lat.toFixed(5)}, {info.lon.toFixed(5)}
-          {' · '}
-          <a href={`/stations?ll=${info.lat.toFixed(3)}_${info.lon.toFixed(3)}_16&s=${info.short_name}`}>
-            view on map
-          </a>
         </Typography>
       )}
+
       <Typography variant="body2" color="text.secondary" gutterBottom>
         {data ? `Today (${data.date}): ${data.rows.length} snapshots` : ''}
       </Typography>
@@ -109,6 +192,28 @@ export default function StationDetail() {
 
       {data && data.rows.length === 0 && (
         <Typography>No data yet for today.</Typography>
+      )}
+
+      {mapCenter && mapShortName && (
+        <>
+          <Box sx={{ height: 400, width: '100%', mt: 3, borderRadius: 1, overflow: 'hidden' }}>
+            <StationMap
+              stations={mapStations}
+              selectedId={mapShortName}
+              pairCounts={pairCounts}
+              center={mapCenter}
+              zoom={15}
+              scrollWheelZoom={false}
+              style={{ height: '100%', width: '100%' }}
+              overlay={latestMonth ? `Citi Bike rides, ${formatMonth(latestMonth)}` : null}
+            />
+          </Box>
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+            <a href={`/stations?lat=${mapCenter[0].toFixed(4)}&lng=${mapCenter[1].toFixed(4)}&z=16&s=${mapShortName}`}>
+              view on full map →
+            </a>
+          </Typography>
+        </>
       )}
     </Box>
   )

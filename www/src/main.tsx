@@ -10,6 +10,7 @@ import { ThemeProvider, useTheme } from "./contexts/ThemeContext"
 import { ThemeToggle } from "./components/ThemeToggle"
 import { HomeButton, ThemeTileToggle } from "./components/TileStyleButton"
 import { useScrollToHash } from "./hooks/useScrollToHash"
+import { useGlobalStationsOmnibar } from "./hooks/useGlobalStationsOmnibar"
 import Home from "./pages/Home"
 import Stations from "./pages/Stations"
 import StationDetail from "./pages/StationDetail"
@@ -31,12 +32,15 @@ function AppContent() {
   const { pathname } = useLocation()
   const isStationsPage = pathname === '/stations'
   useScrollToHash()
+  useGlobalStationsOmnibar()
 
   return (
     <>
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/stations" element={<Stations />} />
+        <Route path="/s/:id" element={<StationDetail />} />
+        {/* Back-compat: redirect old /stations/:id form to /s/:id */}
         <Route path="/stations/:id" element={<StationDetail />} />
         <Route path="/pipeline" element={<Pipeline />} />
       </Routes>

@@ -72,12 +72,42 @@ async function getStationDay(
 	}
 }
 
+/** Detect ID format: slug | uuid | short_name. */
+function detectIdKind(id: string): 'uuid' | 'slug' | 'short_name' {
+	if (/^[0-9a-f]{8}-[0-9a-f]{4}-/.test(id)) return 'uuid';
+	if (/^[a-z0-9-]+$/.test(id) && /[a-z]/.test(id)) return 'slug';
+	return 'short_name';
+}
+
+/** Look up a station by any ID form (slug, UUID, short_name). */
+async function lookupStation(db: D1Database, id: string): Promise<Record<string, unknown> | null> {
+	const kind = detectIdKind(id);
+	const col = kind === 'uuid' ? 'gbfs_station_id' : kind === 'slug' ? 'slug' : 'short_name';
+	const row = await db.prepare(`SELECT * FROM stations WHERE ${col} = ?`).bind(id).first();
+	if (row) return row;
+	// Fallback: try other columns (in case format detection was wrong)
+	const fallbackOrder = (['slug', 'short_name', 'gbfs_station_id'] as const).filter((c) => c !== col);
+	for (const c of fallbackOrder) {
+		const r = await db.prepare(`SELECT * FROM stations WHERE ${c} = ?`).bind(id).first();
+		if (r) return r;
+	}
+	return null;
+}
+
 /** Look up capacity (and other metadata) for a station, by GBFS UUID. */
 async function getStationCapacity(db: D1Database, gbfsId: string): Promise<number | null> {
 	const row = await db.prepare(
 		`SELECT capacity FROM stations WHERE gbfs_station_id = ?`
 	).bind(gbfsId).first<{ capacity: number | null }>();
 	return row?.capacity ?? null;
+}
+
+/** Resolve any-form ID → GBFS UUID for availability lookups. */
+async function resolveToGbfsId(db: D1Database, id: string): Promise<string | null> {
+	const kind = detectIdKind(id);
+	if (kind === 'uuid') return id;
+	const station = await lookupStation(db, id);
+	return (station?.gbfs_station_id as string | null) ?? null;
 }
 
 async function dropOldTables(db: D1Database, retainDays: number): Promise<string> {
@@ -120,44 +150,44 @@ export default {
 			return jsonResponse({ status: 'ok' }, env);
 		}
 
-		// /api/stations/:id/info — accepts UUID or short_name
+		// /api/stations/:id/info — accepts slug, UUID, or short_name
 		const infoMatch = url.pathname.match(/^\/api\/stations\/([^/]+)\/info$/);
 		if (infoMatch) {
 			const id = decodeURIComponent(infoMatch[1]);
-			const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(id);
-			const sql = isUuid
-				? `SELECT * FROM stations WHERE gbfs_station_id = ?`
-				: `SELECT * FROM stations WHERE short_name = ?`;
-			const result = await env.DB.prepare(sql).bind(id).first();
+			const result = await lookupStation(env.DB, id);
 			if (!result) return errorResponse(`Station not found: ${id}`, 404, env);
 			return jsonResponse(result, env);
 		}
 
-		// /api/stations/:id/today
+		// /api/stations/:id/today  (id = slug | uuid | short_name)
 		const todayMatch = url.pathname.match(/^\/api\/stations\/([^/]+)\/today$/);
 		if (todayMatch) {
-			const stationId = decodeURIComponent(todayMatch[1]);
+			const id = decodeURIComponent(todayMatch[1]);
+			const gbfsId = await resolveToGbfsId(env.DB, id);
+			if (!gbfsId) return errorResponse(`Station not found: ${id}`, 404, env);
 			const dateStr = todayUtc();
 			const [rows, capacity] = await Promise.all([
-				getStationDay(env.DB, stationId, dateStr),
-				getStationCapacity(env.DB, stationId),
+				getStationDay(env.DB, gbfsId, dateStr),
+				getStationCapacity(env.DB, gbfsId),
 			]);
-			return jsonResponse({ station_id: stationId, date: dateStr, capacity, rows }, env);
+			return jsonResponse({ station_id: gbfsId, date: dateStr, capacity, rows }, env);
 		}
 
 		// /api/stations/:id/range?date=YYYY-MM-DD
 		const rangeMatch = url.pathname.match(/^\/api\/stations\/([^/]+)\/range$/);
 		if (rangeMatch) {
-			const stationId = decodeURIComponent(rangeMatch[1]);
+			const id = decodeURIComponent(rangeMatch[1]);
+			const gbfsId = await resolveToGbfsId(env.DB, id);
+			if (!gbfsId) return errorResponse(`Station not found: ${id}`, 404, env);
 			const dateStr = url.searchParams.get('date') ?? todayUtc();
 			if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
 				return errorResponse(`Invalid date: ${dateStr} (expected YYYY-MM-DD)`, 400, env);
 			}
 			const [rows, capacity] = await Promise.all([
-				getStationDay(env.DB, stationId, dateStr),
-				getStationCapacity(env.DB, stationId),
+				getStationDay(env.DB, gbfsId, dateStr),
+				getStationCapacity(env.DB, gbfsId),
 			]);
-			return jsonResponse({ station_id: stationId, date: dateStr, capacity, rows }, env);
+			return jsonResponse({ station_id: gbfsId, date: dateStr, capacity, rows }, env);
 		}
 
 		return errorResponse('Not found', 404, env);
