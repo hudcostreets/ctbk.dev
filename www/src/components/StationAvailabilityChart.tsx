@@ -133,8 +133,10 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400 
         },
       },
       axes: [
+        // Default sizes for x-axis (keep date labels readable)
         { stroke: axisColor, grid: { stroke: gridColor }, ticks: { stroke: tickColor } },
-        { label: 'Count', stroke: axisColor, grid: { stroke: gridColor }, ticks: { stroke: tickColor } },
+        // Y-axis: drop "Count" label + shrink to ~30px (enough for 2-digit numbers)
+        { stroke: axisColor, grid: { stroke: gridColor }, ticks: { stroke: tickColor }, size: 30 },
       ],
       legend: { show: false },
       series: [
