@@ -363,10 +363,9 @@ export default function StationDetail() {
             className={css.controls}
             open={!tripsControlsClosed}
             onToggle={(e) => setTripsControlsClosed(!(e.target as HTMLDetailsElement).open)}
-            style={{ marginTop: 0 }}
           >
-            <summary><span className={css.settingsGear}>⚙</span>️</summary>
-            <div style={{ display: 'flex', flexWrap: 'wrap' }}>
+            <summary style={{ paddingLeft: '1em' }}><span className={css.settingsGear}>⚙</span>️</summary>
+            <div style={{ display: 'flex', flexWrap: 'wrap', paddingLeft: '1em' }}>
               <Radios
                 label="Stack by"
                 options={[
