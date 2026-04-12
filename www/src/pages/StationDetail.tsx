@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Box, CircularProgress, Typography } from '@mui/material'
+import css from '../index.module.css'
+import controlCss from '../controls.module.css'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
 import StationMap, { type Stations, type StationPairCounts } from '../components/StationMap'
 import YmrgtbChart from '../chart/YmrgtbChart'
@@ -11,7 +13,8 @@ import { Radios } from '../components/Radios'
 import { useSmartPolling } from '../hooks/useSmartPolling'
 import { useStationTrips } from '../hooks/useStationTrips'
 import {
-  type StackBy, type YAxis,
+  type Docking, type StackBy, type YAxis,
+  Dockings,
   Regions, UserTypes, Genders, GenderQueryStrings,
   RideableTypes, RideableTypeChars,
   UserTypeDisplayNames, UserTypeQueryStrings,
@@ -117,6 +120,8 @@ export default function StationDetail() {
   const [tripsGenders, setTripsGenders] = useUrlState('tg', codesParam(Genders, GenderQueryStrings))
   const [tripsRideableTypes, setTripsRideableTypes] = useUrlState('trt', codesParam(RideableTypes, RideableTypeChars))
   const [tripsRollingAvgs, setTripsRollingAvgs] = useUrlState('tavg', numberArrayParam([12]))
+  const [tripsDockings, setTripsDockings] = useUrlState('td', codesParam<Docking>(Dockings, [['start', 's'], ['end', 'e']]))
+  const [tripsControlsClosed, setTripsControlsClosed] = useUrlState('tcc', boolParam)
 
   // Preprocess rows for the shared `buildTraces` logic.
   // The per-station JSON has no Region column — default to NYC for all rows
@@ -351,67 +356,84 @@ export default function StationDetail() {
               start: '2013-06',
               end: '2099-01',
               rollingAvgs: tripsRollingAvgs,
+              extraFilter: (r) => !r.Docking || tripsDockings.includes(r.Docking),
             }}
           />
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, mt: 2, fontSize: 13 }}>
-            <Radios
-              label="Stack by"
-              options={[
-                { label: 'None', data: 'None' },
-                { label: 'Docking', data: 'Docking' },
-                { label: 'User Type', data: 'User Type' },
-                { label: 'Bike Type', data: 'Rideable Type' },
-                { label: 'Gender', data: 'Gender' },
-              ]}
-              cb={setTripsStackBy}
-              choice={tripsStackBy}
-            />
-            <Radios
-              label="Y Axis"
-              options={[
-                { label: 'Rides', data: 'Rides' },
-                { label: 'Minutes', data: 'Ride minutes' },
-              ]}
-              cb={setTripsYAxis}
-              choice={tripsYAxis}
-            />
-            <Box>
-              <Checkbox
-                label="12mo avg"
-                checked={tripsRollingAvgs.includes(12)}
-                cb={(v) => setTripsRollingAvgs(v ? [12] : [])}
+          <details
+            className={css.controls}
+            open={!tripsControlsClosed}
+            onToggle={(e) => setTripsControlsClosed(!(e.target as HTMLDetailsElement).open)}
+            style={{ marginTop: 0 }}
+          >
+            <summary><span className={css.settingsGear}>⚙</span>️</summary>
+            <div style={{ display: 'flex', flexWrap: 'wrap' }}>
+              <Radios
+                label="Stack by"
+                options={[
+                  { label: 'None', data: 'None' },
+                  { label: 'Docking', data: 'Docking' },
+                  { label: 'User Type', data: 'User Type' },
+                  { label: 'Bike Type', data: 'Rideable Type' },
+                  { label: 'Gender', data: 'Gender' },
+                ]}
+                cb={setTripsStackBy}
+                choice={tripsStackBy}
               />
-              <Checkbox
-                label="Stack %"
-                checked={tripsStackPercent}
-                cb={setTripsStackPercent}
+              <Radios
+                label="Y Axis"
+                options={[
+                  { label: 'Rides', data: 'Rides' },
+                  { label: 'Minutes', data: 'Ride minutes' },
+                ]}
+                cb={setTripsYAxis}
+                choice={tripsYAxis}
               />
-            </Box>
-            <Checklist
-              label="User Type"
-              data={UserTypes.map((ut) => ({
-                name: ut, label: UserTypeDisplayNames[ut], data: ut,
-                checked: tripsUserTypes.includes(ut),
-              }))}
-              cb={setTripsUserTypes}
-            />
-            <Checklist
-              label="Bike Type"
-              data={RideableTypes.map((rt) => ({
-                name: rt, label: rt, data: rt,
-                checked: tripsRideableTypes.includes(rt),
-              }))}
-              cb={setTripsRideableTypes}
-            />
-            <Checklist
-              label="Gender"
-              data={Genders.map((g) => ({
-                name: g, label: g, data: g,
-                checked: tripsGenders.includes(g),
-              }))}
-              cb={setTripsGenders}
-            />
-          </Box>
+              <div className={controlCss.control}>
+                <Checkbox
+                  label="12mo avg"
+                  checked={tripsRollingAvgs.includes(12)}
+                  cb={(v) => setTripsRollingAvgs(v ? [12] : [])}
+                />
+                <Checkbox
+                  label="Stack %"
+                  checked={tripsStackPercent}
+                  cb={setTripsStackPercent}
+                />
+              </div>
+              <Checklist
+                label="Include"
+                data={Dockings.map((d) => ({
+                  name: d, label: d === 'start' ? 'Starts' : 'Ends', data: d,
+                  checked: tripsDockings.includes(d),
+                }))}
+                cb={setTripsDockings}
+              />
+              <Checklist
+                label="User Type"
+                data={UserTypes.map((ut) => ({
+                  name: ut, label: UserTypeDisplayNames[ut], data: ut,
+                  checked: tripsUserTypes.includes(ut),
+                }))}
+                cb={setTripsUserTypes}
+              />
+              <Checklist
+                label="Bike Type"
+                data={RideableTypes.map((rt) => ({
+                  name: rt, label: rt, data: rt,
+                  checked: tripsRideableTypes.includes(rt),
+                }))}
+                cb={setTripsRideableTypes}
+              />
+              <Checklist
+                label="Gender"
+                data={Genders.map((g) => ({
+                  name: g, label: g, data: g,
+                  checked: tripsGenders.includes(g),
+                }))}
+                cb={setTripsGenders}
+              />
+            </div>
+          </details>
         </Box>
       )}
     </Box>
