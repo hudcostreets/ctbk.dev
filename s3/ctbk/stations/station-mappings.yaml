@@ -14790,20 +14790,14 @@ stations:
     ids:
       '3331': 160816-191231
       '7623.13': 200101-
-  '7625.18':
-    name: E 118 St & Park Ave
-    lat: 40.8005
-    lng: -73.942
-    first: '170918'
-    ids:
-      '3492': 170918-191231
-      '7625.18': 200101-260204
   '7625.22':
     name: E 118 St & Park Ave
     lat: 40.8007
     lng: -73.9426
-    first: '260303'
+    first: '170918'
     ids:
+      '3492': 170918-191231
+      '7625.18': 200101-260204
       '7625.22': 260303-
   '7626.02':
     name: Willow Ave & E 133 St
@@ -17285,11 +17279,12 @@ stations:
       '8379.07': 210715-240108
   '8381.04':
     name: W 181 St & Riverside Dr
-    lat: 40.8517
-    lng: -73.9419
+    lat: 40.8518
+    lng: -73.9417
     first: '200921'
     ids:
       '8381.04': 200921-260325
+      '8421.03': 260325-
   '8384.03':
     name: W Tremont Ave & Grand Ave
     lat: 40.85
@@ -17381,13 +17376,6 @@ stations:
     first: '210407'
     ids:
       '8416.10': 231004-
-  '8421.03':
-    name: W 181 St & Riverside Dr
-    lat: 40.8518
-    lng: -73.9417
-    first: '260325'
-    ids:
-      '8421.03': 260325-
   '8425.01':
     name: W Burnside Ave & University Ave
     lat: 40.8537
@@ -18696,14 +18684,6 @@ stations:
     first: '210514'
     ids:
       HB507: 210514-230913
-  HB508:
-    name: Monroe St & 11 St
-    lat: 40.7501
-    lng: -74.0366
-    first: '210514'
-    ids:
-      HB503: 210514-
-      HB508: 250114-260311
   HB601:
     name: Church Sq Park - 5 St & Park Ave
     lat: 40.7427
@@ -19421,3 +19401,11 @@ stations:
     first: '220902'
     ids:
       'Shop Morgan ': 220902-
+  HB503:
+    name: Monroe St & 11 St
+    lat: 40.7501
+    lng: -74.0366
+    first: '210514'
+    ids:
+      HB503: 210514-
+      HB508: 250114-260311
