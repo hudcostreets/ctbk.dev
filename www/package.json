@@ -50,7 +50,10 @@
   },
   "scripts": {
     "clean": "rm -rf node_modules/.vite",
+    "gen-ymdgtb-index": "node scripts/gen-ymdgtb-index.js",
+    "predev": "node scripts/gen-ymdgtb-index.js",
     "dev": "vite",
+    "prebuild": "node scripts/gen-ymdgtb-index.js",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint .",

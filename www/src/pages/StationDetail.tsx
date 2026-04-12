@@ -3,8 +3,11 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { Box, CircularProgress, Typography } from '@mui/material'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
 import StationMap, { type Stations, type StationPairCounts } from '../components/StationMap'
-import StationTripsChart, { type TripsRow } from '../components/StationTripsChart'
+import YmrgtbChart from '../chart/YmrgtbChart'
+import { processData } from '../chart/ymrgtb-traces'
 import { useSmartPolling } from '../hooks/useSmartPolling'
+import { useStationTrips } from '../hooks/useStationTrips'
+import { Regions, UserTypes, Genders, RideableTypes } from '../data'
 
 const API_BASE = 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -70,7 +73,6 @@ export default function StationDetail() {
   const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [mapMonth, setMapMonth] = useState<string | null>(null)
-  const [tripsRows, setTripsRows] = useState<TripsRow[] | null>(null)
 
   useEffect(() => {
     if (!id) return
@@ -90,12 +92,24 @@ export default function StationDetail() {
       })
       .then(setData)
       .catch((e) => setError(String(e)))
-
-    fetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/trips`)
-      .then((r) => (r.ok ? r.json() : { rows: [] }))
-      .then((d) => setTripsRows(d.rows ?? []))
-      .catch(() => setTripsRows([]))
   }, [id])
+
+  // Load monthly trip history from the public DVX cache
+  const { rows: tripsRows } = useStationTrips(info?.short_name)
+
+  // Preprocess rows for the shared `buildTraces` logic.
+  // The per-station JSON has no Region column — default to NYC for all rows
+  // (each station is in one region; cross-region filtering is a no-op here).
+  const processedTripsRows = useMemo(() => {
+    if (!tripsRows) return null
+    return processData(tripsRows.map((r) => ({
+      Year: r.Year, Month: r.Month, Count: r.Count, Duration: r.Duration,
+      Region: 'NYC' as const,
+      'User Type': r['User Type'],
+      Gender: r.Gender,
+      'Rideable Type': r['Rideable Type'],
+    })))
+  }, [tripsRows])
 
   // Smart polling: append new `today` rows synced to the GBFS poll cadence.
   // Uses `polled_at` as the mtime. Incremental fetch via `?since=<polled_at>`.
@@ -297,10 +311,25 @@ export default function StationDetail() {
         </>
       )}
 
-      {tripsRows && tripsRows.length > 0 && (
+      {processedTripsRows && processedTripsRows.length > 0 && (
         <Box sx={{ mt: 4 }}>
           <Typography variant="subtitle1" gutterBottom>Monthly trips</Typography>
-          <StationTripsChart rows={tripsRows} />
+          <YmrgtbChart
+            rows={processedTripsRows}
+            style={{ width: '100%', height: 500 }}
+            config={{
+              yAxis: 'Rides',
+              stackBy: 'None',
+              stackPercents: false,
+              regions: Regions,
+              userTypes: UserTypes,
+              genders: Genders,
+              rideableTypes: RideableTypes,
+              start: '2013-06',
+              end: '2099-01',
+              rollingAvgs: [12],
+            }}
+          />
         </Box>
       )}
     </Box>
