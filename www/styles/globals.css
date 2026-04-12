@@ -56,3 +56,11 @@ a {
 * {
   box-sizing: border-box;
 }
+
+/* uPlot dark theme overrides */
+.station-availability-chart.dark .u-legend {
+  color: var(--text-primary);
+}
+.station-availability-chart.dark .u-legend .u-marker {
+  border-color: rgba(255, 255, 255, 0.3);
+}

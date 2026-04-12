@@ -12,6 +12,7 @@ import { HomeButton, ThemeTileToggle } from "./components/TileStyleButton"
 import { useScrollToHash } from "./hooks/useScrollToHash"
 import Home from "./pages/Home"
 import Stations from "./pages/Stations"
+import StationDetail from "./pages/StationDetail"
 import PipelineMdx from "./pages/Pipeline.mdx"
 import { Box } from "@mui/material"
 import { Footer } from "./components/Footer"
@@ -36,6 +37,7 @@ function AppContent() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/stations" element={<Stations />} />
+        <Route path="/stations/:id" element={<StationDetail />} />
         <Route path="/pipeline" element={<Pipeline />} />
       </Routes>
       <ThemeToggle onOpenShortcuts={openModal} hideThemeButton={isStationsPage}>
