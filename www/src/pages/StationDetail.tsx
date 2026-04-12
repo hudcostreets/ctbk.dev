@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Box, CircularProgress, Typography } from '@mui/material'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
@@ -64,7 +64,8 @@ export default function StationDetail() {
   const [error, setError] = useState<string | null>(null)
   const [stations, setStations] = useState<Stations | null>(null)
   const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
-  const [latestMonth, setLatestMonth] = useState<string | null>(null)
+  const [manifest, setManifest] = useState<Manifest | null>(null)
+  const [mapMonth, setMapMonth] = useState<string | null>(null)
 
   useEffect(() => {
     if (!id) return
@@ -86,20 +87,29 @@ export default function StationDetail() {
       .catch((e) => setError(String(e)))
   }, [id])
 
-  // Load manifest + latest-month stations + pair data for the embedded map
+  // Load manifest once; default mapMonth to latestMonth
   useEffect(() => {
     fetch(MANIFEST_URL)
       .then((r) => r.json())
       .then((m: Manifest) => {
-        const month = m.latestMonth
-        setLatestMonth(month)
-        const stationsUrl = m.stations[month]
-        const pairsUrl = m.pairs[month]
-        return Promise.all([
-          fetch(stationsUrl).then((r) => r.json()),
-          pairsUrl ? fetch(pairsUrl).then((r) => r.json()) : Promise.resolve(null),
-        ])
+        setManifest(m)
+        setMapMonth((cur) => cur ?? m.latestMonth)
       })
+      .catch((err) => console.warn('Failed to load manifest:', err))
+  }, [])
+
+  // (Re)load stations + pair data when mapMonth changes
+  useEffect(() => {
+    if (!manifest || !mapMonth) return
+    const stationsUrl = manifest.stations[mapMonth]
+    const pairsUrl = manifest.pairs[mapMonth]
+    if (!stationsUrl) return
+    setStations(null)
+    setPairCounts(null)
+    Promise.all([
+      fetch(stationsUrl).then((r) => r.json()),
+      pairsUrl ? fetch(pairsUrl).then((r) => r.json()) : Promise.resolve(null),
+    ])
       .then(([stationsData, pairsData]) => {
         setStations(stationsData)
         if (pairsData) {
@@ -120,8 +130,14 @@ export default function StationDetail() {
           setPairCounts(converted)
         }
       })
-      .catch((err) => console.warn('Failed to load station map data:', err))
-  }, [])
+      .catch((err) => console.warn('Failed to load month data:', err))
+  }, [manifest, mapMonth])
+
+  // Sorted list of available months (newest first)
+  const availableMonths = useMemo(() => {
+    if (!manifest) return []
+    return Object.keys(manifest.stations).sort().reverse()
+  }, [manifest])
 
   // Set document title
   useEffect(() => {
@@ -205,7 +221,30 @@ export default function StationDetail() {
               zoom={15}
               scrollWheelZoom={false}
               style={{ height: '100%', width: '100%' }}
-              overlay={latestMonth ? `Citi Bike rides, ${formatMonth(latestMonth)}` : null}
+              overlay={
+                availableMonths.length > 0 && mapMonth ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, pointerEvents: 'auto' }}>
+                    Citi Bike rides,{' '}
+                    <select
+                      value={mapMonth}
+                      onChange={(e) => setMapMonth(e.target.value)}
+                      style={{
+                        background: 'transparent',
+                        color: 'white',
+                        border: '1px solid rgba(255,255,255,0.3)',
+                        borderRadius: 3,
+                        padding: '0 4px',
+                        fontSize: 12,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {availableMonths.map((m) => (
+                        <option key={m} value={m} style={{ color: 'black' }}>{formatMonth(m)}</option>
+                      ))}
+                    </select>
+                  </span>
+                ) : null
+              }
             />
           </Box>
           <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
