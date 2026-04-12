@@ -51,10 +51,8 @@ def update(
     ctbk_run('agg', 'create', '-ge', '-ac', ym)
     ctbk_run('agg', 'create', '-gse', '-ac', ym)
     ctbk_run('agg', 'create', '-g', 'ymrgtb', '-acd', ym)
-    # Per-station monthly trip aggregates (start side, end side) — fed into D1
-    # for the /s/:slug "monthly trips" chart.
-    ctbk_run('agg', 'create', '-g', 'ymrsgtb', '-acd', ym)
-    ctbk_run('agg', 'create', '-g', 'ymregtb', '-acd', ym)
+    ctbk_run('agg', 'create', '-g', 'ymrgtbs', '-acd', ym)
+    ctbk_run('agg', 'create', '-g', 'ymrgtbe', '-acd', ym)
 
     err(f"--- Station modes ---")
     ctbk_run('sm', 'create', ym)

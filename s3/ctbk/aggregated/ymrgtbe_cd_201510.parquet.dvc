@@ -1,0 +1,5 @@
+outs:
+- md5: 5ca0b02a7b714375edff88ac0f0cd2fe
+  size: 27310
+  hash: md5
+  path: ymrgtbe_cd_201510.parquet

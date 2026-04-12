@@ -15,8 +15,8 @@ Reuse the homepage's `ymrgtb` plotting machinery, just with extra filters.
 `ctbk agg create` already accepts arbitrary group keys. Add two new variants to `update.sh` / `ctbk update`:
 
 ```
-agg create -g ymrsgtb -acd <ym>   # → ymrsgtb_cd_<ym>.parquet
-agg create -g ymregtb -acd <ym>   # → ymregtb_cd_<ym>.parquet
+agg create -g ymrgtbs -acd <ym>   # → ymrgtbs_cd_<ym>.parquet
+agg create -g ymrgtbe -acd <ym>   # → ymrgtbe_cd_<ym>.parquet
 ```
 
 Where:
@@ -25,6 +25,8 @@ Where:
 - `cd` = count + duration (existing aggregations)
 - `r` = region (NYC vs JC)
 - `ym` = year-month
+
+Note: `ctbk agg` canonicalizes group-key ordering (`y,m,d,w,h,r,g,t,b,s,e`), so the output filename is always `ymrgtbs_…` / `ymrgtbe_…` regardless of the input flag order.
 
 Output rows have shape:
 ```
@@ -122,17 +124,20 @@ Toggleable dim breakdowns (similar to homepage):
 
 ## Implementation Phases
 
-1. Add `agg create -g ymrsgtb -acd` and `-g ymregtb -acd` to `ctbk update`
-2. Backfill all months: `ctbk agg create -g ymrsgtb -acd -d 201306-202603` (and `-g ymregtb`)
+1. Add `agg create -g ymrgtbs -acd` and `-g ymrgtbe -acd` to `ctbk update`
+2. Backfill all months: `ctbk agg create -g ymrgtbs -acd -d 201306-202603` (and `-g ymrgtbe`)
 3. Write `gbfs/d1/load_station_trips_monthly.py` Python loader
 4. Add D1 schema + tables; load all data
 5. Add `/api/stations/:id/trips` endpoint
 6. Build `StationTripsChart` component (uPlot-based, themed like availability chart)
 7. Wire into `/s/:slug` page below the map
 
+## Controls
+
+Mirror the homepage `ymrgtb` plot: all the same dim toggles (region, user type, bike type, gender), date range selector, stacking modes, etc. The per-station chart is "the homepage plot, filtered to one station".
+
+Improvements to the date range widget are tracked separately (arbitrary month-to-month ranges, and eventual day/hour zoom-in for a selected week) — see a forthcoming `specs/date-range-selector.md`.
+
 ## Open Questions
 
-- Do we want a separate `region` filter or always show all?
-- Should the chart respect a date range URL param (matching the homepage's date selector)?
-- For very long histories (10+ years monthly), is a default zoom helpful?
-- Should we surface "totals" (total starts, total ends, ratio) somewhere prominent on the page?
+- Should we surface "totals" (total starts, total ends, ratio) somewhere prominent on the page (e.g. a stat block above the chart)?

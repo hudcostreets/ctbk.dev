@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Load per-station monthly trip aggregates into D1.
 
-Reads `s3/ctbk/aggregated/ymrsgtb_cd_<ym>.parquet` (start side) and
-`ymregtb_cd_<ym>.parquet` (end side), unions into a single table
+Reads `s3/ctbk/aggregated/ymrgtbs_cd_<ym>.parquet` (start side) and
+`ymrgtbe_cd_<ym>.parquet` (end side), unions into a single table
 with `is_start` boolean. Idempotent (uses INSERT OR REPLACE on PK).
 
 Usage:
@@ -26,8 +26,8 @@ SQL_OUT = Path('s3/ctbk/aggregated/_d1_load.sql')
 
 # DVC-tracked: actual files only present after `dvc pull`. The .dvc files
 # tell us which ms we have data for.
-START_PATTERN = re.compile(r'^ymrsgtb_cd_(\d{6})\.parquet(\.dvc)?$')
-END_PATTERN = re.compile(r'^ymregtb_cd_(\d{6})\.parquet(\.dvc)?$')
+START_PATTERN = re.compile(r'^ymrgtbs_cd_(\d{6})\.parquet(\.dvc)?$')
+END_PATTERN = re.compile(r'^ymrgtbe_cd_(\d{6})\.parquet(\.dvc)?$')
 
 
 def lit(v) -> str:
@@ -49,7 +49,7 @@ def discover_months(side: str) -> list[str]:
 
 
 def parquet_path(ym: str, side: str) -> Path:
-    name = f'ymrsgtb_cd_{ym}.parquet' if side == 'start' else f'ymregtb_cd_{ym}.parquet'
+    name = f'ymrgtbs_cd_{ym}.parquet' if side == 'start' else f'ymrgtbe_cd_{ym}.parquet'
     return AGG_DIR / name
 
 
