@@ -72,6 +72,14 @@ async function getStationDay(
 	}
 }
 
+/** Look up capacity (and other metadata) for a station, by GBFS UUID. */
+async function getStationCapacity(db: D1Database, gbfsId: string): Promise<number | null> {
+	const row = await db.prepare(
+		`SELECT capacity FROM stations WHERE gbfs_station_id = ?`
+	).bind(gbfsId).first<{ capacity: number | null }>();
+	return row?.capacity ?? null;
+}
+
 async function dropOldTables(db: D1Database, retainDays: number): Promise<string> {
 	const cutoff = new Date(Date.now() - retainDays * 86400000).toISOString().slice(0, 10);
 	const old = await db.prepare(
@@ -130,8 +138,11 @@ export default {
 		if (todayMatch) {
 			const stationId = decodeURIComponent(todayMatch[1]);
 			const dateStr = todayUtc();
-			const rows = await getStationDay(env.DB, stationId, dateStr);
-			return jsonResponse({ station_id: stationId, date: dateStr, rows }, env);
+			const [rows, capacity] = await Promise.all([
+				getStationDay(env.DB, stationId, dateStr),
+				getStationCapacity(env.DB, stationId),
+			]);
+			return jsonResponse({ station_id: stationId, date: dateStr, capacity, rows }, env);
 		}
 
 		// /api/stations/:id/range?date=YYYY-MM-DD
@@ -142,8 +153,11 @@ export default {
 			if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
 				return errorResponse(`Invalid date: ${dateStr} (expected YYYY-MM-DD)`, 400, env);
 			}
-			const rows = await getStationDay(env.DB, stationId, dateStr);
-			return jsonResponse({ station_id: stationId, date: dateStr, rows }, env);
+			const [rows, capacity] = await Promise.all([
+				getStationDay(env.DB, stationId, dateStr),
+				getStationCapacity(env.DB, stationId),
+			]);
+			return jsonResponse({ station_id: stationId, date: dateStr, capacity, rows }, env);
 		}
 
 		return errorResponse('Not found', 404, env);
