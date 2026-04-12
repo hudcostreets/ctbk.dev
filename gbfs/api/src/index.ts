@@ -112,6 +112,19 @@ export default {
 			return jsonResponse({ status: 'ok' }, env);
 		}
 
+		// /api/stations/:id/info — accepts UUID or short_name
+		const infoMatch = url.pathname.match(/^\/api\/stations\/([^/]+)\/info$/);
+		if (infoMatch) {
+			const id = decodeURIComponent(infoMatch[1]);
+			const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(id);
+			const sql = isUuid
+				? `SELECT * FROM stations WHERE gbfs_station_id = ?`
+				: `SELECT * FROM stations WHERE short_name = ?`;
+			const result = await env.DB.prepare(sql).bind(id).first();
+			if (!result) return errorResponse(`Station not found: ${id}`, 404, env);
+			return jsonResponse(result, env);
+		}
+
 		// /api/stations/:id/today
 		const todayMatch = url.pathname.match(/^\/api\/stations\/([^/]+)\/today$/);
 		if (todayMatch) {
