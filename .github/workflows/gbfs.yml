@@ -1,25 +1,87 @@
-name: Deploy GBFS Worker
+name: Deploy GBFS Workers
 on:
   push:
     branches: [main]
-    paths: ['gbfs/worker/**']
+    paths:
+      - 'gbfs/worker/**'
+      - 'gbfs/loader/**'
+      - 'gbfs/api/**'
+      - '.github/workflows/gbfs.yml'
   workflow_dispatch:
+    inputs:
+      worker:
+        description: 'Worker to deploy (default: all)'
+        required: false
+        type: choice
+        options: [all, worker, loader, api]
+        default: all
 
 jobs:
-  deploy:
+  detect-changes:
     runs-on: ubuntu-latest
+    outputs:
+      worker: ${{ steps.filter.outputs.worker }}
+      loader: ${{ steps.filter.outputs.loader }}
+      api: ${{ steps.filter.outputs.api }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            worker:
+              - 'gbfs/worker/**'
+            loader:
+              - 'gbfs/loader/**'
+            api:
+              - 'gbfs/api/**'
+
+  deploy:
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [worker, loader, api]
+    steps:
+      - name: Check if this worker should deploy
+        id: should
+        run: |
+          want="${{ inputs.worker || 'all' }}"
+          if [ "$want" = "all" ]; then
+            case "${{ matrix.worker }}" in
+              worker) deploy="${{ needs.detect-changes.outputs.worker }}";;
+              loader) deploy="${{ needs.detect-changes.outputs.loader }}";;
+              api)    deploy="${{ needs.detect-changes.outputs.api }}";;
+            esac
+          elif [ "$want" = "${{ matrix.worker }}" ]; then
+            deploy=true
+          else
+            deploy=false
+          fi
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+          echo "Deploy ${{ matrix.worker }}: $deploy"
+
+      - if: steps.should.outputs.deploy == 'true'
+        uses: actions/checkout@v4
+
+      - if: steps.should.outputs.deploy == 'true'
+        uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - uses: pnpm/action-setup@v4
+
+      - if: steps.should.outputs.deploy == 'true'
+        uses: pnpm/action-setup@v4
         with:
           version: 10
-      - run: pnpm install --frozen-lockfile
-        working-directory: gbfs/worker
-      - run: npx wrangler deploy
-        working-directory: gbfs/worker
+
+      - if: steps.should.outputs.deploy == 'true'
+        run: pnpm install --frozen-lockfile
+        working-directory: gbfs/${{ matrix.worker }}
+
+      - if: steps.should.outputs.deploy == 'true'
+        run: npx wrangler deploy
+        working-directory: gbfs/${{ matrix.worker }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

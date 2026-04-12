@@ -61,3 +61,14 @@ pulumi.export('d1_database_id', gbfs_db.id)
 pulumi.export('d1_database_name', gbfs_db.name)
 pulumi.export('queue_id', gbfs_events_queue.queue_id)
 pulumi.export('queue_name', gbfs_events_queue.queue_name)
+
+# ── Workers (deployed via wrangler from gbfs/{worker,loader,api}/) ────
+# Not managed by Pulumi (wrangler is authoritative for script content),
+# but recorded here for documentation. Bindings in each wrangler.toml
+# reference the Pulumi-provisioned resources above.
+WORKERS = {
+    'ctbk-gbfs-poller':  'gbfs/worker',  # cron */1 *: poll GBFS → R2
+    'ctbk-gbfs-loader':  'gbfs/loader',  # queue consumer: R2 events → D1
+    'ctbk-gbfs-api':     'gbfs/api',     # HTTP API: D1 reads, daily cleanup cron
+}
+pulumi.export('workers', WORKERS)

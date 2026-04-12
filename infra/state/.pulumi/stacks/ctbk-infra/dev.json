@@ -4,7 +4,7 @@
         "stack": "organization/ctbk-infra/dev",
         "latest": {
             "manifest": {
-                "time": "2026-04-11T21:45:43.246786-04:00",
+                "time": "2026-04-11T22:36:04.12804-04:00",
                 "magic": "d356bec6413f613372e5158db9b9441f6f60fd81ed9a5e4980d2b8af2faf06fd",
                 "version": "v3.228.0"
             },
@@ -24,7 +24,12 @@
                         "d1_database_name": "ctbk-gbfs",
                         "queue_id": "6537322612bf4734a26284109ceb1661",
                         "queue_name": "gbfs-status-events",
-                        "r2_bucket": "ctbk"
+                        "r2_bucket": "ctbk",
+                        "workers": {
+                            "ctbk-gbfs-api": "gbfs/api",
+                            "ctbk-gbfs-loader": "gbfs/loader",
+                            "ctbk-gbfs-poller": "gbfs/worker"
+                        }
                     },
                     "created": "2026-04-12T01:36:37.346907Z",
                     "modified": "2026-04-12T01:36:37.346907Z",
@@ -70,6 +75,101 @@
                     },
                     "created": "2026-04-12T01:36:37.435781Z",
                     "modified": "2026-04-12T01:36:37.435781Z"
+                },
+                {
+                    "urn": "urn:pulumi:dev::ctbk-infra::cloudflare:index/queue:Queue::gbfs-status-events",
+                    "custom": true,
+                    "id": "6537322612bf4734a26284109ceb1661",
+                    "type": "cloudflare:index/queue:Queue",
+                    "inputs": {
+                        "accountId": "0dcad5654e9744de6616f74b8df4af63",
+                        "queueName": "gbfs-status-events"
+                    },
+                    "outputs": {
+                        "__meta": "{\"schema_version\":\"1\"}",
+                        "__pulumi_raw_state_delta": {
+                            "obj": {
+                                "ps": {
+                                    "consumers": {
+                                        "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+                                        "ciphertext": "v1:QOSp6/bnbvUdcN7k:471QksiCc+chTInemInHFL33JRmQjaLppSEFaChW0Z2t/5J3qnWNkA=="
+                                    },
+                                    "producers": {
+                                        "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+                                        "ciphertext": "v1:FZo+GAfZaecbiLwX:V2/5yqVzg+ZQ9yrPmhb2s3qwIzvRStEYidgs03PeDZYLsNxYysI8gQ=="
+                                    },
+                                    "settings": {
+                                        "obj": {
+                                            "ps": {
+                                                "deliveryPaused": {
+                                                    "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+                                                    "ciphertext": "v1:tVp8wLxekVSuvCOP:9RLJMtRxb7zD/6hIeNfar37dXx6Q1Y5XDajlZhwAPGEdGSIrKRhVlw=="
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "accountId": "0dcad5654e9744de6616f74b8df4af63",
+                        "consumersTotalCount": 0,
+                        "createdOn": "2026-04-12T01:36:37.689291Z",
+                        "id": "6537322612bf4734a26284109ceb1661",
+                        "modifiedOn": "2026-04-12T01:36:37.689291Z",
+                        "producersTotalCount": 0,
+                        "queueId": "6537322612bf4734a26284109ceb1661",
+                        "queueName": "gbfs-status-events",
+                        "settings": {
+                            "deliveryDelay": 0,
+                            "messageRetentionPeriod": 345600
+                        }
+                    },
+                    "parent": "urn:pulumi:dev::ctbk-infra::pulumi:pulumi:Stack::ctbk-infra-dev",
+                    "provider": "urn:pulumi:dev::ctbk-infra::pulumi:providers:cloudflare::default_6_14_0::c42ae4d0-a15c-4bcd-8088-37247e980387",
+                    "propertyDependencies": {
+                        "accountId": [],
+                        "queueName": []
+                    },
+                    "created": "2026-04-12T01:36:38.595658Z",
+                    "modified": "2026-04-12T01:36:38.595658Z",
+                    "sourcePosition": "project:///__main__.py#37",
+                    "stackTrace": [
+                        {
+                            "sourcePosition": "project:///__main__.py#37"
+                        },
+                        {},
+                        {},
+                        {
+                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#188"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#214"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#185"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#83"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#188"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/events.py#89"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#2050"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#683"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#712"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#232"
+                        }
+                    ]
                 },
                 {
                     "urn": "urn:pulumi:dev::ctbk-infra::cloudflare:index/r2Bucket:R2Bucket::ctbk",
@@ -145,65 +245,54 @@
                     ]
                 },
                 {
-                    "urn": "urn:pulumi:dev::ctbk-infra::cloudflare:index/queue:Queue::gbfs-status-events",
+                    "urn": "urn:pulumi:dev::ctbk-infra::cloudflare:index/d1Database:D1Database::ctbk-gbfs",
                     "custom": true,
-                    "id": "6537322612bf4734a26284109ceb1661",
-                    "type": "cloudflare:index/queue:Queue",
+                    "id": "d5746734-70ba-46aa-8780-be09e4837f0b",
+                    "type": "cloudflare:index/d1Database:D1Database",
                     "inputs": {
                         "accountId": "0dcad5654e9744de6616f74b8df4af63",
-                        "queueName": "gbfs-status-events"
+                        "name": "ctbk-gbfs"
                     },
                     "outputs": {
-                        "__meta": "{\"schema_version\":\"1\"}",
                         "__pulumi_raw_state_delta": {
                             "obj": {
                                 "ps": {
-                                    "consumers": {
+                                    "jurisdiction": {
                                         "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
-                                        "ciphertext": "v1:pHa5Fft2cqjC0R6K:0/QuAIFafatGbRLB5kdTYek4nR1M50sHS4oajY6ap0C6VLUJYb8n3g=="
+                                        "ciphertext": "v1:SZzjKV/QTVw1RZLs:BnxzTWhlI7wGTVnP0SsyaAu0QJm7OtBQGS88a4N70F0ZAHDv52bLdQ=="
                                     },
-                                    "producers": {
+                                    "primaryLocationHint": {
                                         "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
-                                        "ciphertext": "v1:7cP29zn1phydimVg:jNtlLNWqZcBLxanIrwuhavhAb96S0OTLv40pCNdD5G/fdOal32UDwQ=="
+                                        "ciphertext": "v1:nt1a+UFAQmqvsW/n:VWXvOPfQQpzD+Mflr63AlEw6y3w4YNhROCDEq4Re6KQ7vEb7eEpAbw=="
                                     },
-                                    "settings": {
-                                        "obj": {
-                                            "ps": {
-                                                "deliveryPaused": {
-                                                    "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
-                                                    "ciphertext": "v1:1JziuFtsxy6lynVl:PQ9oWn5hg/jvvjDAtSR5n1IascNLhg9CiuKBQkTBKm2R6V29Src8sg=="
-                                                }
-                                            }
-                                        }
+                                    "readReplication": {
+                                        "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+                                        "ciphertext": "v1:WuU7EfB5uVTMQPmY:kYD5OPCFIhviUuaSNsUaXV01WmlzqElUr5k4Aav2gkZCVRP3OuFjEg=="
                                     }
                                 }
                             }
                         },
                         "accountId": "0dcad5654e9744de6616f74b8df4af63",
-                        "consumersTotalCount": 0,
-                        "createdOn": "2026-04-12T01:36:37.689291Z",
-                        "id": "6537322612bf4734a26284109ceb1661",
-                        "modifiedOn": "2026-04-12T01:36:37.689291Z",
-                        "producersTotalCount": 0,
-                        "queueId": "6537322612bf4734a26284109ceb1661",
-                        "queueName": "gbfs-status-events",
-                        "settings": {
-                            "deliveryDelay": 0,
-                            "messageRetentionPeriod": 345600
-                        }
+                        "createdAt": "2026-04-12T01:45:43Z",
+                        "fileSize": 8192,
+                        "id": "d5746734-70ba-46aa-8780-be09e4837f0b",
+                        "name": "ctbk-gbfs",
+                        "numTables": 0,
+                        "uuid": "d5746734-70ba-46aa-8780-be09e4837f0b",
+                        "version": "production"
                     },
                     "parent": "urn:pulumi:dev::ctbk-infra::pulumi:pulumi:Stack::ctbk-infra-dev",
                     "provider": "urn:pulumi:dev::ctbk-infra::pulumi:providers:cloudflare::default_6_14_0::c42ae4d0-a15c-4bcd-8088-37247e980387",
                     "propertyDependencies": {
                         "accountId": [],
-                        "queueName": []
+                        "name": []
                     },
-                    "created": "2026-04-12T01:36:38.595658Z",
-                    "modified": "2026-04-12T01:36:38.595658Z",
-                    "sourcePosition": "project:///__main__.py#37",
+                    "created": "2026-04-12T01:45:43.237428Z",
+                    "modified": "2026-04-12T01:45:43.237428Z",
+                    "sourcePosition": "project:///__main__.py#30",
                     "stackTrace": [
                         {
-                            "sourcePosition": "project:///__main__.py#37"
+                            "sourcePosition": "project:///__main__.py#30"
                         },
                         {},
                         {},
@@ -264,7 +353,7 @@
                                 "ps": {
                                     "queueName": {
                                         "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
-                                        "ciphertext": "v1:3PbfZFnj/5asRNnx:UX3h6qLKjqNQrZxycuwvdPnyYhhVl7bwcS2mwC9fmZZme2wrpKag/A=="
+                                        "ciphertext": "v1:D0bYEnjD5XhAnvLW:yor4kILdQb1URsv3QC3SIfepalhs/hHDSwUpqeicuSvMZc5nwX7cxg=="
                                     },
                                     "rules": {
                                         "arr": {
@@ -277,7 +366,7 @@
                                                             },
                                                             "description": {
                                                                 "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
-                                                                "ciphertext": "v1:3/92tQgzrcXDsdsi:XclMcPzKy0KGY5LVzQsg8+xp+K+piSSn3fu4p8ee8SBhtaFOrp4Wpw=="
+                                                                "ciphertext": "v1:jnQMas1poHwT9RPF:6wM9UK30J9HrQiUtYo3DHT9H/O/F4/qzdXok6DTSfA3XrPywxcglNA=="
                                                             }
                                                         }
                                                     }
@@ -304,8 +393,8 @@
                     },
                     "parent": "urn:pulumi:dev::ctbk-infra::pulumi:pulumi:Stack::ctbk-infra-dev",
                     "dependencies": [
-                        "urn:pulumi:dev::ctbk-infra::cloudflare:index/queue:Queue::gbfs-status-events",
-                        "urn:pulumi:dev::ctbk-infra::cloudflare:index/r2Bucket:R2Bucket::ctbk"
+                        "urn:pulumi:dev::ctbk-infra::cloudflare:index/r2Bucket:R2Bucket::ctbk",
+                        "urn:pulumi:dev::ctbk-infra::cloudflare:index/queue:Queue::gbfs-status-events"
                     ],
                     "provider": "urn:pulumi:dev::ctbk-infra::pulumi:providers:cloudflare::default_6_14_0::c42ae4d0-a15c-4bcd-8088-37247e980387",
                     "propertyDependencies": {
@@ -324,90 +413,6 @@
                     "stackTrace": [
                         {
                             "sourcePosition": "project:///__main__.py#44"
-                        },
-                        {},
-                        {},
-                        {
-                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#188"
-                        },
-                        {
-                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#214"
-                        },
-                        {
-                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#185"
-                        },
-                        {
-                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#83"
-                        },
-                        {
-                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#188"
-                        },
-                        {
-                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/events.py#89"
-                        },
-                        {
-                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#2050"
-                        },
-                        {
-                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#683"
-                        },
-                        {
-                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#712"
-                        },
-                        {
-                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#232"
-                        }
-                    ]
-                },
-                {
-                    "urn": "urn:pulumi:dev::ctbk-infra::cloudflare:index/d1Database:D1Database::ctbk-gbfs",
-                    "custom": true,
-                    "id": "d5746734-70ba-46aa-8780-be09e4837f0b",
-                    "type": "cloudflare:index/d1Database:D1Database",
-                    "inputs": {
-                        "accountId": "0dcad5654e9744de6616f74b8df4af63",
-                        "name": "ctbk-gbfs"
-                    },
-                    "outputs": {
-                        "__pulumi_raw_state_delta": {
-                            "obj": {
-                                "ps": {
-                                    "jurisdiction": {
-                                        "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
-                                        "ciphertext": "v1:RY9sPqGws9h9UlPS:umhfcaJomRl0SwxoPvsmn/8/QjALGvygevoYqBxBUITYOVltQig/6w=="
-                                    },
-                                    "primaryLocationHint": {
-                                        "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
-                                        "ciphertext": "v1:CX9pESwiVRUvU6PW:Ve5K3vDlAJIStQsZY5oeLHJoRIqllqtJTutZi0281s3NqaZ6EGNVFQ=="
-                                    },
-                                    "readReplication": {
-                                        "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
-                                        "ciphertext": "v1:mOomq8rvub88J5wk:30toKFHKw8BZ+gxyu/tG71Tk4pKLT27+GzuhxpnUWE/SjKMOpLk/MA=="
-                                    }
-                                }
-                            }
-                        },
-                        "accountId": "0dcad5654e9744de6616f74b8df4af63",
-                        "createdAt": "2026-04-12T01:45:43Z",
-                        "fileSize": 8192,
-                        "id": "d5746734-70ba-46aa-8780-be09e4837f0b",
-                        "name": "ctbk-gbfs",
-                        "numTables": 0,
-                        "uuid": "d5746734-70ba-46aa-8780-be09e4837f0b",
-                        "version": "production"
-                    },
-                    "parent": "urn:pulumi:dev::ctbk-infra::pulumi:pulumi:Stack::ctbk-infra-dev",
-                    "provider": "urn:pulumi:dev::ctbk-infra::pulumi:providers:cloudflare::default_6_14_0::c42ae4d0-a15c-4bcd-8088-37247e980387",
-                    "propertyDependencies": {
-                        "accountId": [],
-                        "name": []
-                    },
-                    "created": "2026-04-12T01:45:43.237428Z",
-                    "modified": "2026-04-12T01:45:43.237428Z",
-                    "sourcePosition": "project:///__main__.py#30",
-                    "stackTrace": [
-                        {
-                            "sourcePosition": "project:///__main__.py#30"
                         },
                         {},
                         {},
