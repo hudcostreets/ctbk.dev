@@ -7,5 +7,5 @@ from .stations.modes import ModesMonthJson, ModesMonthJsons
 from .stations.pair_jsons import StationPairsJson, StationPairsJsons
 
 from . import zips, import_zips, csvs, normalized, partition, consolidated, aggregated, ymrgtb_cd, stage_dag, update
-from .stations import meta_hists, modes, pair_jsons, harmonize
+from .stations import meta_hists, modes, pair_jsons, harmonize, trips_jsons
 from .cli import yms
