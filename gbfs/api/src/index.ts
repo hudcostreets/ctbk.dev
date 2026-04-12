@@ -173,6 +173,46 @@ export default {
 			return jsonResponse({ station_id: gbfsId, date: dateStr, capacity, rows }, env);
 		}
 
+		// /api/stations/:id/trips — monthly trip aggregates (start + end side)
+		// Returns rows in homepage `Row` shape (Year/Month/Count/Duration/Region/...)
+		// plus an `is_start` boolean. Frontend filters/groups as needed.
+		const tripsMatch = url.pathname.match(/^\/api\/stations\/([^/]+)\/trips$/);
+		if (tripsMatch) {
+			const id = decodeURIComponent(tripsMatch[1]);
+			const station = await lookupStation(env.DB, id);
+			if (!station) return errorResponse(`Station not found: ${id}`, 404, env);
+			const shortName = station.short_name as string;
+
+			const result = await env.DB.prepare(
+				`SELECT ym, is_start, region, gender, user_type, bike_type, trips, duration_s
+				 FROM station_trips_monthly
+				 WHERE short_name = ?
+				 ORDER BY ym, is_start`
+			).bind(shortName).all();
+
+			// Reshape to homepage Row format
+			const rows = (result.results as any[]).map((r) => ({
+				Year: parseInt(r.ym.slice(0, 4), 10),
+				Month: parseInt(r.ym.slice(4, 6), 10),
+				Count: r.trips,
+				Duration: r.duration_s,
+				Region: r.region,
+				'User Type': r.user_type,
+				Gender: r.gender,
+				'Rideable Type': r.bike_type,
+				is_start: r.is_start === 1,
+			}));
+
+			return jsonResponse({
+				station_id: shortName,
+				short_name: shortName,
+				slug: station.slug,
+				rows,
+			}, env, {
+				headers: { 'Cache-Control': 'public, max-age=86400' },  // 1 day
+			});
+		}
+
 		// /api/stations/:id/range?date=YYYY-MM-DD
 		const rangeMatch = url.pathname.match(/^\/api\/stations\/([^/]+)\/range$/);
 		if (rangeMatch) {

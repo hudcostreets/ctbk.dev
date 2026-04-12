@@ -47,3 +47,31 @@ CREATE TABLE IF NOT EXISTS stations (
   updated_at INTEGER NOT NULL      -- unix timestamp of last upsert
 );
 CREATE INDEX IF NOT EXISTS idx_stations_gbfs_id ON stations(gbfs_station_id);
+
+-- Per-station monthly trip counts and durations.
+-- Loaded from `aggregated/ymrsgtb_cd_<ym>.parquet` (is_start=1) and
+-- `aggregated/ymregtb_cd_<ym>.parquet` (is_start=0). Together: ~6M rows
+-- across all months / dim combinations. Drives the /s/:slug trips chart.
+CREATE TABLE IF NOT EXISTS station_trips_monthly (
+  short_name TEXT NOT NULL,
+  ym TEXT NOT NULL,            -- YYYYMM
+  is_start INTEGER NOT NULL,   -- 1 = trip started here, 0 = trip ended here
+  region TEXT,                 -- 'NYC' | 'JC'
+  gender INTEGER,              -- 0/1/2 (unknown/male/female; sometimes missing)
+  user_type TEXT,              -- 'Subscriber' | 'Customer'
+  bike_type TEXT,              -- 'classic' | 'electric'
+  trips INTEGER NOT NULL,
+  duration_s INTEGER NOT NULL,
+  PRIMARY KEY (short_name, ym, is_start, region, gender, user_type, bike_type)
+);
+CREATE INDEX IF NOT EXISTS idx_trips_short_name ON station_trips_monthly(short_name, ym);
+
+-- Tracks which (ym, side) batches have been loaded into station_trips_monthly,
+-- so the loader can be incremental.
+CREATE TABLE IF NOT EXISTS trips_loaded (
+  ym TEXT NOT NULL,
+  is_start INTEGER NOT NULL,
+  loaded_at INTEGER NOT NULL,
+  row_count INTEGER NOT NULL,
+  PRIMARY KEY (ym, is_start)
+);
