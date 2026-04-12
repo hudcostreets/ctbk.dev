@@ -1,0 +1,10 @@
+*.pyc
+venv/
+__pycache__/
+
+# Pulumi local backend internals — only commit the canonical stack state file
+state/.pulumi/backups/
+state/.pulumi/history/
+state/.pulumi/locks/
+state/.pulumi/stacks/*/*.bak
+state/.pulumi/stacks/*/*.bak.attrs

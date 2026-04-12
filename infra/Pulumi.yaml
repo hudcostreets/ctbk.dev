@@ -1,0 +1,13 @@
+name: ctbk-infra
+description: Cloudflare infra for ctbk.dev
+runtime:
+  name: python
+  options:
+    toolchain: pip
+    virtualenv: venv
+backend:
+  url: file://./state
+config:
+  pulumi:tags:
+    value:
+      pulumi:template: python

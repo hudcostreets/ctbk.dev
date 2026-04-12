@@ -1,0 +1,450 @@
+{
+    "version": 3,
+    "checkpoint": {
+        "stack": "organization/ctbk-infra/dev",
+        "latest": {
+            "manifest": {
+                "time": "2026-04-11T21:45:43.246786-04:00",
+                "magic": "d356bec6413f613372e5158db9b9441f6f60fd81ed9a5e4980d2b8af2faf06fd",
+                "version": "v3.228.0"
+            },
+            "secrets_providers": {
+                "type": "passphrase",
+                "state": {
+                    "salt": "v1:gP3+hAIywDA=:v1:gx4D6Gr6Im9KmLpV:jSbS0jlbbPzl4oInNtlwfNqeJavpWA=="
+                }
+            },
+            "resources": [
+                {
+                    "urn": "urn:pulumi:dev::ctbk-infra::pulumi:pulumi:Stack::ctbk-infra-dev",
+                    "custom": false,
+                    "type": "pulumi:pulumi:Stack",
+                    "outputs": {
+                        "d1_database_id": "d5746734-70ba-46aa-8780-be09e4837f0b",
+                        "d1_database_name": "ctbk-gbfs",
+                        "queue_id": "6537322612bf4734a26284109ceb1661",
+                        "queue_name": "gbfs-status-events",
+                        "r2_bucket": "ctbk"
+                    },
+                    "created": "2026-04-12T01:36:37.346907Z",
+                    "modified": "2026-04-12T01:36:37.346907Z",
+                    "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#185",
+                    "stackTrace": [
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#185"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#83"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#188"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/events.py#89"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#2050"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#683"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#712"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#232"
+                        }
+                    ]
+                },
+                {
+                    "urn": "urn:pulumi:dev::ctbk-infra::pulumi:providers:cloudflare::default_6_14_0",
+                    "custom": true,
+                    "id": "c42ae4d0-a15c-4bcd-8088-37247e980387",
+                    "type": "pulumi:providers:cloudflare",
+                    "inputs": {
+                        "__internal": {},
+                        "version": "6.14.0"
+                    },
+                    "outputs": {
+                        "version": "6.14.0"
+                    },
+                    "created": "2026-04-12T01:36:37.435781Z",
+                    "modified": "2026-04-12T01:36:37.435781Z"
+                },
+                {
+                    "urn": "urn:pulumi:dev::ctbk-infra::cloudflare:index/r2Bucket:R2Bucket::ctbk",
+                    "custom": true,
+                    "id": "ctbk",
+                    "type": "cloudflare:index/r2Bucket:R2Bucket",
+                    "inputs": {
+                        "accountId": "0dcad5654e9744de6616f74b8df4af63",
+                        "location": "ENAM",
+                        "name": "ctbk"
+                    },
+                    "outputs": {
+                        "__meta": "{\"schema_version\":\"1\"}",
+                        "__pulumi_raw_state_delta": {
+                            "obj": {}
+                        },
+                        "accountId": "0dcad5654e9744de6616f74b8df4af63",
+                        "creationDate": "2026-04-06T23:17:38.381Z",
+                        "id": "ctbk",
+                        "jurisdiction": "default",
+                        "location": "ENAM",
+                        "name": "ctbk",
+                        "storageClass": "Standard"
+                    },
+                    "parent": "urn:pulumi:dev::ctbk-infra::pulumi:pulumi:Stack::ctbk-infra-dev",
+                    "protect": true,
+                    "provider": "urn:pulumi:dev::ctbk-infra::pulumi:providers:cloudflare::default_6_14_0::c42ae4d0-a15c-4bcd-8088-37247e980387",
+                    "propertyDependencies": {
+                        "accountId": [],
+                        "location": [],
+                        "name": []
+                    },
+                    "importID": "0dcad5654e9744de6616f74b8df4af63/ctbk/default",
+                    "created": "2026-04-12T01:36:39.056364Z",
+                    "modified": "2026-04-12T01:36:39.056364Z",
+                    "sourcePosition": "project:///__main__.py#18",
+                    "stackTrace": [
+                        {
+                            "sourcePosition": "project:///__main__.py#18"
+                        },
+                        {},
+                        {},
+                        {
+                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#188"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#214"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#185"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#83"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#188"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/events.py#89"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#2050"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#683"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#712"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#232"
+                        }
+                    ]
+                },
+                {
+                    "urn": "urn:pulumi:dev::ctbk-infra::cloudflare:index/queue:Queue::gbfs-status-events",
+                    "custom": true,
+                    "id": "6537322612bf4734a26284109ceb1661",
+                    "type": "cloudflare:index/queue:Queue",
+                    "inputs": {
+                        "accountId": "0dcad5654e9744de6616f74b8df4af63",
+                        "queueName": "gbfs-status-events"
+                    },
+                    "outputs": {
+                        "__meta": "{\"schema_version\":\"1\"}",
+                        "__pulumi_raw_state_delta": {
+                            "obj": {
+                                "ps": {
+                                    "consumers": {
+                                        "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+                                        "ciphertext": "v1:pHa5Fft2cqjC0R6K:0/QuAIFafatGbRLB5kdTYek4nR1M50sHS4oajY6ap0C6VLUJYb8n3g=="
+                                    },
+                                    "producers": {
+                                        "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+                                        "ciphertext": "v1:7cP29zn1phydimVg:jNtlLNWqZcBLxanIrwuhavhAb96S0OTLv40pCNdD5G/fdOal32UDwQ=="
+                                    },
+                                    "settings": {
+                                        "obj": {
+                                            "ps": {
+                                                "deliveryPaused": {
+                                                    "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+                                                    "ciphertext": "v1:1JziuFtsxy6lynVl:PQ9oWn5hg/jvvjDAtSR5n1IascNLhg9CiuKBQkTBKm2R6V29Src8sg=="
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "accountId": "0dcad5654e9744de6616f74b8df4af63",
+                        "consumersTotalCount": 0,
+                        "createdOn": "2026-04-12T01:36:37.689291Z",
+                        "id": "6537322612bf4734a26284109ceb1661",
+                        "modifiedOn": "2026-04-12T01:36:37.689291Z",
+                        "producersTotalCount": 0,
+                        "queueId": "6537322612bf4734a26284109ceb1661",
+                        "queueName": "gbfs-status-events",
+                        "settings": {
+                            "deliveryDelay": 0,
+                            "messageRetentionPeriod": 345600
+                        }
+                    },
+                    "parent": "urn:pulumi:dev::ctbk-infra::pulumi:pulumi:Stack::ctbk-infra-dev",
+                    "provider": "urn:pulumi:dev::ctbk-infra::pulumi:providers:cloudflare::default_6_14_0::c42ae4d0-a15c-4bcd-8088-37247e980387",
+                    "propertyDependencies": {
+                        "accountId": [],
+                        "queueName": []
+                    },
+                    "created": "2026-04-12T01:36:38.595658Z",
+                    "modified": "2026-04-12T01:36:38.595658Z",
+                    "sourcePosition": "project:///__main__.py#37",
+                    "stackTrace": [
+                        {
+                            "sourcePosition": "project:///__main__.py#37"
+                        },
+                        {},
+                        {},
+                        {
+                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#188"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#214"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#185"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#83"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#188"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/events.py#89"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#2050"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#683"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#712"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#232"
+                        }
+                    ]
+                },
+                {
+                    "urn": "urn:pulumi:dev::ctbk-infra::cloudflare:index/r2BucketEventNotification:R2BucketEventNotification::gbfs-status-events-notification",
+                    "custom": true,
+                    "id": "0dcad5654e9744de6616f74b8df4af63",
+                    "type": "cloudflare:index/r2BucketEventNotification:R2BucketEventNotification",
+                    "inputs": {
+                        "accountId": "0dcad5654e9744de6616f74b8df4af63",
+                        "bucketName": "ctbk",
+                        "queueId": "6537322612bf4734a26284109ceb1661",
+                        "rules": [
+                            {
+                                "actions": [
+                                    "PutObject"
+                                ],
+                                "prefix": "gbfs/status/",
+                                "suffix": ".json"
+                            }
+                        ]
+                    },
+                    "outputs": {
+                        "__pulumi_raw_state_delta": {
+                            "obj": {
+                                "ps": {
+                                    "queueName": {
+                                        "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+                                        "ciphertext": "v1:3PbfZFnj/5asRNnx:UX3h6qLKjqNQrZxycuwvdPnyYhhVl7bwcS2mwC9fmZZme2wrpKag/A=="
+                                    },
+                                    "rules": {
+                                        "arr": {
+                                            "el": {
+                                                "0": {
+                                                    "obj": {
+                                                        "ps": {
+                                                            "actions": {
+                                                                "arr": {}
+                                                            },
+                                                            "description": {
+                                                                "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+                                                                "ciphertext": "v1:3/92tQgzrcXDsdsi:XclMcPzKy0KGY5LVzQsg8+xp+K+piSSn3fu4p8ee8SBhtaFOrp4Wpw=="
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "accountId": "0dcad5654e9744de6616f74b8df4af63",
+                        "bucketName": "ctbk",
+                        "jurisdiction": "default",
+                        "queueId": "6537322612bf4734a26284109ceb1661",
+                        "rules": [
+                            {
+                                "actions": [
+                                    "PutObject"
+                                ],
+                                "prefix": "gbfs/status/",
+                                "suffix": ".json"
+                            }
+                        ]
+                    },
+                    "parent": "urn:pulumi:dev::ctbk-infra::pulumi:pulumi:Stack::ctbk-infra-dev",
+                    "dependencies": [
+                        "urn:pulumi:dev::ctbk-infra::cloudflare:index/queue:Queue::gbfs-status-events",
+                        "urn:pulumi:dev::ctbk-infra::cloudflare:index/r2Bucket:R2Bucket::ctbk"
+                    ],
+                    "provider": "urn:pulumi:dev::ctbk-infra::pulumi:providers:cloudflare::default_6_14_0::c42ae4d0-a15c-4bcd-8088-37247e980387",
+                    "propertyDependencies": {
+                        "accountId": [],
+                        "bucketName": [
+                            "urn:pulumi:dev::ctbk-infra::cloudflare:index/r2Bucket:R2Bucket::ctbk"
+                        ],
+                        "queueId": [
+                            "urn:pulumi:dev::ctbk-infra::cloudflare:index/queue:Queue::gbfs-status-events"
+                        ],
+                        "rules": []
+                    },
+                    "created": "2026-04-12T01:45:42.963055Z",
+                    "modified": "2026-04-12T01:45:42.963055Z",
+                    "sourcePosition": "project:///__main__.py#44",
+                    "stackTrace": [
+                        {
+                            "sourcePosition": "project:///__main__.py#44"
+                        },
+                        {},
+                        {},
+                        {
+                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#188"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#214"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#185"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#83"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#188"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/events.py#89"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#2050"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#683"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#712"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#232"
+                        }
+                    ]
+                },
+                {
+                    "urn": "urn:pulumi:dev::ctbk-infra::cloudflare:index/d1Database:D1Database::ctbk-gbfs",
+                    "custom": true,
+                    "id": "d5746734-70ba-46aa-8780-be09e4837f0b",
+                    "type": "cloudflare:index/d1Database:D1Database",
+                    "inputs": {
+                        "accountId": "0dcad5654e9744de6616f74b8df4af63",
+                        "name": "ctbk-gbfs"
+                    },
+                    "outputs": {
+                        "__pulumi_raw_state_delta": {
+                            "obj": {
+                                "ps": {
+                                    "jurisdiction": {
+                                        "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+                                        "ciphertext": "v1:RY9sPqGws9h9UlPS:umhfcaJomRl0SwxoPvsmn/8/QjALGvygevoYqBxBUITYOVltQig/6w=="
+                                    },
+                                    "primaryLocationHint": {
+                                        "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+                                        "ciphertext": "v1:CX9pESwiVRUvU6PW:Ve5K3vDlAJIStQsZY5oeLHJoRIqllqtJTutZi0281s3NqaZ6EGNVFQ=="
+                                    },
+                                    "readReplication": {
+                                        "4dabf18193072939515e22adb298388d": "1b47061264138c4ac30d75fd1eb44270",
+                                        "ciphertext": "v1:mOomq8rvub88J5wk:30toKFHKw8BZ+gxyu/tG71Tk4pKLT27+GzuhxpnUWE/SjKMOpLk/MA=="
+                                    }
+                                }
+                            }
+                        },
+                        "accountId": "0dcad5654e9744de6616f74b8df4af63",
+                        "createdAt": "2026-04-12T01:45:43Z",
+                        "fileSize": 8192,
+                        "id": "d5746734-70ba-46aa-8780-be09e4837f0b",
+                        "name": "ctbk-gbfs",
+                        "numTables": 0,
+                        "uuid": "d5746734-70ba-46aa-8780-be09e4837f0b",
+                        "version": "production"
+                    },
+                    "parent": "urn:pulumi:dev::ctbk-infra::pulumi:pulumi:Stack::ctbk-infra-dev",
+                    "provider": "urn:pulumi:dev::ctbk-infra::pulumi:providers:cloudflare::default_6_14_0::c42ae4d0-a15c-4bcd-8088-37247e980387",
+                    "propertyDependencies": {
+                        "accountId": [],
+                        "name": []
+                    },
+                    "created": "2026-04-12T01:45:43.237428Z",
+                    "modified": "2026-04-12T01:45:43.237428Z",
+                    "sourcePosition": "project:///__main__.py#30",
+                    "stackTrace": [
+                        {
+                            "sourcePosition": "project:///__main__.py#30"
+                        },
+                        {},
+                        {},
+                        {
+                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#188"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#214"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#185"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#83"
+                        },
+                        {
+                            "sourcePosition": "project:///venv/lib/python3.13/site-packages/pulumi/runtime/stack.py#188"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/events.py#89"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#2050"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#683"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/base_events.py#712"
+                        },
+                        {
+                            "sourcePosition": "project:///../../../../../../opt/homebrew/bin/pulumi-language-python-exec#232"
+                        }
+                    ]
+                }
+            ],
+            "metadata": {}
+        }
+    }
+}
