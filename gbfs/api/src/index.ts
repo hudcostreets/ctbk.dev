@@ -58,12 +58,17 @@ async function getStationDay(
 	db: D1Database,
 	stationId: string,
 	dateStr: string,
+	sincePolledAt: number | null = null,
 ): Promise<Record<string, unknown>[]> {
 	const table = tableForDate(dateStr);
 	try {
-		const result = await db.prepare(
-			`SELECT ${COLS.join(',')} FROM ${table} WHERE station_id = ? ORDER BY ts`
-		).bind(stationId).all();
+		const sql = sincePolledAt !== null
+			? `SELECT ${COLS.join(',')} FROM ${table} WHERE station_id = ? AND polled_at > ? ORDER BY ts`
+			: `SELECT ${COLS.join(',')} FROM ${table} WHERE station_id = ? ORDER BY ts`;
+		const stmt = sincePolledAt !== null
+			? db.prepare(sql).bind(stationId, sincePolledAt)
+			: db.prepare(sql).bind(stationId);
+		const result = await stmt.all();
 		return result.results as Record<string, unknown>[];
 	} catch (err: any) {
 		// Table doesn't exist yet (e.g. start of UTC day before first poll lands)
@@ -159,18 +164,35 @@ export default {
 			return jsonResponse(result, env);
 		}
 
-		// /api/stations/:id/today  (id = slug | uuid | short_name)
+		// /api/stations/:id/today?since=<polled_at>  — incremental rows since the last poll
 		const todayMatch = url.pathname.match(/^\/api\/stations\/([^/]+)\/today$/);
 		if (todayMatch) {
 			const id = decodeURIComponent(todayMatch[1]);
 			const gbfsId = await resolveToGbfsId(env.DB, id);
 			if (!gbfsId) return errorResponse(`Station not found: ${id}`, 404, env);
 			const dateStr = todayUtc();
+			const sinceStr = url.searchParams.get('since');
+			const since = sinceStr ? parseInt(sinceStr, 10) : null;
 			const [rows, capacity] = await Promise.all([
-				getStationDay(env.DB, gbfsId, dateStr),
+				getStationDay(env.DB, gbfsId, dateStr, since),
 				getStationCapacity(env.DB, gbfsId),
 			]);
-			return jsonResponse({ station_id: gbfsId, date: dateStr, capacity, rows }, env);
+			// `last_polled_at` = max polled_at across the returned rows, for client-side smart-polling.
+			const lastPolledAt = rows.length
+				? Math.max(...(rows as { polled_at: number }[]).map((r) => r.polled_at))
+				: since;
+			return jsonResponse({
+				station_id: gbfsId,
+				date: dateStr,
+				capacity,
+				rows,
+				last_polled_at: lastPolledAt,
+			}, env, {
+				// Shorter cache for incremental; full /today still gets the 1-min default
+				headers: since !== null
+					? { 'Cache-Control': 'public, max-age=5' }
+					: {},
+			});
 		}
 
 		// /api/stations/:id/trips — monthly trip aggregates (start + end side)

@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Box, CircularProgress, Typography } from '@mui/material'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
 import StationMap, { type Stations, type StationPairCounts } from '../components/StationMap'
 import StationTripsChart, { type TripsRow } from '../components/StationTripsChart'
+import { useSmartPolling } from '../hooks/useSmartPolling'
 
 const API_BASE = 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -27,6 +28,8 @@ interface ApiResponse {
   station_id: string
   date: string
   rows: Row[]
+  capacity: number | null
+  last_polled_at: number | null
 }
 
 interface StationInfo {
@@ -83,7 +86,7 @@ export default function StationDetail() {
     fetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/today`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
+        return r.json() as Promise<ApiResponse>
       })
       .then(setData)
       .catch((e) => setError(String(e)))
@@ -93,6 +96,38 @@ export default function StationDetail() {
       .then((d) => setTripsRows(d.rows ?? []))
       .catch(() => setTripsRows([]))
   }, [id])
+
+  // Smart polling: append new `today` rows synced to the GBFS poll cadence.
+  // Uses `polled_at` as the mtime. Incremental fetch via `?since=<polled_at>`.
+  const dataRef = useRef<ApiResponse | null>(null)
+  useEffect(() => { dataRef.current = data }, [data])
+
+  const refetchIncremental = useCallback(async () => {
+    if (!id) return
+    const lastPolled = dataRef.current?.last_polled_at
+    if (!lastPolled) return
+    const res = await fetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/today?since=${lastPolled}`)
+    if (!res.ok) return
+    const next = (await res.json()) as ApiResponse
+    if (!next.rows.length) return
+    setData((prev) => prev ? {
+      ...prev,
+      rows: [...prev.rows, ...next.rows],
+      last_polled_at: next.last_polled_at ?? prev.last_polled_at,
+    } : next)
+  }, [id])
+
+  const lastModifiedDate = useMemo(
+    () => (data?.last_polled_at ? new Date(data.last_polled_at * 1000) : null),
+    [data?.last_polled_at],
+  )
+
+  useSmartPolling({
+    lastModified: lastModifiedDate,
+    refetch: refetchIncremental,
+    enabled: !!id && !!data,
+    isLatestMode: true,  // /today is always "latest"; historical views aren't implemented yet
+  })
 
   // Load manifest once; default mapMonth to latestMonth
   useEffect(() => {
