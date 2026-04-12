@@ -42,7 +42,13 @@ def git_dvc_commit(fn):
         if msg:
             push_git = False
             if commit_git:
-                if repo.is_dirty():
+                # `git commit -am` only stages modified tracked files; new
+                # .dvc files created by the pipeline are untracked. Stage
+                # them explicitly so they're included in the commit.
+                new_dvc = [f for f in repo.untracked_files if f.endswith('.dvc')]
+                if new_dvc:
+                    repo.index.add(new_dvc)
+                if repo.is_dirty() or repo.index.diff('HEAD'):
                     run('git', 'commit', '-am', msg)
                     step_output('sha', repo.commit().hexsha)
                     if commit_git > 1:
