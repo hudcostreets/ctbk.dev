@@ -1,6 +1,6 @@
 import { Tooltip } from "@mui/material"
 import { useUrlState, boolParam, numberArrayParam } from 'use-prms'
-import { Data, PlotRelayoutEvent } from 'plotly.js'
+import { PlotRelayoutEvent } from 'plotly.js'
 import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
 import Plot from 'react-plotly.js'
 import { Link, useLocation } from 'react-router-dom'
@@ -12,33 +12,23 @@ import { Checklist } from "../components/Checklist"
 import MonthRangePicker from "../components/MonthRangePicker"
 import { Radios } from "../components/Radios"
 import { useTheme } from "../contexts/ThemeContext"
-import { darken } from "../colors"
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts"
 import { DateRange2Dates, dateRangeParam, parseDuration, isDurationBased, isExplicitRange, formatDuration } from "../date-range"
 import {
-  annualizedPercents,
-  annualPercentStr,
-  Colors,
   Gender,
   GenderQueryStrings,
-  GenderRollingAvgCutoff,
   Genders,
-  Int2Gender,
   codesParam,
-  NormalizeRideableType,
   RegionQueryStrings,
   Regions,
   RideableType,
   RideableTypeChars,
   RideableTypes,
-  rollingAvg,
   Row,
   codeParam,
   StackBy,
   StackByQueryStrings,
-  stackKeyDict,
   toYM,
-  UnknownRideableCutoff,
   UserTypeDisplayNames,
   UserTypeQueryStrings,
   UserTypes,
@@ -46,40 +36,15 @@ import {
   YAxisQueryStrings,
   yAxisLabelDict,
 } from '../data'
+import { buildTraces, monthToDate, processData, type ProcessedRow } from '../chart/ymrgtb-traces'
+import { buildLayout } from '../chart/ymrgtb-layout'
 
 const DATA_URL = '/assets/ymrgtb_cd.json'
 
 // Convert "YYYY-MM" to Date (first day of month)
-function monthToDate(ym: string): Date {
-  const [year, month] = ym.split('-').map(Number)
-  return new Date(year, month - 1, 1)
-}
-
-// Convert Date to "YYYY-MM" string
+// Convert Date to "YYYY-MM" string (used for duration-based snap logic)
 function dateToMonth(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-}
-
-// Bar width in milliseconds (roughly 25 days to leave gaps between months)
-const BAR_WIDTH_MS = 25 * 24 * 60 * 60 * 1000
-
-type ProcessedRow = Row & {
-  m: string
-  Rides: number
-  'Ride minutes': number
-  GenderStr: Gender
-  RideableTypeStr: RideableType
-}
-
-function processData(data: Row[]): ProcessedRow[] {
-  return data.map(row => ({
-    ...row,
-    m: `${row.Year}-${row.Month.toString().padStart(2, '0')}`,
-    Rides: row.Count,
-    'Ride minutes': row.Duration / 60,
-    GenderStr: Int2Gender[row.Gender],
-    RideableTypeStr: NormalizeRideableType[row['Rideable Type']] || 'Unknown',
-  }))
 }
 
 // Warning label with tooltip for deprecated data
@@ -197,8 +162,7 @@ export default function Home() {
 
   // Derived values
   const stackPercents = stackRelative && stackBy !== 'None'
-  const isStacked = stackBy !== 'None'
-  const { hoverLabel: yHoverLabel, title } = yAxisLabelDict[yAxis]
+  const { title } = yAxisLabelDict[yAxis]
 
   // Theme-based colors (needed for trace generation)
   const isDark = actualTheme === 'dark'
@@ -226,239 +190,13 @@ export default function Home() {
     return parts.length ? parts.join(', ') : undefined
   }, [regions, rideableTypes, userTypes, stackPercents, stackBy])
 
-  // Filter and aggregate data
-  const { traces, months, allMonths } = useMemo(() => {
-    if (!data) return { traces: [], months: [], allMonths: [] }
-
-    // Filter data by dimension (but NOT by date - we need full history for rolling avg)
-    const dimensionFiltered = data.filter(row =>
-      regions.includes(row.Region) &&
-      userTypes.includes(row['User Type']) &&
-      genders.includes(row.GenderStr) &&
-      rideableTypes.includes(row.RideableTypeStr)
-    )
-
-    // Group ALL months by (optionally) stack key - needed for rolling avg lookback
-    const stackKeys = stackKeyDict[stackBy]
-    const allGrouped: Record<string, Record<string, number>> = {}
-
-    for (const row of dimensionFiltered) {
-      const m = row.m
-      let stackVal = ''
-      if (stackBy === 'Region') stackVal = row.Region
-      else if (stackBy === 'User Type') stackVal = row['User Type']
-      else if (stackBy === 'Gender') stackVal = row.GenderStr
-      else if (stackBy === 'Rideable Type') stackVal = row.RideableTypeStr
-
-      const val = row[yAxis]
-      if (!allGrouped[m]) allGrouped[m] = {}
-      allGrouped[m][stackVal] = (allGrouped[m][stackVal] || 0) + val
-    }
-
-    // All months for rolling avg computation
-    const allMonths = Object.keys(allGrouped).sort()
-
-    // Visible months for bar chart display
-    const months = allMonths.filter(m => m >= start && m < end)
-
-    // Use allGrouped for visible range (same data, just filtered view)
-    const grouped = allGrouped
-
-    // Build bar traces
-    const colors = Colors[stackBy]
-    const legendRanks: Record<string, number> = {}
-    stackKeys.forEach((k, i) => { legendRanks[k] = -i })
-
-    // Map internal values to display names (for User Type)
-    const getDisplayName = (val: string) =>
-      stackBy === 'User Type' && val in UserTypeDisplayNames
-        ? UserTypeDisplayNames[val as keyof typeof UserTypeDisplayNames]
-        : val
-
-    // Convert months to dates for datetime x-axis
-    const monthDates = months.map(monthToDate)
-
-    const barTraces = stackKeys
-      .filter(key => stackBy === 'None' || months.some(m => grouped[m]?.[key]))
-      .map(stackVal => {
-        const name = getDisplayName(stackVal) || yHoverLabel
-        const customdata: ([number, number] | null)[] = []
-        const y = months.map(m => {
-          const val = grouped[m]?.[stackVal] || 0
-          if (val === 0) {
-            customdata.push(null)
-            return null
-          }
-          const total = Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
-          const pct = total ? val / total : 0
-          customdata.push([val, pct])
-          return stackPercents ? pct : val
-        })
-        // Show both count and percentage when stacked, just count when not stacked
-        const hovertemplate = isStacked
-          ? `${name}: %{customdata[0]:,.0f} (%{customdata[1]:.0%})<extra></extra>`
-          : '%{customdata[0]:,.0f}<extra></extra>'
-        return {
-          x: monthDates,
-          y,
-          width: BAR_WIDTH_MS,
-          customdata,
-          name,
-          type: 'bar' as const,
-          marker: {
-            color: colors[stackVal] || colors[''],
-            line: { color: isDark ? 'rgba(0,0,0,1)' : 'rgba(255,255,255,1)', width: .5 },
-          },
-          hovertemplate,
-          legendrank: 100 + 2 * (legendRanks[stackVal] || 0),
-        }
-      })
-
-    // Rolling average traces - computed on ALL data, then filtered to visible range
-    const show12mo = rollingAvgs.includes(12)
-    const rollingTraces: Data[] = []
-
-    if (show12mo && months.length > 0) {
-      // Helper to filter arrays to visible range
-      const visibleStartIdx = allMonths.indexOf(months[0])
-      const visibleEndIdx = visibleStartIdx + months.length
-
-      if (visibleStartIdx < 0) {
-        console.warn('Rolling avg: visible months not found in allMonths')
-      } else if (stackBy === 'None') {
-        // Single rolling average for total - compute on ALL months
-        const allTotals = allMonths.map(m =>
-          Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
-        )
-        const allAvgY = rollingAvg(allTotals, 12)
-
-        // Filter to visible range
-        const visibleAvgY = allAvgY.slice(visibleStartIdx, visibleEndIdx)
-
-        // Log annualized percents
-        annualizedPercents(months, visibleAvgY).forEach(p => console.log(annualPercentStr(p)))
-        // Shadow trace (thicker, contrasting color for outline effect)
-        rollingTraces.push({
-          x: monthDates,
-          y: visibleAvgY as (number | null)[],
-          name: '12mo avg (outline)',
-          type: 'scatter',
-          mode: 'lines',
-          line: { color: lineOutlineColor, width: 7 },
-          hoverinfo: 'skip',
-          showlegend: false,
-          legendrank: 100,
-        })
-        // Main trace
-        rollingTraces.push({
-          x: monthDates,
-          y: visibleAvgY as (number | null)[],
-          name: '12mo avg',
-          type: 'scatter',
-          mode: 'lines',
-          line: { color: rollingAvgColor, width: 4 },
-          hovertemplate: '12mo avg: %{y:,.0f}<extra></extra>',
-          legendrank: 101,
-        })
-      } else {
-        // Per-stack-value rolling averages
-        const clampEnd = stackBy === 'Gender' && end > GenderRollingAvgCutoff
-          ? GenderRollingAvgCutoff
-          : end
-
-        stackKeys
-          .filter(key => allMonths.some(m => grouped[m]?.[key]))
-          .forEach(stackVal => {
-            // For Unknown rideable type, clamp earlier
-            let effectiveEnd = clampEnd
-            if (stackBy === 'Rideable Type' && stackVal === 'Unknown' && end > UnknownRideableCutoff) {
-              effectiveEnd = UnknownRideableCutoff
-            }
-
-            // Compute on ALL months (up to effectiveEnd)
-            const allClampedMonths = allMonths.filter(m => m < effectiveEnd)
-            const rawValues = allClampedMonths.map(m => grouped[m]?.[stackVal] || 0)
-            const pctValues = allClampedMonths.map(m => {
-              const val = grouped[m]?.[stackVal] || 0
-              const total = Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
-              return total ? val / total : 0
-            })
-            const avgRaw = rollingAvg(rawValues, 12)
-            const avgPct = rollingAvg(pctValues, 12)
-
-            // Find first and last months with actual data for this series
-            const firstDataIdx = rawValues.findIndex(v => v > 0)
-            let lastDataIdx = -1
-            for (let i = rawValues.length - 1; i >= 0; i--) {
-              if (rawValues[i] > 0) { lastDataIdx = i; break }
-            }
-
-            // Null out rolling avg where series hasn't started (need 12 months of data) or has ended
-            const allAvgY = (stackPercents ? avgPct : avgRaw).map((v, i) => {
-              // Need 12 months of data before showing rolling avg (firstDataIdx + 11)
-              if (firstDataIdx < 0 || i < firstDataIdx + 11) return null
-              // Don't show after series ends
-              if (i > lastDataIdx) return null
-              return v
-            })
-            // Combine into customdata for tooltips (null where avgY is null)
-            const allCustomdata = avgRaw.map((raw, i) => allAvgY[i] === null ? null : [raw, avgPct[i]])
-
-            // Filter to visible range
-            const clampedVisibleStart = allClampedMonths.indexOf(months[0])
-            const clampedMonths = allClampedMonths.filter(m => m >= start && m < end && m < effectiveEnd)
-            const clampedDates = clampedMonths.map(monthToDate)
-            const avgY = clampedVisibleStart >= 0
-              ? allAvgY.slice(clampedVisibleStart, clampedVisibleStart + clampedMonths.length)
-              : []
-            const customdata = clampedVisibleStart >= 0
-              ? allCustomdata.slice(clampedVisibleStart, clampedVisibleStart + clampedMonths.length)
-              : []
-
-            // Log annualized percents (use raw values for growth calculation)
-            if (!stackPercents) {
-              const visibleAvgRaw = clampedVisibleStart >= 0
-                ? avgRaw.slice(clampedVisibleStart, clampedVisibleStart + clampedMonths.length)
-                : []
-              annualizedPercents(clampedMonths, visibleAvgRaw).forEach(p =>
-                console.log(`${stackVal}: ${annualPercentStr(p)}`)
-              )
-            }
-
-            const baseColor = colors[stackVal] || colors['']
-            // HOB's light blue gets lost against JC's purple bars, so keep it unchanged
-            const color = stackVal === 'HOB' ? baseColor : darken(baseColor, lineDarkenFactor)
-            const displayName = getDisplayName(stackVal)
-            // Shadow trace (thicker, contrasting color for outline effect)
-            rollingTraces.push({
-              x: clampedDates,
-              y: avgY as (number | null)[],
-              name: `${displayName} (12mo outline)`,
-              type: 'scatter',
-              mode: 'lines',
-              line: { color: lineOutlineColor, width: 7 },
-              hoverinfo: 'skip',
-              showlegend: false,
-              legendrank: 100 + 2 * (legendRanks[stackVal] || 0),
-            })
-            // Main trace - show both count and percentage in tooltip
-            rollingTraces.push({
-              x: clampedDates,
-              y: avgY as (number | null)[],
-              customdata: customdata as any,
-              name: `${displayName} (12mo)`,
-              type: 'scatter',
-              mode: 'lines',
-              line: { color, width: 4 },
-              hovertemplate: `${displayName} (12mo): %{customdata[0]:,.0f} (%{customdata[1]:.0%})<extra></extra>`,
-              legendrank: 101 + 2 * (legendRanks[stackVal] || 0),
-            })
-          })
-      }
-    }
-
-    return { traces: [...barTraces, ...rollingTraces] as Data[], months, allMonths }
-  }, [data, yAxis, stackBy, stackPercents, isStacked, regions, userTypes, genders, rideableTypes, start, end, rollingAvgs, yHoverLabel, rollingAvgColor, lineOutlineColor, lineDarkenFactor])
+  // Filter and aggregate data (extracted to chart/ymrgtb-traces.ts)
+  const { traces, months, allMonths } = useMemo(() => buildTraces(data, {
+    yAxis, stackBy, stackPercents,
+    regions, userTypes, genders, rideableTypes,
+    start, end, rollingAvgs,
+    isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor,
+  }), [data, yAxis, stackBy, stackPercents, regions, userTypes, genders, rideableTypes, start, end, rollingAvgs, isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor])
 
   // Compute data bounds for pan constraints
   const dataBounds = useMemo(() => {
@@ -563,43 +301,6 @@ export default function Home() {
   const gridcolor = isDark ? '#505050' : '#ccc'
   const tickcolor = isDark ? '#e0e0e0' : '#333'
 
-  // Adaptive tick intervals based on date range AND viewport width
-  const totalMonths = months.length
-  // Estimate max ticks that fit comfortably (~50px per tick with rotation)
-  const estimatedPlotWidth = windowWidth * 0.9
-  const maxTicks = Math.floor(estimatedPlotWidth / 50)
-
-  let tickDtick: string
-  let tickAxisFormat: string
-  let tickFormat: 'quarterly' | 'semiannual' | 'annual'
-
-  // Choose tick interval based on both date range and available space
-  const quarterlyTicks = Math.ceil(totalMonths / 3)
-  const semiAnnualTicks = Math.ceil(totalMonths / 6)
-
-  if (quarterlyTicks <= maxTicks && totalMonths <= 60) {
-    // Quarterly ticks (Jan, Apr, Jul, Oct) - if they fit and ≤5 years
-    tickFormat = 'quarterly'
-    tickDtick = 'M3'
-    tickAxisFormat = "%b '%y"  // "Jan '26"
-  } else if (semiAnnualTicks <= maxTicks && totalMonths <= 144) {
-    // Semi-annual ticks (Jan, Jul)
-    tickFormat = 'semiannual'
-    tickDtick = 'M6'
-    tickAxisFormat = "%b '%y"  // "Jan '26"
-  } else {
-    // Annual ticks (Jan only)
-    tickFormat = 'annual'
-    tickDtick = 'M12'
-    tickAxisFormat = "'%y"  // "'26"
-  }
-
-  // Compute x-axis range with padding
-  const xAxisRange = months.length > 0 ? [
-    new Date(monthToDate(months[0]).getTime() - 15 * 24 * 60 * 60 * 1000),  // 15 days before first
-    new Date(monthToDate(months[months.length - 1]).getTime() + 15 * 24 * 60 * 60 * 1000),  // 15 days after last
-  ] : undefined
-
   // Generate a revision key that changes when date range, y-axis scale, or snap changes
   // This forces Plotly to reset its UI state (including pan/zoom) to our specified ranges
   const uiRevision = (() => {
@@ -608,52 +309,17 @@ export default function Home() {
     if (isDurationBased(dateRange)) {
       return `dur-${dateRange.duration}-${dateRange.end?.getTime() ?? "present"}-${suffix}`
     }
-    // Explicit range
     return `exp-${dateRange.start.getTime()}-${dateRange.end?.getTime() ?? "present"}-${suffix}`
   })()
 
-  const layout = {
-    autosize: true,
-    barmode: 'stack' as const,
-    bargap: 0,  // No gaps - use marker.line for visual separation instead
-    dragmode: 'pan' as const,  // Enable horizontal panning
-    uirevision: uiRevision,  // Reset UI state when date range changes
-    showlegend: showLegendValue,
-    hovermode: 'x' as const,
-    legend: {
-      x: 0.5,
-      xanchor: 'center' as const,
-      yanchor: 'top' as const,
-      orientation: 'h' as const,
-      traceorder: 'normal' as const,
-      font: { color: tickcolor },
-    },
-    xaxis: {
-      type: 'date' as const,
-      range: xAxisRange,
-      tickfont: { size: 12, color: tickcolor },
-      titlefont: { size: 14 },
-      tickangle: -45,
-      dtick: tickDtick,
-      tick0: '2013-01-01',  // Anchor ticks to January
-      tickformat: tickAxisFormat,
-      gridcolor,
-      hoverformat: "%b '%y",  // x-axis hover caret: "Jan '26"
-    },
-    yaxis: {
-      automargin: true,
-      gridcolor,
-      tickfont: { size: 14, color: tickcolor },
-      titlefont: { size: 14 },
-      tickformat: stackPercents ? '.0%' : undefined,
-      range: stackPercents ? [0, 1.01] : undefined,
-      fixedrange: true,  // Lock y-axis, only allow horizontal panning
-    },
-    paper_bgcolor: 'rgba(0,0,0,0)',
-    plot_bgcolor: 'rgba(0,0,0,0)',
-    // Bottom margin varies by tick label length: annual "'YY" needs less room than "MMM 'YY"
-    margin: { t: 0, r: 0, b: tickFormat === 'annual' ? 40 : 70, l: 0, },
-  }
+  const layout = buildLayout({
+    months,
+    plotWidth: windowWidth,
+    stackPercents,
+    showLegend: showLegendValue,
+    tickcolor, gridcolor,
+    uiRevision,
+  })
 
   // Duration buttons - clicking sets duration anchored to present
   const durationButtons = ["1y", "2y", "3y", "4y", "5y"] as const
