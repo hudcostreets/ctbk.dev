@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { Box, CircularProgress, Typography } from '@mui/material'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
 import StationMap, { type Stations, type StationPairCounts } from '../components/StationMap'
+import StationTripsChart, { type TripsRow } from '../components/StationTripsChart'
 
 const API_BASE = 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -66,6 +67,7 @@ export default function StationDetail() {
   const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [mapMonth, setMapMonth] = useState<string | null>(null)
+  const [tripsRows, setTripsRows] = useState<TripsRow[] | null>(null)
 
   useEffect(() => {
     if (!id) return
@@ -85,6 +87,11 @@ export default function StationDetail() {
       })
       .then(setData)
       .catch((e) => setError(String(e)))
+
+    fetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/trips`)
+      .then((r) => (r.ok ? r.json() : { rows: [] }))
+      .then((d) => setTripsRows(d.rows ?? []))
+      .catch(() => setTripsRows([]))
   }, [id])
 
   // Load manifest once; default mapMonth to latestMonth
@@ -253,6 +260,13 @@ export default function StationDetail() {
             </a>
           </Typography>
         </>
+      )}
+
+      {tripsRows && tripsRows.length > 0 && (
+        <Box sx={{ mt: 4 }}>
+          <Typography variant="subtitle1" gutterBottom>Monthly trips</Typography>
+          <StationTripsChart rows={tripsRows} />
+        </Box>
       )}
     </Box>
   )
