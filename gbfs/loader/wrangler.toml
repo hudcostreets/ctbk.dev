@@ -1,0 +1,19 @@
+name = "ctbk-gbfs-loader"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+# Consume R2 PutObject events for gbfs/status/*.json
+[[queues.consumers]]
+queue = "gbfs-status-events"
+max_batch_size = 100
+max_batch_timeout = 5
+max_retries = 3
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "ctbk"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ctbk-gbfs"
+database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
