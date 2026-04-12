@@ -403,8 +403,9 @@ def _extract_observations_parallel(parquets: list[Path]) -> DataFrame:
             dfs.append(extract_day_observations(p))
         return pd.concat(dfs, ignore_index=True)
 
-    with ProcessPoolExecutor() as pool:
-        err(f"  Using {pool._max_workers} workers")
+    max_workers = min(8, len(parquets))
+    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+        err(f"  Using {max_workers} workers")
         results = list(pool.map(extract_day_observations, parquets))
     return pd.concat(results, ignore_index=True)
 
