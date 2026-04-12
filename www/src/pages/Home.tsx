@@ -9,6 +9,7 @@ import css from "../index.module.css"
 import controlCss from "../controls.module.css"
 import { Checkbox } from "../components/Checkbox"
 import { Checklist } from "../components/Checklist"
+import MonthRangePicker from "../components/MonthRangePicker"
 import { Radios } from "../components/Radios"
 import { useTheme } from "../contexts/ThemeContext"
 import { darken } from "../colors"
@@ -712,6 +713,26 @@ export default function Home() {
                 value="All"
                 className={`${css.dateRangeButton} ${dateRange === "All" ? css.activeButton : css.inactiveButton}`}
                 onClick={() => setDateRange("All")}
+              />
+              <MonthRangePicker
+                start={isExplicitRange(dateRange) ? dateRange.start : undefined}
+                end={
+                  dateRange === "All"
+                    ? undefined
+                    : isExplicitRange(dateRange) || isDurationBased(dateRange)
+                      ? dateRange.end
+                      : undefined
+                }
+                minDate={dataBounds?.start}
+                maxDate={dataBounds?.end}
+                onChange={(newStart, newEnd) => {
+                  if (newStart) {
+                    setDateRange({ start: newStart, end: newEnd })
+                  } else if (newEnd) {
+                    // Start not set — fall back to "All data up to newEnd"
+                    setDateRange({ start: dataBounds?.start ?? new Date(2013, 5, 1), end: newEnd })
+                  }
+                }}
               />
             </div>
 
