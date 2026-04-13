@@ -1,8 +1,9 @@
 /**
  * Pick an arbitrary start→end month range.
- * Uses native `<input type="month">` for simplicity + good mobile UX.
- * Parent owns state (start/end Dates or undefined for "present").
+ * Compact YY-MM text inputs (e.g. "13-06" → "25-12") to stay small on
+ * mobile. Parent owns state as Date objects (undefined = unset).
  */
+import { useEffect, useState } from 'react'
 
 interface Props {
   start: Date | undefined
@@ -13,46 +14,88 @@ interface Props {
   className?: string
 }
 
-function toMonthValue(d: Date | undefined): string {
+/** Format a Date as "YY-MM". */
+function toYymm(d: Date | undefined): string {
   if (!d) return ''
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+  const yy = String(d.getFullYear() % 100).padStart(2, '0')
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  return `${yy}-${mm}`
 }
 
-function fromMonthValue(s: string): Date | undefined {
-  if (!s) return undefined
-  const [y, m] = s.split('-').map(Number)
-  return new Date(y, m - 1, 1)
+/** Parse "YYMM" or "YY-MM" → Date (first of month). Returns null on invalid. */
+function fromYymm(s: string): Date | null {
+  const m = s.replace(/\D/g, '')
+  if (m.length !== 4) return null
+  const yy = parseInt(m.slice(0, 2), 10)
+  const mm = parseInt(m.slice(2, 4), 10)
+  if (isNaN(yy) || isNaN(mm) || mm < 1 || mm > 12) return null
+  return new Date(2000 + yy, mm - 1, 1)
+}
+
+function Field({
+  value, onCommit, min, max,
+}: {
+  value: Date | undefined
+  onCommit: (d: Date | undefined) => void
+  min?: Date
+  max?: Date
+}) {
+  const [text, setText] = useState(toYymm(value))
+
+  // Keep local text in sync with external value changes
+  useEffect(() => { setText(toYymm(value)) }, [value])
+
+  const commit = () => {
+    const s = text.trim()
+    if (!s) { onCommit(undefined); return }
+    const d = fromYymm(s)
+    if (!d) { setText(toYymm(value)); return }  // revert on invalid
+    if (min && d < min) { setText(toYymm(value)); return }
+    if (max && d > max) { setText(toYymm(value)); return }
+    onCommit(d)
+  }
+
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={text}
+      placeholder="YY-MM"
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+      style={{
+        width: '4.5em',
+        fontFamily: 'monospace',
+        fontSize: '0.95em',
+        padding: '2px 4px',
+        textAlign: 'center',
+        border: '1px solid var(--border-secondary, #888)',
+        borderRadius: 3,
+        background: 'transparent',
+        color: 'inherit',
+      }}
+    />
+  )
 }
 
 export default function MonthRangePicker({
-  start,
-  end,
-  minDate,
-  maxDate,
-  onChange,
-  className,
+  start, end, minDate, maxDate, onChange, className,
 }: Props) {
-  const minStr = minDate ? toMonthValue(minDate) : undefined
-  const maxStr = maxDate ? toMonthValue(maxDate) : undefined
-
   return (
     <span className={className} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-      <input
-        type="month"
-        value={toMonthValue(start)}
-        min={minStr}
-        max={end ? toMonthValue(end) : maxStr}
-        onChange={(e) => onChange(fromMonthValue(e.target.value), end)}
-        aria-label="Start month"
+      <Field
+        value={start}
+        onCommit={(d) => onChange(d, end)}
+        min={minDate}
+        max={end ?? maxDate}
       />
       <span style={{ opacity: 0.6 }}>→</span>
-      <input
-        type="month"
-        value={toMonthValue(end)}
-        min={start ? toMonthValue(start) : minStr}
-        max={maxStr}
-        onChange={(e) => onChange(start, fromMonthValue(e.target.value))}
-        aria-label="End month"
+      <Field
+        value={end}
+        onCommit={(d) => onChange(start, d)}
+        min={start ?? minDate}
+        max={maxDate}
       />
     </span>
   )
