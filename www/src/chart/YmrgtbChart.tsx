@@ -4,7 +4,7 @@
  * object; internally delegates to `buildTraces` + `buildLayout`.
  */
 import { useEffect, useMemo, useState } from 'react'
-import Plot from 'react-plotly.js'
+import { Plot } from 'pltly/react'
 import type { PlotRelayoutEvent } from 'plotly.js'
 import { useTheme } from '../contexts/ThemeContext'
 import { buildTraces, type BuildTracesConfig, type ProcessedRow } from './ymrgtb-traces'
@@ -62,14 +62,14 @@ export default function YmrgtbChart({
   }), [months, windowWidth, config.stackPercents, showLegendEffective, tickcolor, gridcolor, uiRevision])
 
   return (
-    <Plot
-      data={traces}
-      layout={layout}
-      useResizeHandler
-      className={className}
-      style={style}
-      config={{ displayModeBar: false, scrollZoom: false }}
-      onRelayout={onRelayout}
-    />
+    <div className={className} style={style}>
+      <Plot
+        data={traces}
+        layout={layout}
+        style={{ height: '100%' }}
+        config={{ displayModeBar: false, scrollZoom: false }}
+        onRelayout={onRelayout}
+      />
+    </div>
   )
 }

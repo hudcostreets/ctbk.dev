@@ -6,7 +6,7 @@
  * Later this may factor further with Home.tsx as shared utilities.
  */
 import { useMemo } from 'react'
-import Plot from 'react-plotly.js'
+import { Plot } from 'pltly/react'
 import { useTheme } from '../contexts/ThemeContext'
 
 export interface TripsRow {
@@ -141,7 +141,6 @@ export default function StationTripsChart({ rows, stackBy = 'side', height = 400
     <Plot
       data={traces}
       layout={layout}
-      useResizeHandler
       style={{ width: '100%' }}
       config={{ displayModeBar: false, scrollZoom: false }}
     />

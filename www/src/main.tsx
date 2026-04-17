@@ -6,6 +6,7 @@ import { ThemeProvider as MuiThemeProvider, createTheme } from "@mui/material"
 import { StrictMode, useMemo } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
+import { PlotlyProvider } from 'pltly/react'
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext"
 import { ThemeToggle } from "./components/ThemeToggle"
 import { HomeButton, ThemeTileToggle } from "./components/TileStyleButton"
@@ -84,9 +85,11 @@ createRoot(document.getElementById('root')!).render(
     <ThemeProvider>
       <HotkeysProvider>
         <MuiThemeWrapper>
-          <BrowserRouter>
-            <AppContent />
-          </BrowserRouter>
+          <PlotlyProvider loader={() => import('plotly.js/basic' as 'plotly.js').then(m => m.default ?? m)}>
+            <BrowserRouter>
+              <AppContent />
+            </BrowserRouter>
+          </PlotlyProvider>
         </MuiThemeWrapper>
       </HotkeysProvider>
     </ThemeProvider>

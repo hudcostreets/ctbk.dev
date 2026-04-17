@@ -2,7 +2,7 @@ import { Tooltip } from "@mui/material"
 import { useUrlState, boolParam, numberArrayParam } from 'use-prms'
 import { PlotRelayoutEvent } from 'plotly.js'
 import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
-import Plot from 'react-plotly.js'
+import { Plot } from 'pltly/react'
 import { Link, useLocation } from 'react-router-dom'
 import { GitHubIcon, S3Icon, BlueskyIcon } from "@/components/icons"
 import css from "../index.module.css"
@@ -338,14 +338,15 @@ export default function Home() {
           {subtitle && <p className={css.subtitle}>{subtitle}</p>}
         </div>
 
-        <Plot
-          data={traces}
-          layout={layout}
-          useResizeHandler
-          className={css.plot}
-          config={{ displayModeBar: false, scrollZoom: false }}
-          onRelayout={handleRelayout}
-        />
+        <div className={css.plot}>
+          <Plot
+            data={traces}
+            layout={layout}
+            style={{ height: '100%' }}
+            config={{ displayModeBar: false, scrollZoom: false }}
+            onRelayout={handleRelayout}
+          />
+        </div>
 
         {!screenshotMode && (
         <div className={css.row}>
