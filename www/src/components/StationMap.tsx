@@ -116,6 +116,10 @@ function StationMarkers({
     )
   }, [selectedStation, selectedId, pairCounts, stations, mPerPx, zoom, colors])
 
+  // Selected-station overlay: visual-only (pointer-events: none via `.selected`
+  // CSS). Clicks pass through to the base Circle in the `circles` Pane below,
+  // so the target Circle stays mounted between hover and click — avoiding the
+  // unmount/remount race that caused clicks to fall through to the map.
   const selectedCircle = useMemo(() => {
     if (!selectedStation || !selectedId) return null
     const radius = sqrt(selectedStation.ends)
@@ -127,8 +131,7 @@ function StationMarkers({
           center={{ lat: selectedStation.lat, lng: selectedStation.lng }}
           color={colors.selected}
           radius={radius}
-          bubblingMouseEvents={false}
-          eventHandlers={setSelectedId ? { click: () => setSelectedId(undefined) } : undefined}
+          interactive={false}
         >
           <Tooltip className={css.tooltip} sticky permanent pane="selected">
             <p>{selectedStation.name}{selectedStation.ends > 0 ? `: ${selectedStation.ends.toLocaleString()}` : ''}</p>
@@ -136,13 +139,12 @@ function StationMarkers({
         </Circle>
       </Pane>
     )
-  }, [selectedStation, selectedId, setSelectedId, colors])
+  }, [selectedStation, selectedId, colors])
 
   const circles = useMemo(() => {
     return (
       <Pane name="circles" className={css.circles}>
         {Object.entries(stations).map(([id, station]) => {
-          if (id === selectedId) return null
           const radius = sqrt(station.ends)
           if (isNaN(radius)) return null
           const circleColor = stationColors?.[id] ?? colors.circle
