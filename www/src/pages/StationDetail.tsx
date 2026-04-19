@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Box, CircularProgress, Typography } from '@mui/material'
+import { useQueryClient } from '@tanstack/react-query'
 import css from '../index.module.css'
 import controlCss from '../controls.module.css'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
@@ -15,6 +16,10 @@ import { Radios } from '../components/Radios'
 import { useSmartPolling } from '../hooks/useSmartPolling'
 import { useStationTrips } from '../hooks/useStationTrips'
 import {
+  useStationInfo, useStationRange, stationsApi,
+  type StationRangeResponse,
+} from '../query/stations'
+import {
   type Docking, type StackBy, type YAxis,
   Dockings,
   Regions, UserTypes, Genders, GenderQueryStrings,
@@ -25,47 +30,8 @@ import {
 import { boolParam, numberArrayParam, useUrlState } from 'use-prms'
 import { formatTimeRange, roundDuration, timeRangeParam } from '../time-range'
 
-const API_BASE = 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
+const { API_BASE } = stationsApi
 const MANIFEST_URL = '/assets/station-urls.json'
-
-interface Row {
-  station_id: string
-  ts: number
-  polled_at: number
-  num_bikes_available: number
-  num_ebikes_available: number
-  num_docks_available: number
-  num_bikes_disabled: number
-  num_docks_disabled: number
-  is_installed: number
-  is_renting: number
-  is_returning: number
-  last_reported: number
-}
-
-interface ApiResponse {
-  station_id: string
-  from?: number       // unix seconds (range mode)
-  to?: number         // unix seconds (range mode)
-  date?: string       // YYYY-MM-DD (single-day mode; legacy /today response)
-  rows: Row[]
-  capacity: number | null
-  last_polled_at: number | null
-}
-
-interface StationInfo {
-  short_name: string
-  slug: string | null
-  gbfs_station_id: string | null
-  name: string | null
-  lat: number | null
-  lon: number | null
-  capacity: number | null
-  station_type: string | null
-  first_seen: string | null
-  last_seen: string | null
-  in_gbfs: number
-}
 
 interface Manifest {
   stations: Record<string, string>
@@ -84,9 +50,7 @@ function formatMonth(yyyymm: string): string {
 export default function StationDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const [info, setInfo] = useState<StationInfo | null>(null)
-  const [data, setData] = useState<ApiResponse | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
   const [stations, setStations] = useState<Stations | null>(null)
   const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
   const [manifest, setManifest] = useState<Manifest | null>(null)
@@ -95,35 +59,23 @@ export default function StationDetail() {
   // Availability time range (URL param `r`; minute-granularity codec, default Latest + 1d).
   const [range, setRange] = useUrlState('r', timeRangeParam())
 
-  useEffect(() => {
-    if (!id) return
-    setInfo(null)
-    fetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/info`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then(setInfo)
-      .catch(() => {})
-  }, [id])
+  const { data: info } = useStationInfo(id)
 
-  // Use primitive deps — `useUrlState` returns a fresh `TimeRange` object each
-  // render, which would retrigger this effect on every React render cycle.
+  // Snapshot `Date.now()` once per range change — using it directly would
+  // recompute `toS` every render in Latest mode, churning the query key.
   const rangeDuration = range.duration
   const rangeTimestampMs = range.timestamp?.getTime() ?? null
-  useEffect(() => {
-    if (!id) return
-    setData(null)
-    setError(null)
+  const { fromS, toS } = useMemo(() => {
     const toMs = rangeTimestampMs ?? Date.now()
-    const fromMs = toMs - rangeDuration
-    const fromS = Math.floor(fromMs / 1000)
-    const toS = Math.floor(toMs / 1000)
-    fetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/range?from=${fromS}&to=${toS}`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<ApiResponse>
-      })
-      .then(setData)
-      .catch((e) => setError(String(e)))
-  }, [id, rangeDuration, rangeTimestampMs])
+    return {
+      fromS: Math.floor((toMs - rangeDuration) / 1000),
+      toS: Math.floor(toMs / 1000),
+    }
+  }, [rangeDuration, rangeTimestampMs])
+
+  const rangeQuery = useStationRange(id, fromS, toS)
+  const data = rangeQuery.data ?? null
+  const error = rangeQuery.error ? String(rangeQuery.error) : null
 
   // Load monthly trip history from the public DVX cache
   const { rows: tripsRows } = useStationTrips(info?.short_name)
@@ -158,31 +110,31 @@ export default function StationDetail() {
 
   // Smart polling: incremental refresh in Latest mode. In pinned mode
   // (`range.timestamp !== null`) the window is fixed, so polling is disabled.
-  const dataRef = useRef<ApiResponse | null>(null)
-  useEffect(() => { dataRef.current = data }, [data])
-
+  // Incremental rows are merged into the TSQ cache for the active query
+  // (`['station-range', id, fromS, toS]`) so `useStationRange` consumers
+  // see them without a full refetch.
   const isLatestMode = rangeTimestampMs === null
+  const queryKey = useMemo(() => ['station-range', id, fromS, toS], [id, fromS, toS])
 
   const refetchIncremental = useCallback(async () => {
     if (!id) return
-    const prev = dataRef.current
+    const prev = queryClient.getQueryData<StationRangeResponse>(queryKey)
     const lastPolled = prev?.last_polled_at
     if (!lastPolled) return
-    const toS = Math.floor(Date.now() / 1000)
-    const fromS = toS - Math.floor(rangeDuration / 1000)
+    const nowS = Math.floor(Date.now() / 1000)
     const res = await fetch(
       `${API_BASE}/api/stations/${encodeURIComponent(id)}/range` +
-      `?from=${fromS}&to=${toS}&since=${lastPolled}`
+      `?from=${fromS}&to=${nowS}&since=${lastPolled}`
     )
     if (!res.ok) return
-    const next = (await res.json()) as ApiResponse
+    const next = (await res.json()) as StationRangeResponse
     if (!next.rows.length) return
-    setData((p) => p ? {
+    queryClient.setQueryData<StationRangeResponse>(queryKey, (p) => p ? {
       ...p,
       rows: [...p.rows, ...next.rows],
       last_polled_at: next.last_polled_at ?? p.last_polled_at,
     } : next)
-  }, [id, rangeDuration])
+  }, [id, fromS, queryClient, queryKey])
 
   const lastModifiedDate = useMemo(
     () => (data?.last_polled_at ? new Date(data.last_polled_at * 1000) : null),

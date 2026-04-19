@@ -7,6 +7,8 @@ import { StrictMode, useMemo } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { PlotlyProvider } from 'pltly/react'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { queryClient } from "./query/client"
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext"
 import { ThemeToggle } from "./components/ThemeToggle"
 import { HomeButton, ThemeTileToggle } from "./components/TileStyleButton"
@@ -82,16 +84,18 @@ function MuiThemeWrapper({ children }: { children: React.ReactNode }) {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <ThemeProvider>
-      <HotkeysProvider>
-        <MuiThemeWrapper>
-          <PlotlyProvider loader={() => import('plotly.js/basic' as 'plotly.js').then(m => m.default ?? m)}>
-            <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-              <AppContent />
-            </BrowserRouter>
-          </PlotlyProvider>
-        </MuiThemeWrapper>
-      </HotkeysProvider>
-    </ThemeProvider>
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>
+        <HotkeysProvider>
+          <MuiThemeWrapper>
+            <PlotlyProvider loader={() => import('plotly.js/basic' as 'plotly.js').then(m => m.default ?? m)}>
+              <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+                <AppContent />
+              </BrowserRouter>
+            </PlotlyProvider>
+          </MuiThemeWrapper>
+        </HotkeysProvider>
+      </ThemeProvider>
+    </QueryClientProvider>
   </StrictMode>,
 )
