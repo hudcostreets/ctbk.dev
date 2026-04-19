@@ -54,8 +54,8 @@ importers:
         specifier: https://github.com/runsascoded/plotly.js#61e90c2ead90aa3c4a3e4bdc68b1a2c1f86ff101
         version: https://codeload.github.com/runsascoded/plotly.js/tar.gz/61e90c2ead90aa3c4a3e4bdc68b1a2c1f86ff101(mapbox-gl@1.13.3)
       pltly:
-        specifier: https://gitlab.com/runsascoded/js/pltly/-/archive/6915b0559b81e35f21ad12f3c5f662faca4682d4/pltly-6915b0559b81e35f21ad12f3c5f662faca4682d4.tar.gz
-        version: https://gitlab.com/runsascoded/js/pltly/-/archive/6915b0559b81e35f21ad12f3c5f662faca4682d4/pltly-6915b0559b81e35f21ad12f3c5f662faca4682d4.tar.gz(plotly.js@https://codeload.github.com/runsascoded/plotly.js/tar.gz/61e90c2ead90aa3c4a3e4bdc68b1a2c1f86ff101(mapbox-gl@1.13.3))(react-plotly.js@2.6.0(plotly.js@https://codeload.github.com/runsascoded/plotly.js/tar.gz/61e90c2ead90aa3c4a3e4bdc68b1a2c1f86ff101(mapbox-gl@1.13.3))(react@18.3.1))(react@18.3.1)
+        specifier: https://gitlab.com/runsascoded/js/pltly/-/archive/c273e6e35ff11d92f0de577c0f982d61ed3a80af/pltly-c273e6e35ff11d92f0de577c0f982d61ed3a80af.tar.gz
+        version: https://gitlab.com/runsascoded/js/pltly/-/archive/c273e6e35ff11d92f0de577c0f982d61ed3a80af/pltly-c273e6e35ff11d92f0de577c0f982d61ed3a80af.tar.gz(plotly.js@https://codeload.github.com/runsascoded/plotly.js/tar.gz/61e90c2ead90aa3c4a3e4bdc68b1a2c1f86ff101(mapbox-gl@1.13.3))(react-plotly.js@2.6.0(plotly.js@https://codeload.github.com/runsascoded/plotly.js/tar.gz/61e90c2ead90aa3c4a3e4bdc68b1a2c1f86ff101(mapbox-gl@1.13.3))(react@18.3.1))(react@18.3.1)
       pnpm-dep-source:
         specifier: ^0.1.0
         version: 0.1.0
@@ -81,8 +81,8 @@ importers:
         specifier: ^1.6.32
         version: 1.6.32
       use-kbd:
-        specifier: https://github.com/runsascoded/use-kbd#34745efff8efdfd2c46e3e39d479a708aba704b2
-        version: https://codeload.github.com/runsascoded/use-kbd/tar.gz/34745efff8efdfd2c46e3e39d479a708aba704b2(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+        specifier: https://github.com/runsascoded/use-kbd#e8de7954c2d39b639dc1b99203659b91fd8fd269
+        version: https://codeload.github.com/runsascoded/use-kbd/tar.gz/e8de7954c2d39b639dc1b99203659b91fd8fd269(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       use-prms:
         specifier: https://github.com/runsascoded/use-prms#b357b48290740ae53a0ccc5fe837cf312c29f81d
         version: https://codeload.github.com/runsascoded/use-prms/tar.gz/b357b48290740ae53a0ccc5fe837cf312c29f81d(react@18.3.1)
@@ -109,8 +109,8 @@ importers:
         specifier: ^4.3.4
         version: 4.7.0(vite@6.4.1(@types/node@25.3.0)(terser@5.46.0)(yaml@2.8.3))
       scrns:
-        specifier: https://gitlab.com/runsascoded/js/scrns/-/archive/90e84ca64c6041e7e68a43851731436c505a044f/scrns-90e84ca64c6041e7e68a43851731436c505a044f.tar.gz
-        version: https://gitlab.com/runsascoded/js/scrns/-/archive/90e84ca64c6041e7e68a43851731436c505a044f/scrns-90e84ca64c6041e7e68a43851731436c505a044f.tar.gz(playwright@1.57.0)(puppeteer@23.11.1(typescript@5.9.3))
+        specifier: https://gitlab.com/runsascoded/js/scrns/-/archive/17a7273a3d08d7b50e519dcecdbbfd42bf1623e9/scrns-17a7273a3d08d7b50e519dcecdbbfd42bf1623e9.tar.gz
+        version: https://gitlab.com/runsascoded/js/scrns/-/archive/17a7273a3d08d7b50e519dcecdbbfd42bf1623e9/scrns-17a7273a3d08d7b50e519dcecdbbfd42bf1623e9.tar.gz(playwright@1.57.0)(puppeteer@23.11.1(typescript@5.9.3))
       serve:
         specifier: ^14.2.5
         version: 14.2.5
@@ -3029,9 +3029,9 @@ packages:
     version: 3.3.1-dist.9a3e8f3
     engines: {node: '>=18.0.0'}
 
-  pltly@https://gitlab.com/runsascoded/js/pltly/-/archive/6915b0559b81e35f21ad12f3c5f662faca4682d4/pltly-6915b0559b81e35f21ad12f3c5f662faca4682d4.tar.gz:
-    resolution: {tarball: https://gitlab.com/runsascoded/js/pltly/-/archive/6915b0559b81e35f21ad12f3c5f662faca4682d4/pltly-6915b0559b81e35f21ad12f3c5f662faca4682d4.tar.gz}
-    version: 0.1.0-dist.32807ca
+  pltly@https://gitlab.com/runsascoded/js/pltly/-/archive/c273e6e35ff11d92f0de577c0f982d61ed3a80af/pltly-c273e6e35ff11d92f0de577c0f982d61ed3a80af.tar.gz:
+    resolution: {tarball: https://gitlab.com/runsascoded/js/pltly/-/archive/c273e6e35ff11d92f0de577c0f982d61ed3a80af/pltly-c273e6e35ff11d92f0de577c0f982d61ed3a80af.tar.gz}
+    version: 0.1.0-dist.6f92eeb
     peerDependencies:
       plotly.js: '>=2'
       react: '>=17'
@@ -3345,9 +3345,9 @@ packages:
     resolution: {integrity: sha512-eflK8wEtyOE6+hsaRVPxvUKYCpRgzLqDTb8krvAsRIwOGlHoSgYLgBXoubGgLd2fT41/OUYdb48v4k4WWHQurA==}
     engines: {node: '>= 10.13.0'}
 
-  scrns@https://gitlab.com/runsascoded/js/scrns/-/archive/90e84ca64c6041e7e68a43851731436c505a044f/scrns-90e84ca64c6041e7e68a43851731436c505a044f.tar.gz:
-    resolution: {tarball: https://gitlab.com/runsascoded/js/scrns/-/archive/90e84ca64c6041e7e68a43851731436c505a044f/scrns-90e84ca64c6041e7e68a43851731436c505a044f.tar.gz}
-    version: 0.3.0-dist.e4395a9
+  scrns@https://gitlab.com/runsascoded/js/scrns/-/archive/17a7273a3d08d7b50e519dcecdbbfd42bf1623e9/scrns-17a7273a3d08d7b50e519dcecdbbfd42bf1623e9.tar.gz:
+    resolution: {tarball: https://gitlab.com/runsascoded/js/scrns/-/archive/17a7273a3d08d7b50e519dcecdbbfd42bf1623e9/scrns-17a7273a3d08d7b50e519dcecdbbfd42bf1623e9.tar.gz}
+    version: 0.3.0-dist.428e24f
     hasBin: true
     peerDependencies:
       playwright: '>=1.40'
@@ -3748,9 +3748,9 @@ packages:
   uri-js@4.4.1:
     resolution: {integrity: sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==}
 
-  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/34745efff8efdfd2c46e3e39d479a708aba704b2:
-    resolution: {tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/34745efff8efdfd2c46e3e39d479a708aba704b2}
-    version: 0.10.0-dist.bf02e9e
+  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/e8de7954c2d39b639dc1b99203659b91fd8fd269:
+    resolution: {tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/e8de7954c2d39b639dc1b99203659b91fd8fd269}
+    version: 0.12.0-dist.7d2aa3d
     peerDependencies:
       react: '>=18.0.0'
       react-dom: '>=18.0.0'
@@ -7435,7 +7435,7 @@ snapshots:
       - mapbox-gl
       - supports-color
 
-  pltly@https://gitlab.com/runsascoded/js/pltly/-/archive/6915b0559b81e35f21ad12f3c5f662faca4682d4/pltly-6915b0559b81e35f21ad12f3c5f662faca4682d4.tar.gz(plotly.js@https://codeload.github.com/runsascoded/plotly.js/tar.gz/61e90c2ead90aa3c4a3e4bdc68b1a2c1f86ff101(mapbox-gl@1.13.3))(react-plotly.js@2.6.0(plotly.js@https://codeload.github.com/runsascoded/plotly.js/tar.gz/61e90c2ead90aa3c4a3e4bdc68b1a2c1f86ff101(mapbox-gl@1.13.3))(react@18.3.1))(react@18.3.1):
+  pltly@https://gitlab.com/runsascoded/js/pltly/-/archive/c273e6e35ff11d92f0de577c0f982d61ed3a80af/pltly-c273e6e35ff11d92f0de577c0f982d61ed3a80af.tar.gz(plotly.js@https://codeload.github.com/runsascoded/plotly.js/tar.gz/61e90c2ead90aa3c4a3e4bdc68b1a2c1f86ff101(mapbox-gl@1.13.3))(react-plotly.js@2.6.0(plotly.js@https://codeload.github.com/runsascoded/plotly.js/tar.gz/61e90c2ead90aa3c4a3e4bdc68b1a2c1f86ff101(mapbox-gl@1.13.3))(react@18.3.1))(react@18.3.1):
     dependencies:
       plotly.js: https://codeload.github.com/runsascoded/plotly.js/tar.gz/61e90c2ead90aa3c4a3e4bdc68b1a2c1f86ff101(mapbox-gl@1.13.3)
       react: 18.3.1
@@ -7896,7 +7896,7 @@ snapshots:
       ajv-formats: 2.1.1(ajv@8.17.1)
       ajv-keywords: 5.1.0(ajv@8.17.1)
 
-  scrns@https://gitlab.com/runsascoded/js/scrns/-/archive/90e84ca64c6041e7e68a43851731436c505a044f/scrns-90e84ca64c6041e7e68a43851731436c505a044f.tar.gz(playwright@1.57.0)(puppeteer@23.11.1(typescript@5.9.3)):
+  scrns@https://gitlab.com/runsascoded/js/scrns/-/archive/17a7273a3d08d7b50e519dcecdbbfd42bf1623e9/scrns-17a7273a3d08d7b50e519dcecdbbfd42bf1623e9.tar.gz(playwright@1.57.0)(puppeteer@23.11.1(typescript@5.9.3)):
     dependencies:
       commander: 12.1.0
       gifenc: 1.0.3
@@ -8350,7 +8350,7 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/34745efff8efdfd2c46e3e39d479a708aba704b2(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
+  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/e8de7954c2d39b639dc1b99203659b91fd8fd269(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
     dependencies:
       debug: 4.4.3
       react: 18.3.1
