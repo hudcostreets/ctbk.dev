@@ -56,6 +56,16 @@
     border-radius: 100px;
     backdrop-filter: blur(4px);
 }
+a.subtitle {
+    color: #0366d6;
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+}
+a.subtitle:hover {
+    color: #0246a0;
+    text-decoration-thickness: 2px;
+}
 
 .homeMap {
     width: 100%;

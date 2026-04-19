@@ -2,7 +2,7 @@ import { FormControl, MenuItem, Select, SelectChangeEvent } from '@mui/material'
 import { useUrlState, boolParam, floatParam, stringParam } from 'use-prms'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { StationSearch } from '../components/StationSearch'
+import { SpeedDial, useHotkeysContext } from 'use-kbd'
 import StationMap, {
   type Stations, type StationPairCounts, TILE_COLORS, resolveTileStyle,
 } from '../components/StationMap'
@@ -53,7 +53,6 @@ export default function Stations() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [births, setBirths] = useState<StationBirths | null>(null)
-  const [isSearchOpen, setIsSearchOpen] = useState(false)
   const monthSelectRef = useRef<HTMLSelectElement>(null)
 
   // URL parameters
@@ -165,14 +164,13 @@ export default function Stations() {
   }, [colorByAge, births, stations, actualTheme])
 
   // Keyboard shortcuts
-  const openSearch = useCallback(() => setIsSearchOpen(true), [])
-  const closeSearch = useCallback(() => setIsSearchOpen(false), [])
+  const { openOmnibar } = useHotkeysContext()
   useStationsKeyboardShortcuts({
     month,
     setMonth,
     availableMonths,
     setSelectedId,
-    openSearch,
+    openSearch: openOmnibar,
     toggleTheme,
     monthSelectRef,
     colorByAge,
@@ -225,14 +223,6 @@ export default function Stations() {
         />
         {loading && <div className={css.loading}>Loading...</div>}
         {colorByAge && births && <ColorLegend births={births} actualTheme={actualTheme} />}
-        {stations && (
-          <StationSearch
-            isOpen={isSearchOpen}
-            onClose={closeSearch}
-            stations={stations}
-            onSelect={setSelectedId}
-          />
-        )}
         <div className={css.titleContainer} style={{ color: currentColors.title }}>
           <div className={css.title}>
             <Link to="/" className={css.homeLink}>Citi Bike</Link> rides by station,{' '}
@@ -258,9 +248,14 @@ export default function Stations() {
               month ? formatMonth(month) : '...'
             )}
           </div>
-          {subtitle && <div className={css.subtitle}>{subtitle}</div>}
+          {subtitle && selectedId && (
+            <Link to={`/s/${selectedId}`} className={css.subtitle} title="View station details">
+              {subtitle}
+            </Link>
+          )}
         </div>
       </main>
+      {stations && <SpeedDial ariaLabel="Search stations" />}
     </div>
   )
 }
