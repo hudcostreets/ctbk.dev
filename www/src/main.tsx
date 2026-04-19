@@ -86,7 +86,7 @@ createRoot(document.getElementById('root')!).render(
       <HotkeysProvider>
         <MuiThemeWrapper>
           <PlotlyProvider loader={() => import('plotly.js/basic' as 'plotly.js').then(m => m.default ?? m)}>
-            <BrowserRouter>
+            <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
               <AppContent />
             </BrowserRouter>
           </PlotlyProvider>

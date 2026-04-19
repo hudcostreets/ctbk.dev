@@ -20,8 +20,6 @@ import {
   NormalizeRideableType,
   UnknownRideableCutoff,
   UserTypeDisplayNames,
-  annualizedPercents,
-  annualPercentStr,
   rollingAvg,
   stackKeyDict,
   yAxisLabelDict,
@@ -195,8 +193,6 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
       const allAvgY = rollingAvg(allTotals, 12)
       const visibleAvgY = allAvgY.slice(visibleStartIdx, visibleEndIdx)
 
-      annualizedPercents(months, visibleAvgY).forEach((p) => console.log(annualPercentStr(p)))
-
       rollingTraces.push({
         x: monthDates, y: visibleAvgY as (number | null)[],
         name: '12mo avg (outline)', type: 'scatter', mode: 'lines',
@@ -255,15 +251,6 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
           const customdata = clampedVisibleStart >= 0
             ? allCustomdata.slice(clampedVisibleStart, clampedVisibleStart + clampedMonths.length)
             : []
-
-          if (!stackPercents) {
-            const visibleAvgRaw = clampedVisibleStart >= 0
-              ? avgRaw.slice(clampedVisibleStart, clampedVisibleStart + clampedMonths.length)
-              : []
-            annualizedPercents(clampedMonths, visibleAvgRaw).forEach((p) =>
-              console.log(`${stackVal}: ${annualPercentStr(p)}`)
-            )
-          }
 
           const baseColor = colors[stackVal] || colors['']
           const color = stackVal === 'HOB' ? baseColor : darken(baseColor, lineDarkenFactor)
