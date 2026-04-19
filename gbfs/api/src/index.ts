@@ -4,7 +4,9 @@
  * Endpoints:
  *   GET /api/stations/:id/today        — today's availability rows for one station
  *   GET /api/stations/:id/range?date=YYYY-MM-DD  — one specific day's rows
- *   GET /api/stations/:id/range?from=&to=        — arbitrary time window (unix seconds)
+ *   GET /api/stations/:id/range?from=&to=[&since=] — arbitrary window (unix seconds);
+ *                                                    `since` filters by polled_at for
+ *                                                    incremental polling.
  *   GET /health                         — sanity check
  *
  * Reads from D1 `availability_YYYYMMDD` tables populated by the loader.
@@ -81,7 +83,9 @@ async function getStationDay(
 /**
  * Enumerate UTC dates from fromS (inclusive) to toS (inclusive), fetching per-day
  * tables. Rows with ts outside [fromS, toS] are filtered out. Missing day-tables
- * (beyond HOT_DAYS_RETAIN or before first poll) contribute no rows.
+ * (beyond HOT_DAYS_RETAIN or before first poll) contribute no rows. When
+ * `sincePolledAt` is set, only rows with polled_at > since are returned
+ * (for incremental refresh).
  *
  * TODO: fall back to R2 parquet archive for days outside D1 retention.
  */
@@ -90,16 +94,20 @@ async function getStationRange(
 	stationId: string,
 	fromS: number,
 	toS: number,
+	sincePolledAt: number | null = null,
 ): Promise<Record<string, unknown>[]> {
 	const MS_PER_DAY = 86400 * 1000;
-	const startDay = new Date(fromS * 1000);
+	// When polling incrementally, only scan day-tables from the `since` day
+	// onward — older days can't have new polls.
+	const scanFromS = sincePolledAt !== null ? Math.max(fromS, sincePolledAt) : fromS;
+	const startDay = new Date(scanFromS * 1000);
 	startDay.setUTCHours(0, 0, 0, 0);
 	const endDayMs = toS * 1000;
 	const dates: string[] = [];
 	for (let t = startDay.getTime(); t <= endDayMs; t += MS_PER_DAY) {
 		dates.push(new Date(t).toISOString().slice(0, 10));
 	}
-	const perDay = await Promise.all(dates.map((d) => getStationDay(db, stationId, d)));
+	const perDay = await Promise.all(dates.map((d) => getStationDay(db, stationId, d, sincePolledAt)));
 	const rows: Record<string, unknown>[] = [];
 	for (const dayRows of perDay) {
 		for (const r of dayRows) {
@@ -288,13 +296,18 @@ export default {
 				if ((toS - fromS) / 86400 > maxSpanDays) {
 					return errorResponse(`Range exceeds ${maxSpanDays} days`, 400, env);
 				}
+				const sinceParam = url.searchParams.get('since');
+				const since = sinceParam !== null ? parseInt(sinceParam, 10) : null;
+				if (sinceParam !== null && !Number.isFinite(since)) {
+					return errorResponse(`Invalid since: ${sinceParam}`, 400, env);
+				}
 				const [rows, capacity] = await Promise.all([
-					getStationRange(env.DB, gbfsId, fromS, toS),
+					getStationRange(env.DB, gbfsId, fromS, toS, since),
 					getStationCapacity(env.DB, gbfsId),
 				]);
 				const lastPolledAt = rows.length
 					? Math.max(...(rows as { polled_at: number }[]).map((r) => r.polled_at))
-					: null;
+					: since;
 				return jsonResponse({
 					station_id: gbfsId,
 					from: fromS,
@@ -302,7 +315,11 @@ export default {
 					capacity,
 					rows,
 					last_polled_at: lastPolledAt,
-				}, env);
+				}, env, {
+					headers: since !== null
+						? { 'Cache-Control': 'public, max-age=5' }
+						: {},
+				});
 			}
 
 			const dateStr = url.searchParams.get('date') ?? todayUtc();
