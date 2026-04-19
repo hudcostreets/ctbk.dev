@@ -23,7 +23,7 @@ import {
   codeParam, codesParam,
 } from '../data'
 import { boolParam, numberArrayParam, useUrlState } from 'use-prms'
-import { formatTimeRange, timeRangeParam } from '../time-range'
+import { formatTimeRange, roundDuration, timeRangeParam } from '../time-range'
 
 const API_BASE = 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -337,7 +337,20 @@ export default function StationDetail() {
       )}
 
       {data && data.rows.length > 0 && (
-        <StationAvailabilityChart rows={data.rows} capacity={info?.capacity ?? null} />
+        <StationAvailabilityChart
+          rows={data.rows}
+          capacity={info?.capacity ?? null}
+          onPan={(minS, maxS) => {
+            const duration = roundDuration((maxS - minS) * 1000)
+            const nowS = Date.now() / 1000
+            // Snap to Latest when drag ends within 10 min of now (matches awair UX).
+            const snapToLatest = maxS >= nowS - 10 * 60
+            setRange({
+              timestamp: snapToLatest ? null : new Date(maxS * 1000),
+              duration,
+            })
+          }}
+        />
       )}
 
       {data && data.rows.length === 0 && (

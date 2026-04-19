@@ -26,6 +26,21 @@ const DAY_MS = 24 * 60 * 60 * 1000
 const HOUR_MS = 60 * 60 * 1000
 const MIN_MS = 60 * 1000
 
+const { round } = Math
+
+/**
+ * Round a duration to sensible precision based on magnitude, so drag-pan
+ * gestures don't produce `2d23h58m`-style oddness and presets remain
+ * highlightable. Ported from awair's `useTimeRangeParam.roundDuration`.
+ */
+export function roundDuration(ms: number): number {
+  if (ms < 2 * HOUR_MS) return round(ms / (5 * MIN_MS)) * (5 * MIN_MS)
+  if (ms < 12 * HOUR_MS) return round(ms / (15 * MIN_MS)) * (15 * MIN_MS)
+  if (ms < 3 * DAY_MS) return round(ms / HOUR_MS) * HOUR_MS
+  if (ms < 14 * DAY_MS) return round(ms / (6 * HOUR_MS)) * (6 * HOUR_MS)
+  return round(ms / DAY_MS) * DAY_MS
+}
+
 function pad2(n: number): string {
   return String(n).padStart(2, '0')
 }

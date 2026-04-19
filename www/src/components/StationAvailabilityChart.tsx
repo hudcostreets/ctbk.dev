@@ -3,6 +3,7 @@ import uPlot, { type AlignedData, type Options } from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import './StationAvailabilityChart.css'
 import { useTheme } from '../contexts/ThemeContext'
+import { useDragPan } from '../uplot'
 
 export interface AvailabilityRow {
   polled_at: number
@@ -17,6 +18,10 @@ interface Props {
   rows: AvailabilityRow[]
   capacity: number | null
   height?: number
+  /** Drag-to-pan commit handler. Called on mouseup with the new visible x-range
+   *  (unix seconds). Parent should update URL state accordingly. If omitted,
+   *  drag-pan is disabled. */
+  onPan?: (minS: number, maxS: number) => void
 }
 
 const COLORS = {
@@ -68,7 +73,7 @@ function smoothRow(r: AvailabilityRow, capacity: number) {
 const SERIES_KEYS = ['classic', 'ebike', 'docks', 'disabled', 'pending'] as const
 type SeriesKey = (typeof SERIES_KEYS)[number]
 
-export default function StationAvailabilityChart({ rows, capacity, height = 400 }: Props) {
+export default function StationAvailabilityChart({ rows, capacity, height = 400, onPan }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -126,7 +131,7 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400 
     const opts: Options = {
       width: containerRef.current.clientWidth,
       height,
-      cursor: { x: true, y: false, drag: { x: true, y: false } },
+      cursor: { x: true, y: false, drag: { x: false, y: false } },
       scales: {
         x: { time: true },
         y: {
@@ -224,6 +229,11 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400 
     }
   }
   const onLegendDoubleClick = () => setVisible(null)
+
+  useDragPan(plotRef, containerRef, {
+    enabled: !!onPan,
+    onPan: (minS, maxS) => onPan?.(minS, maxS),
+  })
 
   return (
     <div
