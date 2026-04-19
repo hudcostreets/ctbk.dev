@@ -56,9 +56,13 @@
 
 .controls {
     width: 100%;
-    margin-top: -2em;
     position: relative;
     z-index: 10;
+}
+/* Tuck the closed-state gear icon up over the plot's bottom-left corner.
+   When open, let the expanded controls sit below the plot to avoid overlap. */
+.controls:not([open]) {
+    margin-top: -2em;
 }
 .controls > summary {
     margin-bottom: 0.3em;
