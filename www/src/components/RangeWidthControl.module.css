@@ -1,0 +1,62 @@
+.row {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    flex-wrap: wrap;
+}
+
+.label {
+    font-weight: 600;
+    font-size: 0.9em;
+}
+
+.presets {
+    display: inline-flex;
+    border: 1px solid rgba(127, 127, 127, 0.4);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.preset {
+    padding: 0.25em 0.65em;
+    border: none;
+    border-right: 1px solid rgba(127, 127, 127, 0.3);
+    background: transparent;
+    font-size: 0.9em;
+    color: inherit;
+    cursor: pointer;
+    font-family: inherit;
+}
+.preset:last-child {
+    border-right: none;
+}
+.preset:hover {
+    background: rgba(127, 127, 127, 0.1);
+}
+.preset.active {
+    background: rgba(25, 118, 210, 0.25);
+    font-weight: 600;
+}
+
+.latest {
+    padding: 0.25em 0.65em;
+    border: 1px solid rgba(127, 127, 127, 0.4);
+    border-radius: 4px;
+    background: transparent;
+    font-size: 0.9em;
+    color: inherit;
+    cursor: pointer;
+    font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25em;
+}
+.latest:hover {
+    background: rgba(127, 127, 127, 0.1);
+}
+.latest.active {
+    background: rgba(25, 118, 210, 0.25);
+    border-color: rgba(25, 118, 210, 0.6);
+    font-weight: 600;
+    cursor: default;
+}

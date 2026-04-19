@@ -1,16 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Box, CircularProgress, Typography } from '@mui/material'
 import css from '../index.module.css'
 import controlCss from '../controls.module.css'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
+import { RangeWidthControl } from '../components/RangeWidthControl'
 import StationMap, { type Stations, type StationPairCounts } from '../components/StationMap'
 import YmrgtbChart from '../chart/YmrgtbChart'
 import { processData } from '../chart/ymrgtb-traces'
 import { Checkbox } from '../components/Checkbox'
 import { Checklist } from '../components/Checklist'
 import { Radios } from '../components/Radios'
-import { useSmartPolling } from '../hooks/useSmartPolling'
 import { useStationTrips } from '../hooks/useStationTrips'
 import {
   type Docking, type StackBy, type YAxis,
@@ -21,6 +21,7 @@ import {
   codeParam, codesParam,
 } from '../data'
 import { boolParam, numberArrayParam, useUrlState } from 'use-prms'
+import { formatTimeRange, timeRangeParam } from '../time-range'
 
 const API_BASE = 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -42,7 +43,9 @@ interface Row {
 
 interface ApiResponse {
   station_id: string
-  date: string
+  from?: number       // unix seconds (range mode)
+  to?: number         // unix seconds (range mode)
+  date?: string       // YYYY-MM-DD (single-day mode; legacy /today response)
   rows: Row[]
   capacity: number | null
   last_polled_at: number | null
@@ -87,25 +90,38 @@ export default function StationDetail() {
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [mapMonth, setMapMonth] = useState<string | null>(null)
 
+  // Availability time range (URL param `r`; minute-granularity codec, default Latest + 1d).
+  const [range, setRange] = useUrlState('r', timeRangeParam())
+
   useEffect(() => {
     if (!id) return
-    setData(null)
     setInfo(null)
-    setError(null)
-
     fetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/info`)
       .then((r) => (r.ok ? r.json() : null))
       .then(setInfo)
       .catch(() => {})
+  }, [id])
 
-    fetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/today`)
+  // Use primitive deps — `useUrlState` returns a fresh `TimeRange` object each
+  // render, which would retrigger this effect on every React render cycle.
+  const rangeDuration = range.duration
+  const rangeTimestampMs = range.timestamp?.getTime() ?? null
+  useEffect(() => {
+    if (!id) return
+    setData(null)
+    setError(null)
+    const toMs = rangeTimestampMs ?? Date.now()
+    const fromMs = toMs - rangeDuration
+    const fromS = Math.floor(fromMs / 1000)
+    const toS = Math.floor(toMs / 1000)
+    fetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/range?from=${fromS}&to=${toS}`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         return r.json() as Promise<ApiResponse>
       })
       .then(setData)
       .catch((e) => setError(String(e)))
-  }, [id])
+  }, [id, rangeDuration, rangeTimestampMs])
 
   // Load monthly trip history from the public DVX cache
   const { rows: tripsRows } = useStationTrips(info?.short_name)
@@ -138,37 +154,10 @@ export default function StationDetail() {
     })))
   }, [tripsRows])
 
-  // Smart polling: append new `today` rows synced to the GBFS poll cadence.
-  // Uses `polled_at` as the mtime. Incremental fetch via `?since=<polled_at>`.
-  const dataRef = useRef<ApiResponse | null>(null)
-  useEffect(() => { dataRef.current = data }, [data])
-
-  const refetchIncremental = useCallback(async () => {
-    if (!id) return
-    const lastPolled = dataRef.current?.last_polled_at
-    if (!lastPolled) return
-    const res = await fetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/today?since=${lastPolled}`)
-    if (!res.ok) return
-    const next = (await res.json()) as ApiResponse
-    if (!next.rows.length) return
-    setData((prev) => prev ? {
-      ...prev,
-      rows: [...prev.rows, ...next.rows],
-      last_polled_at: next.last_polled_at ?? prev.last_polled_at,
-    } : next)
-  }, [id])
-
-  const lastModifiedDate = useMemo(
-    () => (data?.last_polled_at ? new Date(data.last_polled_at * 1000) : null),
-    [data?.last_polled_at],
-  )
-
-  useSmartPolling({
-    lastModified: lastModifiedDate,
-    refetch: refetchIncremental,
-    enabled: !!id && !!data,
-    isLatestMode: true,  // /today is always "latest"; historical views aren't implemented yet
-  })
+  // Smart polling temporarily disabled while migrating from /today to /range
+  // (slice 4 of multi-scale work). Re-enable for Latest mode once the range
+  // endpoint supports `?since=<polled_at>` — tracked in
+  // `specs/multi-scale-ts-library.md`.
 
   // Load manifest once; default mapMonth to latestMonth
   useEffect(() => {
@@ -281,8 +270,13 @@ export default function StationDetail() {
       )}
 
       <Typography variant="body2" color="text.secondary" gutterBottom>
-        {data ? `Today (${data.date}): ${data.rows.length} snapshots` : ''}
+        {data ? `${data.rows.length.toLocaleString()} snapshots · ` : ''}
+        {formatTimeRange(range)}
       </Typography>
+
+      <Box my={1}>
+        <RangeWidthControl value={range} onChange={setRange} />
+      </Box>
 
       {error && (
         <Typography color="error">Error: {error}</Typography>
