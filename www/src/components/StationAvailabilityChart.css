@@ -1,0 +1,8 @@
+/* Visibility bump for the cursor crosshair: uPlot's default is a thin, low-contrast
+   dashed line that's easy to miss on the stacked-area chart. */
+.station-availability-chart .u-cursor-x {
+    border-right: 2px solid rgba(255, 255, 255, 0.9);
+}
+.station-availability-chart.light .u-cursor-x {
+    border-right-color: rgba(0, 0, 0, 0.75);
+}

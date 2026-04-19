@@ -1,16 +1,18 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Box, CircularProgress, Typography } from '@mui/material'
 import css from '../index.module.css'
 import controlCss from '../controls.module.css'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
 import { RangeWidthControl } from '../components/RangeWidthControl'
+import { TimeAgo } from '../components/TimeAgo'
 import StationMap, { type Stations, type StationPairCounts } from '../components/StationMap'
 import YmrgtbChart from '../chart/YmrgtbChart'
 import { processData } from '../chart/ymrgtb-traces'
 import { Checkbox } from '../components/Checkbox'
 import { Checklist } from '../components/Checklist'
 import { Radios } from '../components/Radios'
+import { useSmartPolling } from '../hooks/useSmartPolling'
 import { useStationTrips } from '../hooks/useStationTrips'
 import {
   type Docking, type StackBy, type YAxis,
@@ -154,10 +156,45 @@ export default function StationDetail() {
     })))
   }, [tripsRows])
 
-  // Smart polling temporarily disabled while migrating from /today to /range
-  // (slice 4 of multi-scale work). Re-enable for Latest mode once the range
-  // endpoint supports `?since=<polled_at>` — tracked in
-  // `specs/multi-scale-ts-library.md`.
+  // Smart polling: incremental refresh in Latest mode. In pinned mode
+  // (`range.timestamp !== null`) the window is fixed, so polling is disabled.
+  const dataRef = useRef<ApiResponse | null>(null)
+  useEffect(() => { dataRef.current = data }, [data])
+
+  const isLatestMode = rangeTimestampMs === null
+
+  const refetchIncremental = useCallback(async () => {
+    if (!id) return
+    const prev = dataRef.current
+    const lastPolled = prev?.last_polled_at
+    if (!lastPolled) return
+    const toS = Math.floor(Date.now() / 1000)
+    const fromS = toS - Math.floor(rangeDuration / 1000)
+    const res = await fetch(
+      `${API_BASE}/api/stations/${encodeURIComponent(id)}/range` +
+      `?from=${fromS}&to=${toS}&since=${lastPolled}`
+    )
+    if (!res.ok) return
+    const next = (await res.json()) as ApiResponse
+    if (!next.rows.length) return
+    setData((p) => p ? {
+      ...p,
+      rows: [...p.rows, ...next.rows],
+      last_polled_at: next.last_polled_at ?? p.last_polled_at,
+    } : next)
+  }, [id, rangeDuration])
+
+  const lastModifiedDate = useMemo(
+    () => (data?.last_polled_at ? new Date(data.last_polled_at * 1000) : null),
+    [data?.last_polled_at],
+  )
+
+  useSmartPolling({
+    lastModified: lastModifiedDate,
+    refetch: refetchIncremental,
+    enabled: !!id && !!data && isLatestMode,
+    isLatestMode,
+  })
 
   // Load manifest once; default mapMonth to latestMonth
   useEffect(() => {
@@ -255,23 +292,36 @@ export default function StationDetail() {
         ? [info.lat, info.lon]
         : null
 
+  const mapsUrl = info?.lat != null && info?.lon != null
+    ? `https://www.google.com/maps?q=${info.lat},${info.lon}`
+    : null
+
   return (
     <Box p={3} maxWidth={1200} mx="auto">
       <Typography variant="h5" gutterBottom>{title}</Typography>
-      {subtitleParts.length > 0 && (
+      {(subtitleParts.length > 0 || mapsUrl) && (
         <Typography variant="body2" color="text.secondary" gutterBottom>
           {subtitleParts.join(' · ')}
-        </Typography>
-      )}
-      {info?.lat != null && info?.lon != null && (
-        <Typography variant="caption" color="text.secondary" display="block" gutterBottom>
-          {info.lat.toFixed(5)}, {info.lon.toFixed(5)}
+          {mapsUrl && (
+            <>
+              {subtitleParts.length > 0 ? ' · ' : ''}
+              <a href={mapsUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit' }}>
+                Google Maps ↗
+              </a>
+            </>
+          )}
         </Typography>
       )}
 
       <Typography variant="body2" color="text.secondary" gutterBottom>
         {data ? `${data.rows.length.toLocaleString()} snapshots · ` : ''}
         {formatTimeRange(range)}
+        {data?.last_polled_at != null && (
+          <>
+            {' · '}
+            <TimeAgo at={data.last_polled_at} prefix="updated" />
+          </>
+        )}
       </Typography>
 
       <Box my={1}>

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import uPlot, { type AlignedData, type Options } from 'uplot'
 import 'uplot/dist/uPlot.min.css'
+import './StationAvailabilityChart.css'
 import { useTheme } from '../contexts/ThemeContext'
 
 export interface AvailabilityRow {
