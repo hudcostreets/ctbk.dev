@@ -4,6 +4,7 @@
  * Endpoints:
  *   GET /api/stations/:id/today        — today's availability rows for one station
  *   GET /api/stations/:id/range?date=YYYY-MM-DD  — one specific day's rows
+ *   GET /api/stations/:id/range?from=&to=        — arbitrary time window (unix seconds)
  *   GET /health                         — sanity check
  *
  * Reads from D1 `availability_YYYYMMDD` tables populated by the loader.
@@ -75,6 +76,38 @@ async function getStationDay(
 		if (err.message?.includes('no such table')) return [];
 		throw err;
 	}
+}
+
+/**
+ * Enumerate UTC dates from fromS (inclusive) to toS (inclusive), fetching per-day
+ * tables. Rows with ts outside [fromS, toS] are filtered out. Missing day-tables
+ * (beyond HOT_DAYS_RETAIN or before first poll) contribute no rows.
+ *
+ * TODO: fall back to R2 parquet archive for days outside D1 retention.
+ */
+async function getStationRange(
+	db: D1Database,
+	stationId: string,
+	fromS: number,
+	toS: number,
+): Promise<Record<string, unknown>[]> {
+	const MS_PER_DAY = 86400 * 1000;
+	const startDay = new Date(fromS * 1000);
+	startDay.setUTCHours(0, 0, 0, 0);
+	const endDayMs = toS * 1000;
+	const dates: string[] = [];
+	for (let t = startDay.getTime(); t <= endDayMs; t += MS_PER_DAY) {
+		dates.push(new Date(t).toISOString().slice(0, 10));
+	}
+	const perDay = await Promise.all(dates.map((d) => getStationDay(db, stationId, d)));
+	const rows: Record<string, unknown>[] = [];
+	for (const dayRows of perDay) {
+		for (const r of dayRows) {
+			const ts = r.ts as number;
+			if (ts >= fromS && ts <= toS) rows.push(r);
+		}
+	}
+	return rows;
 }
 
 /** Detect ID format: slug | uuid | short_name. */
@@ -235,12 +268,43 @@ export default {
 			});
 		}
 
-		// /api/stations/:id/range?date=YYYY-MM-DD
+		// /api/stations/:id/range?date=YYYY-MM-DD        (single day)
+		//                        ?from=<unix_s>&to=<unix_s>  (time window)
 		const rangeMatch = url.pathname.match(/^\/api\/stations\/([^/]+)\/range$/);
 		if (rangeMatch) {
 			const id = decodeURIComponent(rangeMatch[1]);
 			const gbfsId = await resolveToGbfsId(env.DB, id);
 			if (!gbfsId) return errorResponse(`Station not found: ${id}`, 404, env);
+
+			const fromParam = url.searchParams.get('from');
+			const toParam = url.searchParams.get('to');
+			if (fromParam !== null || toParam !== null) {
+				const fromS = fromParam !== null ? parseInt(fromParam, 10) : NaN;
+				const toS = toParam !== null ? parseInt(toParam, 10) : Math.floor(Date.now() / 1000);
+				if (!Number.isFinite(fromS) || !Number.isFinite(toS) || fromS > toS) {
+					return errorResponse(`Invalid from/to: from=${fromParam} to=${toParam}`, 400, env);
+				}
+				const maxSpanDays = 62;
+				if ((toS - fromS) / 86400 > maxSpanDays) {
+					return errorResponse(`Range exceeds ${maxSpanDays} days`, 400, env);
+				}
+				const [rows, capacity] = await Promise.all([
+					getStationRange(env.DB, gbfsId, fromS, toS),
+					getStationCapacity(env.DB, gbfsId),
+				]);
+				const lastPolledAt = rows.length
+					? Math.max(...(rows as { polled_at: number }[]).map((r) => r.polled_at))
+					: null;
+				return jsonResponse({
+					station_id: gbfsId,
+					from: fromS,
+					to: toS,
+					capacity,
+					rows,
+					last_polled_at: lastPolledAt,
+				}, env);
+			}
+
 			const dateStr = url.searchParams.get('date') ?? todayUtc();
 			if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
 				return errorResponse(`Invalid date: ${dateStr} (expected YYYY-MM-DD)`, 400, env);
