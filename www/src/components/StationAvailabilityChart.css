@@ -1,8 +1,11 @@
 /* Visibility bump for the cursor crosshair: uPlot's default is a thin, low-contrast
-   dashed line that's easy to miss on the stacked-area chart. */
+   dashed line that's easy to miss on the stacked-area chart. Solid + fully opaque
+   + `z-index` so stepped-path risers (which live on the canvas below `.u-over`)
+   don't appear to bleed through. */
 .station-availability-chart .u-cursor-x {
-    border-right: 2px solid rgba(255, 255, 255, 0.9);
+    border-right: 2px solid #fff;
+    z-index: 2;
 }
 .station-availability-chart.light .u-cursor-x {
-    border-right-color: rgba(0, 0, 0, 0.75);
+    border-right-color: #000;
 }

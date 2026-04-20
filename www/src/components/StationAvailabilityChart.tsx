@@ -176,8 +176,13 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
               setTooltip(null)
               return
             }
-            const cx = u.cursor.left ?? 0
-            const cy = u.cursor.top ?? 0
+            // `cursor.left/top` are relative to the plot area (inside the axes),
+            // but the tooltip is absolute-positioned inside the outer wrapper
+            // which includes the axes. Shift by bbox origin so the tooltip
+            // sits right at the cursor.
+            const dpr = devicePixelRatio
+            const cx = (u.cursor.left ?? 0) + u.bbox.left / dpr
+            const cy = (u.cursor.top ?? 0) + u.bbox.top / dpr
             const s = smoothed[idx]
             setTooltip({
               visible: true,
@@ -316,13 +321,19 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
           )
         })}
       </div>
-      {tooltip && (
+      {tooltip && (() => {
+        // Flip to the left of the cursor when close to the right edge so the
+        // tooltip doesn't clip off-screen.
+        const plotW = containerRef.current?.clientWidth ?? 1000
+        const flipH = tooltip.left > plotW * 0.6
+        return (
         <div
           ref={tooltipRef}
           style={{
             position: 'absolute',
-            left: tooltip.left + 16,
+            left: tooltip.left + (flipH ? -8 : 16),
             top: tooltip.top + 28,
+            transform: flipH ? 'translate(-100%, 0)' : undefined,
             pointerEvents: 'none',
             background: actualTheme === 'dark' ? '#2d2d2d' : 'white',
             border: `1px solid ${actualTheme === 'dark' ? '#555' : '#ccc'}`,
@@ -352,7 +363,8 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
             <Row color={COLORS.pending} label="Pending"  value={tooltip.pending} />
           )}
         </div>
-      )}
+        )
+      })()}
     </div>
   )
 }
