@@ -242,9 +242,16 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
   }
   const onLegendDoubleClick = () => setVisible(null)
 
+  // Clamp drag to the fetched data's extents — user can't pan past the
+  // earliest row or into the future beyond `now`. Prevents exposing the
+  // data-retention gap (`HOT_DAYS_RETAIN=7` on the backend) via drag.
+  const clampMinS = rows.length ? rows[0].polled_at : undefined
+  const clampMaxS = Math.floor(Date.now() / 1000)
   useDragPan(plotRef, containerRef, {
     enabled: !!onPan,
     onPan: (minS, maxS) => onPan?.(minS, maxS),
+    clampMinS,
+    clampMaxS,
   })
 
   // Sync x-scale to the visible window when it changes (preset-button click,
@@ -314,8 +321,8 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
           ref={tooltipRef}
           style={{
             position: 'absolute',
-            left: tooltip.left + 12,
-            top: tooltip.top + 12,
+            left: tooltip.left + 16,
+            top: tooltip.top + 28,
             pointerEvents: 'none',
             background: actualTheme === 'dark' ? '#2d2d2d' : 'white',
             border: `1px solid ${actualTheme === 'dark' ? '#555' : '#ccc'}`,

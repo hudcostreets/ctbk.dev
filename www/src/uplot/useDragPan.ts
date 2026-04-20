@@ -18,16 +18,26 @@ export interface DragPanOptions {
    *  typically unix seconds for time series). Not called if the drag distance
    *  was zero (i.e. a plain click). */
   onPan: (minS: number, maxS: number) => void
+  /** If set, prevent the pan from pushing `min` below this bound. Typically
+   *  the earliest available data point. Duration is preserved — the window
+   *  just stops flush against the edge. */
+  clampMinS?: number
+  /** Same for the upper bound — typically `now` or the latest available point. */
+  clampMaxS?: number
 }
 
 export function useDragPan(
   plotRef: React.MutableRefObject<uPlot | null>,
   containerRef: React.RefObject<HTMLElement | null>,
-  { enabled = true, onPan }: DragPanOptions,
+  { enabled = true, onPan, clampMinS, clampMaxS }: DragPanOptions,
 ): void {
   // Capture onPan in a ref so handler identity is stable across renders.
   const onPanRef = useRef(onPan)
   useEffect(() => { onPanRef.current = onPan }, [onPan])
+  const clampMinRef = useRef(clampMinS)
+  const clampMaxRef = useRef(clampMaxS)
+  useEffect(() => { clampMinRef.current = clampMinS }, [clampMinS])
+  useEffect(() => { clampMaxRef.current = clampMaxS }, [clampMaxS])
 
   useEffect(() => {
     if (!enabled) return
@@ -85,7 +95,19 @@ export function useDragPan(
       const plotPxWidth = bbox.width / devicePixelRatio
       const deltaPx = e.clientX - startPxX
       const scaleRange = scaleMaxAtStart - scaleMinAtStart
-      const deltaScale = -(deltaPx / plotPxWidth) * scaleRange
+      let deltaScale = -(deltaPx / plotPxWidth) * scaleRange
+      // Clamp the shift so the window stays inside [clampMinS, clampMaxS],
+      // preserving duration. If both clamps conflict (window wider than the
+      // clamped range), direction of drag wins: dragging-backward stops at min,
+      // dragging-forward stops at max.
+      const clampMin = clampMinRef.current
+      const clampMax = clampMaxRef.current
+      if (deltaScale < 0 && clampMin != null && scaleMinAtStart + deltaScale < clampMin) {
+        deltaScale = clampMin - scaleMinAtStart
+      }
+      if (deltaScale > 0 && clampMax != null && scaleMaxAtStart + deltaScale > clampMax) {
+        deltaScale = clampMax - scaleMaxAtStart
+      }
       currentMin = scaleMinAtStart + deltaScale
       currentMax = scaleMaxAtStart + deltaScale
       plot.setScale('x', { min: currentMin, max: currentMax })

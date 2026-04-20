@@ -278,6 +278,14 @@ export default function StationDetail() {
             <TimeAgo at={data.last_polled_at} prefix="updated" />
           </>
         )}
+        {data && data.rows.length > 0 && fromS <= data.rows[0].ts + 0.05 * rangeDuration / 1000 && (
+          <>
+            {' · '}
+            <span title="Scraping began on this date — no older data available">
+              ⟵ start of data ({new Date(data.rows[0].ts * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })})
+            </span>
+          </>
+        )}
       </Typography>
 
       <Box my={1}>
