@@ -22,6 +22,11 @@ interface Props {
    *  (unix seconds). Parent should update URL state accordingly. If omitted,
    *  drag-pan is disabled. */
   onPan?: (minS: number, maxS: number) => void
+  /** Override auto-fit x-scale to this window (unix seconds). `rows` may extend
+   *  beyond — the extra data is used as buffer during drag-pan so the edges
+   *  aren't empty while dragging. */
+  visibleFromS?: number
+  visibleToS?: number
 }
 
 const COLORS = {
@@ -73,7 +78,7 @@ function smoothRow(r: AvailabilityRow, capacity: number) {
 const SERIES_KEYS = ['classic', 'ebike', 'docks', 'disabled', 'pending'] as const
 type SeriesKey = (typeof SERIES_KEYS)[number]
 
-export default function StationAvailabilityChart({ rows, capacity, height = 400, onPan }: Props) {
+export default function StationAvailabilityChart({ rows, capacity, height = 400, onPan, visibleFromS, visibleToS }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -133,7 +138,11 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
       height,
       cursor: { x: true, y: false, drag: { x: false, y: false } },
       scales: {
-        x: { time: true },
+        // When caller provides a visible window, set `auto: false` so uPlot
+        // respects `setScale('x', ...)` calls (both ours below and drag-pan's
+        // live updates) without re-running a range callback that would clobber
+        // them. Initial bounds are set via `setScale` after instantiation.
+        x: { time: true, auto: visibleFromS == null || visibleToS == null },
         y: {
           range: () => [0, cap > 0 ? cap : Math.max(...s5) * 1.02],
         },
@@ -184,6 +193,9 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
 
     const plot = new uPlot(opts, data, containerRef.current)
     plotRef.current = plot
+    if (visibleFromS != null && visibleToS != null) {
+      plot.setScale('x', { min: visibleFromS, max: visibleToS })
+    }
 
     const resize = () => {
       if (containerRef.current) {
@@ -234,6 +246,15 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
     enabled: !!onPan,
     onPan: (minS, maxS) => onPan?.(minS, maxS),
   })
+
+  // Sync x-scale to the visible window when it changes (preset-button click,
+  // Latest snap-back, etc.) without rebuilding the plot. The `range` callback
+  // in `opts` handles the initial scale; this keeps it in sync on prop change.
+  useEffect(() => {
+    const plot = plotRef.current
+    if (!plot || visibleFromS == null || visibleToS == null) return
+    plot.setScale('x', { min: visibleFromS, max: visibleToS })
+  }, [visibleFromS, visibleToS])
 
   return (
     <div

@@ -38,6 +38,12 @@ export function useDragPan(
     let startPxX = 0
     let scaleMinAtStart = 0
     let scaleMaxAtStart = 0
+    // Track last-set bounds in the hook's closure. If the plot is rebuilt
+    // mid-drag (e.g. from a refetch updating the `rows` dep), `plot.scales.x`
+    // resets — reading from it on mouseup would skip the commit. Our own
+    // tracked values survive plot rebuilds.
+    let currentMin = 0
+    let currentMax = 0
 
     const isOverPlotArea = (e: MouseEvent): boolean => {
       const plot = plotRef.current
@@ -63,6 +69,8 @@ export function useDragPan(
       startPxX = e.clientX
       scaleMinAtStart = min
       scaleMaxAtStart = max
+      currentMin = min
+      currentMax = max
       container.style.cursor = 'grabbing'
       e.preventDefault()
     }
@@ -78,24 +86,18 @@ export function useDragPan(
       const deltaPx = e.clientX - startPxX
       const scaleRange = scaleMaxAtStart - scaleMinAtStart
       const deltaScale = -(deltaPx / plotPxWidth) * scaleRange
-      plot.setScale('x', {
-        min: scaleMinAtStart + deltaScale,
-        max: scaleMaxAtStart + deltaScale,
-      })
+      currentMin = scaleMinAtStart + deltaScale
+      currentMax = scaleMaxAtStart + deltaScale
+      plot.setScale('x', { min: currentMin, max: currentMax })
     }
 
     const onMouseUp = (_e: MouseEvent) => {
       if (!dragging) return
       dragging = false
       container.style.cursor = 'grab'
-      const plot = plotRef.current
-      if (!plot) return
-      const min = plot.scales.x.min
-      const max = plot.scales.x.max
-      if (min == null || max == null) return
-      // Skip no-op clicks where the scale didn't move.
-      if (min === scaleMinAtStart && max === scaleMaxAtStart) return
-      onPanRef.current(min, max)
+      // Skip no-op clicks where nothing moved.
+      if (currentMin === scaleMinAtStart && currentMax === scaleMaxAtStart) return
+      onPanRef.current(currentMin, currentMax)
     }
 
     container.addEventListener('mousedown', onMouseDown)

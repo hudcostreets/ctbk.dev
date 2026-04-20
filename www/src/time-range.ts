@@ -41,6 +41,33 @@ export function roundDuration(ms: number): number {
   return round(ms / DAY_MS) * DAY_MS
 }
 
+/**
+ * Given a visible `[fromS, toS]` window (unix seconds), return buffered bounds
+ * that include ~`bufferFactor` * duration of extra data on each side, rounded
+ * to a stable quantum based on duration. The rounding keeps the TSQ query key
+ * stable across small drags/shifts — we want the buffer to be a cacheable
+ * superset, not a different window per pixel of drag.
+ */
+export function bufferedBounds(
+  fromS: number,
+  toS: number,
+  bufferFactor: number = 0.5,
+): [bufferedFromS: number, bufferedToS: number] {
+  const durationS = toS - fromS
+  const padS = durationS * bufferFactor
+  const HOUR_S = 3600
+  const DAY_S = 86400
+  let quantumS: number
+  if (durationS < 2 * HOUR_S) quantumS = 5 * 60
+  else if (durationS < 12 * HOUR_S) quantumS = 15 * 60
+  else if (durationS < 3 * DAY_S) quantumS = HOUR_S
+  else if (durationS < 14 * DAY_S) quantumS = 6 * HOUR_S
+  else quantumS = DAY_S
+  const bufFrom = Math.floor((fromS - padS) / quantumS) * quantumS
+  const bufTo = Math.ceil((toS + padS) / quantumS) * quantumS
+  return [bufFrom, bufTo]
+}
+
 function pad2(n: number): string {
   return String(n).padStart(2, '0')
 }

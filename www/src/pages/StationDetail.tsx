@@ -28,7 +28,7 @@ import {
   codeParam, codesParam,
 } from '../data'
 import { boolParam, numberArrayParam, useUrlState } from 'use-prms'
-import { formatTimeRange, roundDuration, timeRangeParam } from '../time-range'
+import { bufferedBounds, formatTimeRange, roundDuration, timeRangeParam } from '../time-range'
 
 const { API_BASE } = stationsApi
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -73,7 +73,11 @@ export default function StationDetail() {
     }
   }, [rangeDuration, rangeTimestampMs])
 
-  const rangeQuery = useStationRange(id, fromS, toS)
+  // Fetch a quantum-rounded super-range of the visible window so drag-pan
+  // within the buffer is instant (TSQ cache hit) and uPlot has data to
+  // render in the edges as the user drags.
+  const [bufFromS, bufToS] = useMemo(() => bufferedBounds(fromS, toS), [fromS, toS])
+  const rangeQuery = useStationRange(id, bufFromS, bufToS)
   const data = rangeQuery.data ?? null
   const error = rangeQuery.error ? String(rangeQuery.error) : null
 
@@ -114,7 +118,7 @@ export default function StationDetail() {
   // (`['station-range', id, fromS, toS]`) so `useStationRange` consumers
   // see them without a full refetch.
   const isLatestMode = rangeTimestampMs === null
-  const queryKey = useMemo(() => ['station-range', id, fromS, toS], [id, fromS, toS])
+  const queryKey = useMemo(() => ['station-range', id, bufFromS, bufToS], [id, bufFromS, bufToS])
 
   const refetchIncremental = useCallback(async () => {
     if (!id) return
@@ -124,7 +128,7 @@ export default function StationDetail() {
     const nowS = Math.floor(Date.now() / 1000)
     const res = await fetch(
       `${API_BASE}/api/stations/${encodeURIComponent(id)}/range` +
-      `?from=${fromS}&to=${nowS}&since=${lastPolled}`
+      `?from=${bufFromS}&to=${nowS}&since=${lastPolled}`
     )
     if (!res.ok) return
     const next = (await res.json()) as StationRangeResponse
@@ -134,7 +138,7 @@ export default function StationDetail() {
       rows: [...p.rows, ...next.rows],
       last_polled_at: next.last_polled_at ?? p.last_polled_at,
     } : next)
-  }, [id, fromS, queryClient, queryKey])
+  }, [id, bufFromS, queryClient, queryKey])
 
   const lastModifiedDate = useMemo(
     () => (data?.last_polled_at ? new Date(data.last_polled_at * 1000) : null),
@@ -292,6 +296,8 @@ export default function StationDetail() {
         <StationAvailabilityChart
           rows={data.rows}
           capacity={info?.capacity ?? null}
+          visibleFromS={fromS}
+          visibleToS={toS}
           onPan={(minS, maxS) => {
             const duration = roundDuration((maxS - minS) * 1000)
             const nowS = Date.now() / 1000
