@@ -14,6 +14,7 @@
 
 interface Env {
 	DB: D1Database;
+	R2: R2Bucket;
 	CORS_ORIGIN: string;
 	HOT_DAYS_RETAIN: string;
 }
@@ -81,40 +82,106 @@ async function getStationDay(
 }
 
 /**
- * Enumerate UTC dates from fromS (inclusive) to toS (inclusive), fetching per-day
- * tables. Rows with ts outside [fromS, toS] are filtered out. Missing day-tables
- * (beyond HOT_DAYS_RETAIN or before first poll) contribute no rows. When
+ * Read one station's per-month parquet from R2 (`gbfs/stations/<gbfsId>/<yyyymm>.parquet`)
+ * and return rows as plain objects (same shape as D1 queries). Returns `[]` if
+ * the object doesn't exist.
+ */
+async function getStationMonthFromR2(
+	r2: R2Bucket,
+	stationId: string,
+	yyyymm: string,
+): Promise<Record<string, unknown>[]> {
+	const key = `gbfs/stations/${stationId}/${yyyymm}.parquet`;
+	const obj = await r2.get(key);
+	if (!obj) return [];
+	const buf = await obj.arrayBuffer();
+	const file = {
+		byteLength: buf.byteLength,
+		slice: (start: number, end?: number) => buf.slice(start, end),
+	};
+	const { parquetReadObjects } = await import('hyparquet');
+	const rows = await parquetReadObjects({ file }) as Record<string, unknown>[];
+	// hyparquet returns int64 columns (ts, polled_at, last_reported) as BigInt;
+	// coerce to Number so downstream comparisons (and JSON serialization) work.
+	for (const r of rows) {
+		for (const k of Object.keys(r)) {
+			if (typeof r[k] === 'bigint') r[k] = Number(r[k]);
+		}
+	}
+	return rows;
+}
+
+function yyyymmOfDate(dateStr: string): string {
+	// "2026-04-07" → "2026-04"
+	return dateStr.slice(0, 7);
+}
+
+function hotCutoffDate(retainDays: number): string {
+	const ms = Date.now() - retainDays * 86400 * 1000;
+	return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * Enumerate UTC dates from fromS (inclusive) to toS (inclusive), pulling from D1
+ * for dates within `HOT_DAYS_RETAIN` and falling back to R2 per-station monthly
+ * parquets for older dates. Rows outside [fromS, toS] are filtered out. When
  * `sincePolledAt` is set, only rows with polled_at > since are returned
- * (for incremental refresh).
- *
- * TODO: fall back to R2 parquet archive for days outside D1 retention.
+ * (for incremental refresh — skips the R2 path entirely since the archive is
+ * immutable per-day once compacted).
  */
 async function getStationRange(
 	db: D1Database,
+	r2: R2Bucket,
 	stationId: string,
 	fromS: number,
 	toS: number,
+	retainDays: number,
 	sincePolledAt: number | null = null,
 ): Promise<Record<string, unknown>[]> {
 	const MS_PER_DAY = 86400 * 1000;
-	// When polling incrementally, only scan day-tables from the `since` day
-	// onward — older days can't have new polls.
 	const scanFromS = sincePolledAt !== null ? Math.max(fromS, sincePolledAt) : fromS;
 	const startDay = new Date(scanFromS * 1000);
 	startDay.setUTCHours(0, 0, 0, 0);
 	const endDayMs = toS * 1000;
+
 	const dates: string[] = [];
 	for (let t = startDay.getTime(); t <= endDayMs; t += MS_PER_DAY) {
 		dates.push(new Date(t).toISOString().slice(0, 10));
 	}
-	const perDay = await Promise.all(dates.map((d) => getStationDay(db, stationId, d, sincePolledAt)));
+
+	const cutoff = hotCutoffDate(retainDays);
+	// Partition dates: `hot` served from D1; `cold` served from R2 monthly parquets.
+	// Skip R2 entirely when polling incrementally — the archive is immutable.
+	const hotDates: string[] = [];
+	const coldMonths = new Set<string>();
+	for (const d of dates) {
+		if (d >= cutoff) hotDates.push(d);
+		else if (sincePolledAt === null) coldMonths.add(yyyymmOfDate(d));
+	}
+
+	const [hotDayResults, coldMonthResults] = await Promise.all([
+		Promise.all(hotDates.map((d) => getStationDay(db, stationId, d, sincePolledAt))),
+		Promise.all([...coldMonths].map((m) => getStationMonthFromR2(r2, stationId, m))),
+	]);
+
 	const rows: Record<string, unknown>[] = [];
-	for (const dayRows of perDay) {
+	for (const dayRows of hotDayResults) {
 		for (const r of dayRows) {
 			const ts = r.ts as number;
 			if (ts >= fromS && ts <= toS) rows.push(r);
 		}
 	}
+	// R2 month covers ~30 days; filter to the requested window + hot boundary
+	// so cold rows don't duplicate hot ones. Cutoff is exclusive of `cutoff` day
+	// (that day is served by D1).
+	const cutoffS = Math.floor(new Date(cutoff + 'T00:00:00Z').getTime() / 1000);
+	for (const monthRows of coldMonthResults) {
+		for (const r of monthRows) {
+			const ts = r.ts as number;
+			if (ts >= fromS && ts <= toS && ts < cutoffS) rows.push(r);
+		}
+	}
+	rows.sort((a, b) => (a.ts as number) - (b.ts as number));
 	return rows;
 }
 
@@ -302,7 +369,7 @@ export default {
 					return errorResponse(`Invalid since: ${sinceParam}`, 400, env);
 				}
 				const [rows, capacity] = await Promise.all([
-					getStationRange(env.DB, gbfsId, fromS, toS, since),
+					getStationRange(env.DB, env.R2, gbfsId, fromS, toS, parseInt(env.HOT_DAYS_RETAIN, 10), since),
 					getStationCapacity(env.DB, gbfsId),
 				]);
 				const lastPolledAt = rows.length

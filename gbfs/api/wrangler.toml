@@ -15,3 +15,7 @@ binding = "DB"
 database_name = "ctbk-gbfs"
 database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
 
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "ctbk"
+
