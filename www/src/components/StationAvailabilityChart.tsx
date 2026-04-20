@@ -217,6 +217,15 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
     }
   }, [rows, capacity, height, actualTheme, visible, hovered])
 
+  // Latest smoothed values, for inline display in legend items ("current state").
+  const latestValues = (() => {
+    if (!rows.length) return null
+    const cap = capacity ?? 0
+    if (cap <= 0) return null
+    const s = smoothRow(rows[rows.length - 1], cap)
+    return { classic: s.classic, ebike: s.ebikes, docks: s.docks, disabled: s.disabled, pending: s.pending }
+  })()
+
   const legendItems: { key: SeriesKey; color: string; label: string }[] = [
     { key: 'classic',  color: COLORS.classic,  label: 'Classic bikes' },
     { key: 'ebike',    color: COLORS.ebike,    label: 'eBikes' },
@@ -316,7 +325,14 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
                 background: it.color, borderRadius: 2,
                 opacity: shown ? 1 : 0.5,
               }} />
-              <span style={{ textDecoration: shown ? 'none' : 'line-through' }}>{it.label}</span>
+              <span style={{ textDecoration: shown ? 'none' : 'line-through' }}>
+                {it.label}
+                {latestValues && (
+                  <span style={{ marginLeft: 4, fontVariantNumeric: 'tabular-nums', opacity: 0.75 }}>
+                    ({latestValues[it.key]})
+                  </span>
+                )}
+              </span>
             </div>
           )
         })}
