@@ -112,6 +112,10 @@ function parseDuration(s: string): number {
 }
 
 /** Encode ms → `1d3h10m`; omits zero components. */
+export function formatDuration(ms: number): string {
+  return encodeDuration(ms)
+}
+
 function encodeDuration(ms: number): string {
   const days = floor(ms / DAY_MS); ms -= days * DAY_MS
   const hours = floor(ms / HOUR_MS); ms -= hours * HOUR_MS

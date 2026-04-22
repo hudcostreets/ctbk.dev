@@ -1,18 +1,22 @@
 /**
- * Availability time-range picker: preset duration buttons + a "Latest" toggle.
- *
- * A pinned timestamp (from URL `?r=YYMMDD-...`) isn't directly settable here
- * yet — clear to Latest via the ▶| button. Drag-zoom on the chart will
- * eventually drive this (see `specs/station-zoom-subdaily.md`).
+ * Availability time-range picker: duration dropdown + a "Latest" toggle.
+ * Drag-pan on the chart updates duration (via `roundDuration`) and
+ * timestamp; when the current duration doesn't match a preset, a
+ * "(custom)" option is added to the dropdown so selection state is
+ * still meaningful.
  */
+import { formatDuration } from '../time-range'
 import css from './RangeWidthControl.module.css'
 import type { TimeRange } from '../time-range'
 
-const DAY_MS = 24 * 60 * 60 * 1000
+const HOUR_MS = 60 * 60 * 1000
+const DAY_MS = 24 * HOUR_MS
 
 export type DurationPreset = { label: string; ms: number }
 
 export const DEFAULT_PRESETS: readonly DurationPreset[] = [
+  { label: '6h',  ms: 6 * HOUR_MS },
+  { label: '12h', ms: 12 * HOUR_MS },
   { label: '1d',  ms: DAY_MS },
   { label: '3d',  ms: 3 * DAY_MS },
   { label: '7d',  ms: 7 * DAY_MS },
@@ -26,26 +30,35 @@ interface Props {
   presets?: readonly DurationPreset[]
 }
 
+const CUSTOM = 'custom'
+
 export function RangeWidthControl({ value, onChange, presets = DEFAULT_PRESETS }: Props) {
   const isLatest = value.timestamp === null
-  const activeMs = presets.find(p => p.ms === value.duration)?.ms
+  const activePreset = presets.find(p => p.ms === value.duration)
+  const selectValue = activePreset?.label ?? CUSTOM
+  const customLabel = activePreset ? null : formatDuration(value.duration)
 
   return (
     <div className={css.row}>
-      <span className={css.label}>Range:</span>
-      <div className={css.presets} role="group" aria-label="Duration">
+      <label className={css.label} htmlFor="range-width-select">Range:</label>
+      <select
+        id="range-width-select"
+        className={css.select}
+        value={selectValue}
+        onChange={(e) => {
+          const next = e.target.value
+          if (next === CUSTOM) return  // display-only option
+          const p = presets.find(pp => pp.label === next)
+          if (p) onChange({ ...value, duration: p.ms })
+        }}
+      >
+        {!activePreset && (
+          <option value={CUSTOM}>{customLabel ?? 'custom'}</option>
+        )}
         {presets.map(p => (
-          <button
-            key={p.label}
-            type="button"
-            className={`${css.preset} ${p.ms === activeMs ? css.active : ''}`}
-            onClick={() => onChange({ ...value, duration: p.ms })}
-            aria-pressed={p.ms === activeMs}
-          >
-            {p.label}
-          </button>
+          <option key={p.label} value={p.label}>{p.label}</option>
         ))}
-      </div>
+      </select>
       <button
         type="button"
         className={`${css.latest} ${isLatest ? css.active : ''}`}

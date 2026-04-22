@@ -3,39 +3,31 @@
     align-items: center;
     gap: 0.5em;
     flex-wrap: wrap;
+    font-size: 1rem;
 }
 
 .label {
     font-weight: 600;
-    font-size: 0.9em;
+    line-height: 1.5;
+    padding: 0.25em 0;   /* match `.select`'s vertical padding so text baselines align */
 }
 
-.presets {
-    display: inline-flex;
+.select {
+    padding: 0.25em 0.5em;
     border: 1px solid rgba(127, 127, 127, 0.4);
     border-radius: 4px;
-    overflow: hidden;
-}
-
-.preset {
-    padding: 0.25em 0.65em;
-    border: none;
-    border-right: 1px solid rgba(127, 127, 127, 0.3);
     background: transparent;
-    font-size: 0.9em;
     color: inherit;
-    cursor: pointer;
     font-family: inherit;
+    line-height: 1.5;
+    cursor: pointer;
 }
-.preset:last-child {
-    border-right: none;
-}
-.preset:hover {
+.select:hover {
     background: rgba(127, 127, 127, 0.1);
 }
-.preset.active {
-    background: rgba(25, 118, 210, 0.25);
-    font-weight: 600;
+.select:focus-visible {
+    outline: 2px solid rgba(25, 118, 210, 0.6);
+    outline-offset: 1px;
 }
 
 .latest {
