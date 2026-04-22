@@ -72,6 +72,21 @@ a.subtitle:hover {
     height: 100vh;
 }
 
+.embedMap {
+    width: 100%;
+    height: 100%;
+}
+
+.embedCaption {
+    text-align: center;
+    padding: 0.4em 0.5em;
+    font-size: 0.95em;
+    min-height: 1.6em;
+}
+.embedCaption .placeholder {
+    opacity: 0.6;
+}
+
 .selected {
     z-index: 500 !important;
 }

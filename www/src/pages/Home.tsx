@@ -10,6 +10,7 @@ import controlCss from "../controls.module.css"
 import { Checkbox } from "../components/Checkbox"
 import { Checklist } from "../components/Checklist"
 import MonthRangePicker from "../components/MonthRangePicker"
+import StationMapEmbed from "../components/StationMapEmbed"
 import { Radios } from "../components/Radios"
 import { useTheme } from "../contexts/ThemeContext"
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts"
@@ -508,8 +509,7 @@ export default function Home() {
           <hr />
 
           <h3 id="map">Map: Stations + Common Destinations</h3>
-          <p>Tap a station to see where rides originating there go:</p>
-          <iframe src="/stations" className={css.map} title="Stations map" />
+          <StationMapEmbed mapClassName={css.map} />
           <p>(<Link to="/stations">Full screen version</Link>)</p>
 
           <hr />
