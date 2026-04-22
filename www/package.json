@@ -61,7 +61,8 @@
     "scrns": "scrns -o public/screenshots -s '.plotly svg rect' -l 30000 -h localhost:3456",
     "scrns:docker": "./scripts/docker-screenshots.sh",
     "test": "playwright test",
-    "test:ui": "playwright test --ui"
+    "test:ui": "playwright test --ui",
+    "test:bundle": "playwright test --config=playwright.bundle.config.ts"
   },
   "repository": {
     "type": "git",
