@@ -3,7 +3,7 @@ import 'use-kbd/styles.css'
 import '../styles/globals.css'
 import { HotkeysProvider, ShortcutsModal, Omnibar, LookupModal, SequenceModal, useHotkeysContext } from 'use-kbd'
 import { ThemeProvider as MuiThemeProvider, createTheme } from "@mui/material"
-import { StrictMode, useMemo } from 'react'
+import { StrictMode, Suspense, lazy, useMemo } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { PlotlyProvider } from 'pltly/react'
@@ -15,11 +15,15 @@ import { HomeButton, ThemeTileToggle } from "./components/TileStyleButton"
 import { useScrollToHash } from "./hooks/useScrollToHash"
 import { useGlobalStationsOmnibar } from "./hooks/useGlobalStationsOmnibar"
 import Home from "./pages/Home"
-import Stations from "./pages/Stations"
-import StationDetail from "./pages/StationDetail"
-import PipelineMdx from "./pages/Pipeline.mdx"
 import { Box } from "@mui/material"
 import { Footer } from "./components/Footer"
+
+// Other routes are lazy so leaflet / station-detail / MDX stay off Home's
+// critical path. Home itself is eagerly imported since it's the common
+// landing page.
+const Stations = lazy(() => import("./pages/Stations"))
+const StationDetail = lazy(() => import("./pages/StationDetail"))
+const PipelineMdx = lazy(() => import("./pages/Pipeline.mdx"))
 
 function Pipeline() {
   return (
@@ -39,14 +43,16 @@ function AppContent() {
 
   return (
     <>
-      <Routes>
-        <Route path="/" element={<Home />} />
-        <Route path="/stations" element={<Stations />} />
-        <Route path="/s/:id" element={<StationDetail />} />
-        {/* Back-compat: redirect old /stations/:id form to /s/:id */}
-        <Route path="/stations/:id" element={<StationDetail />} />
-        <Route path="/pipeline" element={<Pipeline />} />
-      </Routes>
+      <Suspense fallback={null}>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/stations" element={<Stations />} />
+          <Route path="/s/:id" element={<StationDetail />} />
+          {/* Back-compat: redirect old /stations/:id form to /s/:id */}
+          <Route path="/stations/:id" element={<StationDetail />} />
+          <Route path="/pipeline" element={<Pipeline />} />
+        </Routes>
+      </Suspense>
       <ThemeToggle onOpenShortcuts={openModal} hideThemeButton={isStationsPage}>
         {isStationsPage && (
           <>

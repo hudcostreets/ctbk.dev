@@ -1,7 +1,7 @@
 import { Tooltip } from "@mui/material"
 import { useUrlState, boolParam, numberArrayParam } from 'use-prms'
 import { PlotRelayoutEvent } from 'plotly.js'
-import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
+import { ReactNode, Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
 import { Plot } from 'pltly/react'
 import { Link, useLocation } from 'react-router-dom'
 import { GitHubIcon, S3Icon, BlueskyIcon } from "@/components/icons"
@@ -10,8 +10,8 @@ import controlCss from "../controls.module.css"
 import { Checkbox } from "../components/Checkbox"
 import { Checklist } from "../components/Checklist"
 import MonthRangePicker from "../components/MonthRangePicker"
-import StationMapEmbed from "../components/StationMapEmbed"
 import { Radios } from "../components/Radios"
+import { useIsInView } from "../hooks/useIsInView"
 import { useTheme } from "../contexts/ThemeContext"
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts"
 import { DateRange2Dates, dateRangeParam, parseDuration, isDurationBased, isExplicitRange, formatDuration } from "../date-range"
@@ -68,6 +68,29 @@ const GenderLabel = (suffix: number | string) => (
 )
 
 export const RideableTypesExample = "/?y=m&s=b&rt=ce&d=2002-"
+
+const StationMapEmbed = lazy(() => import("../components/StationMapEmbed"))
+
+/**
+ * Render the station map only after its slot scrolls near the viewport.
+ * Keeps leaflet + map data out of the initial Home bundle/fetch. Until
+ * then, show a placeholder sized to match the final map so the page
+ * layout doesn't jump when the real component mounts.
+ */
+function LazyStationMap() {
+  const [ref, isInView] = useIsInView<HTMLDivElement>('400px')
+  return (
+    <div ref={ref}>
+      {isInView ? (
+        <Suspense fallback={<div className={css.map} />}>
+          <StationMapEmbed mapClassName={css.map} />
+        </Suspense>
+      ) : (
+        <div className={css.map} />
+      )}
+    </div>
+  )
+}
 
 export default function Home() {
   // useLocation triggers re-render on URL change (React Router Link navigation)
@@ -509,7 +532,7 @@ export default function Home() {
           <hr />
 
           <h3 id="map">Map: Stations + Common Destinations</h3>
-          <StationMapEmbed mapClassName={css.map} />
+          <LazyStationMap />
           <p>(<Link to="/stations">Full screen version</Link>)</p>
 
           <hr />
