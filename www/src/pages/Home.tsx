@@ -396,8 +396,9 @@ export default function Home() {
                   if (newStart) {
                     setDateRange({ start: newStart, end: newEnd })
                   } else if (newEnd) {
-                    // Start not set — fall back to "All data up to newEnd"
                     setDateRange({ start: dataBounds?.start ?? new Date(2013, 5, 1), end: newEnd })
+                  } else {
+                    setDateRange("All")
                   }
                 }}
               />

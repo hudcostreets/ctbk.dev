@@ -33,12 +33,13 @@ function fromYymm(s: string): Date | null {
 }
 
 function Field({
-  value, onCommit, min, max,
+  value, onCommit, min, max, label,
 }: {
   value: Date | undefined
   onCommit: (d: Date | undefined) => void
   min?: Date
   max?: Date
+  label: string
 }) {
   const [text, setText] = useState(toYymm(value))
 
@@ -59,6 +60,7 @@ function Field({
     <input
       type="text"
       inputMode="numeric"
+      aria-label={label}
       value={text}
       placeholder="YY-MM"
       onChange={(e) => setText(e.target.value)}
@@ -85,6 +87,7 @@ export default function MonthRangePicker({
   return (
     <span className={className} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
       <Field
+        label="Start month"
         value={start}
         onCommit={(d) => onChange(d, end)}
         min={minDate}
@@ -92,6 +95,7 @@ export default function MonthRangePicker({
       />
       <span style={{ opacity: 0.6 }}>→</span>
       <Field
+        label="End month"
         value={end}
         onCommit={(d) => onChange(start, d)}
         min={start ?? minDate}
