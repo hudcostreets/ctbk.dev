@@ -369,6 +369,15 @@ export default function StationDetail() {
         </>
       )}
 
+      {processedTripsRows && processedTripsRows.length === 0 && (
+        <Box sx={{ mt: 4 }}>
+          <Typography variant="subtitle1" gutterBottom>Monthly trips</Typography>
+          <Typography variant="body2" sx={{ opacity: 0.65 }}>
+            No monthly trip aggregations are indexed for this station yet.
+          </Typography>
+        </Box>
+      )}
+
       {processedTripsRows && processedTripsRows.length > 0 && (
         <Box sx={{ mt: 4 }}>
           <Typography variant="subtitle1" gutterBottom>Monthly trips</Typography>

@@ -35,6 +35,17 @@ if (!existsSync(dvcPath)) {
   process.exit(1)
 }
 
+// Optional alias enrichment: many stations have historical ID aliases that
+// all map to the same canonical record in the trips aggregation (e.g.
+// HB106 ↔ HB609 for "River St & Newark St"). `station-id-map.json` holds
+// the alias → canonical mapping; we mirror the canonical's md5 under every
+// alias in the index so client lookups by either form succeed.
+const idMapPath = join(repoRoot, 's3/ctbk/stations/station-id-map.json')
+const idMap = existsSync(idMapPath)
+  ? JSON.parse(readFileSync(idMapPath, 'utf8'))
+  : null
+if (!idMap) console.warn(`Alias enrichment skipped: ${idMapPath} not found`)
+
 const spec = YAML.parse(readFileSync(dvcPath, 'utf8'))
 // `md5` field ends in `.dir` for directory outputs; the S3 object also has
 // that suffix. Keep the suffix in the URL; strip it for the clean dir_md5.
@@ -61,8 +72,23 @@ for (const { md5, relpath } of entries) {
   files[m[1]] = md5
 }
 
+const canonicalCount = Object.keys(files).length
+let aliasesAdded = 0
+if (idMap) {
+  for (const [alias, canonical] of Object.entries(idMap)) {
+    if (alias === canonical) continue
+    if (files[alias]) continue  // already a direct entry; don't overwrite
+    if (files[canonical]) {
+      files[alias] = files[canonical]
+      aliasesAdded++
+    }
+  }
+}
+
 const manifest = { dir_md5: dirMd5, files }
 writeFileSync(outPath, JSON.stringify(manifest))
 
 const size = Buffer.byteLength(JSON.stringify(manifest))
-console.log(`Wrote ${outPath}: ${Object.keys(files).length} stations, ${(size / 1024).toFixed(1)} KB`)
+console.log(
+  `Wrote ${outPath}: ${canonicalCount} canonical + ${aliasesAdded} aliases = ${Object.keys(files).length} entries, ${(size / 1024).toFixed(1)} KB`,
+)

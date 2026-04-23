@@ -60,7 +60,10 @@ export function useStationTrips(shortName: string | null | undefined): {
     const promise: Promise<StationTripsRow[]> = existing ?? (async () => {
       const index = await loadIndex()
       const md5 = index.files[shortName]
-      if (!md5) return []
+      if (!md5) {
+        console.warn(`useStationTrips: no ymdgtb data indexed for short_name=${shortName}`)
+        return []
+      }
       const res = await fetch(trips_url(md5))
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       return res.json() as Promise<StationTripsRow[]>
