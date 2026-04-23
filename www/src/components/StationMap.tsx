@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useTheme } from '../contexts/ThemeContext'
@@ -87,6 +87,11 @@ function StationMarkers({
   const selectedStation = selectedId ? stations[selectedId] : undefined
   const mPerPx = useMemo(() => getMetersPerPixel(map), [map, zoom])
 
+  // Suppress the permanent selected-station tooltip while the cursor is over a
+  // destination line — otherwise both tooltips pile up at the source station,
+  // overlapping awkwardly.
+  const [hoveringLine, setHoveringLine] = useState(false)
+
   const lines = useMemo(() => {
     if (!selectedStation || !selectedId || !pairCounts) return null
     if (!(selectedId in pairCounts)) return null
@@ -107,6 +112,10 @@ function StationMarkers({
               color={colors.line}
               weight={weight}
               opacity={0.7}
+              eventHandlers={{
+                mouseover: () => setHoveringLine(true),
+                mouseout: () => setHoveringLine(false),
+              }}
             >
               <Tooltip sticky>{src.name} → {dst.name}: {count}</Tooltip>
             </Polyline>
@@ -133,13 +142,15 @@ function StationMarkers({
           radius={radius}
           interactive={false}
         >
-          <Tooltip className={css.tooltip} sticky permanent pane="selected">
-            <p>{selectedStation.name}{selectedStation.ends > 0 ? `: ${selectedStation.ends.toLocaleString()}` : ''}</p>
-          </Tooltip>
+          {!hoveringLine && (
+            <Tooltip className={css.tooltip} sticky permanent pane="selected">
+              <p>{selectedStation.name}{selectedStation.ends > 0 ? `: ${selectedStation.ends.toLocaleString()}` : ''}</p>
+            </Tooltip>
+          )}
         </Circle>
       </Pane>
     )
-  }, [selectedStation, selectedId, colors])
+  }, [selectedStation, selectedId, colors, hoveringLine])
 
   const circles = useMemo(() => {
     return (
