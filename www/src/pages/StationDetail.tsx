@@ -56,8 +56,8 @@ export default function StationDetail() {
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [mapMonth, setMapMonth] = useState<string | null>(null)
 
-  // Availability time range (URL param `r`; minute-granularity codec, default Latest + 1d).
-  const [range, setRange] = useUrlState('r', timeRangeParam())
+  // Availability time range (URL param `r`; minute-granularity codec, default Latest + 7d).
+  const [range, setRange] = useUrlState('r', timeRangeParam(7 * 24 * 60 * 60 * 1000))
 
   const { data: info } = useStationInfo(id)
 
