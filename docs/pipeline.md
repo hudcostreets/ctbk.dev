@@ -19,7 +19,59 @@ The `ctbk` CLI provides 8 core pipeline stages, each processing Citi Bike trip d
 
 Plus utility stages:
 - `YmrgtbCdJson` (`ymrgtb-cd`): Dashboard aggregation (cross-month)
+- `YmdgtbCdJson` (`ymdgtb-cd`): Per-station monthly trip aggregations (see *Per-Station Trips*, below)
 - `Partition` (`partition`): v0 data splitting utility
+
+## Per-Station Trips (`ymdgtb`)
+
+`/s/:slug` renders a monthly trips chart filtered to a single station. The underlying
+data is produced by running `agg` with a per-station group key:
+
+- `agg -g ymsgtb -acd` — counts + durations keyed by (year, month, start station, gender, user type, bike type)
+- `agg -g ymegtb -acd` — same, keyed by *end* station
+
+The `YmdgtbCdJson` stage (`ymdgtb-cd`) fans these per-station aggregates into one JSON
+per canonical station under `s3/ctbk/stations/ymdgtb/<short_name>.json` (DVX-tracked
+via `s3/ctbk/stations/ymdgtb.dvc`).
+
+Web side, `www/scripts/gen-ymdgtb-index.js` runs at `prebuild` time and emits
+`public/ymdgtb-index.json`:
+
+```json
+{ "dir_md5": "...", "files": { "<short_name>": "<md5>" } }
+```
+
+which maps each station's short_name to the content-addressed URL of its per-station
+JSON on S3 (served via the DVX cache). The `useStationTrips` hook uses this index to
+lazy-fetch one station's JSON on demand — no per-station static pages, no backend.
+
+## Station Identity & Aliases
+
+Citi Bike renumbers stations over time; the same physical station may appear under
+several `short_name`s across its history (e.g. `HB106` today, `HB609` pre-2025-06).
+`s3/ctbk/stations/station-mappings.yaml` records the canonical record and the full
+set of aliases with their active date ranges. `station-id-map.json` is the derived
+lookup: `{ alias: canonical }` for every known identifier.
+
+Per-station `ymdgtb` JSONs are keyed by **canonical** short_name (one file per
+physical station, combining all historical ID appearances). The web-side index
+enriches this with alias entries — each alias gets the canonical's md5 — so
+client lookups by either form resolve to the same file.
+
+## GBFS Availability Pipeline
+
+Orthogonal to the trip-data pipeline above. Polls Citi Bike's GBFS feed every minute:
+
+| Stage | Where | Purpose |
+|-------|-------|---------|
+| Poll | `gbfs/worker` (Cloudflare Worker cron) | Fetch station_status, append row per station to D1 day-table `availability_YYYYMMDD` |
+| Serve | `gbfs/api` (Cloudflare Worker) | `/api/stations/:id/{info,range}` — D1 for hot (≤ `HOT_DAYS_RETAIN`=7d), R2 parquet fallback for cold |
+| Compact | `gbfs/compact-r2.py` (GHA daily) | Drop aged-out D1 day-tables, merge into daily system-wide parquet `gbfs/parquet/YYYY-MM-DD.parquet`, slice into per-station monthly parquets `gbfs/stations/<gbfs_uuid>/<YYYY-MM>.parquet` |
+
+Consumed by `StationDetail`'s availability chart (`uPlot`) via `useStationRange`.
+
+See `specs/multiscale-timeseries-backend.md` for the planned rollup-pyramid extension
+(minute → 5-min → hour → day → month tiers for both trips and availability).
 
 ## Dependency Graph
 

@@ -108,6 +108,15 @@ Finally, we generate JSON files with ride counts between each pair of stations, 
 
 The `ymrgtb-cd` stage aggregates across all months to produce the JSON consumed by the main dashboard charts—ride counts and durations grouped by year, month, region, gender, user type, and bike type.
 
+<H2 id="per-station-pages">Per-Station Pages</H2>
+
+Each `/s/:slug` detail page pulls two orthogonal data streams:
+
+- **Monthly trip history** via the `ymdgtb-cd` stage — per-station variants of `ymrgtb-cd` with start/end-station facets. One JSON per *canonical* station, indexed at build time into `ymdgtb-index.json`. Stations renumbered over time (e.g. `HB106` today, `HB609` pre-2025-06) share a file keyed by their canonical short_name; the index is enriched with alias entries so client lookups by either form resolve to the same data.
+- **Live availability** (per-minute bikes/docks/disabled snapshots) from a separate GBFS pipeline: a Cloudflare Worker polls `station_status` each minute into a D1 ring buffer (7d hot cache), with older data served from R2 parquet archives generated nightly by `compact-r2.py`.
+
+See `specs/multiscale-timeseries-backend.md` for the planned rollup-pyramid extension (minute → 5-min → hour → day → month tiers).
+
 </PipelineProvider>
 
 [ctbk.dev]: https://ctbk.dev
