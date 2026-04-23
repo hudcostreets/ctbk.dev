@@ -9,7 +9,7 @@
  * Writes to www/public/ymdgtb-index.json.
  */
 
-import { readFileSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import YAML from 'yaml'
@@ -20,6 +20,21 @@ const repoRoot = join(__dirname, '..', '..')
 const S3_BASE = 'https://ctbk.s3.amazonaws.com/.dvc/files/md5'
 
 const dvcPath = join(repoRoot, 's3/ctbk/stations/ymdgtb.dvc')
+const outPath = join(__dirname, '..', 'public/ymdgtb-index.json')
+
+// Graceful fallback for environments that lack the repo's `s3/` tree
+// (e.g. the screenshots Docker image, whose build context is `www/`):
+// if the `.dvc` file isn't reachable, trust a pre-generated index if
+// one exists. The host-side step runs before Docker and produces it.
+if (!existsSync(dvcPath)) {
+  if (existsSync(outPath)) {
+    console.log(`Skipping ymdgtb-index regeneration: ${dvcPath} not found, using existing ${outPath}`)
+    process.exit(0)
+  }
+  console.error(`Can't generate ymdgtb-index: neither ${dvcPath} nor ${outPath} exists`)
+  process.exit(1)
+}
+
 const spec = YAML.parse(readFileSync(dvcPath, 'utf8'))
 // `md5` field ends in `.dir` for directory outputs; the S3 object also has
 // that suffix. Keep the suffix in the URL; strip it for the clean dir_md5.
@@ -47,7 +62,6 @@ for (const { md5, relpath } of entries) {
 }
 
 const manifest = { dir_md5: dirMd5, files }
-const outPath = join(__dirname, '..', 'public/ymdgtb-index.json')
 writeFileSync(outPath, JSON.stringify(manifest))
 
 const size = Buffer.byteLength(JSON.stringify(manifest))

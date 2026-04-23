@@ -29,6 +29,10 @@
 !public/assets/twitter.png
 !public/assets/warning.png
 !public/assets/ymrgtb_cd.json
+# Generated at host-build time (see `scripts/gen-ymdgtb-index.js`); the
+# screenshots Docker image can't regenerate it (no `s3/*.dvc` in context),
+# so ship the host-built artifact into the image.
+!public/ymdgtb-index.json
 !public/data/annualized_pcts.json
 !public/favicon.ico
 !public/img/ride_durations_202303_10s.png
