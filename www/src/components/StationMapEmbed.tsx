@@ -107,7 +107,7 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
             <Link to={`/s/${selectedId}`}>View station details →</Link>
           </>
         ) : (
-          <span className={css.placeholder}>Tap a station to see its top destinations.</span>
+          <span className={css.placeholder}>Tap a station to see its top destinations and open its page.</span>
         )}
         {captionTrailing && (
           <>
