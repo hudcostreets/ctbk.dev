@@ -42,10 +42,14 @@ Using `@rdub/screenshots` package from GitLab.
 
 ## Phase 2: Station Harmonization
 
-### 2.1 Station Identity Mapping
-**Complexity:** High | **Dependencies:** None (pipeline work)
+### 2.1 Station Identity Mapping ✅
+**Complexity:** High | **Dependencies:** None (pipeline work) | **Status:** Complete
 
-Build a mapping from "canonical station ID" to historical appearances:
+Built. See `s3/ctbk/stations/station-mappings.yaml` (canonical records + full
+alias history with date ranges), derived `station-id-map.json` (`{alias: canonical}`
+lookup), and `station-slugs.json` (canonical → URL slug).
+
+Original idea below:
 
 ```python
 # Example schema
@@ -76,16 +80,23 @@ canonical_stations = {
 - Output: `s3/ctbk/station-mappings.json`
 - Manual override file for edge cases: `station-bridges.yaml`
 
-### 2.2 Per-Station Pages
-**Complexity:** Medium | **Dependencies:** 2.1
+### 2.2 Per-Station Pages ✅
+**Complexity:** Medium | **Dependencies:** 2.1 | **Status:** Complete
 
-Route: `/stations/:canonicalId`
+Live at `/s/:slug` (or `/s/:short_name`). Features delivered:
 
-Features:
-- Same plot controls as homepage
-- Filter data to rides starting/ending at this station
-- Station metadata (name, coords, first/last seen)
-- Link to map view centered on station
+- Monthly trips chart via per-station `ymdgtb-cd` aggregations (`start` / `end` /
+  `both` radio, plus the full homepage filter palette: User Type, Gender, Bike Type,
+  stack-by, rolling avg, date range).
+- Live availability chart (bikes / docks / disabled by minute, 7d default, drag-pan,
+  smart polling for new data, `uPlot`-rendered).
+- Station metadata header (capacity, type, first-seen date, Google Maps link).
+- Map view centered on station with destination spokes (shared `StationMap`).
+- URL-encoded state for every control; deep-linkable.
+
+Completed specs: `specs/done/station-detail-pages.md`,
+`specs/done/station-trips-monthly.md`, `specs/done/station-slugs.md`,
+`specs/done/live-minute-refresh.md`.
 
 ---
 
@@ -184,28 +195,34 @@ Web interface for S3 data:
 
 ## Phase 6: Real-time Availability Data
 
-### 6.1 GBFS Scraper
-**Complexity:** High | **Dependencies:** Backend infrastructure
+### 6.1 GBFS Scraper ✅
+**Complexity:** High | **Dependencies:** Backend infrastructure | **Status:** Complete
 
-Citi Bike publishes GBFS (General Bikeshare Feed Specification):
-- `station_status.json` - real-time bike/dock availability
-- Updated every ~1 minute
+Running in production. Cloudflare Worker (`gbfs/worker`) polls
+`station_status.json` every minute and appends rows to D1 day-tables
+`availability_YYYYMMDD`. Daily GHA (`gbfs/compact-r2.py`) evicts old D1 tables
+and compacts the day into R2 parquet, then slices into per-station monthly files
+under `gbfs/stations/<gbfs_uuid>/<YYYY-MM>.parquet`. `HOT_DAYS_RETAIN=7` keeps
+D1 as a rolling hot cache; older reads fall back to R2.
 
-**Pipeline:**
-1. Lambda/cron job scrapes every minute
-2. Append to time-series parquet files
-3. Aggregate hourly/daily summaries
+### 6.2 Availability Visualization ✅
+**Complexity:** Medium | **Dependencies:** 6.1 | **Status:** Complete
 
-**Storage estimate:**
-- ~2000 stations × 1440 minutes/day × 365 days = ~1B rows/year
-- Partitioned by date, compressed: ~10-50GB/year
+Shipped on `/s/:slug`:
+- `uPlot` stacked-area chart of bikes (classic + ebike) / docks / disabled.
+- Drag-to-pan with duration preservation, snap-to-latest.
+- Smart polling (via `useSmartPolling`) refreshes in Latest mode only.
+- Legend shows current values per series; tooltip with per-series + total readouts.
 
-### 6.2 Availability Visualization
-**Complexity:** Medium | **Dependencies:** 6.1
+### 6.3 Multi-scale availability + rides (next)
+**Complexity:** High | **Dependencies:** 6.1, 2.2 | **Status:** Spec only
 
-- Heatmap: bike availability over time
-- Station-level charts: availability patterns
-- Alerts: stations frequently empty/full
+Extend both availability (state data) and trips (flow data) to a rollup pyramid
+(1m → 5m → 1h → 1d → 1mo). Parquet-in-R2 primary storage, optional Worker, optional
+DuckDB-WASM upgrade for cross-station ad-hoc queries. Extract the shared pattern
+into a reusable `use-rollups` library for awair / apvd / ctbk.
+
+See `specs/multiscale-timeseries-backend.md`.
 
 ---
 
