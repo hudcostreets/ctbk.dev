@@ -1,5 +1,6 @@
 import { FormControl, MenuItem, Select, SelectChangeEvent } from '@mui/material'
 import { useUrlState, boolParam, floatParam, stringParam } from 'use-prms'
+import type { Param } from 'use-prms'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { SpeedDial, useHotkeysContext } from 'use-kbd'
@@ -32,6 +33,18 @@ type Manifest = {
   latestMonth: string
 }
 
+/** URL codec for the `m` param: stored internally as `YYYYMM`, encoded as `YYMM`
+ * (matches `MonthRangePicker`'s 2-digit year format elsewhere in the app).
+ * Decodes legacy 6-char `YYYYMM` values for back-compat. */
+const monthParam: Param<string | undefined> = {
+  encode: (v) => (v ? v.slice(2) : undefined),
+  decode: (raw) => {
+    if (!raw) return undefined
+    if (raw.length === 6) return raw
+    return `20${raw}`
+  },
+}
+
 /** Parse YYMMDD birth date string to timestamp. */
 function parseBirthDate(yymmdd: string): number {
   const yy = parseInt(yymmdd.substring(0, 2))
@@ -61,7 +74,7 @@ export default function Stations() {
   const [lng, setLng] = useUrlState('lng', floatParam(DEFAULT_CENTER[1]))
   const [zoom, setZoom] = useUrlState('z', floatParam(DEFAULT_ZOOM))
   const [selectedId, setSelectedId] = useUrlState('s', stringParam())
-  const [month, setMonth] = useUrlState('m', stringParam())
+  const [month, setMonth] = useUrlState('m', monthParam)
   const [tileCode] = useUrlState('t', stringParam(DEFAULT_TILE_CODE))
   const [tileBase] = useUrlState('tileBase', stringParam())
 
@@ -69,13 +82,20 @@ export default function Stations() {
   useEffect(() => {
     fetch(MANIFEST_URL)
       .then(res => res.json())
-      .then((m: Manifest) => {
-        setManifest(m)
-        // Set default month if not specified
-        if (!month) setMonth(m.latestMonth)
-      })
+      .then((m: Manifest) => setManifest(m))
       .catch(err => setError(err.message))
   }, [])
+
+  // Effective month for rendering/data-fetching: URL value if set, else the
+  // manifest's latest month. URL param stays absent when showing latest.
+  const effectiveMonth = month ?? manifest?.latestMonth
+
+  // Wrapped setter: write `undefined` when the new value is the latest month,
+  // so the URL stays clean for the default view.
+  const latestMonth = manifest?.latestMonth
+  const setMonthSmart = useCallback((v: string | undefined) => {
+    setMonth(!v || v === latestMonth ? undefined : v)
+  }, [setMonth, latestMonth])
 
   // Load births data on mount
   useEffect(() => {
@@ -85,15 +105,15 @@ export default function Stations() {
       .catch(err => console.warn('Failed to load station births:', err))
   }, [])
 
-  // Load station data when month changes
+  // Load station data when effective month changes
   useEffect(() => {
-    if (!manifest || !month) return
+    if (!manifest || !effectiveMonth) return
 
-    const stationsUrl = manifest.stations[month]
-    const pairsUrl = manifest.pairs[month]
+    const stationsUrl = manifest.stations[effectiveMonth]
+    const pairsUrl = manifest.pairs[effectiveMonth]
 
     if (!stationsUrl) {
-      setError(`No data for month ${month}`)
+      setError(`No data for month ${effectiveMonth}`)
       return
     }
 
@@ -128,7 +148,7 @@ export default function Stations() {
         setError(err.message)
         setLoading(false)
       })
-  }, [manifest, month])
+  }, [manifest, effectiveMonth])
 
   // Get sorted list of available months (newest first)
   const availableMonths = useMemo(() => {
@@ -166,8 +186,8 @@ export default function Stations() {
   // Keyboard shortcuts
   const { openOmnibar } = useHotkeysContext()
   useStationsKeyboardShortcuts({
-    month,
-    setMonth,
+    month: effectiveMonth,
+    setMonth: setMonthSmart,
     availableMonths,
     setSelectedId,
     openSearch: openOmnibar,
@@ -185,8 +205,8 @@ export default function Stations() {
   })
 
   const handleMonthChange = useCallback((e: SelectChangeEvent<string>) => {
-    setMonth(e.target.value)
-  }, [setMonth])
+    setMonthSmart(e.target.value)
+  }, [setMonthSmart])
 
   const tileStyle = resolveTileStyle(tileCode, actualTheme)
   const currentColors = TILE_COLORS[tileStyle]
@@ -226,11 +246,11 @@ export default function Stations() {
         <div className={css.titleContainer} style={{ color: currentColors.title }}>
           <div className={css.title}>
             <Link to="/" className={css.homeLink}>Citi Bike</Link> rides by station,{' '}
-            {month && availableMonths.length > 0 ? (
+            {effectiveMonth && availableMonths.length > 0 ? (
               <FormControl variant="standard" className={css.monthSelect}>
                 <Select
                   inputRef={monthSelectRef}
-                  value={month}
+                  value={effectiveMonth}
                   onChange={handleMonthChange}
                   disableUnderline
                   MenuProps={{
@@ -245,7 +265,7 @@ export default function Stations() {
                 </Select>
               </FormControl>
             ) : (
-              month ? formatMonth(month) : '...'
+              effectiveMonth ? formatMonth(effectiveMonth) : '...'
             )}
           </div>
           {subtitle && selectedId && (
