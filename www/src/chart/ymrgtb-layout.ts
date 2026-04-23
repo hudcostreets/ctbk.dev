@@ -62,7 +62,7 @@ export function buildLayout(cfg: BuildLayoutConfig): Partial<Layout> {
     dragmode: 'pan',
     uirevision: uiRevision,
     showlegend: showLegend,
-    hovermode: 'x',
+    hovermode: 'x unified',
     legend: {
       x: 0.5,
       xanchor: 'center',
