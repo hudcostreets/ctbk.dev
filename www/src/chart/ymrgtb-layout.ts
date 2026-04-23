@@ -16,6 +16,8 @@ export interface BuildLayoutConfig {
   /** Theme colors. */
   tickcolor: string
   gridcolor: string
+  /** True when rendering on a dark background (controls hoverlabel palette). */
+  isDark: boolean
   /** Any string that uniquely IDs the plot state; Plotly resets UI state on change. */
   uiRevision: string
 }
@@ -23,7 +25,7 @@ export interface BuildLayoutConfig {
 export function buildLayout(cfg: BuildLayoutConfig): Partial<Layout> {
   const {
     months, plotWidth, stackPercents, showLegend,
-    tickcolor, gridcolor, uiRevision,
+    tickcolor, gridcolor, isDark, uiRevision,
   } = cfg
 
   // Adaptive tick intervals based on date range AND viewport width
@@ -63,6 +65,11 @@ export function buildLayout(cfg: BuildLayoutConfig): Partial<Layout> {
     uirevision: uiRevision,
     showlegend: showLegend,
     hovermode: 'x unified',
+    hoverlabel: {
+      bgcolor: isDark ? 'rgba(32,32,36,0.95)' : 'rgba(255,255,255,0.95)',
+      bordercolor: isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)',
+      font: { color: tickcolor },
+    },
     legend: {
       x: 0.5,
       xanchor: 'center',

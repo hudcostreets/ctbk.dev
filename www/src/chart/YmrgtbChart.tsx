@@ -57,9 +57,9 @@ export default function YmrgtbChart({
     plotWidth: windowWidth,
     stackPercents: config.stackPercents,
     showLegend: showLegendEffective,
-    tickcolor, gridcolor,
+    tickcolor, gridcolor, isDark,
     uiRevision: uiRevision ?? 'static',
-  }), [months, windowWidth, config.stackPercents, showLegendEffective, tickcolor, gridcolor, uiRevision])
+  }), [months, windowWidth, config.stackPercents, showLegendEffective, tickcolor, gridcolor, isDark, uiRevision])
 
   return (
     <div className={className} style={style}>

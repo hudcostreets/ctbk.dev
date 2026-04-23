@@ -342,7 +342,7 @@ export default function Home() {
     plotWidth: windowWidth,
     stackPercents,
     showLegend: showLegendValue,
-    tickcolor, gridcolor,
+    tickcolor, gridcolor, isDark,
     uiRevision,
   })
 
