@@ -61,20 +61,9 @@ export default function YmrgtbChart({
     uiRevision: uiRevision ?? 'static',
   }), [months, windowWidth, config.stackPercents, showLegendEffective, tickcolor, gridcolor, uiRevision])
 
-  // Key on the set of trace names so that Plotly remounts whenever the
-  // trace shape changes (e.g. Docking filter Both → Starts removes the
-  // 'end' trace). Without a remount, `Plotly.react` has been observed to
-  // keep stale per-slot styling — e.g. the new slot-0 'start' trace
-  // inheriting the old slot-0 'end' trace's orange marker color.
-  const plotKey = useMemo(
-    () => traces.map(t => (t as { name?: string }).name ?? '').join('|'),
-    [traces],
-  )
-
   return (
     <div className={className} style={style}>
       <Plot
-        key={plotKey}
         data={traces}
         layout={layout}
         style={{ height: '100%' }}

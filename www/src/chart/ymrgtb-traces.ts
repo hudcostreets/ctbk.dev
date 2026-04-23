@@ -162,6 +162,11 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
         ? `${name}: %{customdata[0]:,.0f} (%{customdata[1]:.0%})<extra></extra>`
         : '%{customdata[0]:,.0f}<extra></extra>'
       return {
+        // Stable identity across updates — lets `Plotly.react` match traces
+        // by `uid` instead of by slot index, so swapping the set of visible
+        // traces (e.g. Both → Starts) doesn't carry stale per-slot styling
+        // (marker color) onto the new trace.
+        uid: `bar:${stackVal}`,
         x: monthDates,
         y,
         width: BAR_WIDTH_MS,
@@ -194,12 +199,14 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
       const visibleAvgY = allAvgY.slice(visibleStartIdx, visibleEndIdx)
 
       rollingTraces.push({
+        uid: 'rollavg-outline:total',
         x: monthDates, y: visibleAvgY as (number | null)[],
         name: '12mo avg (outline)', type: 'scatter', mode: 'lines',
         line: { color: lineOutlineColor, width: 7 },
         hoverinfo: 'skip', showlegend: false, legendrank: 100,
       })
       rollingTraces.push({
+        uid: 'rollavg:total',
         x: monthDates, y: visibleAvgY as (number | null)[],
         name: '12mo avg', type: 'scatter', mode: 'lines',
         line: { color: rollingAvgColor, width: 4 },
@@ -257,6 +264,7 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
           const displayName = getDisplayName(stackVal)
 
           rollingTraces.push({
+            uid: `rollavg-outline:${stackVal}`,
             x: clampedDates, y: avgY as (number | null)[],
             name: `${displayName} (12mo outline)`, type: 'scatter', mode: 'lines',
             line: { color: lineOutlineColor, width: 7 },
@@ -264,6 +272,7 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
             legendrank: 100 + 2 * (legendRanks[stackVal] || 0),
           })
           rollingTraces.push({
+            uid: `rollavg:${stackVal}`,
             x: clampedDates, y: avgY as (number | null)[],
             customdata: customdata as any,
             name: `${displayName} (12mo)`, type: 'scatter', mode: 'lines',
