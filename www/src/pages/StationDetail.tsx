@@ -20,8 +20,7 @@ import {
   type StationRangeResponse,
 } from '../query/stations'
 import {
-  type Docking, type StackBy, type YAxis,
-  Dockings,
+  type DockingFilter, type StackBy, type YAxis,
   Regions, UserTypes, Genders, GenderQueryStrings,
   RideableTypes, RideableTypeChars,
   UserTypeDisplayNames, UserTypeQueryStrings,
@@ -94,7 +93,7 @@ export default function StationDetail() {
   const [tripsGenders, setTripsGenders] = useUrlState('tg', codesParam(Genders, GenderQueryStrings))
   const [tripsRideableTypes, setTripsRideableTypes] = useUrlState('trt', codesParam(RideableTypes, RideableTypeChars))
   const [tripsRollingAvgs, setTripsRollingAvgs] = useUrlState('tavg', numberArrayParam([12]))
-  const [tripsDockings, setTripsDockings] = useUrlState('td', codesParam<Docking>(Dockings, [['start', 's'], ['end', 'e']]))
+  const [tripsDocking, setTripsDocking] = useUrlState('td', codeParam<DockingFilter>('both', [['both', 'b'], ['start', 's'], ['end', 'e']]))
   const [tripsControlsClosed, setTripsControlsClosed] = useUrlState('tcc', boolParam)
 
   // Preprocess rows for the shared `buildTraces` logic.
@@ -395,7 +394,7 @@ export default function StationDetail() {
               start: '2013-06',
               end: '2099-01',
               rollingAvgs: tripsRollingAvgs,
-              extraFilter: (r) => !r.Docking || tripsDockings.includes(r.Docking),
+              extraFilter: (r) => !r.Docking || tripsDocking === 'both' || r.Docking === tripsDocking,
             }}
           />
           <details
@@ -438,13 +437,15 @@ export default function StationDetail() {
                   cb={setTripsStackPercent}
                 />
               </div>
-              <Checklist
+              <Radios
                 label="Include"
-                data={Dockings.map((d) => ({
-                  name: d, label: d === 'start' ? 'Starts' : 'Ends', data: d,
-                  checked: tripsDockings.includes(d),
-                }))}
-                cb={setTripsDockings}
+                options={[
+                  { label: 'Both', data: 'both' },
+                  { label: 'Starts', data: 'start' },
+                  { label: 'Ends', data: 'end' },
+                ]}
+                cb={setTripsDocking}
+                choice={tripsDocking}
               />
               <Checklist
                 label="User Type"

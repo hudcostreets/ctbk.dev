@@ -47,6 +47,9 @@ export type Docking = 'start' | 'end'
 export const Dockings: Docking[] = ['start', 'end']
 export const DockingColors: { [d in Docking]: string } = { 'start': '#1976d2', 'end': '#ef6c00' }
 
+/** Filter choice for station trips: which docking side(s) to include. */
+export type DockingFilter = Docking | 'both'
+
 export type YAxis = 'Rides' | 'Ride minutes'
 export const YAxes: YAxis[] = ['Rides', 'Ride minutes']
 export const YAxisQueryStrings: [YAxis, string][] = [['Rides', 'r'], ['Ride minutes', 'm']]
