@@ -4,7 +4,7 @@
  * Uses local state only (no URL sync), so it can drop into any page
  * without clobbering the host page's URL params.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import StationMap, { type Stations, type StationPairCounts } from './StationMap'
 import css from '../stations.module.css'
@@ -19,12 +19,23 @@ type Manifest = {
   latestMonth: string
 }
 
+/** Format `YYYYMM` → `MMM 'YY` (matches the `/stations` title). */
+function formatMonth(yyyymm: string): string {
+  const yr = yyyymm.substring(2, 4)
+  const m = parseInt(yyyymm.substring(4))
+  const monthName = new Date(2000, m - 1).toLocaleDateString('default', { month: 'short' })
+  return `${monthName} '${yr}`
+}
+
 interface Props {
   /** Applied to the wrapping `<div>` that hosts the Leaflet map (controls size/aspect). */
   mapClassName?: string
+  /** Optional extra content appended to the caption below the map (e.g. a link
+   *  to the full-screen `/stations` page). Rendered after a `·` separator. */
+  captionTrailing?: ReactNode
 }
 
-export default function StationMapEmbed({ mapClassName }: Props) {
+export default function StationMapEmbed({ mapClassName, captionTrailing }: Props) {
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [stations, setStations] = useState<Stations | null>(null)
   const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
@@ -70,6 +81,7 @@ export default function StationMapEmbed({ mapClassName }: Props) {
   }, [manifest])
 
   const selectedStation = selectedId && stations ? stations[selectedId] : null
+  const monthLabel = manifest ? formatMonth(manifest.latestMonth) : null
 
   return (
     <>
@@ -84,6 +96,7 @@ export default function StationMapEmbed({ mapClassName }: Props) {
           className={css.embedMap}
           hoverToSelect
           onClick={() => setSelectedId(undefined)}
+          overlay={monthLabel && <>Citi Bike rides, {monthLabel}</>}
         />
       </div>
       <div className={css.embedCaption}>
@@ -95,6 +108,12 @@ export default function StationMapEmbed({ mapClassName }: Props) {
           </>
         ) : (
           <span className={css.placeholder}>Tap a station to see its top destinations.</span>
+        )}
+        {captionTrailing && (
+          <>
+            <span className={css.captionSep}> · </span>
+            {captionTrailing}
+          </>
         )}
       </div>
     </>

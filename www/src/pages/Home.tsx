@@ -79,11 +79,12 @@ const StationMapEmbed = lazy(() => import("../components/StationMapEmbed"))
  */
 function LazyStationMap() {
   const [ref, isInView] = useIsInView<HTMLDivElement>('400px')
+  const fullScreen = <Link to="/stations">Full screen version →</Link>
   return (
     <div ref={ref}>
       {isInView ? (
         <Suspense fallback={<div className={css.map} />}>
-          <StationMapEmbed mapClassName={css.map} />
+          <StationMapEmbed mapClassName={css.map} captionTrailing={fullScreen} />
         </Suspense>
       ) : (
         <div className={css.map} />
@@ -533,7 +534,6 @@ export default function Home() {
 
           <h3 id="map">Map: Stations + Common Destinations</h3>
           <LazyStationMap />
-          <p>(<Link to="/stations">Full screen version</Link>)</p>
 
           <hr />
 
