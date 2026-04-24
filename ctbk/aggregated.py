@@ -23,6 +23,7 @@ class GroupByKeys(keys.GroupByKeys):
     day: bool = False
     weekday: bool = False
     hour: bool = False
+    minute: bool = False
     region: bool = False
     gender: bool = False
     user_type: bool = False
@@ -36,6 +37,7 @@ class GroupByKeys(keys.GroupByKeys):
         'day': 'd',
         'weekday': 'w',
         'hour': 'h',
+        'minute': 'n',
         'region': 'r',
         'gender': 'g',
         'user_type': 't',
@@ -121,6 +123,10 @@ class AggregatedMonth(MonthTable):
             if 'Start Hour' not in df:
                 df['Start Hour'] = df['Start Time'].dt.hour
             group_by_cols.append('Start Hour')
+        if group_by_keys.get('n'):
+            if 'Start Minute' not in df:
+                df['Start Minute'] = df['Start Time'].dt.minute
+            group_by_cols.append('Start Minute')
         if group_by_keys.get('g'):
             group_by_cols.append('Gender')
         if group_by_keys.get('t'):
@@ -131,10 +137,6 @@ class AggregatedMonth(MonthTable):
             group_by_cols.append('Start Station ID')
         if group_by_keys.get('e'):
             group_by_cols.append('End Station ID')
-        if group_by_keys.get('n'):
-            group_by_cols.append('Start Station Name')
-        if group_by_keys.get('N'):
-            group_by_cols.append('End Station Name')
         if group_by_keys.get('l'):
             group_by_cols += ['Start Station Latitude', 'Start Station Longitude']
         if group_by_keys.get('L'):
