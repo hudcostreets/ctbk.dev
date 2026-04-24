@@ -7,6 +7,9 @@
  *   GET /api/stations/:id/range?from=&to=[&since=] — arbitrary window (unix seconds);
  *                                                    `since` filters by polled_at for
  *                                                    incremental polling.
+ *   GET /api/query?kind=&station=|region=&from=&to=&(bin=|targetPxPerBin=&plotWidth=)
+ *                                      — unified multi-scale time-series query
+ *                                        (trips + availability). See planQuery() below.
  *   GET /health                         — sanity check
  *
  * Reads from D1 `availability_YYYYMMDD` tables populated by the loader.
@@ -223,6 +226,302 @@ async function resolveToGbfsId(db: D1Database, id: string): Promise<string | nul
 	return (station?.gbfs_station_id as string | null) ?? null;
 }
 
+// -----------------------------------------------------------------------------
+// Multi-scale time-series query (`/api/query`)
+// See specs/multiscale-timeseries-backend.md for the full design.
+// -----------------------------------------------------------------------------
+
+type Kind = 'trips' | 'availability';
+type Region = 'nyc' | 'jc' | 'hob';
+type Side = 'start' | 'end';
+
+const ALL_REGIONS: Region[] = ['nyc', 'jc', 'hob'];
+const SECOND_MS = 1000;
+const MINUTE_MS = 60 * SECOND_MS;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+/** Standard bin sizes (from <BinSelect /> spec). Used to snap auto-binning. */
+const STANDARD_BINS_MS: number[] = [
+	1 * MINUTE_MS, 2 * MINUTE_MS, 5 * MINUTE_MS, 10 * MINUTE_MS,
+	15 * MINUTE_MS, 20 * MINUTE_MS, 30 * MINUTE_MS,
+	1 * HOUR_MS, 2 * HOUR_MS, 3 * HOUR_MS, 4 * HOUR_MS,
+	6 * HOUR_MS, 8 * HOUR_MS, 12 * HOUR_MS,
+	1 * DAY_MS, 2 * DAY_MS, 3 * DAY_MS, 7 * DAY_MS, 14 * DAY_MS,
+	30 * DAY_MS, 60 * DAY_MS, 90 * DAY_MS, 180 * DAY_MS, 365 * DAY_MS,
+];
+
+interface QueryInput {
+	kind: Kind;
+	station?: string;          // XOR with regions
+	regions?: Region[];        // defaults to ALL_REGIONS on region-mode queries
+	fromS: number;             // unix seconds, inclusive
+	toS: number;               // unix seconds, inclusive
+	binMs?: number;            // explicit; else derived from target/plotWidth
+	targetPxPerBin?: number;   // auto-tier
+	plotWidth?: number;        // auto-tier
+	fields?: string[];         // projection (reserved; null = all)
+	dims?: string[];           // reserved
+	side?: Side;               // per-station only
+}
+
+interface QueryPlan {
+	paths: string[];           // R2 keys to read in parallel
+	tier: 'raw' | 'h1' | 'n1' | 'avail-region';
+	binMs: number;             // final bin size (explicit or snapped from target)
+	mode: 'station' | 'region';
+}
+
+/** Snap an arbitrary ms value UP to the next standard bin (or return max). */
+function snapToStandardBin(ms: number): number {
+	for (const b of STANDARD_BINS_MS) if (b >= ms) return b;
+	return STANDARD_BINS_MS[STANDARD_BINS_MS.length - 1];
+}
+
+/** Derive bin size from `targetPxPerBin` + `plotWidth` + range. */
+function deriveBinMs(fromS: number, toS: number, targetPxPerBin: number, plotWidth: number): number {
+	const rangeMs = (toS - fromS) * SECOND_MS;
+	const nBins = Math.max(1, Math.floor(plotWidth / targetPxPerBin));
+	return snapToStandardBin(Math.max(MINUTE_MS, Math.ceil(rangeMs / nBins)));
+}
+
+/** Enumerate YYYY years touching [fromS, toS] (UTC). */
+function yearsIn(fromS: number, toS: number): string[] {
+	const y0 = new Date(fromS * SECOND_MS).getUTCFullYear();
+	const y1 = new Date(toS * SECOND_MS).getUTCFullYear();
+	const out: string[] = [];
+	for (let y = y0; y <= y1; y++) out.push(String(y));
+	return out;
+}
+
+/** Enumerate YYYYMM months touching [fromS, toS] (UTC). */
+function monthsIn(fromS: number, toS: number): string[] {
+	const d0 = new Date(fromS * SECOND_MS);
+	const d1 = new Date(toS * SECOND_MS);
+	const out: string[] = [];
+	let y = d0.getUTCFullYear();
+	let m = d0.getUTCMonth();  // 0-indexed
+	const yEnd = d1.getUTCFullYear();
+	const mEnd = d1.getUTCMonth();
+	while (y < yEnd || (y === yEnd && m <= mEnd)) {
+		out.push(`${y}${String(m + 1).padStart(2, '0')}`);
+		m++;
+		if (m === 12) { m = 0; y++; }
+	}
+	return out;
+}
+
+/** Enumerate YYYY-MM months touching [fromS, toS] (UTC). */
+function monthsInDashed(fromS: number, toS: number): string[] {
+	return monthsIn(fromS, toS).map((ym) => `${ym.slice(0, 4)}-${ym.slice(4, 6)}`);
+}
+
+/**
+ * Pure query planner. Resolves `{kind, station|regions, from, to, bin?, target?}`
+ * into a concrete set of R2 keys + final bin size.
+ *
+ * Examples:
+ *
+ *   planQuery({ kind: 'trips', station: '6002.04', fromS: 1704067200, toS: 1735689600, binMs: HOUR_MS })
+ *     → { paths: ['trips/stations/6002.04.parquet'], tier: 'raw', binMs: 3_600_000, mode: 'station' }
+ *
+ *   planQuery({ kind: 'trips', regions: ['nyc'], fromS: <2023-06-01>, toS: <2024-02-01>, binMs: HOUR_MS })
+ *     → paths: ['trips/region/nyc/h1/2023.parquet', 'trips/region/nyc/h1/2024.parquet']
+ *
+ *   planQuery({ kind: 'trips', regions: ['nyc','jc'], fromS: <2024-03-01>, toS: <2024-04-05>, binMs: 5*MINUTE_MS })
+ *     → paths: [
+ *         'trips/region/nyc/n1/202403.parquet', 'trips/region/nyc/n1/202404.parquet',
+ *         'trips/region/jc/n1/202403.parquet', 'trips/region/jc/n1/202404.parquet',
+ *       ]
+ *
+ *   planQuery({ kind: 'availability', regions: ['nyc'], fromS: <2024-01-01>, toS: <2024-03-01>, binMs: MINUTE_MS })
+ *     → paths: ['avail/region/nyc/2024-01.parquet', 'avail/region/nyc/2024-02.parquet', 'avail/region/nyc/2024-03.parquet']
+ */
+function planQuery(q: QueryInput): QueryPlan {
+	let binMs = q.binMs;
+	if (binMs === undefined) {
+		if (q.targetPxPerBin === undefined || q.plotWidth === undefined) {
+			throw new Error('bin XOR (targetPxPerBin + plotWidth) required');
+		}
+		binMs = deriveBinMs(q.fromS, q.toS, q.targetPxPerBin, q.plotWidth);
+	}
+
+	// Per-station: one file, bin on the fly from raw.
+	if (q.station) {
+		return {
+			paths: [`${q.kind}/stations/${q.station}.parquet`],
+			tier: 'raw',
+			binMs,
+			mode: 'station',
+		};
+	}
+
+	const regions = q.regions && q.regions.length ? q.regions : ALL_REGIONS;
+
+	if (q.kind === 'availability') {
+		// No rollup tier — monthly region shards.
+		const months = monthsInDashed(q.fromS, q.toS);
+		return {
+			paths: regions.flatMap((r) => months.map((ym) => `avail/region/${r}/${ym}.parquet`)),
+			tier: 'avail-region',
+			binMs,
+			mode: 'region',
+		};
+	}
+
+	// trips: h1 if bin ≥ 1h, n1 otherwise.
+	const tier: 'h1' | 'n1' = binMs >= HOUR_MS ? 'h1' : 'n1';
+	const windows = tier === 'h1' ? yearsIn(q.fromS, q.toS) : monthsIn(q.fromS, q.toS);
+	return {
+		paths: regions.flatMap((r) => windows.map((w) => `trips/region/${r}/${tier}/${w}.parquet`)),
+		tier,
+		binMs,
+		mode: 'region',
+	};
+}
+
+/**
+ * Read one parquet from R2, returning rows as plain objects. Returns `null` if
+ * the object doesn't exist (so the caller can distinguish missing shards from
+ * empty ones). BigInt columns (int64) are coerced to Number.
+ */
+async function readR2Parquet(
+	r2: R2Bucket,
+	key: string,
+	columns?: string[],
+): Promise<Record<string, unknown>[] | null> {
+	const obj = await r2.get(key);
+	if (!obj) return null;
+	const buf = await obj.arrayBuffer();
+	const file = {
+		byteLength: buf.byteLength,
+		slice: (start: number, end?: number) => buf.slice(start, end),
+	};
+	const { parquetReadObjects } = await import('hyparquet');
+	const rows = await parquetReadObjects({ file, columns }) as Record<string, unknown>[];
+	for (const r of rows) {
+		for (const k of Object.keys(r)) {
+			if (typeof r[k] === 'bigint') r[k] = Number(r[k]);
+		}
+	}
+	return rows;
+}
+
+/**
+ * Bin and aggregate rows in-place. Assumes each row has a numeric `dt` column
+ * (unix seconds). Numeric fields are summed per bin; non-numeric fields from
+ * the first row in a bin are carried through. `dt` is normalized to the bin's
+ * left edge (unix seconds).
+ *
+ * `binMs` is floored into seconds for the bin grid (parquet `dt` is seconds).
+ * For sub-second bins this would need adjustment (N/A for any standard bin).
+ */
+function binAndAggregate(
+	rows: Record<string, unknown>[],
+	binMs: number,
+	fromS: number,
+	toS: number,
+): Record<string, unknown>[] {
+	const binS = Math.max(1, Math.floor(binMs / SECOND_MS));
+	const buckets = new Map<number, Record<string, unknown>>();
+	for (const r of rows) {
+		const dt = r.dt as number | undefined;
+		if (dt === undefined || dt < fromS || dt > toS) continue;
+		const bin = Math.floor(dt / binS) * binS;
+		let acc = buckets.get(bin);
+		if (!acc) {
+			acc = { ...r, dt: bin };
+			buckets.set(bin, acc);
+			continue;
+		}
+		for (const k of Object.keys(r)) {
+			if (k === 'dt') continue;
+			const v = r[k];
+			if (typeof v === 'number' && typeof acc[k] === 'number') {
+				acc[k] = (acc[k] as number) + v;
+			}
+		}
+	}
+	return [...buckets.values()].sort((a, b) => (a.dt as number) - (b.dt as number));
+}
+
+/** Parse and validate `/api/query` params; throws on invalid input. */
+function parseQueryParams(params: URLSearchParams): QueryInput {
+	const kind = params.get('kind');
+	if (kind !== 'trips' && kind !== 'availability') {
+		throw new Error(`kind must be 'trips' or 'availability' (got ${kind})`);
+	}
+	const station = params.get('station') ?? undefined;
+	const regionRaw = params.get('region');
+	if ((station === undefined) === (regionRaw === null)) {
+		throw new Error(`exactly one of station= or region= required`);
+	}
+	let regions: Region[] | undefined;
+	if (regionRaw !== null) {
+		regions = regionRaw.split(',').map((s) => s.trim()) as Region[];
+		for (const r of regions) {
+			if (!ALL_REGIONS.includes(r)) throw new Error(`invalid region: ${r}`);
+		}
+	}
+	const fromS = parseInt(params.get('from') ?? '', 10);
+	const toS = parseInt(params.get('to') ?? '', 10);
+	if (!Number.isFinite(fromS) || !Number.isFinite(toS) || fromS > toS) {
+		throw new Error(`invalid from/to`);
+	}
+	const binRaw = params.get('bin');
+	const targetPxPerBinRaw = params.get('targetPxPerBin');
+	const plotWidthRaw = params.get('plotWidth');
+	const hasBin = binRaw !== null;
+	const hasTarget = targetPxPerBinRaw !== null && plotWidthRaw !== null;
+	if (hasBin === hasTarget) {
+		throw new Error(`exactly one of bin= or (targetPxPerBin= + plotWidth=) required`);
+	}
+	const binMs = hasBin ? parseInt(binRaw, 10) : undefined;
+	const targetPxPerBin = hasTarget ? parseInt(targetPxPerBinRaw, 10) : undefined;
+	const plotWidth = hasTarget ? parseInt(plotWidthRaw, 10) : undefined;
+	if (hasBin && (!Number.isFinite(binMs) || (binMs as number) <= 0)) {
+		throw new Error(`invalid bin: ${binRaw}`);
+	}
+	if (hasTarget && (!Number.isFinite(targetPxPerBin) || !Number.isFinite(plotWidth))) {
+		throw new Error(`invalid targetPxPerBin/plotWidth`);
+	}
+
+	const fields = params.get('fields')?.split(',').map((s) => s.trim()) ?? undefined;
+	const dims = params.get('dims')?.split(',').map((s) => s.trim()) ?? undefined;
+	const sideRaw = params.get('side');
+	if (sideRaw !== null && sideRaw !== 'start' && sideRaw !== 'end') {
+		throw new Error(`side must be 'start' or 'end'`);
+	}
+	if (sideRaw !== null && station === undefined) {
+		throw new Error(`side= only valid with station=`);
+	}
+	const side = (sideRaw as Side | null) ?? undefined;
+	return { kind, station, regions, fromS, toS, binMs, targetPxPerBin, plotWidth, fields, dims, side };
+}
+
+/** Execute a planned query: read all shards in parallel, filter, bin, merge. */
+async function executeQuery(
+	r2: R2Bucket,
+	q: QueryInput,
+	plan: QueryPlan,
+): Promise<{ rows: Record<string, unknown>[]; missing: string[] }> {
+	const results = await Promise.all(
+		plan.paths.map(async (key) => ({ key, rows: await readR2Parquet(r2, key, q.fields) })),
+	);
+	const missing: string[] = [];
+	const merged: Record<string, unknown>[] = [];
+	for (const { key, rows } of results) {
+		if (rows === null) { missing.push(key); continue; }
+		for (const r of rows) {
+			// Per-station filter by side (if requested).
+			if (q.side !== undefined && r.side !== undefined && r.side !== q.side) continue;
+			merged.push(r);
+		}
+	}
+	const binned = binAndAggregate(merged, plan.binMs, q.fromS, q.toS);
+	return { rows: binned, missing };
+}
+
 async function dropOldTables(db: D1Database, retainDays: number): Promise<string> {
 	const cutoff = new Date(Date.now() - retainDays * 86400000).toISOString().slice(0, 10);
 	const old = await db.prepare(
@@ -261,6 +560,44 @@ export default {
 
 		if (url.pathname === '/health') {
 			return jsonResponse({ status: 'ok' }, env);
+		}
+
+		// /api/query — unified multi-scale time-series (trips + availability).
+		// See planQuery() above + specs/multiscale-timeseries-backend.md.
+		if (url.pathname === '/api/query') {
+			let q: QueryInput;
+			try {
+				q = parseQueryParams(url.searchParams);
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'invalid query', 400, env);
+			}
+			let plan: QueryPlan;
+			try {
+				plan = planQuery(q);
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'plan failed', 400, env);
+			}
+			const { rows, missing } = await executeQuery(env.R2, q, plan);
+			// If every planned file is missing, surface 404 so the client can
+			// distinguish "no data yet" from "empty window".
+			if (missing.length === plan.paths.length && plan.paths.length > 0) {
+				return jsonResponse({
+					error: 'no data',
+					tier: plan.tier,
+					binMs: plan.binMs,
+					paths: plan.paths,
+					missing,
+				}, env, { status: 404 });
+			}
+			return jsonResponse({
+				kind: q.kind,
+				tier: plan.tier,
+				binMs: plan.binMs,
+				mode: plan.mode,
+				paths: plan.paths,
+				missing,
+				rows,
+			}, env);
 		}
 
 		// /api/stations/:id/info — accepts slug, UUID, or short_name
