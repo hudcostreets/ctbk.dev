@@ -39,7 +39,12 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [stations, setStations] = useState<Stations | null>(null)
   const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
-  const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
+  // Transient hover preview; click promotes to `pinnedId` below.
+  const [hoveredId, setHoveredId] = useState<string | undefined>(undefined)
+  const [pinnedId, setPinnedId] = useState<string | undefined>(undefined)
+  // The visible "selected" station = pinned (sticky) or, failing that,
+  // whatever the cursor is currently over.
+  const selectedId = pinnedId ?? hoveredId
 
   useEffect(() => {
     fetch(MANIFEST_URL)
@@ -89,13 +94,15 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
         <StationMap
           stations={stations ?? {}}
           selectedId={selectedId}
-          setSelectedId={setSelectedId}
+          setSelectedId={setHoveredId}
+          pinnedId={pinnedId}
+          onPin={(id) => setPinnedId((cur) => (cur === id ? undefined : id))}
           pairCounts={pairCounts}
           center={DEFAULT_CENTER}
           zoom={DEFAULT_ZOOM}
           className={css.embedMap}
           hoverToSelect
-          onClick={() => setSelectedId(undefined)}
+          onClick={() => { setPinnedId(undefined); setHoveredId(undefined) }}
           overlay={monthLabel && <>Citi Bike rides, {monthLabel}</>}
         />
       </div>

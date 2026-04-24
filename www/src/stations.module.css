@@ -102,6 +102,10 @@ a.subtitle:hover {
     margin-bottom: 0;
 }
 
+.pinnedTooltip p {
+    font-weight: 700;
+}
+
 .loading {
     position: fixed;
     top: 50%;

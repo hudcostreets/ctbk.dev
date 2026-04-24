@@ -68,6 +68,8 @@ function StationMarkers({
   stations,
   selectedId,
   setSelectedId,
+  pinnedId,
+  onPin,
   pairCounts,
   colors,
   stationColors,
@@ -76,6 +78,8 @@ function StationMarkers({
   stations: Stations
   selectedId?: string
   setSelectedId?: (id: string | undefined) => void
+  pinnedId?: string
+  onPin?: (id: string | undefined) => void
   pairCounts?: StationPairCounts | null
   colors: TileColors
   stationColors?: Record<string, string> | null
@@ -113,6 +117,10 @@ function StationMarkers({
               weight={weight}
               opacity={0.7}
               eventHandlers={{
+                // Clicks near the source station often land on a fan
+                // polyline rather than the underlying circle. Route such
+                // clicks to pin the source — that's the user's intent.
+                click: () => (onPin ?? setSelectedId)?.(selectedId),
                 mouseover: () => setHoveringLine(true),
                 mouseout: () => setHoveringLine(false),
               }}
@@ -123,12 +131,13 @@ function StationMarkers({
         })}
       </Pane>
     )
-  }, [selectedStation, selectedId, pairCounts, stations, mPerPx, zoom, colors])
+  }, [selectedStation, selectedId, pairCounts, stations, mPerPx, zoom, colors, onPin, setSelectedId])
 
   // Selected-station overlay: visual-only (pointer-events: none via `.selected`
   // CSS). Clicks pass through to the base Circle in the `circles` Pane below,
   // so the target Circle stays mounted between hover and click — avoiding the
   // unmount/remount race that caused clicks to fall through to the map.
+  const isPinned = !!pinnedId && pinnedId === selectedId
   const selectedCircle = useMemo(() => {
     if (!selectedStation || !selectedId) return null
     const radius = sqrt(selectedStation.ends)
@@ -136,21 +145,22 @@ function StationMarkers({
     return (
       <Pane name="selected" className={css.selected}>
         <Circle
-          key={`${selectedId}-${colors.selected}`}
+          key={`${selectedId}-${colors.selected}-${isPinned ? 'pin' : 'hov'}`}
           center={{ lat: selectedStation.lat, lng: selectedStation.lng }}
           color={colors.selected}
           radius={radius}
+          weight={isPinned ? 4 : 3}
           interactive={false}
         >
           {!hoveringLine && (
-            <Tooltip className={css.tooltip} sticky permanent pane="selected">
+            <Tooltip className={`${css.tooltip} ${isPinned ? css.pinnedTooltip : ''}`} sticky permanent pane="selected">
               <p>{selectedStation.name}{selectedStation.ends > 0 ? `: ${selectedStation.ends.toLocaleString()}` : ''}</p>
             </Tooltip>
           )}
         </Circle>
       </Pane>
     )
-  }, [selectedStation, selectedId, colors, hoveringLine])
+  }, [selectedStation, selectedId, colors, hoveringLine, isPinned])
 
   const circles = useMemo(() => {
     return (
@@ -166,9 +176,9 @@ function StationMarkers({
               color={circleColor}
               radius={radius}
               bubblingMouseEvents={false}
-              eventHandlers={setSelectedId ? {
-                click: () => setSelectedId(id),
-                ...(hoverToSelect ? { mouseover: () => { if (id !== selectedId) setSelectedId(id) } } : {}),
+              eventHandlers={(onPin || setSelectedId) ? {
+                click: () => (onPin ?? setSelectedId)?.(id),
+                ...(hoverToSelect && setSelectedId ? { mouseover: () => { if (id !== selectedId) setSelectedId(id) } } : {}),
               } : undefined}
             >
               <Tooltip className={css.tooltip} sticky>
@@ -179,7 +189,7 @@ function StationMarkers({
         })}
       </Pane>
     )
-  }, [stations, selectedId, setSelectedId, colors, stationColors, hoverToSelect])
+  }, [stations, selectedId, setSelectedId, onPin, colors, stationColors, hoverToSelect])
 
   return <>{selectedCircle}{lines}{circles}</>
 }
@@ -212,6 +222,14 @@ export interface StationMapProps {
   stations: Stations
   selectedId?: string
   setSelectedId?: (id: string | undefined) => void
+  /** Opt-in: id of the "pinned" (click-selected) station. When set, its
+   *  tooltip renders bold to distinguish from a transient hover. */
+  pinnedId?: string
+  /** Opt-in click handler. When provided, circle clicks + polyline
+   *  clicks call this (with the source id for lines). Parent is
+   *  expected to toggle / update `pinnedId`. If omitted, clicks
+   *  fall back to `setSelectedId`. */
+  onPin?: (id: string | undefined) => void
   pairCounts?: StationPairCounts | null
   stationColors?: Record<string, string> | null
 
@@ -237,6 +255,8 @@ export default function StationMap({
   stations,
   selectedId,
   setSelectedId,
+  pinnedId,
+  onPin,
   pairCounts,
   stationColors,
   center,
@@ -280,6 +300,8 @@ export default function StationMap({
         stations={stations}
         selectedId={selectedId}
         setSelectedId={setSelectedId}
+        pinnedId={pinnedId}
+        onPin={onPin}
         pairCounts={pairCounts}
         colors={colors}
         stationColors={stationColors}
