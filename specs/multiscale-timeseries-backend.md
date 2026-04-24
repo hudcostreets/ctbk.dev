@@ -64,7 +64,12 @@ trips/region/<region>/n1/<YYYYMM>.parquet        # minute-level, month-shard
 
 Per-station files contain every ride touching the station, with a `side`
 column distinguishing starts from ends (so a ride A→B appears once in
-A.parquet with `side=start` and once in B.parquet with `side=end`).
+A.parquet with `side=start` and once in B.parquet with `side=end`). A
+`counterpart_short_name` column records the *other* end of each ride,
+which powers pair-filtering ("rides from A→B") and the paginated rides
+table (see *Future Extensions*). It's low-cost to include at phase-1
+write time; retro-fitting later would mean rewriting every
+per-station file.
 
 Per-region pre-aggs have the full `gtb_cD` dim cross (gender × user type ×
 bike type × count × duration) per time bucket.
@@ -259,28 +264,91 @@ is a mechanical restructuring of existing infrastructure.
 
 ### Map circles as pies/donuts (phase 4+)
 
-Render each station circle as a pie/donut showing bike / dock / ebike /
-disabled shares. Two variants:
+Render each station circle as a pie/donut with a **toggleable** encoding,
+showing either:
 
-- **Current state** (cheap): read latest row from the station's availability
-  record. Already served by the existing API.
-- **Over viewed range** (new): time-weighted distribution across a user-chosen
-  window. Scan the station's `avail/stations/<short_name>.parquet` over the
-  window, compute per-state mean shares.
+- **Availability** (bike / ebike / dock / disabled shares): at current
+  moment, or time-weighted over a user-chosen window.
+- **Trips**: proportion of starts vs ends over the window. At many stations
+  these skew strongly by time-of-day (residential → commute AM starts,
+  PM ends; employment centers the inverse). Showing this on the map
+  surfaces the flow pattern at-a-glance.
 
-Additional stats for the on-click detail:
+The toggle, combined with the existing time-range picker, also lets users
+see how start/end balance (or availability distribution) shifts across
+dayparts — e.g. "AM rush at this station is 80% starts; PM is 70% ends."
+
+Additional stats for the on-click / hover detail:
 
 - Avg bikes / ebikes / docks available over the range.
-- **Fraction of time at zero bikes** (+ zero docks, zero ebikes). User-
-  highlighted as the most interesting signal — stations that starve.
+- **Fraction of time at zero bikes** (+ zero docks, zero ebikes). The most
+  interesting signal — stations that starve, or stations that never empty.
+- Ride counts split start/end over the range.
 - Daily / hourly histogram of state distributions (phase 4.5).
 
-Data source is the per-station raw availability parquet we're already
-building in phase 2. "Time at zero" is just `count(rows where bikes == 0) /
-count(rows)` over the window — raw scan suffices for single-station queries
-even at multi-year scales. If multi-station "rank by starvation" queries
-become a thing, we'd add a pre-aggregated `zero_bikes_minutes` column to a
-rollup tier; defer until then.
+Data sources, both already built by earlier phases:
+- Availability pies: `avail/stations/<short_name>.parquet`. "Time at zero"
+  = `count(rows where bikes == 0) / count(rows)` over the window — raw
+  scan.
+- Trips pies: `trips/stations/<short_name>.parquet`, grouped by `side`
+  over the window.
+
+If multi-station "rank by starvation / rank by imbalance" queries become a
+thing, we'd add `zero_bikes_minutes`, `starts_count`, `ends_count` etc. as
+pre-aggregated tier columns; defer until then.
+
+### Paginated raw-rides table per station (phase 4+)
+
+On `/s/:slug`, below the chart, a paginated table of individual ride
+records:
+
+- **Columns:** timestamp, side (start / end), counterpart station, rider dim
+  cols (gender / user type / bike type), duration.
+- **Sortable** on every column; dt is the natural default.
+- **Filterable** on date range (inherits the page's range picker),
+  counterpart station (single-station pair filter), dim columns, duration.
+- **Searchable** by counterpart station name — full-text-ish. At ~500k
+  rides/station this is fast enough as a linear scan inside the Worker;
+  no FTS index needed v1.
+- **Paginated** (e.g. 50 rows/page). Worker returns `{ page, rows,
+  totalRows }`.
+
+Data source: `trips/stations/<short_name>.parquet` (built in phase 1). No
+new storage needed. The parquet needs a **`counterpart_short_name`** column
+alongside `side` — added to the phase-1 schema so this feature comes for
+free later.
+
+#### Per-station D1/SQLite alternative (considered, not chosen)
+
+Per-station SQLite DBs (one per station, or one DB with per-station
+tables) with FTS5 indices for snappy search. Downsides:
+- 3000 × ~50 MB/station with indices ≈ 150 GB — way over D1's 10 GB cap.
+- Workers don't bind multiple D1 DBs dynamically; each named binding is
+  fixed at deploy time.
+- One combined DB grows faster than 10 GB even without FTS.
+
+Parquet + Worker scan hits the same UX (page loads in ~100 ms for a
+50-row page) without the cap / provisioning problem. If at some point the
+Worker's in-memory scan becomes the bottleneck — e.g. multi-criteria FTS
+on dim + counterpart name — we spin up a per-station `.sqlite` sidecar as
+a static R2 artifact (read in the browser via `sql.js` or by the Worker
+with a WASM binding). Same data, different query engine. Deferred.
+
+### Pair-filtered rides (drill-in via map brushing)
+
+Related to the rides-table above: when a station is selected and the map
+draws its destination fan, clicking/brushing a specific edge should filter
+the rides table to *only rides between that pair* (direction respected).
+Two semantics:
+
+- **This-station → other**: rides where `short_name = current` and
+  `counterpart_short_name = other`, `side = start`.
+- **Other → this-station**: reversed.
+
+Implemented as additional params on the rides-table query
+(`counterpart=<short_name>&side=<start|end>`). Filter applied Worker-side
+post-scan, cheap. UI: clicking a fan edge toggles the pair-filter; a chip
+above the table shows the active pair.
 
 ### System-wide "All regions" pre-agg
 
