@@ -93,8 +93,10 @@ function StationMarkers({
 
   // Suppress the permanent selected-station tooltip while the cursor is over a
   // destination line — otherwise both tooltips pile up at the source station,
-  // overlapping awkwardly.
+  // overlapping awkwardly. (Only used in unpinned/hover mode; when pinned we
+  // suppress the line tooltips entirely so the pinned-station TT stays put.)
   const [hoveringLine, setHoveringLine] = useState(false)
+  const isPinned = !!pinnedId && pinnedId === selectedId
 
   const lines = useMemo(() => {
     if (!selectedStation || !selectedId || !pairCounts) return null
@@ -125,19 +127,21 @@ function StationMarkers({
                 mouseout: () => setHoveringLine(false),
               }}
             >
-              <Tooltip sticky>{src.name} → {dst.name}: {count}</Tooltip>
+              {/* Suppress edge tooltips entirely once the station is pinned —
+                  moving the cursor off the station (e.g. toward the caption
+                  link below) shouldn't flash neighbor-edge tooltips. */}
+              {!isPinned && <Tooltip sticky>{src.name} → {dst.name}: {count}</Tooltip>}
             </Polyline>
           )
         })}
       </Pane>
     )
-  }, [selectedStation, selectedId, pairCounts, stations, mPerPx, zoom, colors, onPin, setSelectedId])
+  }, [selectedStation, selectedId, pairCounts, stations, mPerPx, zoom, colors, onPin, setSelectedId, isPinned])
 
   // Selected-station overlay: visual-only (pointer-events: none via `.selected`
   // CSS). Clicks pass through to the base Circle in the `circles` Pane below,
   // so the target Circle stays mounted between hover and click — avoiding the
   // unmount/remount race that caused clicks to fall through to the map.
-  const isPinned = !!pinnedId && pinnedId === selectedId
   const selectedCircle = useMemo(() => {
     if (!selectedStation || !selectedId) return null
     const radius = sqrt(selectedStation.ends)
@@ -152,7 +156,10 @@ function StationMarkers({
           weight={isPinned ? 4 : 3}
           interactive={false}
         >
-          {!hoveringLine && (
+          {/* When pinned, the station TT is always on (edge TTs are
+              suppressed). When unpinned/hovering, we hide it while the
+              cursor is over an edge so the edge TT doesn't stack on top. */}
+          {(isPinned || !hoveringLine) && (
             <Tooltip className={`${css.tooltip} ${isPinned ? css.pinnedTooltip : ''}`} sticky permanent pane="selected">
               <p>{selectedStation.name}{selectedStation.ends > 0 ? `: ${selectedStation.ends.toLocaleString()}` : ''}</p>
             </Tooltip>
@@ -181,15 +188,21 @@ function StationMarkers({
                 ...(hoverToSelect && setSelectedId ? { mouseover: () => { if (id !== selectedId) setSelectedId(id) } } : {}),
               } : undefined}
             >
-              <Tooltip className={css.tooltip} sticky>
-                <p>{station.name}{station.ends > 0 ? `: ${station.ends.toLocaleString()}` : ''}</p>
-              </Tooltip>
+              {/* Suppress base-circle tooltips for other stations while a
+                  station is pinned — the pinned TT stays put, nothing else
+                  fires. The pinned station's own circle TT is hidden by the
+                  overlay pane anyway. */}
+              {!isPinned && (
+                <Tooltip className={css.tooltip} sticky>
+                  <p>{station.name}{station.ends > 0 ? `: ${station.ends.toLocaleString()}` : ''}</p>
+                </Tooltip>
+              )}
             </Circle>
           )
         })}
       </Pane>
     )
-  }, [stations, selectedId, setSelectedId, onPin, colors, stationColors, hoverToSelect])
+  }, [stations, selectedId, setSelectedId, onPin, colors, stationColors, hoverToSelect, isPinned])
 
   return <>{selectedCircle}{lines}{circles}</>
 }
