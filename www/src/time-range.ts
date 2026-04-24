@@ -25,6 +25,11 @@ export type TimeRange = {
 const DAY_MS = 24 * 60 * 60 * 1000
 const HOUR_MS = 60 * 60 * 1000
 const MIN_MS = 60 * 1000
+// Calendar-month/year units are approximations for duration display only —
+// actual bin boundaries are resolved on the server when needed. Keeps the
+// URL codec tidy (`1y` beats `365d`) and round-trips cleanly for presets.
+const MONTH_MS = 30 * DAY_MS
+const YEAR_MS = 365 * DAY_MS
 
 const { round } = Math
 
@@ -99,28 +104,43 @@ function encodeCompactTimestamp(date: Date): string {
   return `${datePart}T${`${HH}${MIN}${SS}`.replace(/(?:00)+$/, '')}`
 }
 
-/** Parse duration: `1d3h10m` → ms. */
+/** Parse duration: `1y2mo3d4h5m` → ms. `mo` must precede `m`. */
 function parseDuration(s: string): number {
   let total = 0
-  for (const m of s.matchAll(/(\d+)([dhm])/g)) {
+  // Match `y`, `mo`, `d`, `h`, `m` in order — `mo` before `m` to avoid the
+  // minute suffix gobbling month-suffixed tokens.
+  for (const m of s.matchAll(/(\d+)(mo|[ydhm])/g)) {
     const v = parseInt(m[1], 10)
-    if (m[2] === 'd') total += v * DAY_MS
-    else if (m[2] === 'h') total += v * HOUR_MS
+    const unit = m[2]
+    if (unit === 'y') total += v * YEAR_MS
+    else if (unit === 'mo') total += v * MONTH_MS
+    else if (unit === 'd') total += v * DAY_MS
+    else if (unit === 'h') total += v * HOUR_MS
     else total += v * MIN_MS
   }
   return total
 }
 
-/** Encode ms → `1d3h10m`; omits zero components. */
+/** Encode ms → `1y2mo3d4h5m`; omits zero components. */
 export function formatDuration(ms: number): string {
   return encodeDuration(ms)
 }
 
 function encodeDuration(ms: number): string {
+  // Only emit `y` / `mo` when the duration decomposes cleanly — otherwise
+  // fall through to `d`/`h`/`m` so drag-pan results (e.g. 47d23h) stay readable.
+  const parts: string[] = []
+  if (ms > 0 && ms % YEAR_MS === 0) {
+    parts.push(`${ms / YEAR_MS}y`)
+    return parts.join('')
+  }
+  if (ms > 0 && ms % MONTH_MS === 0) {
+    parts.push(`${ms / MONTH_MS}mo`)
+    return parts.join('')
+  }
   const days = floor(ms / DAY_MS); ms -= days * DAY_MS
   const hours = floor(ms / HOUR_MS); ms -= hours * HOUR_MS
   const minutes = floor(ms / MIN_MS)
-  const parts: string[] = []
   if (days > 0) parts.push(`${days}d`)
   if (hours > 0) parts.push(`${hours}h`)
   if (minutes > 0) parts.push(`${minutes}m`)

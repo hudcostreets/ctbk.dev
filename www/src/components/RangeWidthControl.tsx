@@ -11,6 +11,10 @@ import type { TimeRange } from '../time-range'
 
 const HOUR_MS = 60 * 60 * 1000
 const DAY_MS = 24 * HOUR_MS
+// Align with `time-range.ts`' month/year approximations so preset labels
+// round-trip cleanly through `formatDuration` (1 month = 30d, 1 year = 365d).
+const MONTH_MS = 30 * DAY_MS
+const YEAR_MS = 365 * DAY_MS
 
 export type DurationPreset = { label: string; ms: number }
 
@@ -21,7 +25,9 @@ export const DEFAULT_PRESETS: readonly DurationPreset[] = [
   { label: '3d',  ms: 3 * DAY_MS },
   { label: '7d',  ms: 7 * DAY_MS },
   { label: '14d', ms: 14 * DAY_MS },
-  { label: '1mo', ms: 31 * DAY_MS },
+  { label: '1mo', ms: MONTH_MS },
+  { label: '3mo', ms: 3 * MONTH_MS },
+  { label: '1y',  ms: YEAR_MS },
 ]
 
 interface Props {
