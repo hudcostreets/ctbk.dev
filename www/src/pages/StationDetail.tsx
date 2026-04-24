@@ -6,6 +6,8 @@ import css from '../index.module.css'
 import controlCss from '../controls.module.css'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
 import { RangeWidthControl } from '../components/RangeWidthControl'
+import { BinSelect } from '../components/BinSelect'
+import RollupTripsChart from '../components/RollupTripsChart'
 import { TimeAgo } from '../components/TimeAgo'
 import StationMap, { type Stations, type StationPairCounts } from '../components/StationMap'
 import YmrgtbChart from '../chart/YmrgtbChart'
@@ -19,6 +21,7 @@ import {
   useStationInfo, useStationRange, stationsApi,
   type StationRangeResponse,
 } from '../query/stations'
+import { useRollupQuery, type Side } from '../query/rollups'
 import {
   type DockingFilter, type StackBy, type YAxis,
   Regions, UserTypes, Genders, GenderQueryStrings,
@@ -26,7 +29,7 @@ import {
   UserTypeDisplayNames, UserTypeQueryStrings,
   codeParam, codesParam,
 } from '../data'
-import { boolParam, numberArrayParam, useUrlState } from 'use-prms'
+import { boolParam, intParam, numberArrayParam, useUrlState } from 'use-prms'
 import { bufferedBounds, formatTimeRange, roundDuration, timeRangeParam } from '../time-range'
 
 const { API_BASE } = stationsApi
@@ -96,6 +99,18 @@ export default function StationDetail() {
   const [tripsDocking, setTripsDocking] = useUrlState('td', codeParam<DockingFilter>('both', [['both', 'b'], ['start', 's'], ['end', 'e']]))
   const [tripsControlsClosed, setTripsControlsClosed] = useUrlState('tcc', boolParam)
 
+  // Feature flag for the multi-scale rollup backend (phase 1 — Worker endpoint
+  // currently returns 404 for most stations since the R2 dataset hasn't been
+  // built yet). Gate the new path with `?rollup=1`; default (flag off) keeps
+  // the legacy `useStationTrips`-backed monthly chart.
+  const [rollupEnabled] = useUrlState('rollup', boolParam)
+  // Separate time range for the rollup trips chart (`?tr=...`), mirroring the
+  // availability chart's `?r=...` codec but with a longer default (1 year) —
+  // the trips endpoint covers years of data.
+  const [tripsRange, setTripsRange] = useUrlState('tr', timeRangeParam(365 * 24 * 60 * 60 * 1000))
+  // Bin size (ms). 0 = auto; any other value is explicit (matches BinSelect).
+  const [tripsBinMs, setTripsBinMs] = useUrlState('tbin', intParam(0))
+
   // Preprocess rows for the shared `buildTraces` logic.
   // The per-station JSON has no Region column — default to NYC for all rows
   // (each station is in one region; cross-region filtering is a no-op here).
@@ -110,6 +125,29 @@ export default function StationDetail() {
       Docking: r.Docking,
     })))
   }, [tripsRows])
+
+  // Rollup path — only active when `?rollup=1`. Translates `tripsDocking`
+  // (`both`/`start`/`end`) to the endpoint's `side` param (undefined for both).
+  const rollupSide: Side | undefined =
+    tripsDocking === 'start' || tripsDocking === 'end' ? tripsDocking : undefined
+  const rollupQuery = useRollupQuery({
+    kind: 'trips',
+    // `useRollupQuery` is internally-gated on `!!station || !!regions` — we
+    // additionally gate on the feature flag by only reading the hook's result
+    // when `rollupEnabled`.
+    station: rollupEnabled ? info?.short_name : undefined,
+    end: tripsRange.timestamp,
+    duration: tripsRange.duration,
+    binMs: tripsBinMs > 0 ? tripsBinMs : undefined,
+    side: rollupSide,
+  })
+  const rollupData = rollupQuery.data
+  const rollupError = rollupQuery.error
+    ? (rollupQuery.error instanceof Error ? rollupQuery.error.message : String(rollupQuery.error))
+    : null
+  // Worker returns 404 ("no data") until R2 parquet is populated. Distinguish
+  // that from other errors so we can show a friendlier placeholder.
+  const rollupNoData = rollupError?.startsWith('HTTP 404') ?? false
 
   // Smart polling: incremental refresh in Latest mode. In pinned mode
   // (`range.timestamp !== null`) the window is fixed, so polling is disabled.
@@ -368,7 +406,54 @@ export default function StationDetail() {
         </>
       )}
 
-      {processedTripsRows && processedTripsRows.length === 0 && (
+      {rollupEnabled && (
+        <Box sx={{ mt: 4 }}>
+          <Typography variant="subtitle1" gutterBottom>
+            Monthly trips <span style={{ fontSize: '0.75em', opacity: 0.6 }}>(rollup path)</span>
+          </Typography>
+          <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 1 }}>
+            <RangeWidthControl value={tripsRange} onChange={setTripsRange} />
+            <BinSelect
+              value={tripsBinMs > 0 ? tripsBinMs : undefined}
+              onChange={(ms) => setTripsBinMs(ms ?? 0)}
+            />
+            <Radios
+              label="Include"
+              options={[
+                { label: 'Both', data: 'both' },
+                { label: 'Starts', data: 'start' },
+                { label: 'Ends', data: 'end' },
+              ]}
+              cb={setTripsDocking}
+              choice={tripsDocking}
+            />
+          </Box>
+          {rollupQuery.isPending && !rollupData && (
+            <Typography variant="body2" sx={{ opacity: 0.65 }}>Loading rollup data…</Typography>
+          )}
+          {rollupNoData && (
+            <Typography variant="body2" sx={{ opacity: 0.65 }}>
+              No rollup data yet (backend in progress).
+            </Typography>
+          )}
+          {rollupError && !rollupNoData && (
+            <Typography color="error" variant="body2">Rollup error: {rollupError}</Typography>
+          )}
+          {rollupData && rollupData.rows.length > 0 && (
+            <>
+              <RollupTripsChart rows={rollupData.rows} binMs={rollupData.binMs} height={500} />
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+                tier: {rollupData.tier} · bin: {rollupData.binMs}ms · rows: {rollupData.rows.length.toLocaleString()}
+              </Typography>
+            </>
+          )}
+          {rollupData && rollupData.rows.length === 0 && !rollupQuery.isPending && (
+            <Typography variant="body2" sx={{ opacity: 0.65 }}>No rows in window.</Typography>
+          )}
+        </Box>
+      )}
+
+      {!rollupEnabled && processedTripsRows && processedTripsRows.length === 0 && (
         <Box sx={{ mt: 4 }}>
           <Typography variant="subtitle1" gutterBottom>Monthly trips</Typography>
           <Typography variant="body2" sx={{ opacity: 0.65 }}>
@@ -377,7 +462,7 @@ export default function StationDetail() {
         </Box>
       )}
 
-      {processedTripsRows && processedTripsRows.length > 0 && (
+      {!rollupEnabled && processedTripsRows && processedTripsRows.length > 0 && (
         <Box sx={{ mt: 4 }}>
           <Typography variant="subtitle1" gutterBottom>Monthly trips</Typography>
           <YmrgtbChart
