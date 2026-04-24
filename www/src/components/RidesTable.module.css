@@ -1,0 +1,139 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.tableWrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.table th,
+.table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-primary);
+  white-space: nowrap;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table tbody tr:hover {
+  background: var(--bg-tertiary);
+}
+
+.th {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  position: sticky;
+  top: 0;
+}
+
+.th:hover {
+  background: var(--border-primary);
+}
+
+.thInner {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sortIndicator {
+  opacity: 0.7;
+  font-size: 0.75em;
+  width: 0.8em;
+  display: inline-block;
+  text-align: center;
+}
+
+.sortIndicator.inactive {
+  opacity: 0.25;
+}
+
+.side {
+  display: inline-block;
+  width: 1.2em;
+  text-align: center;
+  font-weight: 600;
+}
+
+.side.start {
+  color: #1976d2;
+}
+
+.side.end {
+  color: #9c27b0;
+}
+
+.counterpartLink {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--border-secondary);
+}
+
+.counterpartLink:hover {
+  text-decoration-color: currentColor;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 4px 2px;
+}
+
+.pageButton {
+  padding: 4px 10px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1.2;
+}
+
+.pageButton:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+}
+
+.pageButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pageInfo {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  min-width: 8em;
+  text-align: center;
+}
+
+.stateRow {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.loading {
+  opacity: 0.6;
+}
