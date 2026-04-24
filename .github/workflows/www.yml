@@ -68,3 +68,8 @@ jobs:
         with:
           branch: ghp
           folder: www/dist
+          # Keep old hashed asset chunks across deploys so stale `index.html`s
+          # in open tabs can still fetch the JS they reference during the
+          # post-deploy propagation window (avoid 503/404 on stale chunks).
+          clean-exclude: |
+            assets/**
