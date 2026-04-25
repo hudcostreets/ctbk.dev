@@ -130,7 +130,11 @@ function StationMarkers({
               {/* Suppress edge tooltips entirely once the station is pinned —
                   moving the cursor off the station (e.g. toward the caption
                   link below) shouldn't flash neighbor-edge tooltips. */}
-              {!isPinned && <Tooltip sticky>{src.name} → {dst.name}: {count}</Tooltip>}
+              {/* Pin to default `tooltipPane` (z=650) — without this,
+                  react-leaflet inherits the parent layer's pane (here our
+                  custom "lines" pane at z=450), so the tooltip would
+                  render UNDER neighboring lines + circles. */}
+              {!isPinned && <Tooltip sticky pane="tooltipPane">{src.name} → {dst.name}: {count}</Tooltip>}
             </Polyline>
           )
         })}
@@ -193,7 +197,7 @@ function StationMarkers({
                   fires. The pinned station's own circle TT is hidden by the
                   overlay pane anyway. */}
               {!isPinned && (
-                <Tooltip className={css.tooltip} sticky>
+                <Tooltip className={css.tooltip} sticky pane="tooltipPane">
                   <p>{station.name}{station.ends > 0 ? `: ${station.ends.toLocaleString()}` : ''}</p>
                 </Tooltip>
               )}
