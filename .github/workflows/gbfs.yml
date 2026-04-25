@@ -79,6 +79,18 @@ jobs:
         run: pnpm install --frozen-lockfile
         working-directory: gbfs/${{ matrix.worker }}
 
+      - name: Tests (gate deploy)
+        if: steps.should.outputs.deploy == 'true'
+        working-directory: gbfs/${{ matrix.worker }}
+        run: |
+          # Run `pnpm test` if defined (currently only `gbfs/api` has
+          # tests — vitest planQuery suite). Skip silently otherwise.
+          if node -e "process.exit(require('./package.json').scripts?.test ? 0 : 1)"; then
+            pnpm test
+          else
+            echo "no test script in gbfs/${{ matrix.worker }}/package.json — skipping"
+          fi
+
       - if: steps.should.outputs.deploy == 'true'
         run: npx wrangler deploy
         working-directory: gbfs/${{ matrix.worker }}

@@ -25,6 +25,17 @@ jobs:
       - name: Install
         working-directory: www
         run: pnpm install
+      - name: Typecheck
+        working-directory: www
+        run: pnpm tc
+      - name: Install Playwright browsers
+        working-directory: www
+        run: pnpm exec playwright install --with-deps chromium
+      - name: e2e tests (gates the deploy)
+        working-directory: www
+        env:
+          CI: '1'
+        run: pnpm test --reporter=list
       - name: Build
         working-directory: www
         run: |
@@ -63,6 +74,7 @@ jobs:
               echo "REGENERATED=true" >> $GITHUB_OUTPUT
           fi
       - name: Deploy to GH Pages
+        id: deploy
         uses: JamesIves/github-pages-deploy-action@v4
         if: github.ref == 'refs/heads/www' && steps.screenshots.outputs.REGENERATED != 'true'
         with:
@@ -74,3 +86,26 @@ jobs:
           # chunks weren't deployed either, breaking the site. Removed.
           # If we want stale-tab survival, do it via a post-deploy step
           # that copies old chunks back into ghp explicitly.
+      - name: Post-deploy smoke check
+        if: steps.deploy.outcome == 'success'
+        working-directory: www
+        run: |
+          # Wait briefly for GH Pages to flip the live tree (it polls ghp
+          # branch every ~10s). If chunks referenced by the just-deployed
+          # `index.html` 404 against ctbk.dev, fail loudly so the deploy
+          # is visibly broken — we hit exactly this when `clean-exclude`
+          # silently dropped chunks (commit ea82f3c0).
+          for i in 1 2 3 4 5 6; do
+            sleep 15
+            html=$(curl -sf https://ctbk.dev/ || true)
+            [ -n "$html" ] && break
+          done
+          chunks=$(echo "$html" | grep -oE 'assets/[A-Za-z0-9._/-]+\.(js|css)' | sort -u)
+          [ -z "$chunks" ] && { echo 'no chunks parsed from live index.html — aborting'; exit 1; }
+          fail=0
+          for c in $chunks; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://ctbk.dev/$c")
+            echo "$code  https://ctbk.dev/$c"
+            [ "$code" = "200" ] || fail=1
+          done
+          [ "$fail" = "0" ] || { echo 'one or more chunks 404 — deploy is broken'; exit 1; }
