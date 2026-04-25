@@ -32,7 +32,11 @@ from ctbk.cli.git_dvc_cmd import git_dvc_cmd
 from ctbk.util.constants import BKT
 
 CONS_DIR = Path(f's3/{BKT}/normalized')
-OUT_DIR = Path(f's3/{BKT}/trips/stations')
+# `r2/` rather than `s3/` because these outputs land in CF R2, not the
+# AWS S3 data-lake. Synced via `aws s3 sync r2/ s3://ctbk/ --profile cf`
+# after the stage runs (see `smoke-rollups.sh`). Naming the local dir
+# differently keeps DVX/DVC unaware of these regenerable cache files.
+OUT_DIR = Path(f'r2/{BKT}/trips/stations')
 ID_MAP = Path(f's3/{BKT}/stations/station-id-map.json')
 
 # Output column order. `dt` first so row-group stats are on the right column.

@@ -40,7 +40,9 @@ from ctbk.cli.base import ctbk
 from ctbk.cli.git_dvc_cmd import git_dvc_cmd
 from ctbk.util.constants import BKT
 
-OUT_DIR = Path(f's3/{BKT}/trips/region')
+# `r2/` rather than `s3/` because these outputs land in CF R2, not the
+# AWS S3 data-lake. Synced via `aws s3 sync r2/ s3://ctbk/ --profile cf`.
+OUT_DIR = Path(f'r2/{BKT}/trips/region')
 REGIONS = ('NYC', 'JC', 'HB')  # canonical region values as they appear in the parquets
 
 OUT_COLS = [

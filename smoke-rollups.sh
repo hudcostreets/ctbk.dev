@@ -60,12 +60,19 @@ section "Per-station fan-in (whole history)"
 # the stage supports it) or limit the month range. Adjust as needed.
 ctbk trips-per-station create
 
-section "Sanity-check the outputs"
-echo "Files produced (from R2/S3 listing):"
-aws s3 ls "s3://ctbk/trips/region/" --recursive 2>/dev/null | tail -20 || true
-echo
-echo "Per-station file for $short_name:"
-aws s3 ls "s3://ctbk/trips/stations/$short_name.parquet" 2>/dev/null || true
+section "Sanity-check the local outputs"
+ls -la r2/ctbk/trips/region/ 2>/dev/null || true
+ls -la r2/ctbk/trips/stations/ 2>/dev/null | head -10 || true
+
+section "Sync local r2/ mirror → CF R2"
+# `--profile cf` resolves to CF R2 (see ~/.aws/{credentials,config}); the
+# `s3://ctbk/` URI here is the *R2* bucket, not the AWS S3 one — same
+# bucket name, different provider. The Worker reads via R2 binding.
+aws s3 sync "r2/${BKT:-ctbk}/trips/" "s3://${BKT:-ctbk}/trips/" --profile cf
+
+section "Sanity-check R2 has the files"
+aws s3 ls "s3://ctbk/trips/region/" --recursive --profile cf | tail -20 || true
+aws s3 ls "s3://ctbk/trips/stations/$short_name.parquet" --profile cf || true
 
 section "Test the Worker endpoint"
 api='https://ctbk-gbfs-api.ryan-0dc.workers.dev'
