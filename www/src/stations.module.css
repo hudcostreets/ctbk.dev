@@ -102,6 +102,14 @@ a.subtitle:hover {
     margin-bottom: 0;
 }
 
+/* Suppress the browser's default focus ring on Leaflet's interactive
+ * SVG elements (polylines + circles). Without this, clicking a fan
+ * polyline gives the SVG path keyboard focus and the browser paints a
+ * dashed bounding rectangle around the entire <path>. */
+:global(.leaflet-container path.leaflet-interactive) {
+    outline: none;
+}
+
 .pinnedTooltip p {
     font-weight: 700;
 }
