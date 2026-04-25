@@ -18,11 +18,19 @@ For incremental updates we rewrite every touched station's file sorted by
 `dt` ascending. Whole-history files are small (tens of MB worst case) so the
 rewrite churn is acceptable; sort-on-write also gives parquet row groups
 free dt-range zone maps, matching the spec's read path.
+
+Memory strategy: processes one month at a time, appending per-station row
+groups to open ParquetWriter handles. Months are processed in chronological
+order and each month's per-station data is dt-sorted before writing, so the
+resulting files are globally dt-sorted. Peak memory ≈ one month of fan-out
+data (~1.5 GB for the largest months).
 """
 import json
 from glob import glob
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pandas as pd
 from pandas import DataFrame
 from utz import err
@@ -77,9 +85,10 @@ def _month_rows(ym: str, id_map: dict[str, str]) -> DataFrame:
     # `Duration` but in an int64 seconds column (`duration_s`).
     duration_s = ((df['Stop Time'] - df['Start Time']).dt.total_seconds()).astype('int64')
 
-    # Unix-seconds `dt` for start and end sides.
-    dt_start = (df['Start Time'].astype('int64') // 1_000_000_000)
-    dt_end = (df['Stop Time'].astype('int64') // 1_000_000_000)
+    # Unix-seconds `dt` for start and end sides. Convert via datetime64[s]
+    # to avoid depending on the source resolution (us vs ns).
+    dt_start = df['Start Time'].values.astype('datetime64[s]').astype('int64')
+    dt_end = df['Stop Time'].values.astype('datetime64[s]').astype('int64')
 
     # Canonical short_names for both endpoints (used for `short_name` on one
     # side and `counterpart_short_name` on the other).
@@ -135,32 +144,60 @@ def create(dry_run: bool) -> str | None:
     months = _discover_months()
     err(f"Processing {len(months)} consolidated months")
 
-    frames = []
-    for ym in months:
-        err(f"  {ym}")
-        frames.append(_month_rows(ym, id_map))
-
-    all_df = pd.concat(frames, ignore_index=True)
-    err(f"Total rows: {len(all_df):,}")
-
     if dry_run:
+        for ym in months:
+            err(f"  {ym}")
         err("Dry run, not writing files")
         return None
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    n_stations = 0
-    total_bytes = 0
-    for short_name, g in all_df.groupby('short_name', observed=True, sort=False):
-        out_path = OUT_DIR / f'{short_name}.parquet'
-        sorted_g = g.sort_values('dt', kind='mergesort').reset_index(drop=True)
-        sorted_g.to_parquet(out_path, index=False)
-        n_stations += 1
-        total_bytes += out_path.stat().st_size
+    # Stream month-by-month through open ParquetWriter handles (one per
+    # station). Months are processed in chronological order and each
+    # month's per-station slice is dt-sorted before writing, so the
+    # resulting files are globally dt-sorted. Peak memory ≈ one month
+    # of fan-out data (~1.5 GB for the largest months).
+    writers: dict[str, pq.ParquetWriter] = {}
+    # Define schema up front so that columns with all-null slices (e.g.
+    # `region` for a station that only appears in months without region
+    # data) are still written as their intended type, not `null`.
+    schema = pa.schema([
+        ('dt', pa.int64()),
+        ('side', pa.string()),
+        ('short_name', pa.string()),
+        ('counterpart_short_name', pa.string()),
+        ('gender', pa.int8()),
+        ('user_type', pa.string()),
+        ('rideable_type', pa.string()),
+        ('region', pa.string()),
+        ('duration_s', pa.int64()),
+    ])
+    total_rows = 0
+    stations_seen: set[str] = set()
 
+    try:
+        for ym in months:
+            err(f"  {ym}")
+            mdf = _month_rows(ym, id_map)
+            total_rows += len(mdf)
+            for sn, g in mdf.groupby('short_name', observed=True, sort=False):
+                sorted_g = g.sort_values('dt', kind='mergesort').reset_index(drop=True)
+                table = pa.Table.from_pandas(sorted_g, preserve_index=False)
+                table = table.cast(schema)
+                if sn not in writers:
+                    out_path = OUT_DIR / f'{sn}.parquet'
+                    writers[sn] = pq.ParquetWriter(str(out_path), schema)
+                    stations_seen.add(sn)
+                writers[sn].write_table(table)
+    finally:
+        for w in writers.values():
+            w.close()
+
+    n_stations = len(stations_seen)
+    total_bytes = sum((OUT_DIR / f'{sn}.parquet').stat().st_size for sn in stations_seen)
     total_mb = total_bytes / 1024 / 1024
     avg_bytes = total_bytes / n_stations if n_stations else 0
-    err(f"Wrote {n_stations:,} station parquets, total {total_mb:.2f} MB, avg {avg_bytes:,.0f} B")
+    err(f"Wrote {n_stations:,} station parquets, {total_rows:,} rows, total {total_mb:.2f} MB, avg {avg_bytes:,.0f} B")
 
     return (
         f"Trips-per-station parquets ({n_stations:,} stations, "

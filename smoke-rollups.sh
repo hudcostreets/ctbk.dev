@@ -36,8 +36,8 @@ set -euo pipefail
 section() { printf '\n\033[1;36m=== %s ===\033[0m\n' "$1"; }
 
 section "Pre-req: hour-level + minute-level monthly aggregates for $ym"
-ctbk agg create -g ymdhgtb  -acd "$ym"
-ctbk agg create -g ymdhngtb -acd "$ym"
+ctbk agg create -g ymdhrgtb  -acd "$ym"
+ctbk agg create -g ymdhnrgtb -acd "$ym"
 
 section "Per-region hour rollup for year=$yyyy (single month of input)"
 # Note: TripsRegionH1Year normally fans in all 12 months of `ymdhgtb_cd`
@@ -58,7 +58,7 @@ section "Per-station fan-in (whole history)"
 # This stage rewrites all per-station parquets each run. If you want to
 # avoid the full ~4 GB read on the smoke test, pass --only $short_name (if
 # the stage supports it) or limit the month range. Adjust as needed.
-ctbk trips-per-station create
+ctbk trips-per-station
 
 section "Sanity-check the local outputs"
 ls -la r2/ctbk/trips/region/ 2>/dev/null || true

@@ -3,12 +3,12 @@
 Two stages, both fanning in from the existing `AggregatedMonth` output:
 
 - `TripsRegionH1Year(region, year)`
-  Reads 12 months of `AggregatedMonth(ym, 'ymdhgtb', 'cD')`, filters to
+  Reads 12 months of `AggregatedMonth(ym, 'ymdhrgtb', 'cd')`, filters to
   `region`, writes one parquet per (region, year) at
   `s3/ctbk/trips/region/<region>/h1/<YYYY>.parquet`.
 
 - `TripsRegionN1Month(region, year, month)`
-  Reads 1 month of `AggregatedMonth(ym, 'ymdhngtb', 'cD')` (where `n` is the
+  Reads 1 month of `AggregatedMonth(ym, 'ymdhnrgtb', 'cd')` (where `n` is the
   new minute-grouping), filters to `region`, writes one parquet per
   (region, year-month) at
   `s3/ctbk/trips/region/<region>/n1/<YYYYMM>.parquet`.
@@ -63,7 +63,7 @@ def _bucket_dt_hour(df: DataFrame) -> pd.Series:
         day=df['Start Day'],
         hour=df['Start Hour'],
     ), utc=True)
-    return (ts.astype('int64') // 1_000_000_000).astype('int64')
+    return pd.array(ts.values.astype('datetime64[s]').astype('int64'), dtype='int64')
 
 
 def _bucket_dt_minute(df: DataFrame) -> pd.Series:
@@ -74,7 +74,7 @@ def _bucket_dt_minute(df: DataFrame) -> pd.Series:
         hour=df['Start Hour'],
         minute=df['Start Minute'],
     ), utc=True)
-    return (ts.astype('int64') // 1_000_000_000).astype('int64')
+    return pd.array(ts.values.astype('datetime64[s]').astype('int64'), dtype='int64')
 
 
 def _normalize_region(region: str) -> str:
@@ -114,7 +114,7 @@ class TripsRegionH1Year:
         frames = []
         for m in range(1, 13):
             ym = YM(self.year * 100 + m)
-            am = AggregatedMonth(ym, 'ymdhgtb', 'cD')
+            am = AggregatedMonth(ym, 'ymdhrgtb', 'cd')
             try:
                 mdf = am.read()
             except FileNotFoundError:
@@ -151,7 +151,7 @@ class TripsRegionN1Month:
         return str(OUT_DIR / _normalize_region(self.region) / 'n1' / f'{self.ym}.parquet')
 
     def _df(self) -> DataFrame:
-        am = AggregatedMonth(self.ym, 'ymdhngtb', 'cD')
+        am = AggregatedMonth(self.ym, 'ymdhnrgtb', 'cd')
         df = am.read()
         df = df[df['Region'] == self.region]
         if df.empty:

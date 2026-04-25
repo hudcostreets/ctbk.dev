@@ -43,7 +43,8 @@ ctbk into a `use-rollups` library (phase 3 below).
 - **Agg-key characters** (used in pipeline stage names):
   `y` year · `m` month · `d` day · `h` hour · **`n` minute** · `r` region ·
   `s` start station · `e` end station · `g` gender · `t` user type ·
-  `b` bike type · `c` count · `D` duration-seconds.
+  `b` bike type · `c` count · `d` duration (overloaded: day in group-by,
+  duration in aggregate-by).
 - **Tier**: a pre-aggregated bin size. We have at most two system-wide
   tiers: `h1` (1-hour) and `n1` (1-minute).
 - **Region**: `nyc` · `jc` · `hob`. Sharded as separate files — **not** a
@@ -214,8 +215,8 @@ This replaces the `{start, end}` widget on the Home page's ride-count chart
 
 Existing pipeline produces monthly-grain outputs. New stages:
 
-1. `ctbk agg -g ymdhgtb -acD`: hour-level system → region `h1` year-shards.
-2. `ctbk agg -g ymdhngtb -acD`: minute-level system → region `n1` month-shards.
+1. `ctbk agg -g ymdhrgtb -acd`: hour-level system → region `h1` year-shards.
+2. `ctbk agg -g ymdhnrgtb -acd`: minute-level system → region `n1` month-shards.
 3. `ctbk trips-per-station`: re-emit ride records partitioned by canonical
    short_name (both sides, dt-sorted) → `trips/stations/*.parquet`.
 
