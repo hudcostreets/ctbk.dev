@@ -68,8 +68,9 @@ jobs:
         with:
           branch: ghp
           folder: www/dist
-          # Keep old hashed asset chunks across deploys so stale `index.html`s
-          # in open tabs can still fetch the JS they reference during the
-          # post-deploy propagation window (avoid 503/404 on stale chunks).
-          clean-exclude: |
-            assets/**
+          # NOTE: `clean-exclude` was tried here to preserve stale chunks
+          # for in-flight tabs across deploys, but JamesIves passes it as
+          # `rsync --exclude` which excludes from BOTH sides — i.e. NEW
+          # chunks weren't deployed either, breaking the site. Removed.
+          # If we want stale-tab survival, do it via a post-deploy step
+          # that copies old chunks back into ghp explicitly.
