@@ -28,6 +28,12 @@
 !public/assets/twitter.png
 !public/assets/warning.png
 !public/assets/ymrgtb_cd.json
+# Generated at host-build time by `scripts/gen-ymdgtb-index.js`. The
+# screenshots Docker image's build context is `www/` and lacks the
+# `s3/*.dvc` files needed to regenerate, so ship the host-built artifact
+# into the image. Re-add this manually after `make-dockerignore.py -G`
+# (it only allowlists git-tracked files).
+!public/ymdgtb-index.json
 !public/data/annualized_pcts.json
 !public/favicon.ico
 !public/img/ride_durations_202303_10s.png
