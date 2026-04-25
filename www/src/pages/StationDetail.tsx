@@ -130,6 +130,18 @@ export default function StationDetail() {
   // (`both`/`start`/`end`) to the endpoint's `side` param (undefined for both).
   const rollupSide: Side | undefined =
     tripsDocking === 'start' || tripsDocking === 'end' ? tripsDocking : undefined
+  // Map the existing `tripsStackBy` URL state onto the rollup endpoint's
+  // `dims` query param. Returns one row per `(bin × dim)` instead of one
+  // row per bin → enables stacked traces in `<RollupTripsChart>`.
+  const rollupDims: string[] | undefined = (() => {
+    switch (tripsStackBy) {
+      case 'Docking': return ['side']
+      case 'User Type': return ['user_type']
+      case 'Gender': return ['gender']
+      case 'Rideable Type': return ['rideable_type']
+      default: return undefined
+    }
+  })()
   const rollupQuery = useRollupQuery({
     kind: 'trips',
     // `useRollupQuery` is internally-gated on `!!station || !!regions` — we
@@ -140,6 +152,7 @@ export default function StationDetail() {
     duration: tripsRange.duration,
     binMs: tripsBinMs > 0 ? tripsBinMs : undefined,
     side: rollupSide,
+    dims: rollupDims,
   })
   const rollupData = rollupQuery.data
   const rollupError = rollupQuery.error
@@ -441,7 +454,12 @@ export default function StationDetail() {
           )}
           {rollupData && rollupData.rows.length > 0 && (
             <>
-              <RollupTripsChart rows={rollupData.rows} binMs={rollupData.binMs} height={500} />
+              <RollupTripsChart
+                rows={rollupData.rows}
+                binMs={rollupData.binMs}
+                metric={tripsYAxis === 'Ride minutes' ? 'ride_minutes' : 'count'}
+                height={500}
+              />
               <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
                 tier: {rollupData.tier} · bin: {rollupData.binMs}ms · rows: {rollupData.rows.length.toLocaleString()}
               </Typography>

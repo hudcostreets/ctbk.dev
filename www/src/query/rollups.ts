@@ -42,11 +42,19 @@ export interface RollupQueryParams {
   plotWidth?: number
   /** Per-station only: restrict to rides where the station is the start/end. */
   side?: Side
+  /** Dim columns to break out as group keys (e.g. `['side']` returns one
+   *  row per `(bin × side)` instead of one row per bin). Default: `[]`. */
+  dims?: string[]
 }
 
+/** Worker returns `dt` (number, unix-s) plus metric columns (`count`,
+ *  `duration_s`) plus any requested dim columns (strings or numeric
+ *  categoricals). Use index-signature for dims. */
 export interface RollupRow {
   dt: number
-  [field: string]: number
+  count?: number
+  duration_s?: number
+  [field: string]: number | string | undefined
 }
 
 export interface RollupResponse {
@@ -81,7 +89,7 @@ export function useRollupQuery(
 ): UseQueryResult<RollupResponse> {
   const {
     kind, station, regions, end, duration,
-    binMs, targetPxPerBin, plotWidth, side,
+    binMs, targetPxPerBin, plotWidth, side, dims,
   } = params
 
   // Snapshot `Date.now()` once per relevant input change — using it directly
@@ -103,6 +111,7 @@ export function useRollupQuery(
   }, [fromS, toS, binMs])
 
   const regionsKey = regions ? [...regions].sort().join(',') : ''
+  const dimsKey = dims?.length ? [...dims].sort().join(',') : ''
   const enabled = !!station || !!regions?.length
 
   return useQuery<RollupResponse>({
@@ -112,6 +121,7 @@ export function useRollupQuery(
       qFromS, qToS,
       binMs ?? 'auto',
       side ?? null,
+      dimsKey,
     ],
     enabled,
     placeholderData: keepPreviousData,
@@ -130,6 +140,7 @@ export function useRollupQuery(
         if (plotWidth !== undefined) sp.set('plotWidth', String(plotWidth))
       }
       if (side) sp.set('side', side)
+      if (dims?.length) sp.set('dims', dims.join(','))
       const res = await fetch(url.toString())
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       return res.json()
