@@ -64,14 +64,18 @@ Orthogonal to the trip-data pipeline above. Polls Citi Bike's GBFS feed every mi
 
 | Stage | Where | Purpose |
 |-------|-------|---------|
-| Poll | `gbfs/worker` (Cloudflare Worker cron) | Fetch station_status, append row per station to D1 day-table `availability_YYYYMMDD` |
-| Serve | `gbfs/api` (Cloudflare Worker) | `/api/stations/:id/{info,range}` — D1 for hot (≤ `HOT_DAYS_RETAIN`=7d), R2 parquet fallback for cold |
-| Compact | `gbfs/compact-r2.py` (GHA daily) | Drop aged-out D1 day-tables, merge into daily system-wide parquet `gbfs/parquet/YYYY-MM-DD.parquet`, slice into per-station monthly parquets `gbfs/stations/<gbfs_uuid>/<YYYY-MM>.parquet` |
+| Poll | `gbfs/worker` (CFW, cron `* * * * *`) | Fetch `station_status.json`, write WAL JSON to R2 at `gbfs/status/YYYY-MM-DD/HH-MM.json` (~580 KB / file). Daily, also fetch `station_information.json` → `gbfs/info/YYYY-MM-DD.json`. |
+| Load | `gbfs/loader` (CFW, R2-event queue consumer) | On each new WAL JSON: `INSERT OR REPLACE` ~2,360 rows into D1 day-table `availability_YYYYMMDD` (created on demand). Daily info → upsert into D1 `stations` table. |
+| Serve | `gbfs/api` (CFW) | `/api/stations/:id/{today,range}`, `/api/query`, `/api/totals`, `/api/rides`. D1 for hot (≤ `HOT_DAYS_RETAIN`=7d), R2 parquet fallback for cold. Daily cron (`0 1 * * *`) drops D1 day-tables older than retention. |
+| Compact | `gbfs/compact-r2.py` (GHA, cron `15 0 * * *`) | Pulls yesterday's WAL JSONs from R2, writes `gbfs/status/YYYY-MM-DD.parquet` (system-wide, ~12-18 MB), and slices into per-station files `gbfs/stations/<gbfs_uuid>/<YYYY-MM>.parquet`. |
 
 Consumed by `StationDetail`'s availability chart (`uPlot`) via `useStationRange`.
 
+> **Cost note (2026-04)**: the loader pattern writes ~2,360 rows × 1,440 polls/day = ~102MM logical inserts/month into D1. Billed at ~150MM rows-written/month (incl. `INSERT OR REPLACE` re-writes when GBFS `last_updated` repeats across polls + auto-PK index updates) ≈ **$100/mo** at $1/MM beyond the 50MM free tier. Migration plan: replace the D1 loader with hourly R2-side compaction, serve availability from R2 parquet only. See `specs/gbfs-r2-only.md`.
+
 See `specs/multiscale-timeseries-backend.md` for the planned rollup-pyramid extension
-(minute → 5-min → hour → day → month tiers for both trips and availability).
+(minute → 5-min → hour → day → month tiers for both trips and availability), which the
+R2-only migration aligns with directly (`avail/n1/...` + `avail/agg/{tier}/...`).
 
 ## Dependency Graph
 

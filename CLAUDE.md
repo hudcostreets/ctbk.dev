@@ -42,6 +42,12 @@ The `s3/ctbk/normalized/` directory contains two types of DVC-tracked outputs pe
 - `/www/` - Next.js frontend dashboard
 - `/s3/` - Local mirror of S3 data structure with DVC tracking
 - `/nbs/` - Jupyter notebooks for analysis
+- `/gbfs/` - Real-time station availability subsystem (orthogonal to trips ETL)
+  - `worker/` — CFW cron `* * * * *`, polls GBFS `station_status.json` → R2 WAL JSONs
+  - `loader/` — CFW R2-event queue consumer, ingests WAL → D1 hot-cache (last 7 days)
+  - `api/` — CFW serving `/api/stations/*`, `/api/query`, `/api/totals`, `/api/rides`
+  - `compact-r2.py` — GHA daily compaction: WAL JSONs → daily/per-station parquet on R2
+  - See `docs/pipeline.md` GBFS section + `specs/gbfs-r2-only.md` (migration in flight)
 
 ## Essential Commands
 

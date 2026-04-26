@@ -1,5 +1,7 @@
 # Spec: Cloudflare D1 Backend for ctbk.dev
 
+> **Status (2026-04)**: Partially superseded. The "Out of scope: availability time series" claim below was contradicted by `specs/done/live-minute-refresh.md`, which adopted a D1 hot-cache for the last 7 days of GBFS availability. That hot-cache is now the dominant D1 cost (~$100/mo) and is being removed; see `specs/gbfs-r2-only.md`. Station-metadata + trip-aggregate use-cases in this spec remain valid and unaffected.
+
 ## Problem
 
 ctbk.dev is a static site that pre-generates all data as JSON/parquet files. This works for aggregate views (monthly ridership charts) but doesn't scale for:
