@@ -22,7 +22,14 @@
  *                                        (reads `trips/stations/<short_name>.parquet`).
  *   GET /health                         — sanity check
  *
- * Reads from D1 `availability_YYYYMMDD` tables populated by the loader.
+ * Availability time-series is served from R2:
+ *   - Today / current UTC date  → hourly h1 shards (`gbfs/avail/h1/<date>/<HH>.parquet`)
+ *                                 + per-minute WAL JSONs for the still-incomplete current hour
+ *   - Older dates                → per-station monthly parquet (`gbfs/stations/<uuid>/<yyyymm>.parquet`)
+ *                                 produced by the daily GHA compaction
+ *
+ * D1 is used only for the `stations` metadata table (short_name → uuid lookups,
+ * capacity, slug, etc.), not for the per-minute volume. See `specs/gbfs-r2-only.md`.
  */
 
 interface Env {
@@ -41,10 +48,6 @@ const COLS = [
 
 function todayUtc(): string {
 	return new Date().toISOString().slice(0, 10);
-}
-
-function tableForDate(dateStr: string): string {
-	return `availability_${dateStr.replace(/-/g, '')}`;
 }
 
 function corsHeaders(env: Env): HeadersInit {
@@ -71,27 +74,238 @@ function errorResponse(message: string, status: number, env: Env): Response {
 	return jsonResponse({ error: message }, env, { status });
 }
 
+function pad2(n: number): string {
+	return n.toString().padStart(2, '0');
+}
+
+interface AvailRow {
+	station_id: string;
+	ts: number;
+	polled_at: number;
+	num_bikes_available: number;
+	num_ebikes_available: number;
+	num_docks_available: number;
+	num_bikes_disabled: number;
+	num_docks_disabled: number;
+	is_installed: number;
+	is_renting: number;
+	is_returning: number;
+	last_reported: number;
+}
+
+/**
+ * Read one h1 parquet shard from R2, returning only rows for `stationId`.
+ *
+ * Two-level cache:
+ *   1. Per-station decoded JSON (~10 KB) keyed by `(date, hour, stationId)` —
+ *      typical case after warm-up; an .json() that returns ~60 rows.
+ *   2. Raw parquet bytes (~6 MB) keyed by R2 key — saves the R2 GET when
+ *      another station from the same hour was requested earlier.
+ *
+ * Per-station decode uses parquet's row-group min/max stats on `station_id`
+ * (compactor sorts shards by (station_id, ts) with rowGroupSize=60), so we
+ * decode just one row group (~60 rows × 12 cols) instead of the whole file.
+ *
+ * Returns `null` if the shard doesn't exist (backfill gap or cron hasn't
+ * fired yet for the just-completed hour); the caller falls through to the
+ * per-minute WAL JSONs in that case.
+ */
+async function readH1ShardForStation(
+	r2: R2Bucket,
+	date: string,
+	hour: string,
+	stationId: string,
+): Promise<AvailRow[] | null> {
+	const stationCacheUrl = `https://avail.cache.internal/h1/${date}/${hour}/${stationId}.json`;
+	const stationCached = await caches.default.match(stationCacheUrl);
+	if (stationCached) {
+		return (await stationCached.json()) as AvailRow[];
+	}
+
+	const key = `gbfs/avail/h1/${date}/${hour}.parquet`;
+	const bytesCacheUrl = `https://avail.cache.internal/${key}`;
+	let buf: ArrayBuffer | null = null;
+
+	const bytesCached = await caches.default.match(bytesCacheUrl);
+	if (bytesCached) {
+		buf = await bytesCached.arrayBuffer();
+	} else {
+		const obj = await r2.get(key);
+		if (!obj) return null;
+		buf = await obj.arrayBuffer();
+		void caches.default.put(
+			bytesCacheUrl,
+			new Response(buf, {
+				headers: { 'Cache-Control': 'public, max-age=86400' },
+			}),
+		);
+	}
+
+	const file = {
+		byteLength: buf.byteLength,
+		slice: (s: number, e?: number) => buf!.slice(s, e),
+	};
+	const { parquetMetadataAsync, parquetReadObjects } = await import('hyparquet');
+	const meta = await parquetMetadataAsync(file);
+
+	// Walk row groups; each one's `station_id` stats tell us whether `stationId`
+	// is in range. With (station_id, ts)-sorted + rg=60, typically exactly one rg
+	// matches (the one for this station × this hour).
+	//
+	// Stats on STRING/BYTE_ARRAY columns are prefix-truncated (~16 chars) by the
+	// writer to bound metadata size. To compare correctly, truncate `stationId`
+	// to the same length as the stat before checking ≤.
+	let rowOffset = 0;
+	const targetRanges: Array<{ rowStart: number; rowEnd: number }> = [];
+	for (const rg of meta.row_groups) {
+		const numRows = Number(rg.num_rows);
+		const sidCol = rg.columns.find((c) => c.meta_data?.path_in_schema?.[0] === 'station_id');
+		const stats = sidCol?.meta_data?.statistics;
+		const min = stats?.min_value as string | undefined;
+		const max = stats?.max_value as string | undefined;
+		const inRange =
+			min === undefined ||
+			max === undefined ||
+			(min <= stationId.slice(0, min.length) && stationId.slice(0, max.length) <= max);
+		if (inRange) {
+			targetRanges.push({ rowStart: rowOffset, rowEnd: rowOffset + numRows });
+		}
+		rowOffset += numRows;
+	}
+
+	const stationRows: AvailRow[] = [];
+	for (const { rowStart, rowEnd } of targetRanges) {
+		const rows = (await parquetReadObjects({ file, rowStart, rowEnd })) as Record<string, unknown>[];
+		for (const r of rows) {
+			if (r.station_id !== stationId) continue;
+			for (const k of Object.keys(r)) {
+				if (typeof r[k] === 'bigint') r[k] = Number(r[k]);
+			}
+			stationRows.push(r as unknown as AvailRow);
+		}
+	}
+
+	// Cache the per-station result for subsequent calls.
+	void caches.default.put(
+		stationCacheUrl,
+		new Response(JSON.stringify(stationRows), {
+			headers: {
+				'Content-Type': 'application/json',
+				'Cache-Control': 'public, max-age=86400',
+			},
+		}),
+	);
+
+	return stationRows;
+}
+
+interface MinuteSnapshot {
+	ts: number;
+	polled_at: number;
+	stations: Array<Record<string, number | string>>;
+}
+
+/**
+ * Read all per-minute WAL JSONs for one (date, hour). Returns flat row list.
+ * Used for the current (not-yet-compacted) hour, or as a fallback when an
+ * h1 shard is missing.
+ */
+async function readMinuteJsonsForHour(r2: R2Bucket, date: string, hour: string): Promise<AvailRow[]> {
+	const result = await r2.list({ prefix: `gbfs/status/${date}/${hour}-`, limit: 100 });
+	const keys = result.objects.map((o) => o.key).filter((k) => k.endsWith('.json'));
+	const reads = await Promise.all(
+		keys.map(async (k) => {
+			const obj = await r2.get(k);
+			if (!obj) return null;
+			try {
+				return JSON.parse(await obj.text()) as MinuteSnapshot;
+			} catch {
+				return null;
+			}
+		}),
+	);
+	const rows: AvailRow[] = [];
+	for (const snap of reads) {
+		if (!snap) continue;
+		for (const s of snap.stations) {
+			rows.push({
+				station_id: s.station_id as string,
+				ts: snap.ts,
+				polled_at: snap.polled_at,
+				num_bikes_available: (s.num_bikes_available as number) ?? 0,
+				num_ebikes_available: (s.num_ebikes_available as number) ?? 0,
+				num_docks_available: (s.num_docks_available as number) ?? 0,
+				num_bikes_disabled: (s.num_bikes_disabled as number) ?? 0,
+				num_docks_disabled: (s.num_docks_disabled as number) ?? 0,
+				is_installed: (s.is_installed as number) ?? 0,
+				is_renting: (s.is_renting as number) ?? 0,
+				is_returning: (s.is_returning as number) ?? 0,
+				last_reported: (s.last_reported as number) ?? 0,
+			});
+		}
+	}
+	return rows;
+}
+
+/**
+ * Get one station's rows for one UTC date. Reads from R2:
+ *   - Hourly h1 shards for completed hours (for `today`, hours where
+ *     the cron has fired and the shard is written; for other dates, all 24)
+ *   - Per-minute WAL JSONs for hours where the h1 shard isn't ready yet
+ *
+ * Falls through JSON→shard if a shard is missing (backfill gap), so this
+ * remains correct even before backfill completes.
+ *
+ * `sincePolledAt`, when set, filters to rows with `polled_at > sincePolledAt`.
+ */
 async function getStationDay(
-	db: D1Database,
+	r2: R2Bucket,
 	stationId: string,
 	dateStr: string,
 	sincePolledAt: number | null = null,
+	now: Date = new Date(),
 ): Promise<Record<string, unknown>[]> {
-	const table = tableForDate(dateStr);
-	try {
-		const sql = sincePolledAt !== null
-			? `SELECT ${COLS.join(',')} FROM ${table} WHERE station_id = ? AND polled_at > ? ORDER BY ts`
-			: `SELECT ${COLS.join(',')} FROM ${table} WHERE station_id = ? ORDER BY ts`;
-		const stmt = sincePolledAt !== null
-			? db.prepare(sql).bind(stationId, sincePolledAt)
-			: db.prepare(sql).bind(stationId);
-		const result = await stmt.all();
-		return result.results as Record<string, unknown>[];
-	} catch (err: any) {
-		// Table doesn't exist yet (e.g. start of UTC day before first poll lands)
-		if (err.message?.includes('no such table')) return [];
-		throw err;
+	const isToday = dateStr === todayUtc();
+	// Hours where the h1 shard *should* be written: every hour < currentHour,
+	// with a 10-min slack for the cron+write to land. Conservative: treat the
+	// just-finished hour as "still-incomplete" until :10 past the next hour.
+	const currentHour = now.getUTCHours();
+	const lastShardHour = isToday
+		? (now.getUTCMinutes() < 10 ? currentHour - 2 : currentHour - 1)
+		: 23;
+
+	// For today, hours > currentHour haven't happened yet — no JSONs, no shard.
+	// For older dates, all 24 hours have data.
+	const maxHour = isToday ? currentHour : 23;
+	type HourPlan = { hour: string; trySh: boolean };
+	const plan: HourPlan[] = [];
+	for (let h = 0; h <= maxHour; h++) {
+		// For today, hours strictly after lastShardHour are not yet compacted.
+		// For non-today dates, all 24 hours have shards (or fall through to JSONs).
+		plan.push({ hour: pad2(h), trySh: h <= lastShardHour });
 	}
+
+	const hourResults = await Promise.all(
+		plan.map(async ({ hour, trySh }) => {
+			if (trySh) {
+				const rows = await readH1ShardForStation(r2, dateStr, hour, stationId);
+				if (rows !== null) return rows;
+				// Shard missing: fall through to JSONs (backfill gap).
+			}
+			const rows = await readMinuteJsonsForHour(r2, dateStr, hour);
+			return rows.filter((r) => r.station_id === stationId);
+		}),
+	);
+
+	let rows = hourResults.flat() as unknown as Record<string, unknown>[];
+	if (sincePolledAt !== null) {
+		rows = rows.filter((r) => (r.polled_at as number) > sincePolledAt);
+	}
+	rows.sort((a, b) => {
+		const dt = (a.ts as number) - (b.ts as number);
+		return dt !== 0 ? dt : (a.polled_at as number) - (b.polled_at as number);
+	});
+	return rows;
 }
 
 /**
@@ -129,27 +343,29 @@ function yyyymmOfDate(dateStr: string): string {
 	return dateStr.slice(0, 7);
 }
 
-function hotCutoffDate(retainDays: number): string {
-	const ms = Date.now() - retainDays * 86400 * 1000;
-	return new Date(ms).toISOString().slice(0, 10);
-}
-
 /**
- * Enumerate UTC dates from fromS (inclusive) to toS (inclusive), pulling from D1
- * for dates within `HOT_DAYS_RETAIN` and falling back to R2 per-station monthly
- * parquets for older dates. Rows outside [fromS, toS] are filtered out. When
- * `sincePolledAt` is set, only rows with polled_at > since are returned
- * (for incremental refresh — skips the R2 path entirely since the archive is
- * immutable per-day once compacted).
+ * Enumerate UTC dates from fromS (inclusive) to toS (inclusive). Today and
+ * yesterday are served from h1 shards + per-minute JSONs (`getStationDay`);
+ * dates ≥ 2 days old use the per-station monthly parquet produced by the
+ * daily GHA compaction.
+ *
+ * Yesterday is in the h1 path because the daily compaction runs at ~03:55 UTC,
+ * so the monthly parquet is only guaranteed to contain D-2 (and earlier) at
+ * any moment in day D. Querying D-1 from the monthly would intermittently
+ * miss until the cron runs each morning.
+ *
+ * When `sincePolledAt` is set, only rows with `polled_at > since` are returned
+ * — an incremental fetch for live refresh. Skips the monthly path entirely
+ * (the archive is immutable, so once a poll has been seen it can't appear in
+ * an older month).
  */
 async function getStationRange(
-	db: D1Database,
 	r2: R2Bucket,
 	stationId: string,
 	fromS: number,
 	toS: number,
-	retainDays: number,
 	sincePolledAt: number | null = null,
+	now: Date = new Date(),
 ): Promise<Record<string, unknown>[]> {
 	const MS_PER_DAY = 86400 * 1000;
 	const scanFromS = sincePolledAt !== null ? Math.max(fromS, sincePolledAt) : fromS;
@@ -162,36 +378,32 @@ async function getStationRange(
 		dates.push(new Date(t).toISOString().slice(0, 10));
 	}
 
-	const cutoff = hotCutoffDate(retainDays);
-	// Partition dates: `hot` served from D1; `cold` served from R2 monthly parquets.
-	// Skip R2 entirely when polling incrementally — the archive is immutable.
-	const hotDates: string[] = [];
-	const coldMonths = new Set<string>();
-	for (const d of dates) {
-		if (d >= cutoff) hotDates.push(d);
-		else if (sincePolledAt === null) coldMonths.add(yyyymmOfDate(d));
-	}
+	// Cutoff: dates ≥ this are "h1 territory" (today + yesterday).
+	const yesterday = new Date(now.getTime() - MS_PER_DAY).toISOString().slice(0, 10);
+	const h1Dates = dates.filter((d) => d >= yesterday);
+	const monthlyMonths = sincePolledAt === null
+		? new Set(dates.filter((d) => d < yesterday).map(yyyymmOfDate))
+		: new Set<string>();
 
-	const [hotDayResults, coldMonthResults] = await Promise.all([
-		Promise.all(hotDates.map((d) => getStationDay(db, stationId, d, sincePolledAt))),
-		Promise.all([...coldMonths].map((m) => getStationMonthFromR2(r2, stationId, m))),
+	const [h1Results, monthlyResults] = await Promise.all([
+		Promise.all(h1Dates.map((d) => getStationDay(r2, stationId, d, sincePolledAt, now))),
+		Promise.all([...monthlyMonths].map((m) => getStationMonthFromR2(r2, stationId, m))),
 	]);
 
 	const rows: Record<string, unknown>[] = [];
-	for (const dayRows of hotDayResults) {
+	for (const dayRows of h1Results) {
 		for (const r of dayRows) {
 			const ts = r.ts as number;
 			if (ts >= fromS && ts <= toS) rows.push(r);
 		}
 	}
-	// R2 month covers ~30 days; filter to the requested window + hot boundary
-	// so cold rows don't duplicate hot ones. Cutoff is exclusive of `cutoff` day
-	// (that day is served by D1).
-	const cutoffS = Math.floor(new Date(cutoff + 'T00:00:00Z').getTime() / 1000);
-	for (const monthRows of coldMonthResults) {
+	// Filter monthly rows to the requested window AND to dates strictly before
+	// yesterday (yesterday's data lives in `h1Results` to avoid duplication).
+	const yesterdayStartS = Math.floor(new Date(yesterday + 'T00:00:00Z').getTime() / 1000);
+	for (const monthRows of monthlyResults) {
 		for (const r of monthRows) {
 			const ts = r.ts as number;
-			if (ts >= fromS && ts <= toS && ts < cutoffS) rows.push(r);
+			if (ts >= fromS && ts <= toS && ts < yesterdayStartS) rows.push(r);
 		}
 	}
 	rows.sort((a, b) => (a.ts as number) - (b.ts as number));
@@ -682,7 +894,7 @@ export default {
 			const sinceStr = url.searchParams.get('since');
 			const since = sinceStr ? parseInt(sinceStr, 10) : null;
 			const [rows, capacity] = await Promise.all([
-				getStationDay(env.DB, gbfsId, dateStr, since),
+				getStationDay(env.R2, gbfsId, dateStr, since),
 				getStationCapacity(env.DB, gbfsId),
 			]);
 			// `last_polled_at` = max polled_at across the returned rows, for client-side smart-polling.
@@ -769,7 +981,7 @@ export default {
 					return errorResponse(`Invalid since: ${sinceParam}`, 400, env);
 				}
 				const [rows, capacity] = await Promise.all([
-					getStationRange(env.DB, env.R2, gbfsId, fromS, toS, parseInt(env.HOT_DAYS_RETAIN, 10), since),
+					getStationRange(env.R2, gbfsId, fromS, toS, since),
 					getStationCapacity(env.DB, gbfsId),
 				]);
 				const lastPolledAt = rows.length
@@ -793,8 +1005,13 @@ export default {
 			if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
 				return errorResponse(`Invalid date: ${dateStr} (expected YYYY-MM-DD)`, 400, env);
 			}
+			// Route through `getStationRange` so non-today dates use the efficient
+			// per-station monthly parquet (single-file read) instead of 24 hourly
+			// h1 shards. `getStationRange` falls back to h1 shards only for today.
+			const dayStartS = Math.floor(new Date(dateStr + 'T00:00:00Z').getTime() / 1000);
+			const dayEndS = dayStartS + 86400 - 1;
 			const [rows, capacity] = await Promise.all([
-				getStationDay(env.DB, gbfsId, dateStr),
+				getStationRange(env.R2, gbfsId, dayStartS, dayEndS),
 				getStationCapacity(env.DB, gbfsId),
 			]);
 			return jsonResponse({ station_id: gbfsId, date: dateStr, capacity, rows }, env);
