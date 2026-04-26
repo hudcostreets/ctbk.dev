@@ -7,10 +7,17 @@ import { SpeedDial, useHotkeysContext } from 'use-kbd'
 import StationMap, {
   type Stations, type StationPairCounts, TILE_COLORS, resolveTileStyle,
 } from '../components/StationMap'
+import { RangeWidthControl } from '../components/RangeWidthControl'
 import { useTheme } from '../contexts/ThemeContext'
 import { useStationsKeyboardShortcuts } from '../hooks/useStationsKeyboardShortcuts'
 import { useStationsOmnibarEndpoint } from '../hooks/useStationsOmnibarEndpoint'
+import { timeRangeParam } from '../time-range'
 import css from "../stations.module.css"
+
+const DAY_MS = 24 * 60 * 60 * 1000
+/** Default time window for `?pies=1` mode: last 30 days, so we don't run
+ *  per-station queries against decades of sparse historical data by default. */
+const DEFAULT_PIES_DURATION = 30 * DAY_MS
 
 const MANIFEST_URL = '/assets/station-urls.json'
 const BIRTHS_URL = '/assets/station-births.json'
@@ -77,6 +84,9 @@ export default function Stations() {
   const [month, setMonth] = useUrlState('m', monthParam)
   const [tileCode] = useUrlState('t', stringParam(DEFAULT_TILE_CODE))
   const [tileBase] = useUrlState('tileBase', stringParam())
+  // POC: render each station as a starts-vs-ends pie. Strictly opt-in.
+  const [pies] = useUrlState('pies', boolParam)
+  const [pieRange, setPieRange] = useUrlState('pr', timeRangeParam(DEFAULT_PIES_DURATION))
 
   // Load manifest on mount
   useEffect(() => {
@@ -240,9 +250,22 @@ export default function Stations() {
           hoverToSelect
           onMove={(la, ln, z) => { setLat(la); setLng(ln); setZoom(z) }}
           onClick={() => setSelectedId(undefined)}
+          pies={pies}
+          pieRange={pies ? pieRange : undefined}
         />
         {loading && <div className={css.loading}>Loading...</div>}
         {colorByAge && births && <ColorLegend births={births} actualTheme={actualTheme} />}
+        {pies && (
+          <div className={css.piesControl}>
+            <RangeWidthControl value={pieRange} onChange={setPieRange} />
+            <span className={css.piesLegend}>
+              <span className={css.piesSwatch} style={{ background: '#3498db' }} />
+              starts
+              <span className={css.piesSwatch} style={{ background: '#e67e22' }} />
+              ends
+            </span>
+          </div>
+        )}
         <div className={css.titleContainer} style={{ color: currentColors.title }}>
           <div className={css.title}>
             <Link to="/" className={css.homeLink}>Citi Bike</Link> rides by station,{' '}

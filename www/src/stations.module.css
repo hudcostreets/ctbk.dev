@@ -110,6 +110,48 @@ a.subtitle:hover {
     outline: none;
 }
 
+/* Strip Leaflet's default divIcon background/border from station-pie
+ * markers — we render the SVG directly. */
+:global(.leaflet-container .station-pie-icon) {
+    background: transparent;
+    border: 0;
+}
+
+.piesControl {
+    position: fixed;
+    bottom: 1.5em;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;
+    background: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(4px);
+    border-radius: 8px;
+    padding: 0.5em 1em;
+    display: flex;
+    align-items: center;
+    gap: 1em;
+    color: #222;
+}
+
+:global([data-theme="dark"]) .piesControl {
+    background: rgba(30, 30, 30, 0.85);
+    color: #eee;
+}
+
+.piesLegend {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+    font-size: 0.9em;
+}
+
+.piesSwatch {
+    display: inline-block;
+    width: 0.85em;
+    height: 0.85em;
+    border-radius: 50%;
+}
+
 .pinnedTooltip p {
     font-weight: 700;
 }

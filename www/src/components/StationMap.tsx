@@ -3,6 +3,8 @@ import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from
 import 'leaflet/dist/leaflet.css'
 import { useTheme } from '../contexts/ThemeContext'
 import css from '../stations.module.css'
+import StationPies from './StationPies'
+import type { TimeRange } from '../time-range'
 
 const { sqrt, max } = Math
 
@@ -266,6 +268,11 @@ export interface StationMapProps {
   style?: React.CSSProperties
   /** Optional overlay rendered top-right (e.g. for month label / context). */
   overlay?: React.ReactNode
+
+  /** POC: render per-station pies (starts vs ends) instead of solid fill.
+   *  Lazy per-station fetch via `useRollupQuery`. Strictly opt-in. */
+  pies?: boolean
+  pieRange?: TimeRange
 }
 
 export default function StationMap({
@@ -287,6 +294,8 @@ export default function StationMap({
   className,
   style,
   overlay,
+  pies,
+  pieRange,
 }: StationMapProps) {
   const { actualTheme } = useTheme()
   const tileStyle = resolveTileStyle(tileCode, actualTheme)
@@ -324,6 +333,9 @@ export default function StationMap({
         stationColors={stationColors}
         hoverToSelect={hoverToSelect}
       />
+      {pies && pieRange && (
+        <StationPies stations={stations} pieRange={pieRange} />
+      )}
       {(onMove || onClick) && <MapEvents onMove={onMove} onClick={onClick} />}
     </MapContainer>
     {overlay && (
