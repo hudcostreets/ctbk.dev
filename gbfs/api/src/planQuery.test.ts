@@ -7,7 +7,9 @@ import {
 	deriveBinMs,
 	monthsIn,
 	monthsInDashed,
+	parseRidesParams,
 	planQuery,
+	ridesStationKey,
 	snapToStandardBin,
 	yearsIn,
 } from './planQuery';
@@ -408,5 +410,89 @@ describe('helpers', () => {
 
 	it('ALL_REGIONS is [nyc, jc, hob]', () => {
 		expect(ALL_REGIONS).toEqual(['nyc', 'jc', 'hob']);
+	});
+});
+
+describe('parseRidesParams', () => {
+	const base = (extra: Record<string, string> = {}) =>
+		new URLSearchParams({ station: '6002.04', from: '1700000000', to: '1700100000', ...extra });
+
+	it('parses minimal params with defaults', () => {
+		expect(parseRidesParams(base())).toEqual({
+			station: '6002.04',
+			fromS: 1700000000,
+			toS: 1700100000,
+			page: 0,
+			pageSize: 50,
+			sortBy: 'dt',
+			sortDir: 'desc',
+			counterpart: undefined,
+			side: undefined,
+		});
+	});
+
+	it('parses all params, including counterpart + side', () => {
+		expect(parseRidesParams(base({
+			page: '3', pageSize: '25',
+			sortBy: 'duration_s', sortDir: 'asc',
+			counterpart: 'HB101', side: 'start',
+		}))).toEqual({
+			station: '6002.04',
+			fromS: 1700000000,
+			toS: 1700100000,
+			page: 3,
+			pageSize: 25,
+			sortBy: 'duration_s',
+			sortDir: 'asc',
+			counterpart: 'HB101',
+			side: 'start',
+		});
+	});
+
+	it('throws when station is missing', () => {
+		expect(() => parseRidesParams(new URLSearchParams({ from: '1', to: '2' })))
+			.toThrow(/station=/);
+	});
+
+	it('throws on invalid from/to', () => {
+		expect(() => parseRidesParams(new URLSearchParams({ station: 's', from: '5', to: '4' })))
+			.toThrow(/invalid from\/to/);
+		expect(() => parseRidesParams(new URLSearchParams({ station: 's', from: 'x', to: '4' })))
+			.toThrow(/invalid from\/to/);
+	});
+
+	it('throws on negative page', () => {
+		expect(() => parseRidesParams(base({ page: '-1' }))).toThrow(/invalid page/);
+	});
+
+	it('throws on out-of-range pageSize', () => {
+		expect(() => parseRidesParams(base({ pageSize: '0' }))).toThrow(/invalid pageSize/);
+		expect(() => parseRidesParams(base({ pageSize: '501' }))).toThrow(/invalid pageSize/);
+	});
+
+	it('throws on disallowed sortBy', () => {
+		expect(() => parseRidesParams(base({ sortBy: 'station_id' }))).toThrow(/invalid sortBy/);
+		expect(() => parseRidesParams(base({ sortBy: 'evil; DROP' }))).toThrow(/invalid sortBy/);
+	});
+
+	it('accepts every entry in the sort allowlist', () => {
+		for (const col of [
+			'dt', 'side', 'counterpart_short_name', 'gender',
+			'user_type', 'rideable_type', 'duration_s',
+		]) {
+			expect(parseRidesParams(base({ sortBy: col })).sortBy).toBe(col);
+		}
+	});
+
+	it('throws on invalid sortDir / side', () => {
+		expect(() => parseRidesParams(base({ sortDir: 'random' }))).toThrow(/invalid sortDir/);
+		expect(() => parseRidesParams(base({ side: 'middle' }))).toThrow(/invalid side/);
+	});
+});
+
+describe('ridesStationKey', () => {
+	it('formats the per-station rides parquet R2 key', () => {
+		expect(ridesStationKey('6002.04')).toBe('trips/stations/6002.04.parquet');
+		expect(ridesStationKey('HB101')).toBe('trips/stations/HB101.parquet');
 	});
 });

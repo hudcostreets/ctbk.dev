@@ -89,6 +89,95 @@ export function monthsInDashed(fromS: number, toS: number): string[] {
 	return monthsIn(fromS, toS).map((ym) => `${ym.slice(0, 4)}-${ym.slice(4, 6)}`);
 }
 
+// -----------------------------------------------------------------------------
+// `/api/rides` — paginated raw-rides table per station
+// (see specs/multiscale-timeseries-backend.md § "Paginated raw-rides table per station")
+// -----------------------------------------------------------------------------
+
+/** Allowlist of sortable columns for `/api/rides`. Keep in sync with the
+ *  client's `SORTABLE_COLUMNS` (`www/src/query/ridesTable.ts`). */
+export const RIDES_SORT_COLUMNS = [
+	'dt',
+	'side',
+	'counterpart_short_name',
+	'gender',
+	'user_type',
+	'rideable_type',
+	'duration_s',
+] as const;
+export type RidesSortColumn = (typeof RIDES_SORT_COLUMNS)[number];
+
+export type RidesSortDir = 'asc' | 'desc';
+
+export interface RidesParams {
+	station: string;
+	fromS: number;
+	toS: number;
+	page: number;
+	pageSize: number;
+	sortBy: RidesSortColumn;
+	sortDir: RidesSortDir;
+	counterpart?: string;
+	side?: Side;
+}
+
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = 500;
+const DEFAULT_SORT_BY: RidesSortColumn = 'dt';
+const DEFAULT_SORT_DIR: RidesSortDir = 'desc';
+
+/**
+ * Parse and validate `/api/rides` query parameters. Pure; throws on invalid
+ * input. Extracted for unit-testability.
+ */
+export function parseRidesParams(params: URLSearchParams): RidesParams {
+	const station = params.get('station');
+	if (!station) throw new Error('station= required');
+
+	const fromS = parseInt(params.get('from') ?? '', 10);
+	const toS = parseInt(params.get('to') ?? '', 10);
+	if (!Number.isFinite(fromS) || !Number.isFinite(toS) || fromS > toS) {
+		throw new Error('invalid from/to');
+	}
+
+	const pageRaw = params.get('page');
+	const page = pageRaw === null ? 0 : parseInt(pageRaw, 10);
+	if (!Number.isFinite(page) || page < 0) throw new Error(`invalid page: ${pageRaw}`);
+
+	const pageSizeRaw = params.get('pageSize');
+	const pageSize = pageSizeRaw === null ? DEFAULT_PAGE_SIZE : parseInt(pageSizeRaw, 10);
+	if (!Number.isFinite(pageSize) || pageSize <= 0 || pageSize > MAX_PAGE_SIZE) {
+		throw new Error(`invalid pageSize: ${pageSizeRaw} (must be 1..${MAX_PAGE_SIZE})`);
+	}
+
+	const sortByRaw = params.get('sortBy');
+	const sortBy: RidesSortColumn = sortByRaw === null
+		? DEFAULT_SORT_BY
+		: (RIDES_SORT_COLUMNS as readonly string[]).includes(sortByRaw)
+			? (sortByRaw as RidesSortColumn)
+			: (() => { throw new Error(`invalid sortBy: ${sortByRaw}`); })();
+
+	const sortDirRaw = params.get('sortDir');
+	let sortDir: RidesSortDir;
+	if (sortDirRaw === null) sortDir = DEFAULT_SORT_DIR;
+	else if (sortDirRaw === 'asc' || sortDirRaw === 'desc') sortDir = sortDirRaw;
+	else throw new Error(`invalid sortDir: ${sortDirRaw}`);
+
+	const counterpart = params.get('counterpart') ?? undefined;
+	const sideRaw = params.get('side');
+	if (sideRaw !== null && sideRaw !== 'start' && sideRaw !== 'end') {
+		throw new Error(`invalid side: ${sideRaw}`);
+	}
+	const side = (sideRaw as Side | null) ?? undefined;
+
+	return { station, fromS, toS, page, pageSize, sortBy, sortDir, counterpart, side };
+}
+
+/** R2 key for a per-station rides parquet. */
+export function ridesStationKey(station: string): string {
+	return `trips/stations/${station}.parquet`;
+}
+
 /**
  * Pure query planner. Resolves `{kind, station|regions, from, to, bin?, target?}`
  * into a concrete set of R2 keys + final bin size.

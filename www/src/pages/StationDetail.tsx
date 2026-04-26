@@ -7,6 +7,7 @@ import controlCss from '../controls.module.css'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
 import { RangeWidthControl } from '../components/RangeWidthControl'
 import { BinSelect } from '../components/BinSelect'
+import RidesTable from '../components/RidesTable'
 import RollupTripsChart from '../components/RollupTripsChart'
 import { TimeAgo } from '../components/TimeAgo'
 import StationMap, { type Stations, type StationPairCounts } from '../components/StationMap'
@@ -29,7 +30,7 @@ import {
   UserTypeDisplayNames, UserTypeQueryStrings,
   codeParam, codesParam,
 } from '../data'
-import { boolParam, intParam, numberArrayParam, useUrlState } from 'use-prms'
+import { boolParam, intParam, numberArrayParam, stringParam, useUrlState } from 'use-prms'
 import { bufferedBounds, formatTimeRange, roundDuration, timeRangeParam } from '../time-range'
 
 const { API_BASE } = stationsApi
@@ -110,6 +111,24 @@ export default function StationDetail() {
   const [tripsRange, setTripsRange] = useUrlState('tr', timeRangeParam(365 * 24 * 60 * 60 * 1000))
   // Bin size (ms). 0 = auto; any other value is explicit (matches BinSelect).
   const [tripsBinMs, setTripsBinMs] = useUrlState('tbin', intParam(0))
+  // Rides-table pair filter: counterpart short_name. No UI yet — set manually
+  // for testing (clicking a fan edge is a future iteration).
+  const [ridesPair] = useUrlState('rt_pair', stringParam())
+
+  // Compute unix-seconds range for the rides table, mirroring `tripsRange`.
+  const tripsRangeDuration = tripsRange.duration
+  const tripsRangeTimestampMs = tripsRange.timestamp?.getTime() ?? null
+  const { ridesFromS, ridesToS } = useMemo(() => {
+    const toMs = tripsRangeTimestampMs ?? Date.now()
+    return {
+      ridesFromS: Math.floor((toMs - tripsRangeDuration) / 1000),
+      ridesToS: Math.floor(toMs / 1000),
+    }
+  }, [tripsRangeDuration, tripsRangeTimestampMs])
+
+  // Translate `tripsDocking` (`both/start/end`) to the rides table's `side`.
+  const ridesSide: 'start' | 'end' | undefined =
+    tripsDocking === 'start' || tripsDocking === 'end' ? tripsDocking : undefined
 
   // Preprocess rows for the shared `buildTraces` logic.
   // The per-station JSON has no Region column — default to NYC for all rows
@@ -467,6 +486,25 @@ export default function StationDetail() {
           )}
           {rollupData && rollupData.rows.length === 0 && !rollupQuery.isPending && (
             <Typography variant="body2" sx={{ opacity: 0.65 }}>No rows in window.</Typography>
+          )}
+          {info?.short_name && (
+            <Box sx={{ mt: 3 }}>
+              <Typography variant="subtitle2" gutterBottom>
+                Rides
+                {ridesPair && (
+                  <span style={{ fontSize: '0.75em', opacity: 0.7, marginLeft: 6 }}>
+                    (paired with #{ridesPair})
+                  </span>
+                )}
+              </Typography>
+              <RidesTable
+                station={info.short_name}
+                counterpartStation={ridesPair}
+                side={ridesSide}
+                fromS={ridesFromS}
+                toS={ridesToS}
+              />
+            </Box>
           )}
         </Box>
       )}

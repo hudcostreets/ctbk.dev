@@ -10,6 +10,10 @@
  *   GET /api/query?kind=&station=|region=&from=&to=&(bin=|targetPxPerBin=&plotWidth=)
  *                                      — unified multi-scale time-series query
  *                                        (trips + availability). See planQuery() below.
+ *   GET /api/rides?station=&from=&to=&page=&pageSize=&sortBy=&sortDir=
+ *                  [&counterpart=&side=]
+ *                                      — paginated raw-rides table per station
+ *                                        (reads `trips/stations/<short_name>.parquet`).
  *   GET /health                         — sanity check
  *
  * Reads from D1 `availability_YYYYMMDD` tables populated by the loader.
@@ -234,10 +238,13 @@ async function resolveToGbfsId(db: D1Database, id: string): Promise<string | nul
 
 import {
 	ALL_REGIONS,
+	parseRidesParams,
 	planQuery,
+	ridesStationKey,
 	type QueryInput,
 	type QueryPlan,
 	type Region,
+	type RidesParams,
 	type Side,
 } from './planQuery';
 import { binAndAggregate } from './bin';
@@ -358,6 +365,56 @@ async function executeQuery(
 	return { rows: binned, missing };
 }
 
+/**
+ * Execute a `/api/rides` request: read the per-station parquet from R2, filter
+ * by dt range / counterpart / side, sort, paginate. Returns `null` if the
+ * station file doesn't exist (caller surfaces 404).
+ */
+async function executeRidesQuery(
+	r2: R2Bucket,
+	q: RidesParams,
+): Promise<{ rows: Record<string, unknown>[]; totalRows: number; page: number; pageSize: number } | null> {
+	const key = ridesStationKey(q.station);
+	const rows = await readR2Parquet(r2, key);
+	if (rows === null) return null;
+
+	// Filter
+	const filtered: Record<string, unknown>[] = [];
+	for (const r of rows) {
+		const dt = r.dt as number | undefined;
+		if (dt === undefined || dt < q.fromS || dt > q.toS) continue;
+		if (q.side !== undefined && r.side !== q.side) continue;
+		if (q.counterpart !== undefined && r.counterpart_short_name !== q.counterpart) continue;
+		filtered.push(r);
+	}
+
+	// Sort. Numeric columns compare as numbers; string columns lexicographically.
+	const sortBy = q.sortBy;
+	const dir = q.sortDir === 'asc' ? 1 : -1;
+	filtered.sort((a, b) => {
+		const av = a[sortBy];
+		const bv = b[sortBy];
+		// Stable secondary sort by dt to keep paging deterministic when the
+		// primary key has ties (e.g. many rides at the same minute).
+		const primary =
+			typeof av === 'number' && typeof bv === 'number'
+				? (av - bv)
+				: String(av ?? '') < String(bv ?? '') ? -1
+					: String(av ?? '') > String(bv ?? '') ? 1
+						: 0;
+		if (primary !== 0) return primary * dir;
+		if (sortBy === 'dt') return 0;
+		const aDt = (a.dt as number) ?? 0;
+		const bDt = (b.dt as number) ?? 0;
+		return (aDt - bDt) * dir;
+	});
+
+	const totalRows = filtered.length;
+	const start = q.page * q.pageSize;
+	const slice = filtered.slice(start, start + q.pageSize);
+	return { rows: slice, totalRows, page: q.page, pageSize: q.pageSize };
+}
+
 async function dropOldTables(db: D1Database, retainDays: number): Promise<string> {
 	const cutoff = new Date(Date.now() - retainDays * 86400000).toISOString().slice(0, 10);
 	const old = await db.prepare(
@@ -434,6 +491,25 @@ export default {
 				missing,
 				rows,
 			}, env);
+		}
+
+		// /api/rides — paginated raw-rides table per station (see specs/multiscale-timeseries-backend.md
+		// § "Paginated raw-rides table per station"). Reads `trips/stations/<short_name>.parquet`.
+		if (url.pathname === '/api/rides') {
+			let q: RidesParams;
+			try {
+				q = parseRidesParams(url.searchParams);
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'invalid query', 400, env);
+			}
+			const result = await executeRidesQuery(env.R2, q);
+			if (result === null) {
+				return jsonResponse({
+					error: 'no data',
+					path: ridesStationKey(q.station),
+				}, env, { status: 404 });
+			}
+			return jsonResponse(result, env);
 		}
 
 		// /api/stations/:id/info — accepts slug, UUID, or short_name
