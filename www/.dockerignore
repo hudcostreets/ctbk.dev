@@ -28,12 +28,6 @@
 !public/assets/twitter.png
 !public/assets/warning.png
 !public/assets/ymrgtb_cd.json
-# Generated at host-build time by `scripts/gen-ymdgtb-index.js`. The
-# screenshots Docker image's build context is `www/` and lacks the
-# `s3/*.dvc` files needed to regenerate, so ship the host-built artifact
-# into the image. Re-add this manually after `make-dockerignore.py -G`
-# (it only allowlists git-tracked files).
-!public/ymdgtb-index.json
 !public/data/annualized_pcts.json
 !public/favicon.ico
 !public/img/ride_durations_202303_10s.png
@@ -94,6 +88,7 @@
 !public/tiles/alidade_smooth_dark/12/1208/1538.png
 !public/tiles/alidade_smooth_dark/12/1208/1539.png
 !public/tiles/alidade_smooth_dark/12/1208/1540.png
+!public/ymdgtb-index.json
 !scripts/compose-og.sh
 !scripts/docker-screenshots.sh
 !scripts/docker.py
@@ -125,6 +120,7 @@
 !src/components/StationAvailabilityChart.tsx
 !src/components/StationMap.tsx
 !src/components/StationMapEmbed.tsx
+!src/components/StationPies.tsx
 !src/components/StationSearch.module.css
 !src/components/StationSearch.tsx
 !src/components/StationTripsChart.tsx
