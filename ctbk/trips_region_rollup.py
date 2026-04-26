@@ -45,6 +45,18 @@ from ctbk.util.constants import BKT
 OUT_DIR = Path(f'r2/{BKT}/trips/region')
 REGIONS = ('NYC', 'JC', 'HB')  # canonical region values as they appear in the parquets
 
+# CLI/URL form (`nyc|jc|hob`) → data-column form (`NYC|JC|HB`).
+DATA_REGION = {'nyc': 'NYC', 'jc': 'JC', 'hob': 'HB'}
+
+
+def _data_region(region: str) -> str:
+    """Normalize CLI/URL region (`nyc|jc|hob`, any case) to the parquet data
+    form (`NYC|JC|HB`). Accepts either form on input."""
+    key = region.lower()
+    if key not in DATA_REGION:
+        raise ValueError(f"Unknown region {region!r}; expected one of {list(DATA_REGION)}")
+    return DATA_REGION[key]
+
 OUT_COLS = [
     'dt',
     'gender',
@@ -111,6 +123,7 @@ class TripsRegionH1Year:
         return str(OUT_DIR / _normalize_region(self.region) / 'h1' / f'{self.year}.parquet')
 
     def _df(self) -> DataFrame:
+        data_region = _data_region(self.region)
         frames = []
         for m in range(1, 13):
             ym = YM(self.year * 100 + m)
@@ -120,7 +133,7 @@ class TripsRegionH1Year:
             except FileNotFoundError:
                 err(f"  {ym}: no aggregated input, skipping")
                 continue
-            mdf = mdf[mdf['Region'] == self.region]
+            mdf = mdf[mdf['Region'] == data_region]
             if mdf.empty:
                 continue
             frames.append(mdf)
@@ -153,7 +166,7 @@ class TripsRegionN1Month:
     def _df(self) -> DataFrame:
         am = AggregatedMonth(self.ym, 'ymdhnrgtb', 'cd')
         df = am.read()
-        df = df[df['Region'] == self.region]
+        df = df[df['Region'] == _data_region(self.region)]
         if df.empty:
             return DataFrame(columns=OUT_COLS)
         return _shape(df, _bucket_dt_minute(df))
