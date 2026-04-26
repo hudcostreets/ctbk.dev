@@ -1,248 +1,350 @@
 # Spec: Multi-scale time-series backend
 
 Status: design, implementation pending. Supersedes earlier revisions of this
-file; incorporates decisions from the 2026-04-23/24 design thread.
+file; incorporates decisions from the 2026-04-23/24/26 design thread.
 
 ## Motivation
 
-Both the ride-count chart (`/` + `/s/:slug`) and the availability chart
-(`/s/:slug`) need to span minute → multi-year scales on the same page
-without separate pipelines. Today:
+Both the ride-count chart and the availability chart need to span minute → multi-year
+scales on the same page without separate pipelines. Beyond the per-station
+detail page, the same access pattern serves:
 
-- Ride counts are monthly-only (`ymrgtb_cd.json` / per-station `ymdgtb_cd.json`).
-- Availability is minute-only, served via D1 hot cache (7 d) with R2 parquet
-  fallback for older dates. Queries beyond ~14 d feel slow.
+- **Map circle pies** (per-station start/end split, or per-station availability
+  distribution, both over a chosen window).
+- **Paginated raw-rides table** with date / counterpart / dim filters.
+- **Geographic rollups** (e.g. neighborhood = H3 hex) — future.
+- **Cross-project reuse** (awair, apvd) via a `use-rollups` library.
 
-The same pattern is needed in awair / apvd. Factor the common infra out of
-ctbk into a `use-rollups` library (phase 3 below).
+The unifying observation: every panel in the UI is a query over a *time window*
+for a *metric* defined by a CRDT-shaped (monoidal) aggregate. The serving
+infrastructure should expose semantic queries; the storage should be a
+multi-resolution pyramid that the backend stitches.
 
 ## Design principles
 
-1. **One serving format, one place.** Parquet in R2. No D1 on the serving path.
-2. **Sort by `dt` in every file.** Parquet row-group min/max stats act as a
+1. **Metrics are values in a commutative monoid.** Each metric has a value
+   type, an identity, and an associative+commutative combiner. This is the
+   universal precondition for tier-stitched aggregation.
+2. **One serving format, one place.** Parquet in R2. AWS S3 stays as the
+   data-lake archive; nothing is served from it.
+3. **Sort by `dt` in every file.** Parquet row-group min/max stats act as a
    free dt index — readers skip row groups outside the query window with no
    external index structure.
-3. **Shard so closed shards are immutable.** Year-sharding at hour-level,
-   month-sharding at minute-level. Once a shard's time window closes it
-   never changes, which means:
-   - Long CDN `Cache-Control`, cheap edge caching.
-   - No append-rewrite churn for historical data.
-   - Trivial content-addressing if we ever want it.
-4. **Pre-compute only what can't be derived fast.** Per-station queries work
-   on raw ride records (projection + zone-map skipping keep them cheap);
-   system-wide rollups exist only at two tiers (`h1`, `n1`), and month/day
-   bins are derived by the Worker.
-5. **Worker owns the query-routing.** Client API takes `{station XOR region(s),
-   bin size, time range}` and doesn't know the storage layout. Moving files
-   around, adding tiers, swapping D1 for a DO — all invisible to the client.
+4. **Shard so closed shards are immutable.** Time-bucketed shards close
+   at calendar boundaries; immutable shards get long `Cache-Control` headers,
+   no append-rewrite churn for historical data.
+5. **Pre-compute pyramid tiers; tier-stitch at query time.** A query for
+   `[from, to]` reads coarse tiers in the middle and finer tiers at the
+   edges (worst case bounded by `2 × (n_tiers − 1) + n_coarse_shards`).
+6. **Worker owns the query planner.** Client API is `(metric, scope,
+   window, group-by)`; everything else is invisible to the client.
 
-## Terminology
+---
 
-- **Bin**: one x-axis data point on a plot (width = bin size). Replaces
-  "window" from earlier drafts.
-- **Agg-key characters** (used in pipeline stage names):
-  `y` year · `m` month · `d` day · `h` hour · **`n` minute** · `r` region ·
-  `s` start station · `e` end station · `g` gender · `t` user type ·
-  `b` bike type · `c` count · `d` duration (overloaded: day in group-by,
-  duration in aggregate-by).
-- **Tier**: a pre-aggregated bin size. We have at most two system-wide
-  tiers: `h1` (1-hour) and `n1` (1-minute).
-- **Region**: `nyc` · `jc` · `hob`. Sharded as separate files — **not** a
-  column — because they align with the UI's region filter and the three
-  regions have wildly different volume (NYC ~95% of rides).
+## Metrics as monoids
+
+Every metric exposed by the API is a triple `(Type, identity, ⊕)`:
+
+| Metric family | Value type | Identity | Combiner |
+|---|---|---|---|
+| `count` (rides started/ended) | `int` | `0` | `+` |
+| `duration_sum` (ride-seconds) | `int` | `0` | `+` |
+| `state_histogram` (bikes / ebikes / docks / disabled / pending available) | `Map<int, int>` (state → minutes-at-state) | `{}` (empty map) | merge (sum bucket counts on key) |
+
+The histogram lets us answer not only mean / min / max / quantiles but also
+the user-relevant questions:
+- "How often did this station have **zero** bikes?" → `hist[0] / Σ hist`
+- "How often was it **near-full**?" → `Σ_{k ≥ 0.9N} hist[k] / Σ hist`
+- Full distribution plot → `hist` itself.
+
+### Joint vs marginal histograms
+
+For each per-minute observation we have a 5-tuple
+`(bikes, ebikes, docks, disabled, pending)`. Two storage choices:
+
+- **Joint**: one histogram keyed by the 5-tuple. Captures correlations
+  (e.g. "both bikes and docks at zero simultaneously"). Cardinality
+  bound is N₅(C+5) where C is capacity, but practical cardinality is
+  much smaller because Σmetrics = capacity (so the 5-tuple lives on a
+  4-simplex), and most stations have `disabled` and `pending` = 0 most
+  of the time, collapsing to ~3 active dimensions and ≤ (C+2 choose 2)
+  realized states.
+- **Marginal × 5**: five separate 1-D histograms, ~`C+1` buckets each.
+  Loses correlations.
+
+Tradeoff: keep joint if cardinality measurements show it's tractable
+(<~1k distinct keys per station per shard); fall back to 5 marginals
+if any station blows up. **EDA pending — see "Open EDA" section.**
+The data-model design supports either; the pipeline writes whichever
+we settle on.
+
+### Why three families is enough
+
+`trips` queries (start/end counts, durations, dim breakdowns) compose by
+sum. `availability` queries (mean, median, percentile, time-at-zero,
+distribution) all derive from the histogram. No other metric families
+emerge from the use-cases we've listed.
 
 ---
 
 ## Storage layout
 
-### Trips
+All paths are R2-resident. The local filesystem mirror at `r2/ctbk/...`
+exists for ergonomic build-then-sync.
 
 ```
-trips/stations/<short_name>.parquet              # raw records, dt-sorted; side column {start, end}
-trips/region/<region>/h1/<YYYY>.parquet          # hour-level, year-shard
-trips/region/<region>/n1/<YYYYMM>.parquet        # minute-level, month-shard
+trips/n0/stations/<short_name>.parquet           # raw ride records, dt-sorted, side-keyed
+trips/agg/<tier>/<window>.parquet                # all-stations × dt × side × dims → count, duration_s
+
+avail/n1/stations/<short_name>.parquet           # raw 1-min polls, dt-sorted
+avail/agg/<tier>/<window>.parquet                # all-stations × dt × state-histogram per metric
 ```
 
-Per-station files contain every ride touching the station, with a `side`
-column distinguishing starts from ends (so a ride A→B appears once in
-A.parquet with `side=start` and once in B.parquet with `side=end`). A
-`counterpart_short_name` column records the *other* end of each ride,
-which powers pair-filtering ("rides from A→B") and the paginated rides
-table (see *Future Extensions*). It's low-cost to include at phase-1
-write time; retro-fitting later would mean rewriting every
-per-station file.
+`<tier>` ∈ `{h1, d1, mo1}`; `<window>` is the natural calendar boundary
+of the tier (`YYYY-MM-DD` for `h1`, `YYYY-MM` for `d1`, `YYYY` for `mo1`).
 
-Per-region pre-aggs have the full `gtb_cD` dim cross (gender × user type ×
-bike type × count × duration) per time bucket.
-
-### Availability
+`trips/agg/<tier>/<window>.parquet` schema (long-format, one row per
+fact, all stations co-located):
 
 ```
-avail/stations/<short_name>.parquet              # raw minute polls, dt-sorted
-avail/region/<region>/<YYYY-MM>.parquet          # raw minute polls (system-wide-by-region), month-shard
+dt              int64   unix seconds at bucket start
+short_name      string  canonical
+side            string  "start" | "end"
+gender          int8
+user_type       string  "Subscriber" | "Customer" | ...
+rideable_type   string  "classic_bike" | "electric_bike" | ...
+region          string  "NYC" | "JC" | "HB"
+count           int64   sum
+duration_s      int64   sum
 ```
 
-No rollup tier in v1. Raw availability is small enough — ~20 float/int
-columns × typically < 500k rows per station — that a Worker scan of the
-raw is fast for any reasonable query. If per-station queries at multi-year
-scales prove slow we add an `h1` tier later.
+`avail/agg/<tier>/<window>.parquet` schema:
 
-### Immutability
+```
+dt              int64
+short_name      string
+metric          string  "bikes" | "ebikes" | "docks" | "disabled" | "pending"
+state           int16   value of the metric (e.g. # bikes available)
+minutes         int32   time spent in that state during this bucket
+```
 
-All time-sharded parquets are **immutable once their shard is closed**:
-- `h1/<YYYY>.parquet` closes at the first write after year rollover.
-- `n1/<YYYYMM>.parquet` closes at the first write after month rollover.
-- `avail/region/<region>/<YYYY-MM>.parquet` same.
+Long-format (one row per `(dt, short, metric, state)` cell, sparse —
+states with zero minutes are not stored). Trivial to merge across tiers
+(sum on key). If joint histogram wins after EDA, swap the `(metric, state)`
+columns for a single `state_tuple` int-array column (still long-format).
 
-In-flight (current period) shards may be rewritten or appended-via-flush.
-Closed shards carry `Cache-Control: public, max-age=31536000, immutable`;
-in-flight shards use a short TTL.
+### Tier ladder
 
-Per-station raw files are **not** time-sharded — one file per station for
-the whole history. Rewrite cadence is bounded (monthly for trips, hourly
-for availability) and files are small (10s of MB), so rewrite churn is
-acceptable. An alternative is to year-shard per-station files too; defer
-until measurement argues for it.
+Total span: 1 minute → ~12.5 years ≈ 6.6 M minutes.
+
+We pick **n=4 tiers** at calendar boundaries: `n1/n0 → h1 → d1 → mo1`.
+The scale-ups are 60×, 24×, 30× — geometric mean ~33×, vs. theoretical
+optimum of 6.6M^(1/3) ≈ 188 for n=4 tiers, or ~53 for n=5.
+
+Why depart from the theoretical optimum:
+- Worker query latency is dominated by R2 first-byte (~50 ms), not bytes
+  scanned. 4 reads per query vs 6 doesn't materially change wall-clock.
+- Calendar-aligned shards close cleanly at month/year boundaries → easy
+  immutable Cache-Control + no append churn. A 53× tier needs synthetic
+  windows.
+- Operationally easier: "is this tier's shard complete?" maps to "did the
+  calendar bucket close?" Trivially.
+- Display alignment: when the UI asks "this month" or "last year" the
+  query hits a single shard.
+
+Adding a `y1` tier costs ~10 MB total (per-metric per-station); skip until
+queries spanning >5 years prove slow. Easy add later.
+
+### Query worst case
+
+For `[from, to]` spanning multiple years at minute resolution:
+- Two `n0` partial shards at the edges (the start and end days)
+- Two `d1` partial shards (the start and end months)
+- N `mo1` shards covering the full years/months in the middle
+
+Worst case ≈ `2 × (n_tiers − 1) + n_coarse_shards`. For our 4 tiers and a
+12-year query: `2 × 3 + 12 = 18` reads. All in parallel from the Worker;
+typical wall-clock ~1s.
+
+### Boundary subtraction trick (deferred optimization)
+
+For sum-aggregable metrics, prefix-sum representations let the Worker
+compute `value(end) − value(start)` without scanning intermediate buckets.
+Histogram metrics also support this (histograms are pointwise additive).
+Adds storage cost (cumulative columns) and query complexity. Not needed
+at our scale; flag as a phase-5+ optimization.
+
+### Geographic rollups (H3) — design-compatible, deferred
+
+Adding an `h3_<res>` string column to agg parquets makes the same query
+infrastructure trivially answer per-hex queries: `GROUP BY h3_<res>` in
+place of `GROUP BY short_name`. Per-hex aggregates are derivable from
+the per-station agg by a final `GROUP BY` step at query time, or
+materialized in a parallel set of files at write time if needed.
+
+Defer: not in v1, not blocking. The schema accommodates whenever we want it.
 
 ---
 
-## Worker query routing
+## Worker query API
 
-One endpoint:
+One endpoint, one shape:
 
 ```
-GET /api/query
+GET /api/totals
   ?kind=trips|availability
-  &station=<short_name>          # XOR
-  &region=nyc,jc,hob             # XOR
+  &metric=count|duration_s|bikes|ebikes|docks|disabled|pending
   &from=<unix-s>&to=<unix-s>
-  &bin=<ms>                      # or:
-  &targetPxPerBin=<px>           # for auto-tier
-  &fields=...                    # projection
-  &dims=r,g,t,b                  # which dim cols to return broken-out
-  &side=start|end                # per-station only
-→ { tier, binMs, rows: [{dt, ...aggs}] }
+  &scope=stations|regions|all          # what to GROUP BY
+  &filter.short_name=A,B,C             # optional restrict
+  &filter.region=nyc,jc                # optional
+  &filter.side=start|end               # trips only
+  &dims=side,user_type                 # optional break-out keys
+  &agg=sum|mean|p05|p95|hist           # for availability: which reducer
+→ { metric, binMs, rows: [{...keys, ...values}, ...] }
 ```
 
-Routing logic:
+The Worker:
+1. **Tier selection.** From `[from, to]`, pick coarsest tier whose shards
+   align cleanly. Build the read list (boundary fine + middle coarse).
+2. **Parallel R2 reads.** Project only the columns needed
+   (`dt + short_name + filter cols + metric cols`).
+3. **Filter** by `dt` window + optional dim filters.
+4. **Group + reduce** by `(scope, ...dims)`. For trips, sum. For
+   availability, merge histograms; if `agg` is mean/quantile/etc., compute
+   from the merged histogram.
+5. Return JSON (rows, plus the final `binMs` decided).
 
-```ts
-function pickFiles(q: Query): R2Path[] {
-  if (q.station) {
-    // per-station: one file, bin on the fly
-    return [`${q.kind}/stations/${q.station}.parquet`]
-  }
-  // region(s)
-  const regions = q.regions ?? ['nyc', 'jc', 'hob']
-  if (q.kind === 'availability') {
-    // no rollup tier; monthly shards
-    return monthsIn(q.from, q.to)
-      .flatMap(ym => regions.map(r => `avail/region/${r}/${ym}.parquet`))
-  }
-  // trips: h1 if bin ≥ 1h, n1 otherwise
-  const tier = q.binMs >= HOUR_MS ? 'h1' : 'n1'
-  const windows = tier === 'h1' ? yearsIn(q.from, q.to) : monthsIn(q.from, q.to)
-  return regions.flatMap(r => windows.map(w => `trips/region/${r}/${tier}/${w}.parquet`))
-}
-```
+Streaming considerations: we never return raw minute-level data over
+this endpoint; the response is always aggregated to `(scope × dims)`,
+so payloads are bounded by viewport-station-count × dims-cardinality.
 
-Worker reads all paths in parallel (`Promise.all`), filters (column projection
-+ `dt`-range), bins to `q.binMs`, merges across regions (sum same-`dt` rows),
-returns JSON.
+### Existing endpoints' fate
 
-**Cost at scale:** widest realistic query — NYC per-station lifetime trips at
-year-bins — reads ~20 MB projected, bins 1 M rows in-worker, returns 12 rows.
-Sub-second. Widest system-wide minute query — "last month across all regions"
-— reads 3 × ~250 MB files in parallel; probably under the Worker CPU/memory
-budget but worth measuring. Fallback: raise target bin size to `h1` for
-super-wide-minute queries.
+`/api/query`, `/api/rides`, `/api/stations/:id/{info,range}` stay as-is for
+v1. The new `/api/totals` is the canonical path forward; we'll port
+features off the old endpoints as we re-plumb the client.
 
 ---
 
 ## Client API
 
-### `useRollupQuery(...)` hook
+### `useTotalsQuery({...})` — one hook for all panels
 
 ```ts
-const { rows, isPending, tier, binMs } = useRollupQuery({
+const { rows, isPending, binMs } = useTotalsQuery({
   kind: 'trips' | 'availability',
-  station?: string,
-  regions?: Region[],
-  end: Date | null,                 // null = "Latest"
-  duration: number,                 // ms
-  binMs?: number,                   // explicit, OR
-  targetPxPerBin?: number,          // auto (Worker picks coarsest fitting)
-  fields?: string[],
-  side?: 'start' | 'end',
+  metric: 'count' | 'duration_s' | 'bikes' | 'ebikes' | 'docks' | ...,
+  scope: 'stations' | 'regions' | 'all',
+  from: number, to: number,            // unix seconds; or {end, duration} computed
+  filter?: {short_name?: string[], region?: Region[], side?: Side},
+  dims?: string[],
+  agg?: 'sum' | 'mean' | 'p05' | 'p95' | 'hist',
 })
 ```
 
-TSQ-backed. The query key is `(kind, station|regions.join, end.getTime, duration,
-binMs|auto, fields, side)`. Range is quantized to the bin grid so drag-pan
-within a bin doesn't re-trigger fetches.
+TSQ-keyed on the param shape; range quantized to the chosen tier's bin grid
+so drag-pan within a bin is a cache hit; `placeholderData: keepPreviousData`.
 
-### `<BinSelect />` component
+### `<BinSelect />` (existing) drives only the *display* axis
 
-Standard unit table (from awair, lightly trimmed):
+`<BinSelect />` is purely a chart-axis decision (how many bars to show).
+It maps to a `binMs` the Worker tier-stitches to. The user-facing tiers
+in the picker can stay at human-aligned values (1m, 5m, 1h, 1d, 1mo, 1y);
+the Worker decides which storage tier to read.
 
-```
-Minute:  1n · 2n · 5n · 10n · 15n · 20n · 30n
-Hour:    1h · 2h · 3h · 4h · 6h · 8h · 12h
-Day:     1d · 2d · 3d · 7d · 14d
-Month+:  1mo · 2mo · 3mo · 6mo · 1y
-```
+### `<RangePicker />` — already consolidated on `{end, duration}`
 
-Plus **"auto"** (default) — drives `targetPxPerBin ≈ 3`. Manual override is
-exposed as a dropdown in chart settings.
-
-### `<RangePicker />` component
-
-`{timestamp, duration}` model (already in ctbk's `time-range.ts`). End +
-duration, with "Latest" as `timestamp=null`. Picker UX:
-
-- Slider / presets for duration (1d, 7d, 30d, 1y, All, …).
-- Explicit "end at" control (calendar / "now"). Defaults to Latest.
-- No separate start — `start = end - duration`.
-
-This replaces the `{start, end}` widget on the Home page's ride-count chart
-(unified with the availability chart).
+Time selection model unified across all panels.
 
 ---
 
-## Ingest
+## Pipeline
 
-### Trips
+### Source data
+- `trips/n0/stations/<short_name>.parquet` — already exists; one row per
+  ride per side, dt-sorted, with canonical short_name + counterpart.
+- `avail/n1/stations/<short_name>.parquet` — already exists; one row per
+  minute poll, dt-sorted.
 
-Existing pipeline produces monthly-grain outputs. New stages:
+### New stages
 
-1. `ctbk agg -g ymdhrgtb -acd`: hour-level system → region `h1` year-shards.
-2. `ctbk agg -g ymdhnrgtb -acd`: minute-level system → region `n1` month-shards.
-3. `ctbk trips-per-station`: re-emit ride records partitioned by canonical
-   short_name (both sides, dt-sorted) → `trips/stations/*.parquet`.
+`ctbk trips-agg`:
+- Reads all `trips/n0/stations/*.parquet`.
+- Aggregates by `(year, month, day, hour, short_name, side, dim cross)`
+  to produce `trips/agg/h1/<YYYY-MM-DD>.parquet`.
+- Then aggregates `h1` → `d1` (group by day) → `mo1` (group by month).
+  Coarser tiers consume finer ones, so we only re-scan raw on the finest
+  level + once per existing tier.
 
-Runs monthly after tripdata arrives. Shards close at year/month rollover.
+`ctbk avail-agg`:
+- Reads all `avail/n1/stations/*.parquet`.
+- For each tier (`h1`, `d1`, `mo1`) and each metric in
+  `{bikes, ebikes, docks, disabled, pending}`, emits long-format histograms
+  `(dt, short_name, metric, state, minutes)`.
+- If joint histogram wins after EDA: emits one histogram column with
+  `state_tuple` keys instead of per-metric rows.
 
-### Availability
+### Run cadence
 
-**Current:** Worker cron polls GBFS each minute → D1 day-table → daily
-compaction to R2.
+- **Trips**: monthly, after new tripdata arrives. Affects only the new
+  month's `h1` shards + the rolling-month `d1`/`mo1` shards.
+- **Availability**: daily (continuous), after `compact-r2.py` finalizes
+  the day's per-station parquet. Updates that day's `h1` shard +
+  appends to the rolling-month `d1`/`mo1` shards.
 
-**Target:** D1 (or DO) as **ingest staging only**. Compaction cadence
-goes from daily to **hourly**: at hour rollover, the hour's D1 rows append
-into the active month's `avail/region/<region>/<YYYY-MM>.parquet` and each
-touched station's `avail/stations/<short_name>.parquet`. Serving path reads
-R2 only.
+### Output cadence + immutability
 
-**Two migration paths, in order:**
+- `h1/<YYYY-MM-DD>.parquet` → immutable once the day closes.
+- `d1/<YYYY-MM>.parquet` → immutable once the month closes.
+- `mo1/<YYYY>.parquet` → immutable once the year closes.
 
-1. **Step 1 (smaller):** keep D1, reduce retention from 7 d to ~2 h, switch
-   serving API to always read R2. D1 is just an ingest WAL.
-2. **Step 2 (larger, optional):** replace D1 with a Durable Object that
-   batches polls in memory and flushes hourly. Removes D1 dependency entirely.
-   Defer until step 1 ships.
+In-flight shards get `Cache-Control: max-age=60` (poll-friendly);
+closed shards get `max-age=31536000, immutable`.
 
-Confidence test: with step 1 done, "is R2 serving good enough?" is the only
-remaining question — no cache to hide perf issues.
+---
+
+## Open EDA (pre-implementation)
+
+Decisions to lock down before building the agg pipeline:
+
+### 1. Joint histogram cardinality (per station, per shard)
+
+Run on `e` (R2 + per-station availability already there):
+
+```bash
+# pick a few stations of varying capacity + activity
+for s in HB101 5980.10 6450.12 5847.01 grove-st-path; do
+  python -c "
+import pandas as pd
+df = pd.read_parquet('r2/ctbk/avail/stations/${s}.parquet')
+print('${s}:', len(df), 'rows')
+print('  distinct 5-tuples:', df.groupby(['num_bikes_available', 'num_ebikes_available', 'num_docks_available', 'num_bikes_disabled', 'num_docks_disabled']).size().shape[0])
+print('  distinct 3-tuples (b/eb/dock):', df.groupby(['num_bikes_available', 'num_ebikes_available', 'num_docks_available']).size().shape[0])
+print('  capacity (max bikes+ebikes+docks):', (df.num_bikes_available + df.num_ebikes_available + df.num_docks_available).max())
+"
+done
+```
+
+Decide:
+- If max distinct 5-tuples per station ≤ ~1000 → joint histogram is fine.
+  Single `state_tuple` column, smaller storage, captures correlations.
+- If much higher → marginal × 5. Slightly larger storage, no correlations
+  but answers all stated questions.
+
+Document findings; lock the schema choice in the spec.
+
+### 2. Tier validation
+
+Before backfilling all-time, run the pipeline for one month at all four
+tiers (`n0`, `h1`, `d1`, `mo1`); verify Worker tier-stitching produces
+identical results across tiers for sanity queries. Sized as a smoke test.
+
+### 3. h1 storage size
+
+12 years × 365 days × 24 hours × 5 metrics × ~50 distinct states × 2,609
+stations is the upper bound; sparse rows + dict encoding will compress
+heavily. Estimate empirically from the smoke-test month.
 
 ---
 
@@ -250,167 +352,82 @@ remaining question — no cache to hide perf issues.
 
 | Phase | Scope | Unlocks |
 |---|---|---|
-| 1 | Trips: per-station raw + region `h1`/`n1` pre-aggs; Worker + client API | Hour/minute binning on `/s/:slug` trips chart and Home chart; unified range picker |
-| 2 | Availability: compact hourly; serving path reads R2 only | Full-history availability at any bin size, no D1 cache |
-| 3 | Extract `use-rollups` (Python CLI + Worker template + React hooks + chart helpers) | awair / apvd reuse |
-| 4 | Map pies + per-station availability stats (see Future Extensions) | Visual use of the availability infra |
+| 0 | EDA on `e` (cardinality + tier sanity) | Lock schema choices |
+| 1 | `trips-agg` pipeline + `/api/totals` for trips | Pies, RidesTable variants, region totals |
+| 2 | `avail-agg` pipeline + `/api/totals` for availability | Multi-scale availability charts, time-at-zero stats, availability pies |
+| 3 | Migrate existing client paths to `/api/totals` | Retire `/api/query` + `/api/rides` legacy endpoints |
+| 4 | `use-rollups` library extraction | awair / apvd reuse |
+| 5+ | H3 geo-rollups, prefix-sum trick, year-tier if measured-needed | TBD |
 
-Phase 1 is the spike — it validates the layout, routing, and client API on
-the more-complex trips side (larger files, dim cross, two sides). Phase 2
-is a mechanical restructuring of existing infrastructure.
+R2-canonical: lands organically by phase 1 — all new agg outputs go to
+R2 only; AWS-S3 retains raw normalized/consolidated for the data-lake.
 
 ---
 
-## Future extensions
+## Future extensions (preserved from prior versions)
 
-### Map circles as pies/donuts (phase 4+)
+### Map circles as pies/donuts (phase 2/4)
 
-Render each station circle as a pie/donut with a **toggleable** encoding,
-showing either:
+Render station circles as toggleable pies showing:
+- **Trips**: starts vs ends share (phase 1 data: `/api/totals?kind=trips&scope=stations&dims=side`)
+- **Availability**: time-share by state (phase 2 data: `/api/totals?kind=availability&metric=bikes&agg=hist&scope=stations`)
 
-- **Availability** (bike / ebike / dock / disabled shares): at current
-  moment, or time-weighted over a user-chosen window.
-- **Trips**: proportion of starts vs ends over the window. At many stations
-  these skew strongly by time-of-day (residential → commute AM starts,
-  PM ends; employment centers the inverse). Showing this on the map
-  surfaces the flow pattern at-a-glance.
+ONE Worker call per pies-render covers all visible stations. No
+per-station fan-out; the all-stations agg parquet is read once.
 
-The toggle, combined with the existing time-range picker, also lets users
-see how start/end balance (or availability distribution) shifts across
-dayparts — e.g. "AM rush at this station is 80% starts; PM is 70% ends."
+### Paginated raw-rides table (phase 1 already partially built)
 
-Additional stats for the on-click / hover detail:
+Backed by the existing `trips/n0/stations/<short_name>.parquet` files.
+Worker scans + paginates. Pair filter via `counterpart_short_name`
+column (already in the schema).
 
-- Avg bikes / ebikes / docks available over the range.
-- **Fraction of time at zero bikes** (+ zero docks, zero ebikes). The most
-  interesting signal — stations that starve, or stations that never empty.
-- Ride counts split start/end over the range.
-- Daily / hourly histogram of state distributions (phase 4.5).
+### Map-edge → pair-filter wiring (phase 3+)
 
-Data sources, both already built by earlier phases:
-- Availability pies: `avail/stations/<short_name>.parquet`. "Time at zero"
-  = `count(rows where bikes == 0) / count(rows)` over the window — raw
-  scan.
-- Trips pies: `trips/stations/<short_name>.parquet`, grouped by `side`
-  over the window.
+Click a destination polyline on `<StationMap>` → set `?rt_pair=<short>`
+on the URL → rides table re-queries with `counterpart_short_name`
+filter. Click empty map → clear pair filter.
 
-If multi-station "rank by starvation / rank by imbalance" queries become a
-thing, we'd add `zero_bikes_minutes`, `starts_count`, `ends_count` etc. as
-pre-aggregated tier columns; defer until then.
+### DuckDB-WASM as ad-hoc query escape hatch (phase 5+)
 
-### Paginated raw-rides table per station (phase 4+)
-
-On `/s/:slug`, below the chart, a paginated table of individual ride
-records:
-
-- **Columns:** timestamp, side (start / end), counterpart station, rider dim
-  cols (gender / user type / bike type), duration.
-- **Sortable** on every column; dt is the natural default.
-- **Filterable** on date range (inherits the page's range picker),
-  counterpart station (single-station pair filter), dim columns, duration.
-- **Searchable** by counterpart station name — full-text-ish. At ~500k
-  rides/station this is fast enough as a linear scan inside the Worker;
-  no FTS index needed v1.
-- **Paginated** (e.g. 50 rows/page). Worker returns `{ page, rows,
-  totalRows }`.
-
-Data source: `trips/stations/<short_name>.parquet` (built in phase 1). No
-new storage needed. The parquet needs a **`counterpart_short_name`** column
-alongside `side` — added to the phase-1 schema so this feature comes for
-free later.
-
-#### Per-station D1/SQLite alternative (considered, not chosen)
-
-Per-station SQLite DBs (one per station, or one DB with per-station
-tables) with FTS5 indices for snappy search. Downsides:
-- 3000 × ~50 MB/station with indices ≈ 150 GB — way over D1's 10 GB cap.
-- Workers don't bind multiple D1 DBs dynamically; each named binding is
-  fixed at deploy time.
-- One combined DB grows faster than 10 GB even without FTS.
-
-Parquet + Worker scan hits the same UX (page loads in ~100 ms for a
-50-row page) without the cap / provisioning problem. If at some point the
-Worker's in-memory scan becomes the bottleneck — e.g. multi-criteria FTS
-on dim + counterpart name — we spin up a per-station `.sqlite` sidecar as
-a static R2 artifact (read in the browser via `sql.js` or by the Worker
-with a WASM binding). Same data, different query engine. Deferred.
-
-### Pair-filtered rides (drill-in via map brushing)
-
-Related to the rides-table above: when a station is selected and the map
-draws its destination fan, clicking/brushing a specific edge should filter
-the rides table to *only rides between that pair* (direction respected).
-Two semantics:
-
-- **This-station → other**: rides where `short_name = current` and
-  `counterpart_short_name = other`, `side = start`.
-- **Other → this-station**: reversed.
-
-Implemented as additional params on the rides-table query
-(`counterpart=<short_name>&side=<start|end>`). Filter applied Worker-side
-post-scan, cheap. UI: clicking a fan edge toggles the pair-filter; a chip
-above the table shows the active pair.
-
-### System-wide "All regions" pre-agg
-
-Currently a 3-region query is three parallel reads + merge — cheap. If
-measurement shows "all regions" is the dominant query shape and the merge
-cost is material, emit a 4th file per tier combining all regions. Storage
-dup cost is ~30% (NYC is 95% of volume; JC+HOB combined rounds up to full).
-Skip until measured.
-
-### DuckDB-WASM as a client-side engine
-
-For ad-hoc multi-station or cross-cutting queries ("which 20 stations spend
-the most time at zero bikes in Q2?") the per-station / per-region parquet
-layout is already DuckDB-compatible — no format change needed. Ship
-DuckDB-WASM lazily (~15 MB) behind an "advanced queries" UI surface.
-
-### Per-station year-sharding
-
-Defer. Only worth it if data refresh cadence becomes an issue, or if Penn
-Station-scale stations produce a single parquet large enough to slow
-client-side reads. Current projected sizes (~50 MB worst case) are fine.
+Same parquet files; lazy-load DuckDB-WASM (~15 MB) for cross-station
+ad-hoc SQL ("which 20 stations spend the most time at zero bikes in
+Q2?"). Storage format unchanged.
 
 ---
 
 ## Open questions
 
-1. **Which Worker runtime reads parquet?** Current gbfs api uses `hyparquet`
-   — small and works, but hasn't been stressed at `n1` scale (250 MB single
-   file, reading one row-group at a time). Alternative: `@duckdb/duckdb-wasm`
-   in Workers, or a Rust-compiled parquet reader via WASM. Measure `hyparquet`
-   first.
-2. **Station raw file rewrite frequency.** For trips, monthly is natural —
-   new month of tripdata arrives → rewrite every touched station file. For
-   availability, hourly rewrite of per-station files means ~3000 file
-   rewrites/hour = ~25M writes/year, ~100K$/yr at R2 pricing (class A ops
-   dominate). **Fix**: batch — only rewrite the `avail/region/...` monthly
-   shard hourly (one file/hour/region = 24 ops/day/region); rewrite
-   `avail/stations/...` daily or weekly. Per-station queries stitch the
-   region file's recent data onto the stale per-station file.
-3. **Query-key quantization for drag-pan smoothness.** Inherited from the
-   current availability chart's `bufferedBounds`. Worth generalizing as a
-   hook utility in `use-rollups`.
-4. **Back-compat for existing URL params.** `?d=…` (date-range), `?r=…`
-   (range, on StationDetail) have existing encodings. New unified picker
-   should decode legacy values for old shared links.
-5. **What about the `t` axis for "touched at all" rollups?** Some stations
-   have days with zero rides. Current `ymrgtb_cd` rows at a sparse station
-   can be missing months. Worth defining: do we emit zero rows for "nothing
-   happened" bins, or leave gaps? Affects chart rendering (line-break on
-   null vs. hold-at-zero).
+1. **Backend compute capacity ceiling.** Worker (1 GB Unbound, 30s CPU)
+   should comfortably handle the queries described. If we hit a wall on
+   wide minute-tier scans of avail/agg, fallback is Lambda or a small
+   Fargate worker. No infra change today.
+2. **Pipeline runner.** Trips agg every month, avail agg every day.
+   Reuse existing GHA workflow + DVX, or a separate cron Worker that
+   triggers it? The existing GHA pattern (`gbfs-compact.yml`) works; lean
+   on it.
+3. **D1 future.** With availability raw-tier on R2, D1 becomes purely an
+   ingest staging buffer (1-hour retention). Possibly removable in favor
+   of a Durable Object that batches polls in memory and flushes hourly.
+   Defer until measurable benefit; D1 isn't hurting today.
+4. **Schema versioning.** Eventually we'll want a schema-version field
+   in shards so the Worker can detect mismatches across pipeline updates.
+   Cheap to add; do it at phase-1 write time.
+5. **Failure modes for `/api/totals` mid-tier-stitch.** If one shard
+   read 404s (e.g. a finer tier hasn't been written yet), the Worker
+   could fall back to a coarser tier covering that range. Or 503. TBD.
 
 ---
 
 ## Related / superseded specs
 
 - `specs/d1-backend.md` — the original availability backend spec. Partly
-  built (what's live today); this spec supersedes the "serving architecture"
-  sections. When phase 2 ships, move to `specs/done/`.
+  built. Move to `specs/done/` when phase 2 retires D1 from the serving
+  path.
 - `specs/multi-scale-ts-library.md` — original library-extraction sketch.
-  Subsumed by phase 3 of this spec.
-- `specs/station-zoom-subdaily.md` — ride-count zoom idea. Subsumed by
-  phase 1.
-- `specs/station-trips-serving.md` — trips API design. Merge into phase 1
-  and move to done/.
+  Subsumed by phase 4.
+- `specs/station-zoom-subdaily.md` — ride-count zoom idea. Subsumed.
+- `specs/station-trips-serving.md` — trips API design. Merge here.
+- The earlier spec revision (commit 52d9ff25) — design with `h1`/`n1`
+  per-region tiers, sum-only availability binning, per-station fan-out
+  for pies. **This rewrite supersedes it** based on the CRDT/monoid
+  framing + EDA-driven histogram decisions in the 2026-04-26 thread.
