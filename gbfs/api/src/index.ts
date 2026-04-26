@@ -240,8 +240,7 @@ import {
 	type Region,
 	type Side,
 } from './planQuery';
-
-const SECOND_MS = 1000;
+import { binAndAggregate } from './bin';
 
 /**
  * Read one parquet from R2, returning rows as plain objects. Returns `null` if
@@ -268,78 +267,6 @@ async function readR2Parquet(
 		}
 	}
 	return rows;
-}
-
-/**
- * Allowlist of column names that are aggregated (summed) per bin. Other
- * columns — even numeric ones like `gender` (a 0/1/2 enum) — are categorical
- * and should never be silently summed. They're either kept as a group-key
- * via `dims` or dropped from the output entirely.
- */
-const METRIC_COLUMNS = new Set(['count', 'duration_s']);
-
-/**
- * Bin and aggregate rows. Assumes each row has a numeric `dt` column (unix
- * seconds). Groups by `(bin, ...dims)`: when `dims` is empty the result has
- * exactly one row per bin (totals); when `dims` lists e.g. `['side']` the
- * result has one row per `(bin × side)` combo. Only `METRIC_COLUMNS` are
- * summed; all other columns are either group keys (in `dims`) or dropped.
- *
- * Raw per-station files store one ride per row with no explicit count
- * column; `synthesizeCount=true` injects `count: 1` per source row so the
- * aggregation produces a usable count metric. Region pre-aggs already
- * carry a `count` column, so we leave them alone.
- */
-function binAndAggregate(
-	rows: Record<string, unknown>[],
-	binMs: number,
-	fromS: number,
-	toS: number,
-	dims: string[] = [],
-	synthesizeCount = false,
-): Record<string, unknown>[] {
-	const binS = Math.max(1, Math.floor(binMs / SECOND_MS));
-	// Group key = bin || dim values. Empty `dims` → key is just the bin.
-	const buckets = new Map<string, Record<string, unknown>>();
-	for (const r of rows) {
-		const dt = r.dt as number | undefined;
-		if (dt === undefined || dt < fromS || dt > toS) continue;
-		const bin = Math.floor(dt / binS) * binS;
-		const key = dims.length === 0
-			? String(bin)
-			: `${bin}|${dims.map((d) => String(r[d] ?? '')).join('|')}`;
-		let acc = buckets.get(key);
-		if (!acc) {
-			acc = { dt: bin };
-			for (const d of dims) acc[d] = r[d];
-			buckets.set(key, acc);
-		}
-		// Synthesize count for raw rows (one ride per row, no source `count`).
-		if (synthesizeCount) {
-			acc.count = ((acc.count as number) ?? 0) + 1;
-		}
-		// Sum recognized metric columns. Numeric categoricals (e.g. `gender`)
-		// fall through here — they're either dim group keys or get dropped.
-		for (const k of METRIC_COLUMNS) {
-			if (synthesizeCount && k === 'count') continue;  // already incremented
-			const v = r[k];
-			if (typeof v === 'number') {
-				acc[k] = ((acc[k] as number) ?? 0) + v;
-			}
-		}
-	}
-	return [...buckets.values()].sort((a, b) => {
-		const aDt = a.dt as number;
-		const bDt = b.dt as number;
-		if (aDt !== bDt) return aDt - bDt;
-		// Stable secondary sort by dim values for deterministic output.
-		for (const d of dims) {
-			const av = String(a[d] ?? '');
-			const bv = String(b[d] ?? '');
-			if (av !== bv) return av < bv ? -1 : 1;
-		}
-		return 0;
-	});
 }
 
 /** Parse and validate `/api/query` params; throws on invalid input. */
@@ -417,11 +344,17 @@ async function executeQuery(
 	}
 	// Per-station trips files store one record per ride with no explicit
 	// `count` column — synthesize one. Region pre-aggs (h1/n1) already
-	// carry `count` from the upstream aggregator. Availability is state
-	// data (one record per poll), where sum-aggregation isn't meaningful
-	// — we'll wire up mean/min/max aggs alongside availability rollups.
+	// carry `count` from the upstream aggregator. Availability dispatches
+	// to a separate aggregator (mean/min/max/percentiles per metric col).
 	const synthesizeCount = q.kind === 'trips' && plan.tier === 'raw';
-	const binned = binAndAggregate(merged, plan.binMs, q.fromS, q.toS, q.dims ?? [], synthesizeCount);
+	const binned = binAndAggregate(merged, {
+		kind: q.kind,
+		binMs: plan.binMs,
+		fromS: q.fromS,
+		toS: q.toS,
+		dims: q.dims ?? [],
+		synthesizeCount,
+	});
 	return { rows: binned, missing };
 }
 
