@@ -1,0 +1,12 @@
+name = "ctbk-gbfs-compactor"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+# Hourly compaction at :05 past the hour (window for trailing :59 polls + queue lag).
+# On each fire, compact the hour that *just* ended (now - 1 hour, UTC-bucketed).
+[triggers]
+crons = ["5 * * * *"]
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "ctbk"

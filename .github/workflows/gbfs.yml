@@ -6,6 +6,7 @@ on:
       - 'gbfs/worker/**'
       - 'gbfs/loader/**'
       - 'gbfs/api/**'
+      - 'gbfs/compactor/**'
       - '.github/workflows/gbfs.yml'
   workflow_dispatch:
     inputs:
@@ -13,7 +14,7 @@ on:
         description: 'Worker to deploy (default: all)'
         required: false
         type: choice
-        options: [all, worker, loader, api]
+        options: [all, worker, loader, api, compactor]
         default: all
 
 jobs:
@@ -23,6 +24,7 @@ jobs:
       worker: ${{ steps.filter.outputs.worker }}
       loader: ${{ steps.filter.outputs.loader }}
       api: ${{ steps.filter.outputs.api }}
+      compactor: ${{ steps.filter.outputs.compactor }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -35,6 +37,8 @@ jobs:
               - 'gbfs/loader/**'
             api:
               - 'gbfs/api/**'
+            compactor:
+              - 'gbfs/compactor/**'
 
   deploy:
     needs: detect-changes
@@ -42,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        worker: [worker, loader, api]
+        worker: [worker, loader, api, compactor]
     steps:
       - name: Check if this worker should deploy
         id: should
@@ -50,9 +54,10 @@ jobs:
           want="${{ inputs.worker || 'all' }}"
           if [ "$want" = "all" ]; then
             case "${{ matrix.worker }}" in
-              worker) deploy="${{ needs.detect-changes.outputs.worker }}";;
-              loader) deploy="${{ needs.detect-changes.outputs.loader }}";;
-              api)    deploy="${{ needs.detect-changes.outputs.api }}";;
+              worker)    deploy="${{ needs.detect-changes.outputs.worker }}";;
+              loader)    deploy="${{ needs.detect-changes.outputs.loader }}";;
+              api)       deploy="${{ needs.detect-changes.outputs.api }}";;
+              compactor) deploy="${{ needs.detect-changes.outputs.compactor }}";;
             esac
           elif [ "$want" = "${{ matrix.worker }}" ]; then
             deploy=true
