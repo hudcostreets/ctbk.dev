@@ -84,6 +84,123 @@ export function quantizeToBin(
 
 const DEFAULT_TARGET_PX_PER_BIN = 3
 
+// -----------------------------------------------------------------------------
+// `/api/totals` — windowed totals over monoid-aggregable metrics.
+// See `specs/multiscale-timeseries-backend.md` § "Worker query API".
+// -----------------------------------------------------------------------------
+
+export type TotalsKind = 'trips' | 'availability'
+export type TotalsScope = 'stations' | 'regions' | 'all'
+export type TotalsMetric = 'count' | 'duration_s'
+
+export interface TotalsQueryParams {
+  kind: TotalsKind
+  metric?: TotalsMetric                                // default 'count'
+  scope: TotalsScope
+  /** End timestamp; `null` → "Latest" (snapshotted to `Date.now()`). */
+  end: Date | null
+  /** Lookback duration (ms). */
+  duration: number
+  /** Optional restrict by station short_name. */
+  filterShortName?: string[]
+  /** Optional restrict by region. */
+  filterRegion?: Region[]
+  /** Optional restrict by side (trips). */
+  filterSide?: Side
+  /** Group-by dim columns (in addition to scope key). */
+  dims?: string[]
+  /** Quantum to round `(fromS, toS)` to for cache hit-rate (seconds).
+   *  Default: 60 (one minute). */
+  quantumS?: number
+}
+
+export interface TotalsRow {
+  short_name?: string
+  region?: string
+  side?: 'start' | 'end'
+  count?: number
+  duration_s?: number
+  [field: string]: number | string | undefined
+}
+
+export interface TotalsResponse {
+  kind: TotalsKind
+  metric: TotalsMetric
+  scope: TotalsScope
+  tier: string
+  rows: TotalsRow[]
+}
+
+const DEFAULT_QUANTUM_S = 60
+
+/**
+ * One TSQ-cached fetch for `/api/totals`. Keyed on the param shape; the
+ * `[from, to]` window is quantized to `quantumS` so drag-pans within a quantum
+ * are cache hits. `placeholderData: keepPreviousData` keeps last result
+ * visible during refetches.
+ */
+export function useTotalsQuery(
+  params: TotalsQueryParams,
+): UseQueryResult<TotalsResponse> {
+  const {
+    kind, metric = 'count', scope, end, duration,
+    filterShortName, filterRegion, filterSide, dims,
+    quantumS = DEFAULT_QUANTUM_S,
+  } = params
+
+  const endMs = end?.getTime() ?? null
+  const { qFromS, qToS } = useMemo(() => {
+    const toMs = endMs ?? Date.now()
+    const fromS = Math.floor((toMs - duration) / 1000)
+    const toS = Math.floor(toMs / 1000)
+    const q = Math.max(1, Math.floor(quantumS))
+    return {
+      qFromS: Math.floor(fromS / q) * q,
+      qToS: Math.ceil(toS / q) * q,
+    }
+  }, [endMs, duration, quantumS])
+
+  // Sort all array-valued keys for deterministic cache keys. (Stable
+  // identity even if caller passes the same set in a different order.)
+  const shortNameKey = filterShortName?.length
+    ? [...filterShortName].sort().join(',')
+    : ''
+  const regionKey = filterRegion?.length ? [...filterRegion].sort().join(',') : ''
+  const dimsKey = dims?.length ? [...dims].sort().join(',') : ''
+
+  // Disable when scope=stations and short_name filter is requested but empty
+  // (e.g. no visible stations on the map yet) — saves a useless round-trip.
+  const enabled = !(scope === 'stations' && filterShortName !== undefined && filterShortName.length === 0)
+
+  return useQuery<TotalsResponse>({
+    queryKey: [
+      'totals', kind, metric, scope,
+      qFromS, qToS,
+      shortNameKey, regionKey,
+      filterSide ?? null,
+      dimsKey,
+    ],
+    enabled,
+    placeholderData: keepPreviousData,
+    queryFn: async () => {
+      const url = new URL(`${stationsApi.API_BASE}/api/totals`)
+      const sp = url.searchParams
+      sp.set('kind', kind)
+      sp.set('metric', metric)
+      sp.set('scope', scope)
+      sp.set('from', String(qFromS))
+      sp.set('to', String(qToS))
+      if (filterShortName?.length) sp.set('filter.short_name', filterShortName.join(','))
+      if (filterRegion?.length) sp.set('filter.region', filterRegion.join(','))
+      if (filterSide) sp.set('filter.side', filterSide)
+      if (dims?.length) sp.set('dims', dims.join(','))
+      const res = await fetch(url.toString())
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      return res.json()
+    },
+  })
+}
+
 export function useRollupQuery(
   params: RollupQueryParams,
 ): UseQueryResult<RollupResponse> {

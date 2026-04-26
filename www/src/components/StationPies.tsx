@@ -1,19 +1,24 @@
 /**
  * Per-station "trips starts vs ends" pie overlays for the /stations map.
  *
- * Strictly behind the `?pies=1` URL flag (POC). Each visible station with
- * `ends > MIN_ENDS_FOR_PIE` fires a `useRollupQuery({kind:'trips', station,
- * end, duration, dims:['side']})` that returns ≤2 rows (one per side). The
- * pie radius matches the existing `<Circle radius={sqrt(ends)}>` so the
- * SVG slices visually replace the circle's fill.
+ * Strictly behind the `?pies=1` URL flag (POC). ONE `useTotalsQuery` call
+ * fetches `(short_name, side) → count` rows for every visible station with
+ * `ends > MIN_ENDS_FOR_PIE`. Replaces the previous per-station fan-out
+ * (which fired O(visible-stations) parallel requests and crushed the connection
+ * pool).
  *
- * Defensive: if the per-station query 404s or returns empty, we render
- * nothing (the base circle's normal fill peeks through).
+ * Caching: the query key is keyed on the *quantized* `(from, to)` plus the
+ * sorted set of visible station IDs, so panning the map (without changing
+ * the visible-station set) is a TSQ cache hit. Adding/removing stations on
+ * pan is a fresh fetch — typically warm in the Worker shard cache.
+ *
+ * Defensive: a station with no rows in the response renders nothing (the
+ * underlying `<Circle>` fill peeks through).
  */
 import { useEffect, useMemo, useState } from 'react'
 import { Marker, Pane, useMap } from 'react-leaflet'
 import L from 'leaflet'
-import { useRollupQuery } from '../query/rollups'
+import { useTotalsQuery } from '../query/rollups'
 import type { Stations } from './StationMap'
 import type { TimeRange } from '../time-range'
 
@@ -22,9 +27,6 @@ const { sqrt, cos, sin, PI, max } = Math
 /** Don't fire a query for stations smaller than this — otherwise we'd
  *  request thousands of stations whose pies are 1-3 pixels anyway. */
 export const MIN_ENDS_FOR_PIE = 100
-
-/** Effectively "no binning" — return one row per `side` over the full window. */
-const HUGE_BIN_MS = 100 * 365 * 24 * 60 * 60 * 1000  // 100 years
 
 interface PieColors {
   start: string
@@ -83,56 +85,6 @@ function buildPieIcon(
   })
 }
 
-/** One station's pie. Owns its own TSQ subscription. */
-function StationPie({
-  id, lat, lng, radiusM, mPerPx, end, duration, colors,
-}: {
-  id: string
-  lat: number
-  lng: number
-  /** Same `radius` (in meters) the existing `<Circle>` uses. */
-  radiusM: number
-  mPerPx: number
-  end: Date | null
-  duration: number
-  colors: PieColors
-}) {
-  const q = useRollupQuery({
-    kind: 'trips',
-    station: id,
-    end,
-    duration,
-    binMs: HUGE_BIN_MS,
-    dims: ['side'],
-  })
-
-  // Defensive: 404/empty/error → render nothing (base circle shows through).
-  const rows = q.data?.rows
-  if (!rows || rows.length === 0) return null
-
-  let startCount = 0
-  let endCount = 0
-  for (const row of rows) {
-    const c = typeof row.count === 'number' ? row.count : 0
-    if (row.side === 'start') startCount += c
-    else if (row.side === 'end') endCount += c
-  }
-  if (startCount + endCount === 0) return null
-
-  // Convert the existing radius (meters) to a pixel diameter for the SVG icon
-  // so the pie footprint exactly matches the underlying circle at this zoom.
-  const diameterPx = max(4, (2 * radiusM) / mPerPx)
-  const icon = buildPieIcon(diameterPx, startCount, endCount, colors)
-  return (
-    <Marker
-      position={{ lat, lng }}
-      icon={icon}
-      interactive={false}
-      keyboard={false}
-    />
-  )
-}
-
 export interface StationPiesProps {
   stations: Stations
   pieRange: TimeRange
@@ -142,7 +94,7 @@ export interface StationPiesProps {
 
 /** Renders pie overlays for stations currently visible in the map AND with
  *  `ends > MIN_ENDS_FOR_PIE`. Re-evaluates the visible set on `moveend` /
- *  `zoomend`. */
+ *  `zoomend`. ONE Worker fetch covers the whole visible set. */
 export default function StationPies({
   stations, pieRange, colors = DEFAULT_PIE_COLORS,
 }: StationPiesProps) {
@@ -178,23 +130,65 @@ export default function StationPies({
       out.push({ id, lat: st.lat, lng: st.lng, radiusM })
     }
     return out
-  }, [stations, bounds])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stations, bounds.getNorth(), bounds.getSouth(), bounds.getEast(), bounds.getWest()])
+
+  // Stable, sorted ID list for the TSQ query key (so identity-by-content is
+  // preserved across re-renders that don't actually change the visible set).
+  const visibleIds = useMemo(
+    () => visible.map(v => v.id).sort(),
+    [visible],
+  )
+
+  const totals = useTotalsQuery({
+    kind: 'trips',
+    scope: 'stations',
+    end: pieRange.timestamp,
+    duration: pieRange.duration,
+    filterShortName: visibleIds,
+    dims: ['side'],
+  })
+
+  // Build short_name → {start, end} map from the totals response.
+  const countsByStation = useMemo(() => {
+    const m = new Map<string, { start: number; end: number }>()
+    const rows = totals.data?.rows
+    if (!rows) return m
+    for (const row of rows) {
+      const id = row.short_name
+      if (typeof id !== 'string') continue
+      let entry = m.get(id)
+      if (!entry) {
+        entry = { start: 0, end: 0 }
+        m.set(id, entry)
+      }
+      const c = typeof row.count === 'number' ? row.count : 0
+      if (row.side === 'start') entry.start += c
+      else if (row.side === 'end') entry.end += c
+    }
+    return m
+  }, [totals.data])
 
   return (
     <Pane name="station-pies" style={{ zIndex: 430 }}>
-      {visible.map(s => (
-        <StationPie
-          key={s.id}
-          id={s.id}
-          lat={s.lat}
-          lng={s.lng}
-          radiusM={s.radiusM}
-          mPerPx={mPerPx}
-          end={pieRange.timestamp}
-          duration={pieRange.duration}
-          colors={colors}
-        />
-      ))}
+      {visible.map(s => {
+        const counts = countsByStation.get(s.id)
+        // Defensive: no row for this station → render nothing (base circle shows through).
+        if (!counts) return null
+        const total = counts.start + counts.end
+        if (total === 0) return null
+        const diameterPx = max(4, (2 * s.radiusM) / mPerPx)
+        const icon = buildPieIcon(diameterPx, counts.start, counts.end, colors)
+        return (
+          <Marker
+            key={s.id}
+            position={{ lat: s.lat, lng: s.lng }}
+            icon={icon}
+            interactive={false}
+            keyboard={false}
+          />
+        )
+      })}
     </Pane>
   )
 }

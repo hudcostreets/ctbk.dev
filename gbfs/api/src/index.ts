@@ -10,6 +10,12 @@
  *   GET /api/query?kind=&station=|region=&from=&to=&(bin=|targetPxPerBin=&plotWidth=)
  *                                      — unified multi-scale time-series query
  *                                        (trips + availability). See planQuery() below.
+ *   GET /api/totals?kind=&metric=&from=&to=&scope=[&dims=][&filter.short_name=]
+ *                  [&filter.region=][&filter.side=]
+ *                                      — windowed totals for monoid-aggregable
+ *                                        metrics. trips path implemented; availability
+ *                                        returns 501 pending histogram-schema EDA.
+ *                                        See ./totals.ts.
  *   GET /api/rides?station=&from=&to=&page=&pageSize=&sortBy=&sortDir=
  *                  [&counterpart=&side=]
  *                                      — paginated raw-rides table per station
@@ -248,6 +254,15 @@ import {
 	type Side,
 } from './planQuery';
 import { binAndAggregate } from './bin';
+import {
+	aggregateTotals,
+	parseTotalsParams,
+	pickTripsAggTier,
+	tripsAggKeys,
+	tripsTotalsFallbackPaths,
+	type TotalsParams,
+	type TotalsResponse,
+} from './totals';
 
 /**
  * Read one parquet from R2, returning rows as plain objects. Returns `null` if
@@ -363,6 +378,84 @@ async function executeQuery(
 		synthesizeCount,
 	});
 	return { rows: binned, missing };
+}
+
+/**
+ * Execute an `/api/totals` request (trips path). Tier-stitching:
+ *
+ *   1. Pick the coarsest agg tier that fits the window via `pickTripsAggTier`.
+ *      For a window ≥ 1y: mo1; ≥ 1mo: d1; ≥ 1d: h1; else: skip step 2.
+ *   2. Try reading the corresponding `trips/agg/<tier>/<window>.parquet`
+ *      shards. If ALL shards are 404 (the agg pipeline hasn't produced them
+ *      yet — `ctbk trips-agg` is not yet built), fall through to step 3.
+ *   3. Fallback: per `tripsTotalsFallbackPaths` —
+ *        scope=stations + filter.short_name → per-station rides parquets
+ *        scope=regions / scope=all → per-region h1 yearly shards (already on R2)
+ *      With `synthesizeCount=true` for the per-station fallback (raw rides files
+ *      have no explicit `count` column).
+ *
+ * Once `ctbk trips-agg` is producing files, the fallback branch can be deleted
+ * (mark and search for 'tripsTotalsFallbackPaths' to find it).
+ */
+async function executeTotalsQuery(
+	r2: R2Bucket,
+	p: TotalsParams,
+): Promise<TotalsResponse> {
+	// Step 1+2: try the agg-tier shards first. Only project columns we need.
+	const projection = projectionForTotals(p);
+	const aggTier = pickTripsAggTier(p.fromS, p.toS);
+	if (aggTier) {
+		const aggKeys = tripsAggKeys(aggTier, p.fromS, p.toS);
+		const aggResults = await Promise.all(
+			aggKeys.map((k) => readR2Parquet(r2, k, projection)),
+		);
+		const allMissing = aggResults.every((r) => r === null);
+		if (!allMissing) {
+			const merged: Record<string, unknown>[] = [];
+			for (const r of aggResults) if (r) merged.push(...r);
+			const rows = aggregateTotals(merged, p, /* synthesizeCount */ false);
+			return { kind: p.kind, metric: p.metric, scope: p.scope, tier: aggTier, rows };
+		}
+	}
+
+	// Step 3: fallback to existing R2 parquets (per-station or per-region).
+	const fallback = tripsTotalsFallbackPaths(p);
+	const fallbackResults = await Promise.all(
+		fallback.paths.map((k) => readR2Parquet(r2, k, projection)),
+	);
+	const merged: Record<string, unknown>[] = [];
+	for (const r of fallbackResults) if (r) merged.push(...r);
+	// Per-station fallback files have no explicit `count`; per-region h1 shards do.
+	const synthesizeCount = fallback.tier === 'fallback-stations';
+	// Per-station fallback files lack `short_name` as a column (they're keyed by
+	// filename). Inject it so `aggregateTotals` can group by station.
+	if (fallback.tier === 'fallback-stations' && p.filterShortName) {
+		// Re-walk results, tagging each row with its source short_name.
+		merged.length = 0;
+		fallbackResults.forEach((rows, i) => {
+			if (!rows) return;
+			const shortName = p.filterShortName![i];
+			for (const r of rows) {
+				if (r.short_name === undefined) r.short_name = shortName;
+				merged.push(r);
+			}
+		});
+	}
+	const rows = aggregateTotals(merged, p, synthesizeCount);
+	return { kind: p.kind, metric: p.metric, scope: p.scope, tier: fallback.tier, rows };
+}
+
+/** Columns to project from parquet for `/api/totals`. Keeps R2 byte-scan
+ *  small. `dt` + scope key + dim columns + sum-monoid metric columns. */
+function projectionForTotals(p: TotalsParams): string[] {
+	const cols = new Set<string>(['dt', 'count', 'duration_s']);
+	if (p.scope === 'stations') cols.add('short_name');
+	if (p.scope === 'regions') cols.add('region');
+	for (const d of p.dims) cols.add(d);
+	if (p.filterShortName) cols.add('short_name');
+	if (p.filterRegion) cols.add('region');
+	if (p.filterSide) cols.add('side');
+	return [...cols];
 }
 
 /**
@@ -491,6 +584,25 @@ export default {
 				missing,
 				rows,
 			}, env);
+		}
+
+		// /api/totals — windowed totals over monoid-aggregable metrics. trips path
+		// only for now; availability returns 501 pending histogram-schema EDA
+		// (see specs/multiscale-timeseries-backend.md § "Open EDA").
+		if (url.pathname === '/api/totals') {
+			let p: TotalsParams;
+			try {
+				p = parseTotalsParams(url.searchParams);
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'invalid query', 400, env);
+			}
+			if (p.kind === 'availability') {
+				return jsonResponse({
+					error: 'availability /api/totals not yet implemented; pending histogram-schema EDA',
+				}, env, { status: 501 });
+			}
+			const result = await executeTotalsQuery(env.R2, p);
+			return jsonResponse(result, env);
 		}
 
 		// /api/rides — paginated raw-rides table per station (see specs/multiscale-timeseries-backend.md
