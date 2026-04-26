@@ -25,6 +25,29 @@ Schema (both stages; only `dt` granularity differs):
 
 Rows are sorted by `dt` ascending so parquet row-group stats give readers a
 free dt zone-map, matching the Worker's range-filter strategy.
+
+Cross-month-tail caveat
+-----------------------
+`ConsolidatedMonth(M)` contains rides that *ended* in month `M`. So a ride
+starting in `M-1` and ending in `M` is in `M`'s consolidated; a ride starting
+in `M` and ending in `M+1` is in `M+1`'s consolidated.
+
+`TripsRegionN1Month(M)` reads only `M`'s aggregated parquet, so it captures
+the first case (starts in `M-1` show up with `Start Month = M-1` here, which
+is fine — the Worker reads `n1[M-1]` for those windows) but **misses** the
+second case. `TripsRegionH1Year(Y)` fans in all 12 months so it captures
+both sides.
+
+User-visible effect: minute-grain queries for month `M` (which the Worker
+plans against `n1[M]` only) under-report by ~0.01% relative to hour-grain
+queries (which use `h1[Y]`). For 5M-ride months that's ~600 rides; for
+boundary days it's higher in relative terms.
+
+Fixing requires either (a) materializing rides into n1 keyed by Start month
+(expanding n1[M] to also fan in `M+1`'s aggregated, filtered to
+`Start Month = M`), or (b) having the Worker stitch n1[M] + n1[M+1] for
+month-end queries. Both are deferred — the discrepancy is small enough
+that it's not a P1 fix.
 """
 from datetime import datetime, timezone
 from pathlib import Path
