@@ -126,8 +126,10 @@ interface ColumnData {
  * Pivot a flat list of (snapshot × station) rows into columnar arrays
  * matching the daily-compaction parquet schema.
  *
- * Sorted by (ts, station_id) for deterministic output and cheap row-group
- * min/max stats on `ts`.
+ * Sorted by (station_id, ts) so per-station queries can use parquet's
+ * row-group min/max stats on `station_id` to read just one row group
+ * per shard (~60 rows for that station × that hour) instead of decoding
+ * the whole 144k-row file. See `specs/gbfs-r2-only.md` Phase 2.5.
  */
 export function buildColumnData(snapshots: Snapshot[]): ColumnData[] {
 	const flatRows: (StationRow & { ts: number; polled_at: number })[] = [];
@@ -137,7 +139,7 @@ export function buildColumnData(snapshots: Snapshot[]): ColumnData[] {
 		}
 	}
 	flatRows.sort((a, b) =>
-		a.ts !== b.ts ? a.ts - b.ts : a.station_id < b.station_id ? -1 : a.station_id > b.station_id ? 1 : 0,
+		a.station_id < b.station_id ? -1 : a.station_id > b.station_id ? 1 : a.ts - b.ts,
 	);
 
 	const n = flatRows.length;
@@ -173,8 +175,10 @@ async function snapshotsToParquet(snapshots: Snapshot[]): Promise<ArrayBuffer | 
 	if (columnData[0].data.length === 0) return null;
 
 	const { parquetWriteBuffer } = await import('hyparquet-writer');
-	// codec defaults to 'SNAPPY'; statistics on by default → free dt-index on (ts, polled_at).
-	return parquetWriteBuffer({ columnData });
+	// codec defaults to 'SNAPPY'; statistics on by default → free index on station_id.
+	// rowGroupSize ≈ 60 means one row group ≈ one station × one hour, so per-station
+	// queries can read just one row group (~5-10 KB) instead of the whole file.
+	return parquetWriteBuffer({ columnData, rowGroupSize: 60 });
 }
 
 /** Compact one (date, hour) window. Returns the count of minutes compacted. */

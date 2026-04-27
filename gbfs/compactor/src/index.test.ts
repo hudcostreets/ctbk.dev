@@ -56,7 +56,7 @@ describe('buildColumnData', () => {
 			snap(100, 101, [station('A'), station('B')]),
 			snap(200, 201, [station('A'), station('B')]),
 		]);
-		// Expected schema: station_id, ts, polled_at, 8 INT16, last_reported = 12 columns
+		// Expected schema: station_id, ts, polled_at, 8 INT32, last_reported = 12 columns
 		expect(cols.map((c) => c.name)).toEqual([
 			'station_id',
 			'ts',
@@ -72,18 +72,19 @@ describe('buildColumnData', () => {
 			'last_reported',
 		]);
 		expect(cols[0].data).toHaveLength(4);
-		expect(cols.find((c) => c.name === 'ts')!.data).toEqual([100n, 100n, 200n, 200n]);
-		expect(cols.find((c) => c.name === 'station_id')!.data).toEqual(['A', 'B', 'A', 'B']);
+		// Sorted by (station_id, ts): A@100, A@200, B@100, B@200
+		expect(cols.find((c) => c.name === 'station_id')!.data).toEqual(['A', 'A', 'B', 'B']);
+		expect(cols.find((c) => c.name === 'ts')!.data).toEqual([100n, 200n, 100n, 200n]);
 	});
 
-	test('sorts by (ts, station_id)', () => {
+	test('sorts by (station_id, ts)', () => {
 		const cols = buildColumnData([
 			// Out-of-order input: ts=200 comes first, station_id=B before A
 			snap(200, 201, [station('B'), station('A')]),
 			snap(100, 101, [station('B'), station('A')]),
 		]);
-		expect(cols.find((c) => c.name === 'ts')!.data).toEqual([100n, 100n, 200n, 200n]);
-		expect(cols.find((c) => c.name === 'station_id')!.data).toEqual(['A', 'B', 'A', 'B']);
+		expect(cols.find((c) => c.name === 'station_id')!.data).toEqual(['A', 'A', 'B', 'B']);
+		expect(cols.find((c) => c.name === 'ts')!.data).toEqual([100n, 200n, 100n, 200n]);
 	});
 
 	test('coerces ts/polled_at/last_reported to BigInt', () => {

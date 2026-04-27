@@ -84,6 +84,7 @@ describe('parquet round-trip', () => {
 			}
 		}
 
+		// Sorted by (station_id, ts): A@100, A@200, B@100, B@200
 		expect(rows).toHaveLength(4);
 		expect(rows[0]).toEqual({
 			station_id: 'A',
@@ -99,10 +100,10 @@ describe('parquet round-trip', () => {
 			is_returning: 1,
 			last_reported: 1699999990,
 		});
-		expect(rows[1].station_id).toBe('B');
-		expect(rows[2]).toEqual(
+		expect(rows[1]).toEqual(
 			expect.objectContaining({ station_id: 'A', ts: 1700000060, num_bikes_available: 4 }),
 		);
+		expect(rows[2].station_id).toBe('B');
 		expect(rows[3].station_id).toBe('B');
 	});
 
