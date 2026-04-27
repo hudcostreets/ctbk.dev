@@ -1,5 +1,11 @@
 # Spec: GBFS Availability — R2-Only Serving (Drop D1 Hot-Cache)
 
+> **Status (2026-04-27)**: Done. P0/EDA + P1 (compactor) + P2 (api R2 reads)
+> + P2.5 (row-group pruning) + P3 (decommission D1 hot-cache) all shipped.
+> Cost moved from ~150MM D1 rows-written/mo (gbfs share ~68MM, ~$19/mo)
+> to ~0. Histogram-aggregation pipeline (e's avail-agg work) +
+> `/api/totals?kind=availability` are additional features that landed alongside.
+
 ## Problem
 
 The current GBFS availability pipeline writes ~2,360 station rows / minute into D1

@@ -1,28 +1,30 @@
 /**
  * GBFS loader — Cloudflare Worker queue consumer.
  *
- * Triggered by R2 PutObject events on `gbfs/status/YYYY-MM-DD/HH-MM.json`.
- * Reads the JSON, parses ~2,360 station rows, batch-INSERTs into D1
- * `availability_YYYYMMDD` table (created on demand).
+ * Triggered by R2 PutObject events on `gbfs/status/*` and `gbfs/info/*`.
+ *
+ * Per-minute availability JSONs are now ignored — the api worker reads
+ * availability directly from R2 (h1 shards + monthly parquet); the D1
+ * `availability_YYYYMMDD` hot-cache has been retired (P3 of
+ * `specs/gbfs-r2-only.md`).
+ *
+ * Daily station_information snapshots are still upserted into D1's
+ * `stations` metadata table (low-volume, used for slug/name/region
+ * lookups).
  */
 
-interface StationStatus {
-	station_id: string;
-	num_bikes_available: number;
-	num_ebikes_available: number;
-	num_docks_available: number;
-	num_bikes_disabled: number;
-	num_docks_disabled: number;
-	is_installed: number;
-	is_renting: number;
-	is_returning: number;
-	last_reported: number;
+interface InfoStation {
+	station_id: string;       // GBFS UUID
+	short_name?: string;
+	name?: string;
+	lat?: number;
+	lon?: number;
+	capacity?: number;
+	station_type?: string;
 }
 
-interface Snapshot {
-	ts: number;
-	polled_at: number;
-	stations: StationStatus[];
+interface InfoResponse {
+	data: { stations: InfoStation[] };
 }
 
 // R2 event message shape (Cloudflare Queues delivers these for R2 notifications)
@@ -39,36 +41,14 @@ interface Env {
 	DB: D1Database;
 }
 
-const COLS = [
-	'station_id', 'ts', 'polled_at',
-	'num_bikes_available', 'num_ebikes_available', 'num_docks_available',
-	'num_bikes_disabled', 'num_docks_disabled',
-	'is_installed', 'is_renting', 'is_returning', 'last_reported',
-];
-
-/** Extract YYYY-MM-DD from an object key like "gbfs/status/2026-04-12/00-15.json". */
-function dateFromKey(key: string): string | null {
-	const m = key.match(/^gbfs\/status\/(\d{4}-\d{2}-\d{2})\/\d{2}-\d{2}\.json$/);
-	return m ? m[1] : null;
+/** Detect a per-minute availability snapshot key like "gbfs/status/2026-04-12/00-15.json". */
+function isAvailKey(key: string): boolean {
+	return /^gbfs\/status\/\d{4}-\d{2}-\d{2}\/\d{2}-\d{2}\.json$/.test(key);
 }
 
 /** Detect a station_information snapshot key like "gbfs/info/2026-04-12.json". */
 function isInfoKey(key: string): boolean {
 	return /^gbfs\/info\/\d{4}-\d{2}-\d{2}\.json$/.test(key);
-}
-
-interface InfoStation {
-	station_id: string;       // GBFS UUID
-	short_name?: string;
-	name?: string;
-	lat?: number;
-	lon?: number;
-	capacity?: number;
-	station_type?: string;
-}
-
-interface InfoResponse {
-	data: { stations: InfoStation[] };
 }
 
 /** Upsert all stations from a station_information snapshot.
@@ -106,80 +86,31 @@ async function upsertStationsInfo(db: D1Database, info: InfoResponse): Promise<n
 	return stmts.length;
 }
 
-function tableNameForDate(dateStr: string): string {
-	return `availability_${dateStr.replace(/-/g, '')}`;
-}
-
-async function ensureTable(db: D1Database, dateStr: string): Promise<string> {
-	const table = tableNameForDate(dateStr);
-	// CREATE TABLE IF NOT EXISTS — cheap if it already exists
-	await db.exec(
-		`CREATE TABLE IF NOT EXISTS ${table} (` +
-		`station_id TEXT NOT NULL, ts INTEGER NOT NULL, polled_at INTEGER NOT NULL, ` +
-		`num_bikes_available INTEGER NOT NULL, num_ebikes_available INTEGER NOT NULL, ` +
-		`num_docks_available INTEGER NOT NULL, num_bikes_disabled INTEGER NOT NULL, ` +
-		`num_docks_disabled INTEGER NOT NULL, is_installed INTEGER NOT NULL, ` +
-		`is_renting INTEGER NOT NULL, is_returning INTEGER NOT NULL, last_reported INTEGER NOT NULL, ` +
-		`PRIMARY KEY (station_id, ts))`
-	);
-	// Track in day_tables (idempotent)
-	await db.prepare(
-		`INSERT OR IGNORE INTO day_tables (date, table_name, created_at) VALUES (?, ?, ?)`
-	).bind(dateStr, table, Math.floor(Date.now() / 1000)).run();
-	return table;
-}
-
-async function insertSnapshot(db: D1Database, table: string, snap: Snapshot): Promise<void> {
-	if (!snap.stations.length) return;
-
-	// D1 limits variables per statement (~100). One row per statement (12 vars)
-	// stays well under. Send all as a single batch for one round-trip.
-	const sql = `INSERT OR REPLACE INTO ${table} (${COLS.join(',')}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`;
-	const stmts = snap.stations.map((s) =>
-		db.prepare(sql).bind(
-			s.station_id, snap.ts, snap.polled_at,
-			s.num_bikes_available, s.num_ebikes_available, s.num_docks_available,
-			s.num_bikes_disabled, s.num_docks_disabled,
-			s.is_installed, s.is_renting, s.is_returning, s.last_reported,
-		)
-	);
-	await db.batch(stmts);
-}
-
 export default {
-	async queue(batch: MessageBatch<unknown>, env: Env, ctx: ExecutionContext): Promise<void> {
+	async queue(batch: MessageBatch<unknown>, _env: Env, _ctx: ExecutionContext): Promise<void> {
 		const typed = batch as MessageBatch<R2EventMessage>;
 		for (const msg of typed.messages) {
 			try {
 				const key = msg.body.object.key;
 
-				// Per-minute availability JSON
-				const dateStr = dateFromKey(key);
-				if (dateStr) {
-					const obj = await env.BUCKET.get(key);
-					if (!obj) {
-						console.warn(`Object missing: ${key}`);
-						msg.ack();
-						continue;
-					}
-					const snap = JSON.parse(await obj.text()) as Snapshot;
-					const table = await ensureTable(env.DB, dateStr);
-					await insertSnapshot(env.DB, table, snap);
-					console.log(`Loaded ${snap.stations.length} rows from ${key} → ${table}`);
+				// Per-minute availability JSON — ack without touching D1.
+				// Availability is now served from R2 (h1 shards + monthly parquet)
+				// directly by the api worker; no hot-cache needed.
+				if (isAvailKey(key)) {
 					msg.ack();
 					continue;
 				}
 
 				// Daily station_information snapshot
 				if (isInfoKey(key)) {
-					const obj = await env.BUCKET.get(key);
+					const obj = await _env.BUCKET.get(key);
 					if (!obj) {
 						console.warn(`Object missing: ${key}`);
 						msg.ack();
 						continue;
 					}
 					const info = JSON.parse(await obj.text()) as InfoResponse;
-					const n = await upsertStationsInfo(env.DB, info);
+					const n = await upsertStationsInfo(_env.DB, info);
 					console.log(`Upserted ${n} stations from ${key}`);
 					msg.ack();
 					continue;
