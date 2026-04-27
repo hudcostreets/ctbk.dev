@@ -304,35 +304,60 @@ closed shards get `max-age=31536000, immutable`.
 
 ---
 
-## Open EDA (pre-implementation)
+## EDA findings (P0, 2026-04-27)
 
-Decisions to lock down before building the agg pipeline:
+### 1. Joint histogram cardinality — **marginal × 5 wins**
 
-### 1. Joint histogram cardinality (per station, per shard)
+Ran the cardinality probe on 5 stations covering low → high capacity, ~15 days
+of per-minute data each (`gbfs/stations/<uuid>/2026-04.parquet`):
 
-Run on `e` (R2 + per-station availability already there):
-
-```bash
-# pick a few stations of varying capacity + activity
-for s in HB101 5980.10 6450.12 5847.01 grove-st-path; do
-  python -c "
-import pandas as pd
-df = pd.read_parquet('r2/ctbk/avail/stations/${s}.parquet')
-print('${s}:', len(df), 'rows')
-print('  distinct 5-tuples:', df.groupby(['num_bikes_available', 'num_ebikes_available', 'num_docks_available', 'num_bikes_disabled', 'num_docks_disabled']).size().shape[0])
-print('  distinct 3-tuples (b/eb/dock):', df.groupby(['num_bikes_available', 'num_ebikes_available', 'num_docks_available']).size().shape[0])
-print('  capacity (max bikes+ebikes+docks):', (df.num_bikes_available + df.num_ebikes_available + df.num_docks_available).max())
-"
-done
+```
+station   cap   h1=1h max   d1=1d max   mo1≈30d max
+HB101     24    27          197         1848
+6450.12   96    49          418         3280
+5847.01   74    53          543         5818
+JC115     42    47          344         3747
+5980.10   78    53          601         6838
 ```
 
-Decide:
-- If max distinct 5-tuples per station ≤ ~1000 → joint histogram is fine.
-  Single `state_tuple` column, smaller storage, captures correlations.
-- If much higher → marginal × 5. Slightly larger storage, no correlations
-  but answers all stated questions.
+(`mo1` here is the actual ~15-day window; full month would be higher.)
 
-Document findings; lock the schema choice in the spec.
+At **h1 tier** joint cardinality stays well below 1000 — joint would work.
+At **d1 tier** it's 200-600/station — already past the practical "small
+sparse keyspace" point for parquet dictionaries. At **mo1** it's 1800-6800
+per station, exceeding the spec's joint-OK threshold by **6×** even on a
+modest sample.
+
+Marginal-sum (sum of nunique-per-metric, max across days, d1 tier):
+```
+HB101    81 ;  6450.12   188 ;  5847.01   230 ;  JC115   129 ;  5980.10   231
+```
+Marginal is **~2.5× smaller** even at d1, and stays bounded at mo1
+(≤~5 × max-state-value per station per month).
+
+Bonus probe — `disabled` and `pending` zero-fraction (spec hypothesized
+they'd be 0 most of the time, collapsing the joint to ~3 active dims):
+```
+                 P(bikes_disabled=0)   P(docks_disabled=0)
+HB101            0.088                 0.980
+5980.10          0.001                 0.994
+```
+`docks_disabled` mostly = 0 ✓, but `bikes_disabled` is *almost always
+nonzero* — disabled bikes carry real signal. The 5-tuple does NOT
+collapse to 3 active dims.
+
+**Decision: marginal × 5.** Schema as written in §Storage layout.
+
+### 2. Tier validation
+
+Sized as a smoke test for the avail-agg implementation: build `n0 → h1 → d1`
+(skip `mo1` until enough days exist) for one day; verify Worker tier-stitched
+sanity queries (e.g. mean across the full day) produce identical results
+whether read from h1 or d1.
+
+### 3. h1 storage size
+
+To estimate empirically from a backfill day; record alongside the smoke test.
 
 ### 2. Tier validation
 
