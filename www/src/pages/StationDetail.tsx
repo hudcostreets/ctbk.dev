@@ -5,6 +5,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import css from '../index.module.css'
 import controlCss from '../controls.module.css'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
+import OverviewAvailabilityChart, { pickOverviewBin } from '../components/OverviewAvailabilityChart'
 import { RangeWidthControl } from '../components/RangeWidthControl'
 import { BinSelect } from '../components/BinSelect'
 import RidesTable from '../components/RidesTable'
@@ -19,7 +20,7 @@ import { Radios } from '../components/Radios'
 import { useSmartPolling } from '../hooks/useSmartPolling'
 import { useStationTrips } from '../hooks/useStationTrips'
 import {
-  useStationInfo, useStationRange, stationsApi,
+  useStationInfo, useStationRange, useAvailabilityOverview, stationsApi,
   type StationRangeResponse,
 } from '../query/stations'
 import { useRollupQuery, type Side } from '../query/rollups'
@@ -392,6 +393,8 @@ export default function StationDetail() {
         <Typography>No data yet for today.</Typography>
       )}
 
+      <OverviewSection gbfsId={info?.gbfs_station_id ?? null} capacity={info?.capacity ?? null} />
+
       {mapCenter && mapShortName && (
         <>
           <Box sx={{ height: 400, width: '100%', mt: 3, borderRadius: 1, overflow: 'hidden' }}>
@@ -616,6 +619,79 @@ export default function StationDetail() {
           </details>
         </Box>
       )}
+    </Box>
+  )
+}
+
+/** Earliest UTC date for which any avail-agg shard exists. The compactor +
+ *  backfill cover data from 2026-04-07 onward. */
+const OVERVIEW_FLOOR_S = Math.floor(new Date('2026-04-07T00:00:00Z').getTime() / 1000)
+
+/** "Mean bikes-available across the longest-available window" chart.
+ *  Renders below the per-minute chart on the station detail page; uses
+ *  `/api/totals?kind=availability&bin=<seconds>` with auto-picked bin. */
+function OverviewSection({
+  gbfsId,
+  capacity,
+}: {
+  gbfsId: string | null
+  capacity: number | null
+}) {
+  // Snapshot `toS` once at mount + refresh every 5 min so the chart isn't
+  // stale forever but doesn't churn the query key on every parent re-render.
+  const [toS, setToS] = useState(() => Math.floor(Date.now() / 1000))
+  useEffect(() => {
+    const i = setInterval(() => setToS(Math.floor(Date.now() / 1000)), 5 * 60 * 1000)
+    return () => clearInterval(i)
+  }, [])
+
+  // Re-pick bin on viewport resize — debounced so the query key doesn't churn
+  // mid-drag.
+  const [widthPx, setWidthPx] = useState(() =>
+    typeof window === 'undefined' ? 800 : Math.max(400, Math.min(1400, window.innerWidth - 40))
+  )
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const onResize = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        setWidthPx(Math.max(400, Math.min(1400, window.innerWidth - 40)))
+      }, 250)
+    }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      if (timer) clearTimeout(timer)
+    }
+  }, [])
+
+  const fromS = OVERVIEW_FLOOR_S
+  const binS = useMemo(() => pickOverviewBin(toS - fromS, widthPx), [toS, fromS, widthPx])
+
+  const overview = useAvailabilityOverview(gbfsId ?? undefined, fromS, toS, binS)
+
+  if (!gbfsId) return null
+  if (overview.isLoading) {
+    return (
+      <Box mt={3} display="flex" justifyContent="center"><CircularProgress size={20} /></Box>
+    )
+  }
+  if (overview.error || !overview.data || overview.data.rows.length === 0) return null
+
+  const binLabel = binS >= 2592000 ? 'monthly' : binS >= 86400 * 7 ? 'weekly' : binS >= 86400 ? 'daily' : binS >= 3600 ? `${binS / 3600}h` : `${binS}s`
+
+  return (
+    <Box mt={3}>
+      <Typography variant="subtitle2" sx={{ opacity: 0.7, mb: 0.5 }}>
+        Mean bikes available — {binLabel} bins, since {new Date(fromS * 1000).toISOString().slice(0, 10)}
+      </Typography>
+      <OverviewAvailabilityChart
+        rows={overview.data.rows}
+        capacity={capacity}
+        fromS={fromS}
+        toS={toS}
+        binS={binS}
+      />
     </Box>
   )
 }

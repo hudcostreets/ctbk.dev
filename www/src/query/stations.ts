@@ -82,4 +82,56 @@ export function useStationRange(
   })
 }
 
+/** One row of binned availability aggregation, returned by
+ *  `/api/totals?kind=availability&bin=<seconds>&filter.station_id=<uuid>`. */
+export interface AvailabilityOverviewRow {
+  dt: number               // bin start, unix-s
+  station_id: string
+  sample_count: number     // total minutes-in-state behind the reducer
+  mean?: number            // when agg=mean
+  min?: number             // when agg=min
+  max?: number             // when agg=max
+  p05?: number; p25?: number; p50?: number; p75?: number; p95?: number
+}
+
+export interface AvailabilityOverviewResponse {
+  kind: 'availability'
+  metric: string
+  scope: string
+  tier: string
+  rows: AvailabilityOverviewRow[]
+}
+
+/** Fetch binned availability aggregation for one station. `gbfsId` is the
+ *  GBFS UUID (not slug or short_name). Returns `mean` per `binS`-sized bucket
+ *  by default; pass `agg='p50'` etc. for percentile reducers. */
+export function useAvailabilityOverview(
+  gbfsId: string | undefined,
+  fromS: number,
+  toS: number,
+  binS: number,
+  metric: 'bikes' | 'ebikes' | 'docks' | 'disabled' | 'pending' = 'bikes',
+  agg: 'mean' | 'min' | 'max' | 'p05' | 'p25' | 'p50' | 'p75' | 'p95' = 'mean',
+) {
+  return useQuery<AvailabilityOverviewResponse>({
+    queryKey: ['availability-overview', gbfsId, fromS, toS, binS, metric, agg],
+    enabled: !!gbfsId && fromS < toS && binS >= 3600,
+    queryFn: async () => {
+      const url = new URL(`${API_BASE}/api/totals`)
+      url.searchParams.set('kind', 'availability')
+      url.searchParams.set('metric', metric)
+      url.searchParams.set('scope', 'stations')
+      url.searchParams.set('from', String(fromS))
+      url.searchParams.set('to', String(toS))
+      url.searchParams.set('filter.station_id', gbfsId!)
+      url.searchParams.set('agg', agg)
+      url.searchParams.set('bin', String(binS))
+      const res = await fetch(url.toString())
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      return res.json()
+    },
+    placeholderData: keepPreviousData,
+  })
+}
+
 export const stationsApi = { API_BASE }
