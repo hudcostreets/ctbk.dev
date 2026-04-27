@@ -675,12 +675,14 @@ async function executeAvailTotalsQuery(
 	const projection = projectionForAvailTotals(p);
 	const keys = availAggKeys(tier, p.fromS, p.toS);
 	const groups = new Map<string, ReturnType<typeof initGroupsType>>();
+	// Sequential: each h1 daily shard decodes to ~110MB of JS objects (530k
+	// rows × 5 cols × ~210B/row). Reading even 2 in parallel pushes heap
+	// past the Worker's 128MB cap → 503. Per-file fold-and-drop keeps peak
+	// at one file's worth.
 	for (const key of keys) {
 		const rows = await readR2Parquet(r2, key, projection);
 		if (rows === null) continue;
 		availFold(rows as unknown as AvailHistRow[], p, groups as never);
-		// Drop the parsed batch ASAP so the GC can reclaim it before the
-		// next file lands.
 	}
 	const rows = availFinalize(groups as never, p);
 	return { kind: p.kind, metric: p.metric, scope: p.scope, tier, rows };
@@ -814,10 +816,24 @@ export default {
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'invalid query', 400, env);
 			}
+			// Explicit edge cache: Workers don't auto-cache their generated
+			// responses, but the avail-totals path is expensive (~7s for a
+			// 7-day station query). With a 60s TTL, the first user pays the
+			// cost; everyone else sees ~10ms.
+			const cache = caches.default;
+			const cacheKey = new Request(url.toString(), { method: 'GET' });
+			const hit = await cache.match(cacheKey);
+			if (hit) {
+				const headers = new Headers(hit.headers);
+				headers.set('X-Cache', 'HIT');
+				return new Response(hit.body, { status: hit.status, headers });
+			}
 			const result = p.kind === 'availability'
 				? await executeAvailTotalsQuery(env.R2, p)
 				: await executeTotalsQuery(env.R2, p);
-			return jsonResponse(result, env);
+			const resp = jsonResponse(result, env);
+			ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+			return resp;
 		}
 
 		// /api/rides — paginated raw-rides table per station (see specs/multiscale-timeseries-backend.md
