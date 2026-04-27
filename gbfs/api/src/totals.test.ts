@@ -633,6 +633,96 @@ describe('aggregateAvailTotals: bin= time-binning', () => {
 	});
 });
 
+describe('aggregateAvailTotals: metric=all', () => {
+	const T0 = T['2024-01-01'];
+	const HOUR = 3600;
+	const baseAll = (extra: Partial<TotalsParams> = {}): TotalsParams => ({
+		kind: 'availability', metric: 'all',
+		fromS: T0, toS: T0 + 86400,
+		scope: 'stations', dims: [],
+		availAgg: 'mean',
+		...extra,
+	});
+
+	it('emits one row per (station, metric) when binS undefined', () => {
+		const rows: AvailHistRow[] = [
+			{ dt: T0, station_id: 'S1', metric: 'bikes',  state: 5, minutes: 60 },
+			{ dt: T0, station_id: 'S1', metric: 'docks',  state: 19, minutes: 60 },
+			{ dt: T0, station_id: 'S1', metric: 'ebikes', state: 2, minutes: 60 },
+		];
+		const out = aggregateAvailTotals(rows, baseAll());
+		expect(out).toEqual([
+			{ station_id: 'S1', metric: 'bikes',  sample_count: 60, mean: 5 },
+			{ station_id: 'S1', metric: 'docks',  sample_count: 60, mean: 19 },
+			{ station_id: 'S1', metric: 'ebikes', sample_count: 60, mean: 2 },
+		]);
+	});
+
+	it('emits one row per (bin, station, metric) when binned', () => {
+		const rows: AvailHistRow[] = [
+			{ dt: T0,        station_id: 'S1', metric: 'bikes', state: 5,  minutes: 60 },
+			{ dt: T0,        station_id: 'S1', metric: 'docks', state: 19, minutes: 60 },
+			{ dt: T0 + HOUR, station_id: 'S1', metric: 'bikes', state: 8,  minutes: 60 },
+			{ dt: T0 + HOUR, station_id: 'S1', metric: 'docks', state: 16, minutes: 60 },
+		];
+		const out = aggregateAvailTotals(rows, baseAll({ binS: HOUR }));
+		expect(out).toEqual([
+			{ dt: T0,        station_id: 'S1', metric: 'bikes', sample_count: 60, mean: 5 },
+			{ dt: T0,        station_id: 'S1', metric: 'docks', sample_count: 60, mean: 19 },
+			{ dt: T0 + HOUR, station_id: 'S1', metric: 'bikes', sample_count: 60, mean: 8 },
+			{ dt: T0 + HOUR, station_id: 'S1', metric: 'docks', sample_count: 60, mean: 16 },
+		]);
+	});
+
+	it('does not filter by metric when all selected', () => {
+		// Mix of all 5 metrics; output should retain all of them.
+		const rows: AvailHistRow[] = [
+			{ dt: T0, station_id: 'S1', metric: 'bikes',    state: 5, minutes: 60 },
+			{ dt: T0, station_id: 'S1', metric: 'ebikes',   state: 2, minutes: 60 },
+			{ dt: T0, station_id: 'S1', metric: 'docks',    state: 19, minutes: 60 },
+			{ dt: T0, station_id: 'S1', metric: 'disabled', state: 1, minutes: 60 },
+			{ dt: T0, station_id: 'S1', metric: 'pending',  state: 0, minutes: 60 },
+		];
+		const out = aggregateAvailTotals(rows, baseAll());
+		expect(out.map((r) => r.metric).sort()).toEqual(
+			['bikes', 'disabled', 'docks', 'ebikes', 'pending']
+		);
+	});
+
+	it('per-metric histograms are independent', () => {
+		// Verify bikes-rows do NOT contribute to docks-row's hist (would be a bug
+		// in group-keying — same group means histograms cross-pollinate).
+		const rows: AvailHistRow[] = [
+			{ dt: T0, station_id: 'S1', metric: 'bikes', state: 0,  minutes: 30 },
+			{ dt: T0, station_id: 'S1', metric: 'bikes', state: 10, minutes: 30 },
+			{ dt: T0, station_id: 'S1', metric: 'docks', state: 5,  minutes: 60 },
+		];
+		const out = aggregateAvailTotals(rows, baseAll());
+		const bikes = out.find((r) => r.metric === 'bikes');
+		const docks = out.find((r) => r.metric === 'docks');
+		expect(bikes).toEqual({ station_id: 'S1', metric: 'bikes', sample_count: 60, mean: 5 });
+		expect(docks).toEqual({ station_id: 'S1', metric: 'docks', sample_count: 60, mean: 5 });
+	});
+});
+
+describe('parseTotalsParams: metric=all', () => {
+	it('accepts metric=all for kind=availability', () => {
+		const params = new URLSearchParams({
+			kind: 'availability', metric: 'all', scope: 'stations',
+			from: '1700000000', to: '1700086400',
+		});
+		expect(parseTotalsParams(params).metric).toBe('all');
+	});
+
+	it('rejects metric=all for kind=trips', () => {
+		const params = new URLSearchParams({
+			kind: 'trips', metric: 'all', scope: 'stations',
+			from: '1700000000', to: '1700086400',
+		});
+		expect(() => parseTotalsParams(params)).toThrow();
+	});
+});
+
 describe('parseTotalsParams: bin=', () => {
 	const baseParams = (extra: Record<string, string> = {}) =>
 		new URLSearchParams({

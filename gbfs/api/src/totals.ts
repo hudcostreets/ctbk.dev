@@ -37,7 +37,11 @@ export type TotalsKind = 'trips' | 'availability';
 export type TotalsScope = 'stations' | 'regions' | 'all';
 export type TripsMetric = 'count' | 'duration_s';
 export type AvailMetric = 'bikes' | 'ebikes' | 'docks' | 'disabled' | 'pending';
-export type TotalsMetric = TripsMetric | AvailMetric;
+/** `'all'` is a meta-metric that, for availability totals, returns one row
+ *  per (bin?, scope-key, ...dims, metric) — all 5 availability metrics in
+ *  a single response. Avoids 5x round-trips for stacked-area chart fetches. */
+export type AvailMetricParam = AvailMetric | 'all';
+export type TotalsMetric = TripsMetric | AvailMetricParam;
 
 /** Storage tier picked by `pickAggTier` (shared trips/availability). */
 export type AggTier = 'mo1' | 'd1' | 'h1';
@@ -119,10 +123,11 @@ export function parseTotalsParams(params: URLSearchParams): TotalsParams {
 		}
 		metric = metricRaw;
 	} else {
-		if (!(AVAIL_METRICS as readonly string[]).includes(metricRaw)) {
-			throw new Error(`metric must be one of ${AVAIL_METRICS.join('|')} for kind=availability (got ${metricRaw})`);
+		const allowed = [...AVAIL_METRICS, 'all'];
+		if (!(allowed as readonly string[]).includes(metricRaw)) {
+			throw new Error(`metric must be one of ${allowed.join('|')} for kind=availability (got ${metricRaw})`);
 		}
-		metric = metricRaw as AvailMetric;
+		metric = metricRaw as AvailMetricParam;
 	}
 
 	const fromS = parseInt(params.get('from') ?? '', 10);
@@ -458,17 +463,21 @@ const QUANTILE_REDUCERS: Record<string, number> = {
 /** Build the group key for an availability histogram row.
  *  scope=stations → `station_id`. scope=all → `''` (collapse). dims appended.
  *  When `binS` is set, the bin start (`floor(dt/binS)*binS`) is prepended so
- *  rows with the same scope-key but different bins are kept separate. */
+ *  rows with the same scope-key but different bins are kept separate. When
+ *  `metric === 'all'`, the row's `metric` is appended so each metric gets its
+ *  own group. */
 function availGroupKey(
 	scope: TotalsScope,
 	dims: string[],
 	binS: number | undefined,
+	allMetrics: boolean,
 	r: AvailHistRow,
 ): string {
 	const parts: string[] = [];
 	if (binS !== undefined) parts.push(String(Math.floor(r.dt / binS) * binS));
 	if (scope === 'stations') parts.push(r.station_id ?? '');
 	for (const d of dims) parts.push(String((r as Record<string, unknown>)[d] ?? ''));
+	if (allMetrics) parts.push(r.metric);
 	return parts.join('|');
 }
 
@@ -496,18 +505,20 @@ export function availFold(
 	groups: Map<string, AvailAcc>,
 ): void {
 	const stationIdSet = p.filterStationId?.length ? new Set(p.filterStationId) : null;
+	const allMetrics = p.metric === 'all';
 	for (const r of rows) {
 		if (typeof r.dt !== 'number' || r.dt < p.fromS || r.dt > p.toS) continue;
-		if (r.metric !== p.metric) continue;
+		if (!allMetrics && r.metric !== p.metric) continue;
 		if (stationIdSet && !stationIdSet.has(r.station_id)) continue;
 		if (p.scope === 'stations' && !r.station_id) continue;
-		const key = availGroupKey(p.scope, p.dims, p.binS, r);
+		const key = availGroupKey(p.scope, p.dims, p.binS, allMetrics, r);
 		let acc = groups.get(key);
 		if (!acc) {
 			const dimVals: Record<string, unknown> = {};
 			if (p.binS !== undefined) dimVals.dt = Math.floor(r.dt / p.binS) * p.binS;
 			if (p.scope === 'stations') dimVals.station_id = r.station_id;
 			for (const d of p.dims) dimVals[d] = (r as Record<string, unknown>)[d];
+			if (allMetrics) dimVals.metric = r.metric;
 			acc = { key, dimVals, hist: new Map() };
 			groups.set(key, acc);
 		}
@@ -550,13 +561,16 @@ export function availFinalize(
 		out.push(row);
 	}
 	out.sort((a, b) => {
-		// (dt, station_id) when binned; (station_id) otherwise.
+		// (dt, station_id, metric) — components only present when applicable.
 		const da = (a.dt as number | undefined) ?? 0;
 		const db = (b.dt as number | undefined) ?? 0;
 		if (da !== db) return da - db;
 		const ka = String(a.station_id ?? '');
 		const kb = String(b.station_id ?? '');
-		return ka < kb ? -1 : ka > kb ? 1 : 0;
+		if (ka !== kb) return ka < kb ? -1 : 1;
+		const ma = String(a.metric ?? '');
+		const mb = String(b.metric ?? '');
+		return ma < mb ? -1 : ma > mb ? 1 : 0;
 	});
 	return out;
 }
