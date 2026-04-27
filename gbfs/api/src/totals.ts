@@ -35,10 +35,20 @@ import {
 
 export type TotalsKind = 'trips' | 'availability';
 export type TotalsScope = 'stations' | 'regions' | 'all';
-export type TotalsMetric = 'count' | 'duration_s';
+export type TripsMetric = 'count' | 'duration_s';
+export type AvailMetric = 'bikes' | 'ebikes' | 'docks' | 'disabled' | 'pending';
+export type TotalsMetric = TripsMetric | AvailMetric;
 
-/** Storage tier picked by `pickTripsAggTier`. */
-export type TripsAggTier = 'mo1' | 'd1' | 'h1';
+/** Storage tier picked by `pickAggTier` (shared trips/availability). */
+export type AggTier = 'mo1' | 'd1' | 'h1';
+/** Back-compat alias. */
+export type TripsAggTier = AggTier;
+
+/** Histogram reducers for availability (`agg=` parameter). `hist` returns
+ *  the raw merged histogram as an array of `{state, minutes}` rows. */
+export type AvailAgg = 'mean' | 'min' | 'max' | 'p05' | 'p25' | 'p50' | 'p75' | 'p95' | 'hist';
+export const AVAIL_METRICS: readonly AvailMetric[] = ['bikes', 'ebikes', 'docks', 'disabled', 'pending'];
+export const AVAIL_AGGS: readonly AvailAgg[] = ['mean', 'min', 'max', 'p05', 'p25', 'p50', 'p75', 'p95', 'hist'];
 
 const SECOND_MS = 1000;
 const DAY_S = 86400;
@@ -46,7 +56,7 @@ const MONTH_S = 30 * DAY_S;
 const YEAR_S = 365 * DAY_S;
 
 /** Sum-monoid metric columns for trips. */
-export const TRIPS_TOTAL_METRICS: readonly TotalsMetric[] = ['count', 'duration_s'];
+export const TRIPS_TOTAL_METRICS: readonly TripsMetric[] = ['count', 'duration_s'];
 
 /** Allowlist of dim columns clients may break out by (trips). Keep in sync
  *  with the `trips/agg/<tier>` schema in the spec. */
@@ -68,9 +78,11 @@ export interface TotalsParams {
 	toS: number;
 	scope: TotalsScope;
 	dims: string[];                          // never `undefined`; `[]` means "no breakouts"
-	filterShortName?: string[];              // optional restrict
+	filterShortName?: string[];              // optional restrict (trips only — short_name)
+	filterStationId?: string[];              // optional restrict (availability — UUID)
 	filterRegion?: Region[];                 // optional restrict
 	filterSide?: Side;                       // optional restrict (trips only)
+	availAgg?: AvailAgg;                     // availability only; default 'mean'
 }
 
 /** `/api/totals` JSON response shape. */
@@ -78,7 +90,11 @@ export interface TotalsResponse {
 	kind: TotalsKind;
 	metric: TotalsMetric;
 	scope: TotalsScope;
-	tier: TripsAggTier | 'fallback-stations' | 'fallback-regions';
+	tier: AggTier | 'fallback-stations' | 'fallback-regions';
+	/** Rows shaped per the requested reducer. For trips: one row per
+	 *  `(scope × dims)` with `count` + `duration_s`. For availability:
+	 *  one row per `(scope × dims)` with the requested `agg` field
+	 *  (`mean` / `p50` / etc), or `hist` as `[{state, minutes}, ...]`. */
 	rows: Record<string, unknown>[];
 }
 
@@ -93,11 +109,19 @@ export function parseTotalsParams(params: URLSearchParams): TotalsParams {
 	}
 	const kind = kindRaw;
 
-	const metricRaw = params.get('metric') ?? 'count';
-	if (metricRaw !== 'count' && metricRaw !== 'duration_s') {
-		throw new Error(`metric must be 'count' or 'duration_s' (got ${metricRaw})`);
+	const metricRaw = params.get('metric') ?? (kind === 'trips' ? 'count' : 'bikes');
+	let metric: TotalsMetric;
+	if (kind === 'trips') {
+		if (metricRaw !== 'count' && metricRaw !== 'duration_s') {
+			throw new Error(`metric must be 'count' or 'duration_s' for kind=trips (got ${metricRaw})`);
+		}
+		metric = metricRaw;
+	} else {
+		if (!(AVAIL_METRICS as readonly string[]).includes(metricRaw)) {
+			throw new Error(`metric must be one of ${AVAIL_METRICS.join('|')} for kind=availability (got ${metricRaw})`);
+		}
+		metric = metricRaw as AvailMetric;
 	}
-	const metric = metricRaw;
 
 	const fromS = parseInt(params.get('from') ?? '', 10);
 	const toS = parseInt(params.get('to') ?? '', 10);
@@ -143,7 +167,27 @@ export function parseTotalsParams(params: URLSearchParams): TotalsParams {
 	}
 	const filterSide = (sideRaw as Side | null) ?? undefined;
 
-	return { kind, metric, fromS, toS, scope, dims, filterShortName, filterRegion, filterSide };
+	const stationIdRaw = params.get('filter.station_id');
+	const filterStationId = stationIdRaw
+		? stationIdRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+		: undefined;
+
+	let availAgg: AvailAgg | undefined;
+	const aggRaw = params.get('agg');
+	if (kind === 'availability') {
+		const a = aggRaw ?? 'mean';
+		if (!(AVAIL_AGGS as readonly string[]).includes(a)) {
+			throw new Error(`agg must be one of ${AVAIL_AGGS.join('|')} (got ${a})`);
+		}
+		availAgg = a as AvailAgg;
+	} else if (aggRaw !== null) {
+		throw new Error(`agg= is only valid for kind=availability`);
+	}
+
+	return {
+		kind, metric, fromS, toS, scope, dims,
+		filterShortName, filterStationId, filterRegion, filterSide, availAgg,
+	};
 }
 
 /**
@@ -154,12 +198,24 @@ export function parseTotalsParams(params: URLSearchParams): TotalsParams {
  *   ≥ 1 day    → h1    (daily shards)
  *   else       → null  → caller should fall back to per-station scans
  */
-export function pickTripsAggTier(fromS: number, toS: number): TripsAggTier | null {
+export function pickTripsAggTier(fromS: number, toS: number): AggTier | null {
 	const span = toS - fromS;
 	if (span >= YEAR_S) return 'mo1';
 	if (span >= MONTH_S) return 'd1';
 	if (span >= DAY_S) return 'h1';
 	return null;
+}
+
+/**
+ * Availability shares the same tier ladder. Default to `h1` for short
+ * windows since `n0` (raw 1-min polls) isn't a totals-friendly shape — the
+ * histogram aggregator only collapses pre-bucketed minute counts.
+ */
+export function pickAvailAggTier(fromS: number, toS: number): AggTier {
+	const span = toS - fromS;
+	if (span >= YEAR_S) return 'mo1';
+	if (span >= MONTH_S) return 'd1';
+	return 'h1';
 }
 
 /** Enumerate YYYY-MM-DD days touching [fromS, toS] (UTC). */
@@ -182,11 +238,24 @@ export function daysIn(fromS: number, toS: number): string[] {
  * primary source. Until then we expect 404s and fall back per
  * `tripsTotalsFallbackPaths` below.
  */
-export function tripsAggKeys(tier: TripsAggTier, fromS: number, toS: number): string[] {
+export function tripsAggKeys(tier: AggTier, fromS: number, toS: number): string[] {
 	switch (tier) {
 		case 'mo1': return yearsIn(fromS, toS).map((y) => `trips/agg/mo1/${y}.parquet`);
 		case 'd1':  return monthsInDashed(fromS, toS).map((ym) => `trips/agg/d1/${ym}.parquet`);
 		case 'h1':  return daysIn(fromS, toS).map((d) => `trips/agg/h1/${d}.parquet`);
+	}
+}
+
+/**
+ * R2 keys for `avail/agg/<tier>/<window>.parquet` shards. Mirrors
+ * `tripsAggKeys` — mo1 yearly, d1 monthly, h1 daily. Built by the new
+ * `ctbk avail-agg-{h1,d1,mo1}` Python stages (see `ctbk/avail_agg.py`).
+ */
+export function availAggKeys(tier: AggTier, fromS: number, toS: number): string[] {
+	switch (tier) {
+		case 'mo1': return yearsIn(fromS, toS).map((y) => `avail/agg/mo1/${y}.parquet`);
+		case 'd1':  return monthsInDashed(fromS, toS).map((ym) => `avail/agg/d1/${ym}.parquet`);
+		case 'h1':  return daysIn(fromS, toS).map((d) => `avail/agg/h1/${d}.parquet`);
 	}
 }
 
@@ -299,3 +368,181 @@ export function aggregateTotals(
 // caller needs YYYYMM windows; not currently used here but keeps the import
 // surface minimal at the index.ts edge.
 export { monthsIn };
+
+// ---------------------------------------------------------------------------
+// Availability totals: histogram merge + reducers
+// ---------------------------------------------------------------------------
+
+/** One row of the marginal-histogram parquet schema (see
+ *  `ctbk/avail_agg.py`). Long-format: one row per `(dt, station_id, metric,
+ *  state)` cell, sparse (0-minute states omitted). */
+export interface AvailHistRow {
+	dt: number;
+	station_id: string;
+	metric: AvailMetric | string;
+	state: number;
+	minutes: number;
+	[k: string]: unknown;
+}
+
+/** Linear-interpolation quantile (R-7 / NumPy default) on a sorted histogram
+ *  expressed as parallel arrays of `(state, minutes)`. Treats minutes as
+ *  sample weights. Throws on empty input. */
+export function availHistQuantile(states: number[], weights: number[], p: number): number {
+	if (states.length !== weights.length) throw new Error('states/weights length mismatch');
+	if (states.length === 0) throw new Error('availHistQuantile: empty input');
+	// Build cumulative-weight curve. Already sorted by `state` (caller guarantee).
+	let total = 0;
+	for (const w of weights) total += w;
+	if (total <= 0) throw new Error('availHistQuantile: zero-weight histogram');
+	const target = p * (total - 1);  // 0-indexed sample number
+	let cum = 0;
+	let prev = states[0];
+	for (let i = 0; i < states.length; i++) {
+		const next = cum + weights[i];
+		// Sample numbers `cum .. next-1` all sit at `states[i]`.
+		if (target <= next - 1) {
+			// `target` is between `cum` and `next-1` → answer is `states[i]`,
+			// linear-interpolate to `states[i+1]` only if `target` straddles
+			// the boundary (target == next-1 + frac, frac >= 0 from neighbor).
+			const frac = target - Math.floor(target);
+			if (frac === 0 || target < next - 1) return states[i];
+			// target sits exactly on the last sample of bucket i AND has a
+			// fractional component → interpolate to next bucket if there is one.
+			if (i + 1 < states.length) return states[i] + frac * (states[i + 1] - states[i]);
+			return states[i];
+		}
+		cum = next;
+		prev = states[i];
+	}
+	// Fall-through (shouldn't happen): return the max state.
+	return prev;
+}
+
+const QUANTILE_REDUCERS: Record<string, number> = {
+	p05: 0.05, p25: 0.25, p50: 0.50, p75: 0.75, p95: 0.95,
+};
+
+/** Build the group key for an availability histogram row.
+ *  scope=stations → `station_id`. scope=all → `''` (collapse). dims appended. */
+function availGroupKey(scope: TotalsScope, dims: string[], r: AvailHistRow): string {
+	const parts: string[] = [];
+	if (scope === 'stations') parts.push(r.station_id ?? '');
+	for (const d of dims) parts.push(String((r as Record<string, unknown>)[d] ?? ''));
+	return parts.join('|');
+}
+
+/** Per-group accumulator used by both `aggregateAvailTotals` and the
+ *  streaming variant `availFold` / `availFinalize`. */
+interface AvailAcc {
+	key: string;
+	dimVals: Record<string, unknown>;
+	hist: Map<number, number>;
+}
+
+/**
+ * Streaming-friendly fold: ingest one batch of histogram rows (e.g. one
+ * parquet file's worth) into a `groups` map. Lets the caller drop the source
+ * batch from memory before processing the next file. Pairs with
+ * `availFinalize` once all files are folded.
+ *
+ * Memory bound = sum of per-group sparse histogram sizes — typically tiny
+ * even for million-row inputs since each (station × metric) collapses to
+ * ≤ ~50 distinct states.
+ */
+export function availFold(
+	rows: Iterable<AvailHistRow>,
+	p: TotalsParams,
+	groups: Map<string, AvailAcc>,
+): void {
+	const stationIdSet = p.filterStationId?.length ? new Set(p.filterStationId) : null;
+	for (const r of rows) {
+		if (typeof r.dt !== 'number' || r.dt < p.fromS || r.dt > p.toS) continue;
+		if (r.metric !== p.metric) continue;
+		if (stationIdSet && !stationIdSet.has(r.station_id)) continue;
+		if (p.scope === 'stations' && !r.station_id) continue;
+		const key = availGroupKey(p.scope, p.dims, r);
+		let acc = groups.get(key);
+		if (!acc) {
+			const dimVals: Record<string, unknown> = {};
+			if (p.scope === 'stations') dimVals.station_id = r.station_id;
+			for (const d of p.dims) dimVals[d] = (r as Record<string, unknown>)[d];
+			acc = { key, dimVals, hist: new Map() };
+			groups.set(key, acc);
+		}
+		acc.hist.set(r.state, (acc.hist.get(r.state) ?? 0) + r.minutes);
+	}
+}
+
+/** Finalize a folded `groups` map into output rows by applying the reducer. */
+export function availFinalize(
+	groups: Map<string, AvailAcc>,
+	p: TotalsParams,
+): Record<string, unknown>[] {
+	const reducer = p.availAgg ?? 'mean';
+	const out: Record<string, unknown>[] = [];
+	for (const acc of groups.values()) {
+		const states = [...acc.hist.keys()].sort((a, b) => a - b);
+		const weights = states.map((s) => acc.hist.get(s)!);
+		let total = 0;
+		for (const w of weights) total += w;
+		if (total === 0) continue;
+		const row: Record<string, unknown> = { ...acc.dimVals, sample_count: total };
+		switch (reducer) {
+			case 'mean': {
+				let s = 0;
+				for (let i = 0; i < states.length; i++) s += states[i] * weights[i];
+				row.mean = s / total;
+				break;
+			}
+			case 'min': row.min = states[0]; break;
+			case 'max': row.max = states[states.length - 1]; break;
+			case 'hist':
+				row.hist = states.map((s, i) => ({ state: s, minutes: weights[i] }));
+				break;
+			default: {
+				const q = QUANTILE_REDUCERS[reducer];
+				if (q === undefined) throw new Error(`unknown availAgg: ${reducer}`);
+				row[reducer] = availHistQuantile(states, weights, q);
+			}
+		}
+		out.push(row);
+	}
+	out.sort((a, b) => {
+		const ka = String(a.station_id ?? '');
+		const kb = String(b.station_id ?? '');
+		return ka < kb ? -1 : ka > kb ? 1 : 0;
+	});
+	return out;
+}
+
+/**
+ * Aggregate availability histogram rows into one totals-row per
+ * `(scope × dims)` group, applying the requested reducer.
+ *
+ *   - Filter to `metric` + window + optional station/region.
+ *   - Group by `(scope × dims)`.
+ *   - Within a group, merge histograms across `(dt, ...)` → sum `minutes`
+ *     by `state` (the histogram CRDT combiner; see spec §Metrics as monoids).
+ *   - Apply `availAgg` (default `mean`) on the merged histogram.
+ *
+ * `region` filtering / scope=regions requires a `station_id → region` map
+ * (not in the parquet); not yet supported here. Caller can resolve client-side.
+ *
+ * Convenience wrapper around `availFold` + `availFinalize` — fine for tests
+ * and small inputs. Workers should prefer the streaming variant to avoid
+ * holding all source rows in memory at once.
+ */
+export function aggregateAvailTotals(
+	rows: AvailHistRow[],
+	p: TotalsParams,
+): Record<string, unknown>[] {
+	const groups = new Map<string, AvailAcc>();
+	availFold(rows, p, groups);
+	return availFinalize(groups, p);
+}
+
+/** Columns to project from the avail/agg parquets. */
+export function projectionForAvailTotals(_p: TotalsParams): string[] {
+	return ['dt', 'station_id', 'metric', 'state', 'minutes'];
+}

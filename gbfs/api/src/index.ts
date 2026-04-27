@@ -256,10 +256,16 @@ import {
 import { binAndAggregate } from './bin';
 import {
 	aggregateTotals,
+	availAggKeys,
+	availFinalize,
+	availFold,
 	parseTotalsParams,
+	pickAvailAggTier,
 	pickTripsAggTier,
+	projectionForAvailTotals,
 	tripsAggKeys,
 	tripsTotalsFallbackPaths,
+	type AvailHistRow,
 	type TotalsParams,
 	type TotalsResponse,
 } from './totals';
@@ -445,6 +451,42 @@ async function executeTotalsQuery(
 	return { kind: p.kind, metric: p.metric, scope: p.scope, tier: fallback.tier, rows };
 }
 
+/**
+ * Execute an `/api/totals` request (availability path). Reads the
+ * `avail/agg/<tier>/<window>.parquet` shards (built by `ctbk avail-agg-*`)
+ * one at a time, folding each into a per-group histogram, then finalizes
+ * with the requested reducer.
+ *
+ * Streaming fold avoids holding all parsed rows in JS-object form at once
+ * — h1 daily shards can be ~3.5M rows over a 7-day window which OOMs the
+ * Worker at the 128MB cap. Per-group histogram state is bounded by
+ * (n_stations × n_distinct_states) per metric — typically <5000 entries
+ * even at a year-wide query.
+ */
+async function executeAvailTotalsQuery(
+	r2: R2Bucket,
+	p: TotalsParams,
+): Promise<TotalsResponse> {
+	const tier = pickAvailAggTier(p.fromS, p.toS);
+	const projection = projectionForAvailTotals(p);
+	const keys = availAggKeys(tier, p.fromS, p.toS);
+	const groups = new Map<string, ReturnType<typeof initGroupsType>>();
+	for (const key of keys) {
+		const rows = await readR2Parquet(r2, key, projection);
+		if (rows === null) continue;
+		availFold(rows as unknown as AvailHistRow[], p, groups as never);
+		// Drop the parsed batch ASAP so the GC can reclaim it before the
+		// next file lands.
+	}
+	const rows = availFinalize(groups as never, p);
+	return { kind: p.kind, metric: p.metric, scope: p.scope, tier, rows };
+}
+
+// Type-helper for the `groups` map; avoids importing the `AvailAcc` interface
+// (it's an internal type of totals.ts). The actual shape is `Map<string,
+// {key, dimVals, hist}>` — only used as an opaque accumulator here.
+function initGroupsType(): never { throw new Error('not callable'); }
+
 /** Columns to project from parquet for `/api/totals`. Keeps R2 byte-scan
  *  small. `dt` + scope key + dim columns + sum-monoid metric columns. */
 function projectionForTotals(p: TotalsParams): string[] {
@@ -596,12 +638,9 @@ export default {
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'invalid query', 400, env);
 			}
-			if (p.kind === 'availability') {
-				return jsonResponse({
-					error: 'availability /api/totals not yet implemented; pending histogram-schema EDA',
-				}, env, { status: 501 });
-			}
-			const result = await executeTotalsQuery(env.R2, p);
+			const result = p.kind === 'availability'
+				? await executeAvailTotalsQuery(env.R2, p)
+				: await executeTotalsQuery(env.R2, p);
 			return jsonResponse(result, env);
 		}
 
