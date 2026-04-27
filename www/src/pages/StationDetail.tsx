@@ -20,7 +20,7 @@ import { Radios } from '../components/Radios'
 import { useSmartPolling } from '../hooks/useSmartPolling'
 import { useStationTrips } from '../hooks/useStationTrips'
 import {
-  useStationInfo, useStationRange, useAvailabilityOverview, stationsApi,
+  useStationInfo, useStationAvailability, useAvailabilityOverview, stationsApi,
   type StationRangeResponse,
 } from '../query/stations'
 import { useRollupQuery, type Side } from '../query/rollups'
@@ -71,8 +71,11 @@ export default function StationDetail() {
   const rangeTimestampMs = range.timestamp?.getTime() ?? null
   const { fromS, toS } = useMemo(() => {
     const toMs = rangeTimestampMs ?? Date.now()
+    const wantFrom = Math.floor((toMs - rangeDuration) / 1000)
     return {
-      fromS: Math.floor((toMs - rangeDuration) / 1000),
+      // Clip `from` at the genesis floor — there's no data before the scrape
+      // start, so showing empty x-axis is wasted space.
+      fromS: Math.max(GENESIS_S, wantFrom),
       toS: Math.floor(toMs / 1000),
     }
   }, [rangeDuration, rangeTimestampMs])
@@ -80,8 +83,41 @@ export default function StationDetail() {
   // Fetch a quantum-rounded super-range of the visible window so drag-pan
   // within the buffer is instant (TSQ cache hit) and uPlot has data to
   // render in the edges as the user drags.
-  const [bufFromS, bufToS] = useMemo(() => bufferedBounds(fromS, toS), [fromS, toS])
-  const rangeQuery = useStationRange(id, bufFromS, bufToS)
+  //
+  // Buffer factor: 0.5 for raw /range (≤24h) — generous, since we want
+  // smooth drag-pan in minute-resolution data. 0.1 for binned /totals
+  // (>24h) — the edge cache (60s TTL) handles refetches across drag, and
+  // a generous buffer would tip us into reading more h1 daily shards than
+  // the Worker can chew through in time. Default 7d view → ~7.7d buffered
+  // (vs 14d w/ 0.5), keeps h1 file count under the cold-path budget.
+  const [bufFromS, bufToS] = useMemo(() => {
+    const visibleSpan = toS - fromS
+    const factor = visibleSpan > 86400 ? 0.05 : 0.5
+    const [f, t] = bufferedBounds(fromS, toS, factor)
+    return [Math.max(GENESIS_S, f), t]
+  }, [fromS, toS])
+
+  // Smart availability hook: routes to `/range` (raw, ≤24h windows) or
+  // `/totals?metric=all&bin=…` (binned, >24h windows) so the FE never asks
+  // for more datapoints than the viewport can render.
+  const [availViewportPx, setAvailViewportPx] = useState(() =>
+    typeof window === 'undefined' ? 1000 : Math.max(400, Math.min(2000, window.innerWidth - 40))
+  )
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const onResize = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        setAvailViewportPx(Math.max(400, Math.min(2000, window.innerWidth - 40)))
+      }, 250)
+    }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      if (timer) clearTimeout(timer)
+    }
+  }, [])
+  const rangeQuery = useStationAvailability(id, info?.gbfs_station_id, bufFromS, bufToS, availViewportPx, info?.capacity ?? null)
   const data = rangeQuery.data ?? null
   const error = rangeQuery.error ? String(rangeQuery.error) : null
 
@@ -188,7 +224,14 @@ export default function StationDetail() {
   // (`['station-range', id, fromS, toS]`) so `useStationRange` consumers
   // see them without a full refetch.
   const isLatestMode = rangeTimestampMs === null
-  const queryKey = useMemo(() => ['station-range', id, bufFromS, bufToS], [id, bufFromS, bufToS])
+  // Live incremental refetch only fires in RAW mode (windows ≤ 24h). The
+  // binned-mode path (`/totals?bin=…`) would need a different incremental
+  // strategy (re-fold the latest bin) — out of scope; for windows > 24h
+  // the user is in "history" mode and live refresh isn't meaningful.
+  const queryKey = useMemo(
+    () => ['station-avail', id, info?.gbfs_station_id, bufFromS, bufToS, 'raw'],
+    [id, info?.gbfs_station_id, bufFromS, bufToS],
+  )
 
   const refetchIncremental = useCallback(async () => {
     if (!id) return
@@ -215,10 +258,12 @@ export default function StationDetail() {
     [data?.last_polled_at],
   )
 
+  // Polling only enabled in raw mode + Latest mode.
+  const inRawMode = data?.useRaw === true
   useSmartPolling({
     lastModified: lastModifiedDate,
     refetch: refetchIncremental,
-    enabled: !!id && !!data && isLatestMode,
+    enabled: !!id && !!data && isLatestMode && inRawMode,
     isLatestMode,
   })
 
@@ -623,9 +668,11 @@ export default function StationDetail() {
   )
 }
 
-/** Earliest UTC date for which any avail-agg shard exists. The compactor +
- *  backfill cover data from 2026-04-07 onward. */
-const OVERVIEW_FLOOR_S = Math.floor(new Date('2026-04-07T00:00:00Z').getTime() / 1000)
+/** Earliest UTC date for which any avail-agg shard exists (also the floor
+ *  of any GBFS-availability query — older data simply doesn't exist). The
+ *  compactor + backfill cover data from 2026-04-07 onward. */
+const GENESIS_S = Math.floor(new Date('2026-04-07T00:00:00Z').getTime() / 1000)
+const OVERVIEW_FLOOR_S = GENESIS_S
 
 /** "Mean bikes-available across the longest-available window" chart.
  *  Renders below the per-minute chart on the station detail page; uses

@@ -114,7 +114,17 @@ export default function OverviewAvailabilityChart({
 
 /**
  * Pick a "nice" bin size (seconds) for a given span + chart pixel width.
- * Targets ~30px per bin; clamps to the backend's minimum (3600 = 1 hour).
+ *
+ * Two competing constraints:
+ *   - Visual: ~30px per bin → bin ≥ span / (widthPx/30).
+ *   - Server cost: each tier reads 1 file/period (h1=daily, d1=monthly,
+ *     mo1=yearly). For wide windows, force a coarser tier even if the visual
+ *     target would tolerate a finer bin — otherwise we'd read 30+ daily
+ *     parquets per request, blowing the Worker's CPU/memory budget.
+ *
+ * Tier floors:
+ *   - span > 7d  → bin ≥ 86400  (force d1, ≤ 12 monthly files per query)
+ *   - span > 1y  → bin ≥ 2592000 (force mo1, 1 yearly file per query)
  */
 export function pickOverviewBin(spanS: number, widthPx: number): number {
   const NICE_BINS = [
@@ -128,8 +138,12 @@ export function pickOverviewBin(spanS: number, widthPx: number): number {
     2592000,      //  ~30 d (1 mo)
     2592000 * 3,  //  ~3 mo
   ]
+  const DAY_S = 86400
+  const MONTH_S = 30 * DAY_S
+  const YEAR_S = 365 * DAY_S
+  const tierFloor = spanS > YEAR_S ? MONTH_S : spanS > 7 * DAY_S ? DAY_S : 3600
   const targetPxPerBin = 30
   const targetBins = Math.max(8, Math.floor(widthPx / targetPxPerBin))
-  const target = spanS / targetBins
+  const target = Math.max(tierFloor, spanS / targetBins)
   return NICE_BINS.find((n) => n >= target) ?? NICE_BINS[NICE_BINS.length - 1]
 }
