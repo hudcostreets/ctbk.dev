@@ -51,6 +51,7 @@ export const AVAIL_METRICS: readonly AvailMetric[] = ['bikes', 'ebikes', 'docks'
 export const AVAIL_AGGS: readonly AvailAgg[] = ['mean', 'min', 'max', 'p05', 'p25', 'p50', 'p75', 'p95', 'hist'];
 
 const SECOND_MS = 1000;
+const HOUR_S = 3600;
 const DAY_S = 86400;
 const MONTH_S = 30 * DAY_S;
 const YEAR_S = 365 * DAY_S;
@@ -83,6 +84,7 @@ export interface TotalsParams {
 	filterRegion?: Region[];                 // optional restrict
 	filterSide?: Side;                       // optional restrict (trips only)
 	availAgg?: AvailAgg;                     // availability only; default 'mean'
+	binS?: number;                           // availability only; time-bin aggregation in seconds
 }
 
 /** `/api/totals` JSON response shape. */
@@ -184,9 +186,31 @@ export function parseTotalsParams(params: URLSearchParams): TotalsParams {
 		throw new Error(`agg= is only valid for kind=availability`);
 	}
 
+	// `bin=<seconds>` (availability only): when set, output one row per
+	// (floor(dt/binS)*binS, scope-key, ...dims) instead of one row per
+	// (scope-key, ...dims) for the whole window. Enables time-binned charts.
+	let binS: number | undefined;
+	const binRaw = params.get('bin');
+	if (binRaw !== null) {
+		if (kind !== 'availability') {
+			throw new Error(`bin= is only valid for kind=availability`);
+		}
+		const b = parseInt(binRaw, 10);
+		if (!Number.isFinite(b) || b <= 0) {
+			throw new Error(`bin must be a positive integer of seconds (got ${binRaw})`);
+		}
+		// Lower-bound: h1 tier's natural bucket is 1h (3600s). Asking for a
+		// finer bin would require raw n0 data which the agg pipeline doesn't
+		// preserve. Reject up-front.
+		if (b < HOUR_S) {
+			throw new Error(`bin must be ≥ ${HOUR_S}s (avail-agg tier minimum); got ${b}`);
+		}
+		binS = b;
+	}
+
 	return {
 		kind, metric, fromS, toS, scope, dims,
-		filterShortName, filterStationId, filterRegion, filterSide, availAgg,
+		filterShortName, filterStationId, filterRegion, filterSide, availAgg, binS,
 	};
 }
 
@@ -211,7 +235,15 @@ export function pickTripsAggTier(fromS: number, toS: number): AggTier | null {
  * windows since `n0` (raw 1-min polls) isn't a totals-friendly shape — the
  * histogram aggregator only collapses pre-bucketed minute counts.
  */
-export function pickAvailAggTier(fromS: number, toS: number): AggTier {
+export function pickAvailAggTier(fromS: number, toS: number, binS?: number): AggTier {
+	// When `binS` is set, pick the COARSEST tier whose natural bin is ≤ binS.
+	// (Coarser = fewer files; bin-≤-natural is required to actually produce
+	// the requested bin granularity.)
+	if (binS !== undefined) {
+		if (binS >= MONTH_S) return 'mo1';
+		if (binS >= DAY_S) return 'd1';
+		return 'h1';
+	}
 	const span = toS - fromS;
 	if (span >= YEAR_S) return 'mo1';
 	if (span >= MONTH_S) return 'd1';
@@ -424,9 +456,17 @@ const QUANTILE_REDUCERS: Record<string, number> = {
 };
 
 /** Build the group key for an availability histogram row.
- *  scope=stations → `station_id`. scope=all → `''` (collapse). dims appended. */
-function availGroupKey(scope: TotalsScope, dims: string[], r: AvailHistRow): string {
+ *  scope=stations → `station_id`. scope=all → `''` (collapse). dims appended.
+ *  When `binS` is set, the bin start (`floor(dt/binS)*binS`) is prepended so
+ *  rows with the same scope-key but different bins are kept separate. */
+function availGroupKey(
+	scope: TotalsScope,
+	dims: string[],
+	binS: number | undefined,
+	r: AvailHistRow,
+): string {
 	const parts: string[] = [];
+	if (binS !== undefined) parts.push(String(Math.floor(r.dt / binS) * binS));
 	if (scope === 'stations') parts.push(r.station_id ?? '');
 	for (const d of dims) parts.push(String((r as Record<string, unknown>)[d] ?? ''));
 	return parts.join('|');
@@ -461,10 +501,11 @@ export function availFold(
 		if (r.metric !== p.metric) continue;
 		if (stationIdSet && !stationIdSet.has(r.station_id)) continue;
 		if (p.scope === 'stations' && !r.station_id) continue;
-		const key = availGroupKey(p.scope, p.dims, r);
+		const key = availGroupKey(p.scope, p.dims, p.binS, r);
 		let acc = groups.get(key);
 		if (!acc) {
 			const dimVals: Record<string, unknown> = {};
+			if (p.binS !== undefined) dimVals.dt = Math.floor(r.dt / p.binS) * p.binS;
 			if (p.scope === 'stations') dimVals.station_id = r.station_id;
 			for (const d of p.dims) dimVals[d] = (r as Record<string, unknown>)[d];
 			acc = { key, dimVals, hist: new Map() };
@@ -509,6 +550,10 @@ export function availFinalize(
 		out.push(row);
 	}
 	out.sort((a, b) => {
+		// (dt, station_id) when binned; (station_id) otherwise.
+		const da = (a.dt as number | undefined) ?? 0;
+		const db = (b.dt as number | undefined) ?? 0;
+		if (da !== db) return da - db;
 		const ka = String(a.station_id ?? '');
 		const kb = String(b.station_id ?? '');
 		return ka < kb ? -1 : ka > kb ? 1 : 0;

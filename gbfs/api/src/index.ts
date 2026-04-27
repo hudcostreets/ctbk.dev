@@ -671,7 +671,7 @@ async function executeAvailTotalsQuery(
 	r2: R2Bucket,
 	p: TotalsParams,
 ): Promise<TotalsResponse> {
-	const tier = pickAvailAggTier(p.fromS, p.toS);
+	const tier = pickAvailAggTier(p.fromS, p.toS, p.binS);
 	const projection = projectionForAvailTotals(p);
 	const keys = availAggKeys(tier, p.fromS, p.toS);
 	const groups = new Map<string, ReturnType<typeof initGroupsType>>();

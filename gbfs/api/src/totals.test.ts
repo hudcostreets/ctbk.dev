@@ -535,3 +535,168 @@ describe('aggregateAvailTotals', () => {
 		expect(aggregateAvailTotals([], baseAvailParams)).toEqual([]);
 	});
 });
+
+describe('aggregateAvailTotals: bin= time-binning', () => {
+	const T0 = T['2024-01-01']; // 00:00 UTC
+	const HOUR = 3600;
+	const DAY = 86400;
+	const baseBinned = (binS: number): TotalsParams => ({
+		kind: 'availability', metric: 'bikes',
+		fromS: T0, toS: T0 + DAY,
+		scope: 'stations', dims: [],
+		availAgg: 'mean',
+		binS,
+	});
+
+	it('bin=3600 produces one row per (hour-bucket, station_id)', () => {
+		// 3 hours of data: H0 mean=3, H1 mean=5, H2 mean=8
+		const rows: AvailHistRow[] = [
+			{ dt: T0,            station_id: 'S1', metric: 'bikes', state: 3, minutes: 60 },
+			{ dt: T0 + HOUR,     station_id: 'S1', metric: 'bikes', state: 5, minutes: 60 },
+			{ dt: T0 + 2 * HOUR, station_id: 'S1', metric: 'bikes', state: 8, minutes: 60 },
+		];
+		const out = aggregateAvailTotals(rows, baseBinned(HOUR));
+		expect(out).toEqual([
+			{ dt: T0,            station_id: 'S1', sample_count: 60, mean: 3 },
+			{ dt: T0 + HOUR,     station_id: 'S1', sample_count: 60, mean: 5 },
+			{ dt: T0 + 2 * HOUR, station_id: 'S1', sample_count: 60, mean: 8 },
+		]);
+	});
+
+	it('bin=86400 collapses 24 hourly rows into one daily row per station', () => {
+		const rows: AvailHistRow[] = [];
+		// Two stations, 24 hours each with state=h (hour-of-day) for 60 min.
+		for (const sid of ['S1', 'S2']) {
+			for (let h = 0; h < 24; h++) {
+				rows.push({ dt: T0 + h * HOUR, station_id: sid, metric: 'bikes', state: h, minutes: 60 });
+			}
+		}
+		const out = aggregateAvailTotals(rows, baseBinned(DAY));
+		// Mean of states 0..23 weighted equally = 11.5
+		expect(out).toEqual([
+			{ dt: T0, station_id: 'S1', sample_count: 24 * 60, mean: 11.5 },
+			{ dt: T0, station_id: 'S2', sample_count: 24 * 60, mean: 11.5 },
+		]);
+	});
+
+	it('bin floors dt to the bin boundary (off-bucket dt input)', () => {
+		// Input dts are mid-hour (e.g. h1 sources may have dt at hour-start, but
+		// downstream consumers should not assume input is bin-aligned).
+		const rows: AvailHistRow[] = [
+			{ dt: T0 + 100,        station_id: 'S1', metric: 'bikes', state: 1, minutes: 60 },
+			{ dt: T0 + HOUR + 200, station_id: 'S1', metric: 'bikes', state: 9, minutes: 60 },
+		];
+		const out = aggregateAvailTotals(rows, baseBinned(HOUR));
+		expect(out.map((r) => r.dt)).toEqual([T0, T0 + HOUR]);
+	});
+
+	it('output sorted by (dt, station_id)', () => {
+		const rows: AvailHistRow[] = [
+			{ dt: T0 + 2 * HOUR, station_id: 'S2', metric: 'bikes', state: 1, minutes: 60 },
+			{ dt: T0,            station_id: 'S2', metric: 'bikes', state: 1, minutes: 60 },
+			{ dt: T0 + 2 * HOUR, station_id: 'S1', metric: 'bikes', state: 1, minutes: 60 },
+			{ dt: T0,            station_id: 'S1', metric: 'bikes', state: 1, minutes: 60 },
+		];
+		const out = aggregateAvailTotals(rows, baseBinned(HOUR));
+		expect(out.map((r) => [r.dt, r.station_id])).toEqual([
+			[T0,            'S1'],
+			[T0,            'S2'],
+			[T0 + 2 * HOUR, 'S1'],
+			[T0 + 2 * HOUR, 'S2'],
+		]);
+	});
+
+	it('hist reducer with binning: per-bin merged sparse histograms', () => {
+		const rows: AvailHistRow[] = [
+			{ dt: T0,        station_id: 'S1', metric: 'bikes', state: 0, minutes: 30 },
+			{ dt: T0,        station_id: 'S1', metric: 'bikes', state: 5, minutes: 30 },
+			{ dt: T0 + HOUR, station_id: 'S1', metric: 'bikes', state: 5, minutes: 60 },
+		];
+		const out = aggregateAvailTotals(rows, { ...baseBinned(HOUR), availAgg: 'hist' });
+		expect(out).toEqual([
+			{ dt: T0, station_id: 'S1', sample_count: 60, hist: [{ state: 0, minutes: 30 }, { state: 5, minutes: 30 }] },
+			{ dt: T0 + HOUR, station_id: 'S1', sample_count: 60, hist: [{ state: 5, minutes: 60 }] },
+		]);
+	});
+
+	it('window filter still applies after binning', () => {
+		const rows: AvailHistRow[] = [
+			{ dt: T0 - 60,   station_id: 'S1', metric: 'bikes', state: 99, minutes: 1 },
+			{ dt: T0,        station_id: 'S1', metric: 'bikes', state: 5,  minutes: 60 },
+			{ dt: T0 + HOUR, station_id: 'S1', metric: 'bikes', state: 7,  minutes: 60 },
+		];
+		const out = aggregateAvailTotals(rows, baseBinned(HOUR));
+		expect(out).toEqual([
+			{ dt: T0,        station_id: 'S1', sample_count: 60, mean: 5 },
+			{ dt: T0 + HOUR, station_id: 'S1', sample_count: 60, mean: 7 },
+		]);
+	});
+});
+
+describe('parseTotalsParams: bin=', () => {
+	const baseParams = (extra: Record<string, string> = {}) =>
+		new URLSearchParams({
+			kind: 'availability',
+			metric: 'bikes',
+			scope: 'stations',
+			from: '1700000000',
+			to: '1700086400',
+			...extra,
+		});
+
+	it('accepts bin=3600 (1 hour)', () => {
+		const p = parseTotalsParams(baseParams({ bin: '3600' }));
+		expect(p.binS).toBe(3600);
+	});
+
+	it('accepts bin=86400 (1 day)', () => {
+		const p = parseTotalsParams(baseParams({ bin: '86400' }));
+		expect(p.binS).toBe(86400);
+	});
+
+	it('rejects bin < 3600 (below h1 tier minimum)', () => {
+		expect(() => parseTotalsParams(baseParams({ bin: '60' }))).toThrow(/≥ 3600/);
+	});
+
+	it('rejects non-positive bin', () => {
+		expect(() => parseTotalsParams(baseParams({ bin: '0' }))).toThrow(/positive/);
+		expect(() => parseTotalsParams(baseParams({ bin: '-3600' }))).toThrow(/positive/);
+	});
+
+	it('rejects non-integer bin', () => {
+		expect(() => parseTotalsParams(baseParams({ bin: 'abc' }))).toThrow(/positive/);
+	});
+
+	it('rejects bin= for kind=trips', () => {
+		const params = new URLSearchParams({
+			kind: 'trips', scope: 'stations',
+			from: '1700000000', to: '1700086400', bin: '3600',
+		});
+		expect(() => parseTotalsParams(params)).toThrow(/only valid for kind=availability/);
+	});
+
+	it('omitted bin → binS undefined (whole-window aggregation)', () => {
+		const p = parseTotalsParams(baseParams());
+		expect(p.binS).toBeUndefined();
+	});
+});
+
+describe('pickAvailAggTier with binS', () => {
+	it('binS ≥ MONTH_S → mo1', () => {
+		expect(pickAvailAggTier(0, 86400, 30 * 86400)).toBe('mo1');
+	});
+	it('binS ≥ DAY_S < MONTH_S → d1', () => {
+		expect(pickAvailAggTier(0, 86400, 86400)).toBe('d1');
+	});
+	it('binS < DAY_S → h1', () => {
+		expect(pickAvailAggTier(0, 86400, 3600)).toBe('h1');
+	});
+	it('binS=undefined → falls back to span-based picker', () => {
+		expect(pickAvailAggTier(0, 86400)).toBe('h1'); // small window
+		expect(pickAvailAggTier(0, 365 * 86400)).toBe('mo1'); // big window
+	});
+	it('binS overrides span: small bin + big window → h1', () => {
+		// The user explicitly asked for hourly; honor it even if window is huge.
+		expect(pickAvailAggTier(0, 365 * 86400, 3600)).toBe('h1');
+	});
+});
