@@ -141,7 +141,9 @@ export function pickOverviewBin(spanS: number, widthPx: number): number {
   const DAY_S = 86400
   const MONTH_S = 30 * DAY_S
   const YEAR_S = 365 * DAY_S
-  const tierFloor = spanS > YEAR_S ? MONTH_S : spanS > 7 * DAY_S ? DAY_S : 3600
+  // Cutoffs match useStationAvailability's tier-floor (post-rg-pruning).
+  // Overview is always full-station-history → typically falls at d1 or mo1.
+  const tierFloor = spanS > YEAR_S ? MONTH_S : spanS > 30 * DAY_S ? DAY_S : 3600
   const targetPxPerBin = 30
   const targetBins = Math.max(8, Math.floor(widthPx / targetPxPerBin))
   const target = Math.max(tierFloor, spanS / targetBins)

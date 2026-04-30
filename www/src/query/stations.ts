@@ -127,10 +127,11 @@ export function pickAvailBinMode(spanS: number, viewportPx: number): { binS: num
   const DAY_S = 86400
   const MONTH_S = 30 * DAY_S
   const YEAR_S = 365 * DAY_S
-  // Tier-floor cutoffs are based on the # of h1/d1 shards the Worker can
-  // sequentially decode within ~10s of CPU. h1 = ~1s/file, so cap at ~14
-  // files (14d visible + buffer ≈ 14.7d). Past that we step up to d1.
-  const tierFloor = spanS > YEAR_S ? MONTH_S : spanS > 14 * DAY_S ? DAY_S : HOUR_S
+  // Tier-floor cutoffs based on per-file decode cost. With row-group pruning
+  // on (station_id, ...) sort order, each h1 daily shard decodes ~150ms (one
+  // ~10-station row group via rg min/max prune). At concurrency=6 the Worker
+  // chews 30 files in ~1s. Past 30d we drop to d1 (one monthly file).
+  const tierFloor = spanS > YEAR_S ? MONTH_S : spanS > 30 * DAY_S ? DAY_S : HOUR_S
   // /totals — pick smallest "nice" bin ≥ span/viewport, bounded by tier floor.
   const NICE_BINS = [
     3600,            //  1 h
