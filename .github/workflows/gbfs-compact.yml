@@ -24,16 +24,50 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install pandas pyarrow
+        run: |
+          pip install pandas pyarrow
+          pip install -e .
 
       - name: Determine date
         id: date
         run: |
           if [ -n "${{ inputs.date }}" ]; then
-            echo "date=${{ inputs.date }}" >> "$GITHUB_OUTPUT"
+            DATE="${{ inputs.date }}"
           else
-            echo "date=$(date -u -d yesterday +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+            DATE=$(date -u -d yesterday +%Y-%m-%d)
           fi
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+          # Trigger /d1 build on the 1st of each month (yesterday = last day of prev month)
+          DOM=$(date -u -d "$DATE +1 day" +%d)
+          echo "trigger_d1=$([ "$DOM" = "01" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          # Trigger /mo1 build on Jan 1 (yesterday = Dec 31)
+          NEXT_MONTH=$(date -u -d "$DATE +1 day" +%m)
+          echo "trigger_mo1=$([ "$NEXT_MONTH" = "01" ] && [ "$DOM" = "01" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "ym=$(echo $DATE | cut -c 1-7)" >> "$GITHUB_OUTPUT"
+          echo "year=$(echo $DATE | cut -c 1-4)" >> "$GITHUB_OUTPUT"
 
       - name: Compact WAL → parquet
         run: python3 gbfs/compact-r2.py all ${{ steps.date.outputs.date }}
+
+      - name: Build /h1 avail-agg for the day
+        run: |
+          python3 -c "from ctbk.avail_agg import AvailAggH1Day; AvailAggH1Day('${{ steps.date.outputs.date }}').create()"
+          aws s3 cp "r2/ctbk/avail/agg/h1/${{ steps.date.outputs.date }}.parquet" \
+                    "s3://ctbk/avail/agg/h1/${{ steps.date.outputs.date }}.parquet" \
+                    --endpoint-url "$AWS_ENDPOINT_URL"
+
+      - name: Build /d1 avail-agg for closed month
+        if: ${{ steps.date.outputs.trigger_d1 == 'true' }}
+        run: |
+          python3 -c "from ctbk.avail_agg import AvailAggD1Month; AvailAggD1Month('${{ steps.date.outputs.ym }}').create()"
+          aws s3 cp "r2/ctbk/avail/agg/d1/${{ steps.date.outputs.ym }}.parquet" \
+                    "s3://ctbk/avail/agg/d1/${{ steps.date.outputs.ym }}.parquet" \
+                    --endpoint-url "$AWS_ENDPOINT_URL"
+
+      - name: Build /mo1 avail-agg for closed year
+        if: ${{ steps.date.outputs.trigger_mo1 == 'true' }}
+        run: |
+          python3 -c "from ctbk.avail_agg import AvailAggMo1Year; AvailAggMo1Year(${{ steps.date.outputs.year }}).create()"
+          aws s3 cp "r2/ctbk/avail/agg/mo1/${{ steps.date.outputs.year }}.parquet" \
+                    "s3://ctbk/avail/agg/mo1/${{ steps.date.outputs.year }}.parquet" \
+                    --endpoint-url "$AWS_ENDPOINT_URL"
