@@ -5,7 +5,8 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "E2E_RUN=1 vitest run --config vitest.e2e.config.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241218.0",
