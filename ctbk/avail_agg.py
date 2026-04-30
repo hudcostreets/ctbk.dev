@@ -97,7 +97,9 @@ def _aggregate_to_histogram(df: DataFrame, dt_col: str = 'dt') -> DataFrame:
     see `_rebucket()` for that path).
 
     Returns rows in the canonical `OUT_COLS` order, sorted by
-    `(dt, station_id, metric, state)`.
+    `(station_id, dt, metric, state)`. Sort order is critical: row-group
+    min/max stats on `station_id` give the API row-group pruning for
+    per-station queries (see specs/multiscale-timeseries-v2.md).
     """
     frames = []
     for col, metric in METRIC_COLS.items():
@@ -116,7 +118,7 @@ def _aggregate_to_histogram(df: DataFrame, dt_col: str = 'dt') -> DataFrame:
     out['state'] = out['state'].astype('int16')
     out['minutes'] = out['minutes'].astype('int32')
     return (
-        out.sort_values(['dt', 'station_id', 'metric', 'state'], kind='mergesort')
+        out.sort_values(['station_id', 'dt', 'metric', 'state'], kind='mergesort')
            .reset_index(drop=True)
     )
 
@@ -138,13 +140,38 @@ def _rebucket(agg: DataFrame, bucket_s: int) -> DataFrame:
     out['minutes'] = out['minutes'].astype('int32')
     return (
         out[OUT_COLS]
-           .sort_values(['dt', 'station_id', 'metric', 'state'], kind='mergesort')
+           .sort_values(['station_id', 'dt', 'metric', 'state'], kind='mergesort')
            .reset_index(drop=True)
     )
 
 
 HOUR_S = 3600
 DAY_S = 86400
+
+
+def _write_sorted_parquet(df: DataFrame, out_path: Path) -> None:
+    """Write df to parquet with row-group size ≈ STATIONS_PER_RG stations' rows.
+
+    Each row group holds ~10 stations' rows. Combined with parquet's
+    per-row-group min/max stats on the leading sort column (`station_id`),
+    the Worker prunes to ~1 row group when filtering by one station.
+    Decoded rows: ~10 stations' worth (a few thousand). Cheap.
+
+    Smaller RGs (1 station each) blow up footer metadata (~4× file size).
+    Larger RGs (~all stations) defeat pruning. ~10 is the sweet spot.
+
+    No-ops cleanly on empty DataFrame (writes a 0-row parquet with schema only).
+    """
+    STATIONS_PER_RG = 10
+    n = len(df)
+    if n == 0:
+        df.to_parquet(out_path, index=False)
+        return
+    n_stations = df['station_id'].nunique()
+    # +20% slack for variance in per-station row count (some stations have
+    # more states active than others). Floor at 100.
+    rg = max(100, int(n / n_stations * STATIONS_PER_RG * 1.2))
+    df.to_parquet(out_path, index=False, engine='pyarrow', row_group_size=rg)
 
 
 # ---- h1: 1-hour buckets, packaged daily ------------------------------------
@@ -206,7 +233,7 @@ class AvailAggH1Day:
 
         out_path = Path(self.url)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        agg.to_parquet(out_path, index=False)
+        _write_sorted_parquet(agg, out_path)
         err(f"avail-agg h1 {self.date}: {len(agg):,} rows, {out_path.stat().st_size/1024:.1f} KB")
         return out_path
 
@@ -238,7 +265,7 @@ class AvailAggD1Month:
 
         out_path = Path(self.url)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        d1.to_parquet(out_path, index=False)
+        _write_sorted_parquet(d1, out_path)
         err(f"avail-agg d1 {self.ym}: {len(d1):,} rows from {len(files)} h1 files, "
             f"{out_path.stat().st_size/1024:.1f} KB")
         return out_path
@@ -264,7 +291,7 @@ def _rebucket_to_month(agg: DataFrame) -> DataFrame:
     out['minutes'] = out['minutes'].astype('int32')
     return (
         out[OUT_COLS]
-           .sort_values(['dt', 'station_id', 'metric', 'state'], kind='mergesort')
+           .sort_values(['station_id', 'dt', 'metric', 'state'], kind='mergesort')
            .reset_index(drop=True)
     )
 
@@ -293,7 +320,7 @@ class AvailAggMo1Year:
 
         out_path = Path(self.url)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        mo1.to_parquet(out_path, index=False)
+        _write_sorted_parquet(mo1, out_path)
         err(f"avail-agg mo1 {self.year}: {len(mo1):,} rows from {len(files)} d1 files, "
             f"{out_path.stat().st_size/1024:.1f} KB")
         return out_path

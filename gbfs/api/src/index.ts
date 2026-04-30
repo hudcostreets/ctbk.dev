@@ -501,6 +501,77 @@ async function readR2Parquet(
 	return rows;
 }
 
+/**
+ * Read one parquet from R2, returning ONLY rows where `station_id` matches
+ * any of the given filter UUIDs. Uses parquet row-group min/max stats on
+ * `station_id` to skip non-matching row groups (avail-agg files are sorted
+ * by `(station_id, dt, ...)` with rg ≈ 1 station per row group; see
+ * specs/multiscale-timeseries-v2.md §Storage layout).
+ *
+ * Returns `null` if the object doesn't exist. Empty array if it exists but
+ * no matching rows.
+ *
+ * On legacy single-row-group files (pre-resort), the min/max range covers
+ * all stations → all row groups read → fall back to full decode + filter
+ * (same as `readR2Parquet`). Pruning becomes effective once files are
+ * regenerated with the new layout.
+ */
+async function readR2ParquetStationPruned(
+	r2: R2Bucket,
+	key: string,
+	stationIds: string[],
+	columns?: string[],
+): Promise<Record<string, unknown>[] | null> {
+	const obj = await r2.get(key);
+	if (!obj) return null;
+	const buf = await obj.arrayBuffer();
+	const file = {
+		byteLength: buf.byteLength,
+		slice: (start: number, end?: number) => buf.slice(start, end),
+	};
+	const { parquetMetadataAsync, parquetReadObjects } = await import('hyparquet');
+	const meta = await parquetMetadataAsync(file);
+
+	// Pick row groups whose station_id min/max range overlaps any filter UUID.
+	// String stats are prefix-truncated by some writers; truncate filter UUIDs
+	// to the same length when comparing.
+	let rowOffset = 0;
+	const targetRanges: Array<{ rowStart: number; rowEnd: number }> = [];
+	for (const rg of meta.row_groups) {
+		const numRows = Number(rg.num_rows);
+		const sidCol = rg.columns.find((c) => c.meta_data?.path_in_schema?.[0] === 'station_id');
+		const stats = sidCol?.meta_data?.statistics;
+		const min = stats?.min_value as string | undefined;
+		const max = stats?.max_value as string | undefined;
+		const inRange =
+			min === undefined ||
+			max === undefined ||
+			stationIds.some(
+				(sid) => min <= sid.slice(0, min.length) && sid.slice(0, max.length) <= max,
+			);
+		if (inRange) {
+			targetRanges.push({ rowStart: rowOffset, rowEnd: rowOffset + numRows });
+		}
+		rowOffset += numRows;
+	}
+
+	if (targetRanges.length === 0) return [];
+
+	const sidSet = new Set(stationIds);
+	const out: Record<string, unknown>[] = [];
+	for (const { rowStart, rowEnd } of targetRanges) {
+		const rows = (await parquetReadObjects({ file, rowStart, rowEnd, columns })) as Record<string, unknown>[];
+		for (const r of rows) {
+			if (!sidSet.has(r.station_id as string)) continue;
+			for (const k of Object.keys(r)) {
+				if (typeof r[k] === 'bigint') r[k] = Number(r[k]);
+			}
+			out.push(r);
+		}
+	}
+	return out;
+}
+
 /** Parse and validate `/api/query` params; throws on invalid input. */
 function parseQueryParams(params: URLSearchParams): QueryInput {
 	const kind = params.get('kind');
@@ -675,14 +746,34 @@ async function executeAvailTotalsQuery(
 	const projection = projectionForAvailTotals(p);
 	const keys = availAggKeys(tier, p.fromS, p.toS);
 	const groups = new Map<string, ReturnType<typeof initGroupsType>>();
-	// Sequential: each h1 daily shard decodes to ~110MB of JS objects (530k
-	// rows × 5 cols × ~210B/row). Reading even 2 in parallel pushes heap
-	// past the Worker's 128MB cap → 503. Per-file fold-and-drop keeps peak
-	// at one file's worth.
-	for (const key of keys) {
-		const rows = await readR2Parquet(r2, key, projection);
-		if (rows === null) continue;
-		availFold(rows as unknown as AvailHistRow[], p, groups as never);
+	const stationFilter = p.filterStationId?.length ? p.filterStationId : null;
+	// When filtering by station_id, use row-group pruning: avail-agg files
+	// are sorted by (station_id, dt, ...) with ~1 station per row group, so
+	// we decode ~few KB per file instead of the whole 1-30 MB shard. This
+	// also makes parallel reads safe (each pruned read holds only the
+	// matching rows in heap).
+	//
+	// Without a station filter, we have to scan the whole file → sequential
+	// to keep peak heap bounded by one file at a time.
+	if (stationFilter) {
+		const CONCURRENCY = 6;
+		let next = 0;
+		async function worker() {
+			while (true) {
+				const i = next++;
+				if (i >= keys.length) return;
+				const rows = await readR2ParquetStationPruned(r2, keys[i], stationFilter!, projection);
+				if (rows === null || rows.length === 0) continue;
+				availFold(rows as unknown as AvailHistRow[], p, groups as never);
+			}
+		}
+		await Promise.all(Array.from({ length: Math.min(CONCURRENCY, keys.length) }, worker));
+	} else {
+		for (const key of keys) {
+			const rows = await readR2Parquet(r2, key, projection);
+			if (rows === null) continue;
+			availFold(rows as unknown as AvailHistRow[], p, groups as never);
+		}
 	}
 	const rows = availFinalize(groups as never, p);
 	return { kind: p.kind, metric: p.metric, scope: p.scope, tier, rows };
