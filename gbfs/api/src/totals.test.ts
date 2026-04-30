@@ -5,6 +5,7 @@ import {
 	availAggKeys,
 	availHistQuantile,
 	daysIn,
+	decadesIn,
 	parseTotalsParams,
 	pickAvailAggTier,
 	pickTripsAggTier,
@@ -175,26 +176,67 @@ describe('pickTripsAggTier', () => {
 		expect(pickTripsAggTier(T['2024-01-01'], T['2024-01-01'] + 3600)).toBe(null);
 		expect(pickTripsAggTier(T['2024-01-01'], T['2024-01-01'])).toBe(null);
 	});
+
+	it('binS-aware: binS >= 1 month → mo1', () => {
+		// span doesn't matter when binS is set
+		expect(pickTripsAggTier(T['2024-01-01'], T['2024-01-02'], 30 * 86400)).toBe('mo1');
+	});
+
+	it('binS-aware: binS >= 1 day → d1', () => {
+		expect(pickTripsAggTier(T['2024-01-01'], T['2024-01-02'], 86400)).toBe('d1');
+	});
+
+	it('binS-aware: binS >= 1 hour → h1', () => {
+		expect(pickTripsAggTier(T['2024-01-01'], T['2025-01-01'], 3600)).toBe('h1');
+	});
+
+	it('binS-aware: binS < 1 hour → null (sub-hour multi-station out of scope)', () => {
+		expect(pickTripsAggTier(T['2024-01-01'], T['2025-01-01'], 60)).toBe(null);
+	});
 });
 
-describe('tripsAggKeys', () => {
-	it('mo1: yearly shards', () => {
+describe('tripsAggKeys (v2 file periods)', () => {
+	it('mo1: decade shards (calendar-aligned floor(year/10)*10)', () => {
 		expect(tripsAggKeys('mo1', T['2024-01-01'], T['2025-06-01']))
-			.toEqual(['trips/agg/mo1/2024.parquet', 'trips/agg/mo1/2025.parquet']);
+			.toEqual(['trips/agg/mo1/2020.parquet']);
 	});
 
-	it('d1: monthly shards', () => {
-		expect(tripsAggKeys('d1', T['2024-01-01'], T['2024-03-15']))
+	it('mo1: window straddling two decades returns both', () => {
+		// 2018 → 2020s straddle: 2018 is in the 2010s decade file, 2020 is in 2020s.
+		const t2018 = Date.UTC(2018, 5, 1) / 1000;
+		expect(tripsAggKeys('mo1', t2018, T['2025-01-01']))
+			.toEqual(['trips/agg/mo1/2010.parquet', 'trips/agg/mo1/2020.parquet']);
+	});
+
+	it('d1: yearly shards', () => {
+		expect(tripsAggKeys('d1', T['2024-01-01'], T['2025-06-01']))
+			.toEqual(['trips/agg/d1/2024.parquet', 'trips/agg/d1/2025.parquet']);
+	});
+
+	it('h1: monthly shards', () => {
+		expect(tripsAggKeys('h1', T['2024-01-01'], T['2024-03-15']))
 			.toEqual([
-				'trips/agg/d1/2024-01.parquet',
-				'trips/agg/d1/2024-02.parquet',
-				'trips/agg/d1/2024-03.parquet',
+				'trips/agg/h1/2024-01.parquet',
+				'trips/agg/h1/2024-02.parquet',
+				'trips/agg/h1/2024-03.parquet',
 			]);
 	});
+});
 
-	it('h1: daily shards', () => {
-		expect(tripsAggKeys('h1', T['2024-01-01'], T['2024-01-02']))
-			.toEqual(['trips/agg/h1/2024-01-01.parquet', 'trips/agg/h1/2024-01-02.parquet']);
+describe('decadesIn', () => {
+	it('single-decade window → one decade', () => {
+		expect(decadesIn(T['2024-01-01'], T['2025-06-01'])).toEqual(['2020']);
+	});
+
+	it('cross-decade window → two decades', () => {
+		const t2018 = Date.UTC(2018, 5, 1) / 1000;
+		expect(decadesIn(t2018, T['2025-01-01'])).toEqual(['2010', '2020']);
+	});
+
+	it('decade boundary inclusivity', () => {
+		// 2019-12-31 → 2020-01-01 should span both decades.
+		const t = Date.UTC(2019, 11, 31, 23, 0, 0) / 1000;
+		expect(decadesIn(t, T['2024-01-01'])).toEqual(['2010', '2020']);
 	});
 });
 
@@ -281,8 +323,8 @@ describe('aggregateTotals', () => {
 		];
 		const out = aggregateTotals(rows, baseParams, true);
 		expect(out).toEqual([
-			{ short_name: 'A', count: 2, duration_s: 150 },
-			{ short_name: 'B', count: 1, duration_s: 200 },
+			{ short_name: 'A', count: 2, duration_s: 150, duration_s_sq: 100 * 100 + 50 * 50 },
+			{ short_name: 'B', count: 1, duration_s: 200, duration_s_sq: 200 * 200 },
 		]);
 	});
 
@@ -295,9 +337,9 @@ describe('aggregateTotals', () => {
 		];
 		const out = aggregateTotals(rows, { ...baseParams, dims: ['side'] }, true);
 		expect(out).toEqual([
-			{ short_name: 'A', side: 'end', count: 1, duration_s: 50 },
-			{ short_name: 'A', side: 'start', count: 2, duration_s: 300 },
-			{ short_name: 'B', side: 'end', count: 1, duration_s: 75 },
+			{ short_name: 'A', side: 'end', count: 1, duration_s: 50, duration_s_sq: 50 * 50 },
+			{ short_name: 'A', side: 'start', count: 2, duration_s: 300, duration_s_sq: 100 * 100 + 200 * 200 },
+			{ short_name: 'B', side: 'end', count: 1, duration_s: 75, duration_s_sq: 75 * 75 },
 		]);
 	});
 
@@ -307,10 +349,12 @@ describe('aggregateTotals', () => {
 			{ dt: T['2024-01-01'] + 120, short_name: 'B', duration_s: 200 },
 		];
 		const out = aggregateTotals(rows, { ...baseParams, scope: 'all' }, true);
-		expect(out).toEqual([{ count: 2, duration_s: 300 }]);
+		expect(out).toEqual([{ count: 2, duration_s: 300, duration_s_sq: 100 * 100 + 200 * 200 }]);
 	});
 
 	it('scope=regions → group by region', () => {
+		// synthesizeCount=false → input is pre-agg rows; duration_s_sq is summed
+		// from input column (here input rows omit it → 0).
 		const rows = [
 			{ dt: T['2024-01-01'] + 60, region: 'nyc', count: 5, duration_s: 100 },
 			{ dt: T['2024-01-01'] + 120, region: 'nyc', count: 3, duration_s: 50 },
@@ -318,8 +362,19 @@ describe('aggregateTotals', () => {
 		];
 		const out = aggregateTotals(rows, { ...baseParams, scope: 'regions' }, false);
 		expect(out).toEqual([
-			{ region: 'jc', count: 2, duration_s: 75 },
-			{ region: 'nyc', count: 8, duration_s: 150 },
+			{ region: 'jc', count: 2, duration_s: 75, duration_s_sq: 0 },
+			{ region: 'nyc', count: 8, duration_s: 150, duration_s_sq: 0 },
+		]);
+	});
+
+	it('synthesizeCount=false: passes duration_s_sq through from pre-agg rows', () => {
+		const rows = [
+			{ dt: T['2024-01-01'] + 60, region: 'nyc', count: 5, duration_s: 100, duration_s_sq: 2500 },
+			{ dt: T['2024-01-01'] + 120, region: 'nyc', count: 3, duration_s: 50, duration_s_sq: 900 },
+		];
+		const out = aggregateTotals(rows, { ...baseParams, scope: 'regions' }, false);
+		expect(out).toEqual([
+			{ region: 'nyc', count: 8, duration_s: 150, duration_s_sq: 3400 },
 		]);
 	});
 
@@ -331,7 +386,7 @@ describe('aggregateTotals', () => {
 			{ dt: T['2024-02-01'] + 1, short_name: 'A', duration_s: 999 },
 		];
 		const out = aggregateTotals(rows, baseParams, true);
-		expect(out).toEqual([{ short_name: 'A', count: 2, duration_s: 30 }]);
+		expect(out).toEqual([{ short_name: 'A', count: 2, duration_s: 30, duration_s_sq: 10 * 10 + 20 * 20 }]);
 	});
 
 	it('filterShortName restricts to listed stations', () => {
@@ -346,8 +401,8 @@ describe('aggregateTotals', () => {
 			true,
 		);
 		expect(out).toEqual([
-			{ short_name: 'A', count: 1, duration_s: 100 },
-			{ short_name: 'C', count: 1, duration_s: 200 },
+			{ short_name: 'A', count: 1, duration_s: 100, duration_s_sq: 10000 },
+			{ short_name: 'C', count: 1, duration_s: 200, duration_s_sq: 40000 },
 		]);
 	});
 
@@ -361,7 +416,7 @@ describe('aggregateTotals', () => {
 			{ ...baseParams, filterSide: 'start' },
 			true,
 		);
-		expect(out).toEqual([{ short_name: 'A', count: 1, duration_s: 100 }]);
+		expect(out).toEqual([{ short_name: 'A', count: 1, duration_s: 100, duration_s_sq: 10000 }]);
 	});
 
 	it('synthesizeCount=false: sums explicit `count` (pre-agg shards)', () => {
@@ -370,7 +425,7 @@ describe('aggregateTotals', () => {
 			{ dt: T['2024-01-01'] + 120, short_name: 'A', count: 3, duration_s: 50 },
 		];
 		const out = aggregateTotals(rows, baseParams, false);
-		expect(out).toEqual([{ short_name: 'A', count: 10, duration_s: 150 }]);
+		expect(out).toEqual([{ short_name: 'A', count: 10, duration_s: 150, duration_s_sq: 0 }]);
 	});
 
 	it('drops rows missing the scope key', () => {
@@ -379,7 +434,7 @@ describe('aggregateTotals', () => {
 			{ dt: T['2024-01-01'] + 120, /* no short_name */ duration_s: 999 },
 		];
 		const out = aggregateTotals(rows, baseParams, true);
-		expect(out).toEqual([{ short_name: 'A', count: 1, duration_s: 100 }]);
+		expect(out).toEqual([{ short_name: 'A', count: 1, duration_s: 100, duration_s_sq: 10000 }]);
 	});
 
 	it('empty input → empty output', () => {

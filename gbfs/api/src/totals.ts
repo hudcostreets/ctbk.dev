@@ -35,7 +35,7 @@ import {
 
 export type TotalsKind = 'trips' | 'availability';
 export type TotalsScope = 'stations' | 'regions' | 'all';
-export type TripsMetric = 'count' | 'duration_s';
+export type TripsMetric = 'count' | 'duration_s' | 'duration_s_sq';
 export type AvailMetric = 'bikes' | 'ebikes' | 'docks' | 'disabled' | 'pending';
 /** `'all'` is a meta-metric that, for availability totals, returns one row
  *  per (bin?, scope-key, ...dims, metric) — all 5 availability metrics in
@@ -60,8 +60,10 @@ const DAY_S = 86400;
 const MONTH_S = 30 * DAY_S;
 const YEAR_S = 365 * DAY_S;
 
-/** Sum-monoid metric columns for trips. */
-export const TRIPS_TOTAL_METRICS: readonly TripsMetric[] = ['count', 'duration_s'];
+/** Sum-monoid metric columns for trips. `duration_s_sq` is the per-trip
+ *  duration² sum — pairs with `count` and `duration_s` to derive mean/stddev
+ *  on any subgroup (see v2 §"Variance/percentile reducers"). */
+export const TRIPS_TOTAL_METRICS: readonly TripsMetric[] = ['count', 'duration_s', 'duration_s_sq'];
 
 /** Allowlist of dim columns clients may break out by (trips). Keep in sync
  *  with the `trips/agg/<tier>` schema in the spec. */
@@ -118,8 +120,8 @@ export function parseTotalsParams(params: URLSearchParams): TotalsParams {
 	const metricRaw = params.get('metric') ?? (kind === 'trips' ? 'count' : 'bikes');
 	let metric: TotalsMetric;
 	if (kind === 'trips') {
-		if (metricRaw !== 'count' && metricRaw !== 'duration_s') {
-			throw new Error(`metric must be 'count' or 'duration_s' for kind=trips (got ${metricRaw})`);
+		if (metricRaw !== 'count' && metricRaw !== 'duration_s' && metricRaw !== 'duration_s_sq') {
+			throw new Error(`metric must be one of count|duration_s|duration_s_sq for kind=trips (got ${metricRaw})`);
 		}
 		metric = metricRaw;
 	} else {
@@ -220,14 +222,23 @@ export function parseTotalsParams(params: URLSearchParams): TotalsParams {
 }
 
 /**
- * Pick the coarsest agg tier whose calendar bucket the requested window
- * comfortably spans:
- *   ≥ 1 year   → mo1   (yearly shards)
- *   ≥ 1 month  → d1    (monthly shards)
- *   ≥ 1 day    → h1    (daily shards)
- *   else       → null  → caller should fall back to per-station scans
+ * Pick the coarsest agg tier whose natural bin is finer than the window —
+ * minimizes file reads since coarser tiers pack more bins per file.
+ *   ≥ 1 year   → mo1   (decade-period file, 1mo bins)
+ *   ≥ 1 month  → d1    (year-period file, 1d bins)
+ *   ≥ 1 day    → h1    (month-period file, 1h bins)
+ *   else       → null  → caller falls back to per-station rides files
+ *
+ * Optional `binS` lets binned planQuery callers pick by requested bin
+ * granularity (mirrors `pickAvailAggTier`).
  */
-export function pickTripsAggTier(fromS: number, toS: number): AggTier | null {
+export function pickTripsAggTier(fromS: number, toS: number, binS?: number): AggTier | null {
+	if (binS !== undefined) {
+		if (binS >= MONTH_S) return 'mo1';
+		if (binS >= DAY_S) return 'd1';
+		if (binS >= 3600) return 'h1';
+		return null;
+	}
 	const span = toS - fromS;
 	if (span >= YEAR_S) return 'mo1';
 	if (span >= MONTH_S) return 'd1';
@@ -269,17 +280,28 @@ export function daysIn(fromS: number, toS: number): string[] {
 	return out;
 }
 
+/** Enumerate decade-start years (multiples of 10) touching [fromS, toS] (UTC).
+ *  e.g. a 2018-2024 window → ['2010', '2020']. */
+export function decadesIn(fromS: number, toS: number): string[] {
+	const y0 = new Date(fromS * SECOND_MS).getUTCFullYear();
+	const y1 = new Date(toS * SECOND_MS).getUTCFullYear();
+	const d0 = Math.floor(y0 / 10) * 10;
+	const d1 = Math.floor(y1 / 10) * 10;
+	const out: string[] = [];
+	for (let d = d0; d <= d1; d += 10) out.push(String(d));
+	return out;
+}
+
 /**
- * R2 keys for the eventual `trips/agg/<tier>/<window>.parquet` shards
- * covering the requested window. Once `ctbk trips-agg` lands, these are the
- * primary source. Until then we expect 404s and fall back per
- * `tripsTotalsFallbackPaths` below.
+ * R2 keys for `trips/agg/<tier>/<window>.parquet` shards covering the
+ * requested window (v2 layout: monthly h1, yearly d1, decade mo1).
+ * Built by `ctbk trips-agg-{h1,d1,mo1}` (see `ctbk/trips_agg.py`).
  */
 export function tripsAggKeys(tier: AggTier, fromS: number, toS: number): string[] {
 	switch (tier) {
-		case 'mo1': return yearsIn(fromS, toS).map((y) => `trips/agg/mo1/${y}.parquet`);
-		case 'd1':  return monthsInDashed(fromS, toS).map((ym) => `trips/agg/d1/${ym}.parquet`);
-		case 'h1':  return daysIn(fromS, toS).map((d) => `trips/agg/h1/${d}.parquet`);
+		case 'mo1': return decadesIn(fromS, toS).map((d) => `trips/agg/mo1/${d}.parquet`);
+		case 'd1':  return yearsIn(fromS, toS).map((y) => `trips/agg/d1/${y}.parquet`);
+		case 'h1':  return monthsInDashed(fromS, toS).map((ym) => `trips/agg/h1/${ym}.parquet`);
 	}
 }
 
@@ -379,16 +401,27 @@ export function aggregateTotals(
 			for (const d of p.dims) acc[d] = r[d];
 			acc.count = 0;
 			acc.duration_s = 0;
+			acc.duration_s_sq = 0;
 			buckets.set(key, acc);
 		}
 		if (synthesizeCount) {
 			acc.count = (acc.count as number) + 1;
+			// For per-ride raw rows synthesizing count, derive `duration_s_sq`
+			// from the row's `duration_s` (which is the per-ride duration here,
+			// not a sum). For pre-agg rows, sum the column directly below.
+			const d = r.duration_s;
+			if (typeof d === 'number') {
+				acc.duration_s = (acc.duration_s as number) + d;
+				acc.duration_s_sq = (acc.duration_s_sq as number) + d * d;
+			}
 		} else {
 			const c = r.count;
 			if (typeof c === 'number') acc.count = (acc.count as number) + c;
+			const d = r.duration_s;
+			if (typeof d === 'number') acc.duration_s = (acc.duration_s as number) + d;
+			const dsq = r.duration_s_sq;
+			if (typeof dsq === 'number') acc.duration_s_sq = (acc.duration_s_sq as number) + dsq;
 		}
-		const d = r.duration_s;
-		if (typeof d === 'number') acc.duration_s = (acc.duration_s as number) + d;
 	}
 
 	// Stable sort: by scope-key (if any), then dims, for deterministic output.

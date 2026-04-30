@@ -502,25 +502,26 @@ async function readR2Parquet(
 }
 
 /**
- * Read one parquet from R2, returning ONLY rows where `station_id` matches
- * any of the given filter UUIDs. Uses parquet row-group min/max stats on
- * `station_id` to skip non-matching row groups (avail-agg files are sorted
- * by `(station_id, dt, ...)` with rg ≈ 1 station per row group; see
+ * Read one parquet from R2, returning ONLY rows where the given id-column
+ * matches any of the given filter values. Uses parquet row-group min/max
+ * stats on the id-column to skip non-matching row groups (avail-agg sorts
+ * by `(station_id, ...)`, trips-agg by `(short_name, ...)`; see
  * specs/multiscale-timeseries-v2.md §Storage layout).
  *
  * Returns `null` if the object doesn't exist. Empty array if it exists but
  * no matching rows.
  *
  * On legacy single-row-group files (pre-resort), the min/max range covers
- * all stations → all row groups read → fall back to full decode + filter
+ * all ids → all row groups read → fall back to full decode + filter
  * (same as `readR2Parquet`). Pruning becomes effective once files are
  * regenerated with the new layout.
  */
 async function readR2ParquetStationPruned(
 	r2: R2Bucket,
 	key: string,
-	stationIds: string[],
+	ids: string[],
 	columns?: string[],
+	idCol: string = 'station_id',
 ): Promise<Record<string, unknown>[] | null> {
 	const obj = await r2.get(key);
 	if (!obj) return null;
@@ -532,21 +533,21 @@ async function readR2ParquetStationPruned(
 	const { parquetMetadataAsync, parquetReadObjects } = await import('hyparquet');
 	const meta = await parquetMetadataAsync(file);
 
-	// Pick row groups whose station_id min/max range overlaps any filter UUID.
-	// String stats are prefix-truncated by some writers; truncate filter UUIDs
+	// Pick row groups whose id-col min/max range overlaps any filter id.
+	// String stats are prefix-truncated by some writers; truncate filter ids
 	// to the same length when comparing.
 	let rowOffset = 0;
 	const targetRanges: Array<{ rowStart: number; rowEnd: number }> = [];
 	for (const rg of meta.row_groups) {
 		const numRows = Number(rg.num_rows);
-		const sidCol = rg.columns.find((c) => c.meta_data?.path_in_schema?.[0] === 'station_id');
+		const sidCol = rg.columns.find((c) => c.meta_data?.path_in_schema?.[0] === idCol);
 		const stats = sidCol?.meta_data?.statistics;
 		const min = stats?.min_value as string | undefined;
 		const max = stats?.max_value as string | undefined;
 		const inRange =
 			min === undefined ||
 			max === undefined ||
-			stationIds.some(
+			ids.some(
 				(sid) => min <= sid.slice(0, min.length) && sid.slice(0, max.length) <= max,
 			);
 		if (inRange) {
@@ -557,12 +558,12 @@ async function readR2ParquetStationPruned(
 
 	if (targetRanges.length === 0) return [];
 
-	const sidSet = new Set(stationIds);
+	const sidSet = new Set(ids);
 	const out: Record<string, unknown>[] = [];
 	for (const { rowStart, rowEnd } of targetRanges) {
 		const rows = (await parquetReadObjects({ file, rowStart, rowEnd, columns })) as Record<string, unknown>[];
 		for (const r of rows) {
-			if (!sidSet.has(r.station_id as string)) continue;
+			if (!sidSet.has(r[idCol] as string)) continue;
 			for (const k of Object.keys(r)) {
 				if (typeof r[k] === 'bigint') r[k] = Number(r[k]);
 			}
@@ -683,12 +684,17 @@ async function executeTotalsQuery(
 	p: TotalsParams,
 ): Promise<TotalsResponse> {
 	// Step 1+2: try the agg-tier shards first. Only project columns we need.
+	// Agg tier is only routed when `filter.short_name` is set so we can rg-prune
+	// (full decode of a year-period d1 file or decade-period mo1 file would OOM
+	// the 128 MB worker — needs streaming-aggregation, deferred). For scope=all
+	// or scope=regions without a station filter, fall through to the per-region
+	// rolled rides fallback which is small enough to decode in full.
 	const projection = projectionForTotals(p);
 	const aggTier = pickTripsAggTier(p.fromS, p.toS);
-	if (aggTier) {
+	if (aggTier && p.filterShortName?.length) {
 		const aggKeys = tripsAggKeys(aggTier, p.fromS, p.toS);
 		const aggResults = await Promise.all(
-			aggKeys.map((k) => readR2Parquet(r2, k, projection)),
+			aggKeys.map((k) => readR2ParquetStationPruned(r2, k, p.filterShortName!, projection, 'short_name')),
 		);
 		const allMissing = aggResults.every((r) => r === null);
 		if (!allMissing) {
@@ -787,7 +793,7 @@ function initGroupsType(): never { throw new Error('not callable'); }
 /** Columns to project from parquet for `/api/totals`. Keeps R2 byte-scan
  *  small. `dt` + scope key + dim columns + sum-monoid metric columns. */
 function projectionForTotals(p: TotalsParams): string[] {
-	const cols = new Set<string>(['dt', 'count', 'duration_s']);
+	const cols = new Set<string>(['dt', 'count', 'duration_s', 'duration_s_sq']);
 	if (p.scope === 'stations') cols.add('short_name');
 	if (p.scope === 'regions') cols.add('region');
 	for (const d of p.dims) cols.add(d);
