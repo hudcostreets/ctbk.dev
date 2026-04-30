@@ -699,7 +699,7 @@ async function executeTotalsQuery(
 		const allMissing = aggResults.every((r) => r === null);
 		if (!allMissing) {
 			const merged: Record<string, unknown>[] = [];
-			for (const r of aggResults) if (r) merged.push(...r);
+			for (const r of aggResults) if (r) for (const row of r) merged.push(row);
 			const rows = aggregateTotals(merged, p, /* synthesizeCount */ false);
 			return { kind: p.kind, metric: p.metric, scope: p.scope, tier: aggTier, rows };
 		}
@@ -711,7 +711,7 @@ async function executeTotalsQuery(
 		fallback.paths.map((k) => readR2Parquet(r2, k, projection)),
 	);
 	const merged: Record<string, unknown>[] = [];
-	for (const r of fallbackResults) if (r) merged.push(...r);
+	for (const r of fallbackResults) if (r) for (const row of r) merged.push(row);
 	// Per-station fallback files have no explicit `count`; per-region h1 shards do.
 	const synthesizeCount = fallback.tier === 'fallback-stations';
 	// Per-station fallback files lack `short_name` as a column (they're keyed by
