@@ -449,9 +449,23 @@ describe('availability: pickAvailAggTier', () => {
 	it('span >= 1 month → d1', () => {
 		expect(pickAvailAggTier(T['2024-01-01'], T['2024-02-01'])).toBe('d1');
 	});
-	it('span < 1 month → h1 (no n0/raw fallback for totals)', () => {
+	it('span < 1 month → h1 (no binS)', () => {
 		expect(pickAvailAggTier(T['2024-01-01'], T['2024-01-08'])).toBe('h1');
 		expect(pickAvailAggTier(T['2024-01-01'], T['2024-01-01'] + 3600)).toBe('h1');
+	});
+	it('binS >= 1mo → mo1', () => {
+		expect(pickAvailAggTier(T['2024-01-01'], T['2024-01-08'], 30 * 86400)).toBe('mo1');
+	});
+	it('binS >= 1d → d1', () => {
+		expect(pickAvailAggTier(T['2024-01-01'], T['2024-01-08'], 86400)).toBe('d1');
+	});
+	it('binS >= 1h → h1', () => {
+		expect(pickAvailAggTier(T['2024-01-01'], T['2024-01-08'], 3600)).toBe('h1');
+	});
+	it('binS < 1h → raw (sub-hour bins read /day raw bundle)', () => {
+		expect(pickAvailAggTier(T['2024-01-01'], T['2024-01-08'], 60)).toBe('raw');
+		expect(pickAvailAggTier(T['2024-01-01'], T['2024-01-08'], 300)).toBe('raw');
+		expect(pickAvailAggTier(T['2024-01-01'], T['2024-01-08'], 1800)).toBe('raw');
 	});
 });
 
@@ -799,8 +813,9 @@ describe('parseTotalsParams: bin=', () => {
 		expect(p.binS).toBe(86400);
 	});
 
-	it('rejects bin < 3600 (below h1 tier minimum)', () => {
-		expect(() => parseTotalsParams(baseParams({ bin: '60' }))).toThrow(/≥ 3600/);
+	it('accepts sub-hour bin (routes to raw tier downstream)', () => {
+		expect(parseTotalsParams(baseParams({ bin: '60' })).binS).toBe(60);
+		expect(parseTotalsParams(baseParams({ bin: '300' })).binS).toBe(300);
 	});
 
 	it('rejects non-positive bin', () => {

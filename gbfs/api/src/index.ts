@@ -459,9 +459,11 @@ import {
 } from './planQuery';
 import { binAndAggregate } from './bin';
 import {
+	AVAIL_RAW_PROJECTION,
 	aggregateTotals,
 	availFinalize,
 	availFold,
+	availRawDayKey,
 	daysIn,
 	decadesIn,
 	parseTotalsParams,
@@ -471,6 +473,7 @@ import {
 	tripsAggKeys,
 	tripsTotalsFallbackPaths,
 	type AggTier,
+	type AvailAggTier,
 	type AvailHistRow,
 	type TotalsParams,
 	type TotalsResponse,
@@ -806,9 +809,14 @@ async function stitchInProgressDay(
 }
 
 /**
- * Resolve one period (h1 day / d1 month / mo1 decade) into the running
- * histogram `groups`, transparently falling through to finer tiers when the
- * agg file for an in-progress period doesn't exist yet.
+ * Resolve one period (raw day / h1 day / d1 month / mo1 decade) into the
+ * running histogram `groups`, transparently falling through to finer tiers
+ * when the agg file for an in-progress period doesn't exist yet.
+ *
+ *   raw | period = YYYY-MM-DD: try `gbfs/avail/raw/day/<date>.parquet`
+ *       | (per-poll bundle for sub-hour binning). If missing and past:
+ *       | fall back to 24 h1 raw shards. If period == today: stitch via
+ *       | `stitchInProgressDay`.
  *
  *   h1  | period = YYYY-MM-DD: try `avail/agg/h1/<date>.parquet`. If missing
  *       | and date == today (UTC): stitch raw via `stitchInProgressDay`.
@@ -829,13 +837,49 @@ async function stitchInProgressDay(
  */
 async function resolveAvailTier(
 	r2: R2Bucket,
-	tier: AggTier,
+	tier: AvailAggTier,
 	period: string,
 	stationFilter: string[] | null,
 	p: TotalsParams,
 	groups: Map<string, ReturnType<typeof initGroupsType>>,
 	now: Date = new Date(),
 ): Promise<void> {
+	if (tier === 'raw') {
+		const today = now.toISOString().slice(0, 10);
+		if (period === today) {
+			if (stationFilter) await stitchInProgressDay(r2, period, stationFilter, p, groups);
+			// else: multi-station stitch would require iterating all stations; deferred.
+			return;
+		}
+		const rawProj = AVAIL_RAW_PROJECTION as string[];
+		const dayRows = stationFilter
+			? await readR2ParquetStationPruned(r2, availRawDayKey(period), stationFilter, rawProj)
+			: await readR2Parquet(r2, availRawDayKey(period), rawProj);
+		if (dayRows !== null) {
+			if (dayRows.length > 0) {
+				availFold(pollRowsToHistRows(dayRows as unknown as AvailRow[]), p, groups as never);
+			}
+			return;
+		}
+		// /day raw missing for a closed day → backfill gap. Fall back to the
+		// 24 h1 raw shards (built by the per-hour compactor before /day raw
+		// existed). Idempotent vs. /day raw — same poll rows.
+		const hourKeys = Array.from({ length: 24 }, (_, h) => `gbfs/avail/h1/${period}/${pad2(h)}.parquet`);
+		const hourResults = await Promise.all(
+			hourKeys.map((k) =>
+				stationFilter
+					? readR2ParquetStationPruned(r2, k, stationFilter, rawProj)
+					: readR2Parquet(r2, k, rawProj),
+			),
+		);
+		for (const rows of hourResults) {
+			if (rows && rows.length > 0) {
+				availFold(pollRowsToHistRows(rows as unknown as AvailRow[]), p, groups as never);
+			}
+		}
+		return;
+	}
+
 	const projection = projectionForAvailTotals(p);
 	const key =
 		tier === 'h1'  ? `avail/agg/h1/${period}.parquet` :
@@ -914,6 +958,7 @@ async function executeAvailTotalsQuery(
 
 	// Periods to resolve, at the picked tier's natural granularity.
 	const periods: string[] =
+		tier === 'raw' ? daysIn(p.fromS, p.toS) :
 		tier === 'h1'  ? daysIn(p.fromS, p.toS) :
 		tier === 'd1'  ? monthsInDashed(p.fromS, p.toS) :
 		                 decadesIn(p.fromS, p.toS);

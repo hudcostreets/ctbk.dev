@@ -43,8 +43,11 @@ export type AvailMetric = 'bikes' | 'ebikes' | 'docks' | 'disabled' | 'pending';
 export type AvailMetricParam = AvailMetric | 'all';
 export type TotalsMetric = TripsMetric | AvailMetricParam;
 
-/** Storage tier picked by `pickAggTier` (shared trips/availability). */
+/** Storage tier picked by `pickTripsAggTier`. */
 export type AggTier = 'mo1' | 'd1' | 'h1';
+/** Availability has an extra `raw` tier (per-poll rows, /day raw bundle or
+ *  /h1 raw shards). Routed when binS < 1h. */
+export type AvailAggTier = AggTier | 'raw';
 /** Back-compat alias. */
 export type TripsAggTier = AggTier;
 
@@ -98,7 +101,7 @@ export interface TotalsResponse {
 	kind: TotalsKind;
 	metric: TotalsMetric;
 	scope: TotalsScope;
-	tier: AggTier | 'fallback-stations' | 'fallback-regions';
+	tier: AvailAggTier | 'fallback-stations' | 'fallback-regions';
 	/** Rows shaped per the requested reducer. For trips: one row per
 	 *  `(scope × dims)` with `count` + `duration_s`. For availability:
 	 *  one row per `(scope × dims)` with the requested `agg` field
@@ -206,12 +209,8 @@ export function parseTotalsParams(params: URLSearchParams): TotalsParams {
 		if (!Number.isFinite(b) || b <= 0) {
 			throw new Error(`bin must be a positive integer of seconds (got ${binRaw})`);
 		}
-		// Lower-bound: h1 tier's natural bucket is 1h (3600s). Asking for a
-		// finer bin would require raw n0 data which the agg pipeline doesn't
-		// preserve. Reject up-front.
-		if (b < HOUR_S) {
-			throw new Error(`bin must be ≥ ${HOUR_S}s (avail-agg tier minimum); got ${b}`);
-		}
+		// Sub-hour bins route to the `raw` tier (per-poll /day raw bundle for
+		// closed days + /h1 raw + WAL stitch for the in-progress day).
 		binS = b;
 	}
 
@@ -247,18 +246,19 @@ export function pickTripsAggTier(fromS: number, toS: number, binS?: number): Agg
 }
 
 /**
- * Availability shares the same tier ladder. Default to `h1` for short
- * windows since `n0` (raw 1-min polls) isn't a totals-friendly shape — the
- * histogram aggregator only collapses pre-bucketed minute counts.
+ * Availability has one extra tier (`raw`) for sub-hour bins, fed by the
+ * /day raw bundle (`gbfs/avail/raw/day/<date>.parquet`) or /h1 raw shards
+ * (`gbfs/avail/h1/<date>/<HH>.parquet`) plus today's WAL JSONs.
  */
-export function pickAvailAggTier(fromS: number, toS: number, binS?: number): AggTier {
+export function pickAvailAggTier(fromS: number, toS: number, binS?: number): AvailAggTier {
 	// When `binS` is set, pick the COARSEST tier whose natural bin is ≤ binS.
 	// (Coarser = fewer files; bin-≤-natural is required to actually produce
 	// the requested bin granularity.)
 	if (binS !== undefined) {
 		if (binS >= MONTH_S) return 'mo1';
 		if (binS >= DAY_S) return 'd1';
-		return 'h1';
+		if (binS >= HOUR_S) return 'h1';
+		return 'raw';
 	}
 	const span = toS - fromS;
 	if (span >= YEAR_S) return 'mo1';
@@ -317,6 +317,21 @@ export function availAggKeys(tier: AggTier, fromS: number, toS: number): string[
 		case 'h1':  return daysIn(fromS, toS).map((d) => `avail/agg/h1/${d}.parquet`);
 	}
 }
+
+/** R2 key for a closed day's /day raw bundle (per-poll raw rows). Built by
+ *  `ctbk avail-raw-day` (see `ctbk/avail_raw_day.py`). */
+export function availRawDayKey(date: string): string {
+	return `gbfs/avail/raw/day/${date}.parquet`;
+}
+
+/** Columns to project from /day raw and /h1 raw shards for sub-hour avail
+ *  totals. Drops cols `pollRowsToHistRows` doesn't need (polled_at, is_*,
+ *  last_reported) to halve decode cost. */
+export const AVAIL_RAW_PROJECTION: readonly string[] = [
+	'station_id', 'ts',
+	'num_bikes_available', 'num_ebikes_available', 'num_docks_available',
+	'num_bikes_disabled', 'num_docks_disabled',
+];
 
 /**
  * Fallback chain for when the `trips/agg/<tier>` shards don't exist yet.
