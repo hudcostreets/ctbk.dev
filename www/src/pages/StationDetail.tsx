@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Box, CircularProgress, Typography } from '@mui/material'
-import { useQueryClient } from '@tanstack/react-query'
 import css from '../index.module.css'
 import controlCss from '../controls.module.css'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
@@ -16,11 +15,9 @@ import { processData } from '../chart/ymrgtb-traces'
 import { Checkbox } from '../components/Checkbox'
 import { Checklist } from '../components/Checklist'
 import { Radios } from '../components/Radios'
-import { useSmartPolling } from '../hooks/useSmartPolling'
 import { useStationTrips } from '../hooks/useStationTrips'
 import {
-  useStationInfo, useStationAvailability, stationsApi,
-  type StationRangeResponse,
+  useStationInfo, useStationAvailability,
 } from '../query/stations'
 import { useRollupQuery, type Side } from '../query/rollups'
 import {
@@ -33,7 +30,6 @@ import {
 import { boolParam, intParam, numberArrayParam, stringParam, useUrlState } from 'use-prms'
 import { bufferedBounds, formatTimeRange, roundDuration, timeRangeParam } from '../time-range'
 
-const { API_BASE } = stationsApi
 const MANIFEST_URL = '/assets/station-urls.json'
 
 interface Manifest {
@@ -55,16 +51,12 @@ const DAY_MS = 24 * HOUR_MS
 const MONTH_MS = 30 * DAY_MS
 
 /** Bin presets for the availability chart. Excludes very-fine sub-minute and
- *  very-coarse multi-month bins; both are noise for this UX. Sub-hour bins
- *  are present but disabled at runtime when range > 24h (see
- *  `availDisabledBins`) until the unified-API work lands. */
+ *  very-coarse multi-month bins; both are noise for this UX. */
 const AVAIL_BIN_PRESETS = BIN_PRESETS.filter(
   (p) => p.ms >= 60 * 1000 && p.ms <= MONTH_MS,
 )
 
 /** Bin sizes that should be disabled for the avail chart given current range.
- *  - sub-hour bins: only valid when range ≤ 24h (worker rejects bin < 3600
- *    on `/totals`; pending unified-API + /day raw to lift this).
  *  - bins ≥ range: would render < 2 points; disable.
  *  - bins that violate the current tier-floor (would request too many files)
  *    are still allowed but the worker handles them — we just trust the user.
@@ -72,7 +64,6 @@ const AVAIL_BIN_PRESETS = BIN_PRESETS.filter(
 function availDisabledBins(rangeMs: number): ReadonlySet<number> {
   const out = new Set<number>()
   for (const p of AVAIL_BIN_PRESETS) {
-    if (p.ms < HOUR_MS && rangeMs > DAY_MS) out.add(p.ms)
     if (p.ms >= rangeMs) out.add(p.ms)
   }
   return out
@@ -81,7 +72,6 @@ function availDisabledBins(rangeMs: number): ReadonlySet<number> {
 export default function StationDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const queryClient = useQueryClient()
   const [stations, setStations] = useState<Stations | null>(null)
   const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
   const [manifest, setManifest] = useState<Manifest | null>(null)
@@ -98,6 +88,7 @@ export default function StationDetail() {
   // recompute `toS` every render in Latest mode, churning the query key.
   const rangeDuration = range.duration
   const rangeTimestampMs = range.timestamp?.getTime() ?? null
+  const isLatestMode = rangeTimestampMs === null
   const { fromS, toS } = useMemo(() => {
     const toMs = rangeTimestampMs ?? Date.now()
     const wantFrom = Math.floor((toMs - rangeDuration) / 1000)
@@ -126,9 +117,10 @@ export default function StationDetail() {
     return [Math.max(GENESIS_S, f), t]
   }, [fromS, toS])
 
-  // Smart availability hook: routes to `/range` (raw, ≤24h windows) or
-  // `/totals?metric=all&bin=…` (binned, >24h windows) so the FE never asks
-  // for more datapoints than the viewport can render.
+  // Availability hook: always calls `/api/totals?metric=all&bin=…`. Worker
+  // routes the request through the right tier (mo1/d1/h1/raw) for the chosen
+  // bin. `liveRefresh` flips on a 60s TSQ refetch interval in Latest mode so
+  // newly-polled values bubble in without a manual reload.
   const [availViewportPx, setAvailViewportPx] = useState(() =>
     typeof window === 'undefined' ? 1000 : Math.max(400, Math.min(2000, window.innerWidth - 40))
   )
@@ -147,8 +139,9 @@ export default function StationDetail() {
     }
   }, [])
   const rangeQuery = useStationAvailability(
-    id, info?.gbfs_station_id, bufFromS, bufToS, availViewportPx, info?.capacity ?? null,
+    info?.gbfs_station_id, bufFromS, bufToS, availViewportPx, info?.capacity ?? null,
     binMs > 0 ? Math.floor(binMs / 1000) : undefined,
+    isLatestMode,
   )
   const data = rangeQuery.data ?? null
   const error = rangeQuery.error ? String(rangeQuery.error) : null
@@ -250,54 +243,9 @@ export default function StationDetail() {
   // that from other errors so we can show a friendlier placeholder.
   const rollupNoData = rollupError?.startsWith('HTTP 404') ?? false
 
-  // Smart polling: incremental refresh in Latest mode. In pinned mode
-  // (`range.timestamp !== null`) the window is fixed, so polling is disabled.
-  // Incremental rows are merged into the TSQ cache for the active query
-  // (`['station-range', id, fromS, toS]`) so `useStationRange` consumers
-  // see them without a full refetch.
-  const isLatestMode = rangeTimestampMs === null
-  // Live incremental refetch only fires in RAW mode (windows ≤ 24h). The
-  // binned-mode path (`/totals?bin=…`) would need a different incremental
-  // strategy (re-fold the latest bin) — out of scope; for windows > 24h
-  // the user is in "history" mode and live refresh isn't meaningful.
-  const queryKey = useMemo(
-    () => ['station-avail', id, info?.gbfs_station_id, bufFromS, bufToS, 'raw'],
-    [id, info?.gbfs_station_id, bufFromS, bufToS],
-  )
-
-  const refetchIncremental = useCallback(async () => {
-    if (!id) return
-    const prev = queryClient.getQueryData<StationRangeResponse>(queryKey)
-    const lastPolled = prev?.last_polled_at
-    if (!lastPolled) return
-    const nowS = Math.floor(Date.now() / 1000)
-    const res = await fetch(
-      `${API_BASE}/api/stations/${encodeURIComponent(id)}/range` +
-      `?from=${bufFromS}&to=${nowS}&since=${lastPolled}`
-    )
-    if (!res.ok) return
-    const next = (await res.json()) as StationRangeResponse
-    if (!next.rows.length) return
-    queryClient.setQueryData<StationRangeResponse>(queryKey, (p) => p ? {
-      ...p,
-      rows: [...p.rows, ...next.rows],
-      last_polled_at: next.last_polled_at ?? p.last_polled_at,
-    } : next)
-  }, [id, bufFromS, queryClient, queryKey])
-
-  const lastModifiedDate = useMemo(
-    () => (data?.last_polled_at ? new Date(data.last_polled_at * 1000) : null),
-    [data?.last_polled_at],
-  )
-
-  // Polling only enabled in raw mode + Latest mode.
-  const inRawMode = data?.useRaw === true
-  useSmartPolling({
-    lastModified: lastModifiedDate,
-    refetch: refetchIncremental,
-    enabled: !!id && !!data && isLatestMode && inRawMode,
-    isLatestMode,
-  })
+  // Live refresh in Latest mode is handled via TSQ refetchInterval inside
+  // useStationAvailability (see hook). The worker stitches today's WAL into
+  // the in-progress bin so each refetch returns rows through `now`.
 
   // Load manifest once; default mapMonth to latestMonth
   useEffect(() => {
@@ -460,7 +408,7 @@ export default function StationDetail() {
           capacity={info?.capacity ?? null}
           visibleFromS={fromS}
           visibleToS={toS}
-          binS={data.useRaw ? undefined : data.binS}
+          binS={data.binS}
           onPan={(minS, maxS) => {
             const duration = roundDuration((maxS - minS) * 1000)
             const nowS = Date.now() / 1000

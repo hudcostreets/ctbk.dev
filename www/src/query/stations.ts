@@ -2,11 +2,9 @@
  * TSQ hooks for the GBFS station API.
  *
  * - `useStationInfo(id)`: one-shot `/info` fetch.
- * - `useStationRange(id, fromS, toS)`: time-windowed `/range?from=&to=` fetch
- *   with `keepPreviousData` so the chart stays visible during refetches
- *   (drag-pan commits, Latest snap-back, etc.). `fromS`/`toS` are the
- *   **buffered** bounds the caller wants cached; slice B will widen them so
- *   small drags hit the cache.
+ * - `useStationAvailability(...)`: time-windowed avail data via `/api/totals`,
+ *   binned per `binOverrideS` or `pickAvailBinAuto`. Single shape regardless
+ *   of window size (the worker handles tier selection: mo1/d1/h1/raw).
  */
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 
@@ -67,25 +65,6 @@ export function useStationInfo(id: string | undefined) {
   })
 }
 
-export function useStationRange(
-  id: string | undefined,
-  fromS: number,
-  toS: number,
-) {
-  return useQuery<StationRangeResponse>({
-    queryKey: ['station-range', id, fromS, toS],
-    enabled: !!id,
-    queryFn: async () => {
-      const res = await fetch(
-        `${API_BASE}/api/stations/${encodeURIComponent(id!)}/range?from=${fromS}&to=${toS}`
-      )
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      return res.json()
-    },
-    placeholderData: keepPreviousData,
-  })
-}
-
 /** One row of binned availability aggregation, returned by
  *  `/api/totals?kind=availability&bin=<seconds>&filter.station_id=<uuid>`.
  *  When the request has `metric=all`, each row also has a `metric` field
@@ -110,34 +89,24 @@ export interface AvailabilityOverviewResponse {
   rows: AvailabilityOverviewRow[]
 }
 
-/** Bin/agg picker shared by chart hooks. `target_bin = max(3600, span/vw)`,
- *  rounded UP to the nearest "nice" duration. Below 24h we use the raw
- *  `/range` endpoint instead (since avail-agg's finest bin is 1h, sub-hour
- *  bins require raw data). Returns `{ binS, useRaw }`.
+/** Auto-bin picker for the availability chart: `target_bin = span/viewport`,
+ *  rounded UP to the nearest "nice" duration in `NICE_BINS`. With the unified
+ *  raw tier (sub-hour bins served via `/day raw` bundles + WAL-stitched today)
+ *  there's no longer a useRaw fork; sub-hour bins are first-class.
  *
- *  Tier-cost floor: h1 daily shards are ~110MB parsed each (530k rows × 5
- *  cols), and the Worker can only hold ~1 in memory at the 128MB cap. To
- *  bound CPU/IO regardless of viewport: span > 7d forces binS ≥ 86400 (d1
- *  tier, monthly files); span > 1y forces binS ≥ 1mo (mo1 tier, yearly
- *  files). The visual bin-count rule still applies on top — we just refuse
- *  to over-spend on hourly granularity when the window is too wide. */
-export function pickAvailBinMode(spanS: number, viewportPx: number): { binS: number; useRaw: boolean } {
-  const RAW_THRESHOLD_S = 86400  // 24h: at/below this, raw /range is bounded enough
-  if (spanS <= RAW_THRESHOLD_S) {
-    // /range raw — minute-resolution, FE displays as-is.
-    return { binS: 60, useRaw: true }
-  }
-  const HOUR_S = 3600
+ *  Tier-cost floor for very-wide windows: span > 30d forces binS ≥ 86400
+ *  (d1 tier, yearly files); span > 1y forces binS ≥ 1mo (mo1 tier, decade
+ *  files). Caps the per-file decode load on the Worker. */
+export function pickAvailBinAuto(spanS: number, viewportPx: number): number {
   const DAY_S = 86400
   const MONTH_S = 30 * DAY_S
   const YEAR_S = 365 * DAY_S
-  // Tier-floor cutoffs based on per-file decode cost. With row-group pruning
-  // on (station_id, ...) sort order, each h1 daily shard decodes ~150ms (one
-  // ~10-station row group via rg min/max prune). At concurrency=6 the Worker
-  // chews 30 files in ~1s. Past 30d we drop to d1 (one monthly file).
-  const tierFloor = spanS > YEAR_S ? MONTH_S : spanS > 30 * DAY_S ? DAY_S : HOUR_S
-  // /totals — pick smallest "nice" bin ≥ span/viewport, bounded by tier floor.
+  const tierFloor = spanS > YEAR_S ? MONTH_S : spanS > 30 * DAY_S ? DAY_S : 60
   const NICE_BINS = [
+    60,              //  1 min
+    300,             //  5 min
+    900,             // 15 min
+    1800,            // 30 min
     3600,            //  1 h
     7200,            //  2 h
     14400,           //  4 h
@@ -151,8 +120,7 @@ export function pickAvailBinMode(spanS: number, viewportPx: number): { binS: num
     2592000 * 12,    // ~1 y
   ]
   const target = Math.max(tierFloor, spanS / viewportPx)
-  const binS = NICE_BINS.find((n) => n >= target) ?? NICE_BINS[NICE_BINS.length - 1]
-  return { binS, useRaw: false }
+  return NICE_BINS.find((n) => n >= target) ?? NICE_BINS[NICE_BINS.length - 1]
 }
 
 /** Reshape `/api/totals?metric=all` rows (one per (dt, station, metric))
@@ -201,43 +169,30 @@ function totalsRowsToAvailabilityRows(
   return Array.from(byDt.values()).sort((a, b) => a.polled_at - b.polled_at)
 }
 
-/** Smart availability hook. Picks `/range` (raw, ≤24h windows) or
- *  `/totals?metric=all` (binned, >24h windows) based on viewport.
+/** Availability hook. Always calls `/api/totals?metric=all` regardless of
+ *  window or bin — the unified raw tier serves sub-hour bins via `/day raw`
+ *  bundles + WAL stitching for today. No useRaw fork.
  *
- *  Returns the same `StationRangeResponse` shape regardless, so the chart
- *  doesn't need to know which path served the data. `last_polled_at` is set
- *  only for the raw path (live-refresh hook gates on it). */
+ *  `liveRefresh` enables a 60s refetch interval (for "Latest" mode where
+ *  newly-arrived polls should appear without a manual reload). Worker
+ *  stitches today's WAL into in-progress bins, so a refetch returns rows
+ *  through `now`. */
 export function useStationAvailability(
-  id: string | undefined,           // slug, short_name, or UUID — for /range
-  gbfsId: string | null | undefined, // canonical UUID — for /totals
+  gbfsId: string | null | undefined,  // canonical UUID — required for /totals
   fromS: number,
   toS: number,
   viewportPx: number,
   capacityHint: number | null,
-  /** Manual bin override in seconds. When set, force `/totals` with this bin
-   *  (must be ≥ 3600 — worker rejects sub-hour). When undefined, fall back to
-   *  `pickAvailBinMode`'s auto choice. */
+  /** Manual bin override in seconds. When undefined, falls back to
+   *  `pickAvailBinAuto`'s auto choice. */
   binOverrideS?: number,
+  liveRefresh: boolean = false,
 ) {
-  let binS: number
-  let useRaw: boolean
-  if (binOverrideS != null && binOverrideS >= 3600) {
-    binS = binOverrideS
-    useRaw = false
-  } else {
-    ({ binS, useRaw } = pickAvailBinMode(toS - fromS, viewportPx))
-  }
-  return useQuery<StationRangeResponse & { binS: number; useRaw: boolean }>({
-    queryKey: ['station-avail', id, gbfsId, fromS, toS, useRaw ? 'raw' : `bin${binS}`],
-    enabled: !!id && (useRaw || !!gbfsId),
+  const binS = binOverrideS ?? pickAvailBinAuto(toS - fromS, viewportPx)
+  return useQuery<StationRangeResponse & { binS: number }>({
+    queryKey: ['station-avail', gbfsId, fromS, toS, `bin${binS}`],
+    enabled: !!gbfsId,
     queryFn: async () => {
-      if (useRaw) {
-        const url = `${API_BASE}/api/stations/${encodeURIComponent(id!)}/range?from=${fromS}&to=${toS}`
-        const res = await fetch(url)
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const data = await res.json() as StationRangeResponse
-        return { ...data, binS, useRaw }
-      }
       const url = new URL(`${API_BASE}/api/totals`)
       url.searchParams.set('kind', 'availability')
       url.searchParams.set('metric', 'all')
@@ -255,13 +210,13 @@ export function useStationAvailability(
         from: fromS,
         to: toS,
         capacity: capacityHint,
-        last_polled_at: null,  // no live-refresh in binned mode
+        last_polled_at: null,
         rows: totalsRowsToAvailabilityRows(data.rows),
         binS,
-        useRaw,
       }
     },
     placeholderData: keepPreviousData,
+    refetchInterval: liveRefresh ? 60_000 : false,
   })
 }
 
