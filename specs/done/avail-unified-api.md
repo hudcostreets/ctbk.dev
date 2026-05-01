@@ -1,10 +1,23 @@
 # Spec: unified availability read API
 
-Status: design, ready for implementation. Closes the gap left by
-`specs/multiscale-timeseries-v2.md`: that spec covered the storage layout
-but didn't fully specify the client-facing API contract, which left the
-FE picking between `/range` (raw minute polls) and `/api/totals` (binned
-agg) based on window size. This spec collapses those into one path.
+Status: **done** (2026-05-01). Worker accepts any positive `bin` and
+routes sub-hour bins through a new `raw` tier (`/day raw` bundles +
+today-WAL stitch). FE drops the `useRaw` fork; `useStationAvailability`
+always calls `/api/totals`. Live refresh in Latest mode is a TSQ
+`refetchInterval: 60_000`. `useStationRange` removed from the FE; the
+worker's `/api/stations/:id/range` endpoint stays for direct-access use.
+
+Notes / known gaps:
+- Cold latency on the 7d × 5min query is ~3s (spec target ≤ 1s);
+  tracked as a `_write_sorted_parquet` rg-size tightening — see
+  `specs/multiscale-timeseries-v2.md` (rg=1440 = 1 station/day per rg
+  vs. current ~10 stations/rg).
+
+Closes the gap left by `specs/multiscale-timeseries-v2.md`: that spec
+covered the storage layout but didn't fully specify the client-facing
+API contract, which left the FE picking between `/range` (raw minute
+polls) and `/api/totals` (binned agg) based on window size. This spec
+collapses those into one path.
 
 ## Goal
 
