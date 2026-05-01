@@ -39,6 +39,10 @@ export interface AvailabilityRow {
   is_renting: number
   is_returning: number
   last_reported: number
+  /** Number of source-minute polls aggregated into this row, when row came
+   *  from `/api/totals` (binned). Absent on raw `/range` rows (each row IS
+   *  one minute). Used by the chart's tooltip to label the aggregation. */
+  sample_count?: number
 }
 
 export interface StationRangeResponse {
@@ -176,8 +180,14 @@ function totalsRowsToAvailabilityRows(
         is_renting: 1,
         is_returning: 1,
         last_reported: key,
+        sample_count: r.sample_count,
       }
       byDt.set(key, row)
+    }
+    // Per-metric `sample_count` is the same per (dt, station) — keep the max
+    // in case a later metric row carries it but an earlier one didn't.
+    if (r.sample_count != null && (row.sample_count == null || r.sample_count > row.sample_count)) {
+      row.sample_count = r.sample_count
     }
     const v = r.mean ?? 0
     switch (r.metric) {

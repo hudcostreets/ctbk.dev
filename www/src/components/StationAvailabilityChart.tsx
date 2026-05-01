@@ -12,6 +12,9 @@ export interface AvailabilityRow {
   num_docks_available: number
   num_bikes_disabled: number
   num_docks_disabled: number
+  /** Number of minute-polls behind this row. Present when row came from
+   *  `/api/totals` (binned, mean values), absent for raw 1-minute polls. */
+  sample_count?: number
 }
 
 interface Props {
@@ -27,6 +30,10 @@ interface Props {
    *  aren't empty while dragging. */
   visibleFromS?: number
   visibleToS?: number
+  /** When `rows` are pre-binned aggregates from `/api/totals` (not raw
+   *  1-min polls), bin width in seconds. Used to label the tooltip with
+   *  the bin's time range. Absent → tooltip uses point timestamp. */
+  binS?: number
 }
 
 const COLORS = {
@@ -48,6 +55,8 @@ interface TooltipState {
   disabled: number
   pending: number
   raw_sum: number
+  /** Number of source-minute polls behind this row, when binned. */
+  sample_count?: number
 }
 
 /** Smooth a row to sum to capacity:
@@ -78,7 +87,7 @@ function smoothRow(r: AvailabilityRow, capacity: number) {
 const SERIES_KEYS = ['classic', 'ebike', 'docks', 'disabled', 'pending'] as const
 type SeriesKey = (typeof SERIES_KEYS)[number]
 
-export default function StationAvailabilityChart({ rows, capacity, height = 400, onPan, visibleFromS, visibleToS }: Props) {
+export default function StationAvailabilityChart({ rows, capacity, height = 400, onPan, visibleFromS, visibleToS, binS }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -190,6 +199,7 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
               top: cy,
               ts: rows[idx].polled_at,
               ...s,
+              sample_count: rows[idx].sample_count,
             })
           },
         ],
@@ -216,15 +226,6 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
       setTooltip(null)
     }
   }, [rows, capacity, height, actualTheme, visible, hovered])
-
-  // Latest smoothed values, for inline display in legend items ("current state").
-  const latestValues = (() => {
-    if (!rows.length) return null
-    const cap = capacity ?? 0
-    if (cap <= 0) return null
-    const s = smoothRow(rows[rows.length - 1], cap)
-    return { classic: s.classic, ebike: s.ebikes, docks: s.docks, disabled: s.disabled, pending: s.pending }
-  })()
 
   const legendItems: { key: SeriesKey; color: string; label: string }[] = [
     { key: 'classic',  color: COLORS.classic,  label: 'Classic bikes' },
@@ -327,11 +328,6 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
               }} />
               <span style={{ textDecoration: shown ? 'none' : 'line-through' }}>
                 {it.label}
-                {latestValues && (
-                  <span style={{ marginLeft: 4, fontVariantNumeric: 'tabular-nums', opacity: 0.75 }}>
-                    ({latestValues[it.key]})
-                  </span>
-                )}
               </span>
             </div>
           )
@@ -363,21 +359,24 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
             zIndex: 10,
           }}
         >
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>
-            {new Date(tooltip.ts * 1000).toLocaleString(undefined, {
-              hour: '2-digit', minute: '2-digit', second: '2-digit',
-              month: 'short', day: 'numeric',
-            })}
+          <div style={{ fontWeight: 600, marginBottom: 2 }}>
+            {formatTooltipTitle(tooltip.ts, binS)}
           </div>
-          <Row color={COLORS.classic}    label="Classic bikes" value={tooltip.classic} />
-          <Row color={COLORS.ebike}      label="eBikes"        value={tooltip.ebikes} />
+          {binS != null && tooltip.sample_count != null && (
+            <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 4 }}>
+              mean over {tooltip.sample_count} {tooltip.sample_count === 1 ? 'minute' : 'minutes'}
+            </div>
+          )}
+          {/* Order matches the stacked-area plot read top-to-bottom: pending
+            * is on top of the stack, classic on the bottom. Always render all
+            * 5 rows so the tooltip's vertical extent doesn't jitter as the
+            * cursor moves between bins where Pending or Disabled drop to 0;
+            * zero-valued rows fade to "-". */}
+          <Row color={COLORS.pending}    label="Pending"       value={tooltip.pending} />
+          <Row color={COLORS.disabled}   label="Disabled"      value={tooltip.disabled} />
           <Row color={COLORS.docks}      label="Empty docks"   value={tooltip.docks} />
-          {tooltip.disabled > 0 && (
-            <Row color={COLORS.disabled} label="Disabled"      value={tooltip.disabled} />
-          )}
-          {tooltip.pending > 0 && (
-            <Row color={COLORS.pending} label="Pending"  value={tooltip.pending} />
-          )}
+          <Row color={COLORS.ebike}      label="eBikes"        value={tooltip.ebikes} />
+          <Row color={COLORS.classic}    label="Classic bikes" value={tooltip.classic} />
         </div>
         )
       })()}
@@ -386,14 +385,59 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
 }
 
 function Row({ color, label, value }: { color: string; label: string; value: number }) {
+  // value === 0 → faded placeholder ("-") so the tooltip's row count stays
+  // constant across bins (no vertical jitter when Pending / Disabled drop
+  // out at some bins).
+  const empty = value === 0
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, lineHeight: 1.5 }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, lineHeight: 1.5, opacity: empty ? 0.4 : 1 }}>
       <span style={{
         display: 'inline-block', width: 10, height: 10,
         background: color, borderRadius: 2,
       }} />
       <span style={{ flex: 1 }}>{label}</span>
-      <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{value}</span>
+      <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
+        {empty ? '–' : formatValue(value)}
+      </span>
     </div>
   )
+}
+
+/** Round to integer when whole, else 1 decimal (raw poll values are integers;
+ *  binned mean values may be fractional). Matches the ~precision a user can
+ *  read off the stacked-area chart. */
+function formatValue(v: number): string {
+  if (Number.isInteger(v)) return String(v)
+  return v.toFixed(1)
+}
+
+const HOUR_S = 3600
+const DAY_S = 86400
+
+/** Tooltip title: "Apr 29, 11:00 AM" for raw / hourly bins; "Apr 29 (1d bin)"
+ *  for daily bins; "Apr 2026 (1mo bin)" for monthly. Bin width drives the
+ *  precision so the time label matches the bin's actual extent. */
+function formatTooltipTitle(ts: number, binS: number | undefined): string {
+  const d = new Date(ts * 1000)
+  if (binS == null || binS < HOUR_S) {
+    // Raw / sub-hour: show full timestamp.
+    return d.toLocaleString(undefined, {
+      month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    })
+  }
+  if (binS < DAY_S) {
+    // Hourly: show the bin's hour range.
+    const end = new Date(ts * 1000 + binS * 1000)
+    const dateStr = d.toLocaleString(undefined, { month: 'short', day: 'numeric' })
+    const startH = d.toLocaleString(undefined, { hour: 'numeric', minute: '2-digit' })
+    const endH   = end.toLocaleString(undefined, { hour: 'numeric', minute: '2-digit' })
+    return `${dateStr}, ${startH}–${endH}`
+  }
+  if (binS < 28 * DAY_S) {
+    // Daily.
+    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) + ' (1d bin)'
+  }
+  // Monthly+ bins: just the month label.
+  return d.toLocaleString(undefined, { month: 'long', year: 'numeric' }) + ' (1mo bin)'
 }

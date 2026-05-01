@@ -421,6 +421,7 @@ export default function StationDetail() {
           capacity={info?.capacity ?? null}
           visibleFromS={fromS}
           visibleToS={toS}
+          binS={data.useRaw ? undefined : data.binS}
           onPan={(minS, maxS) => {
             const duration = roundDuration((maxS - minS) * 1000)
             const nowS = Date.now() / 1000
