@@ -43,8 +43,6 @@ LOCAL_RAW = Path(f'r2/{R2_BUCKET}/gbfs/avail/h1')    # hourly input mirror
 LOCAL_DAILY = Path(f'r2/{R2_BUCKET}/gbfs/status')    # daily input mirror
 LOCAL_AGG = Path(f'r2/{R2_BUCKET}/avail/agg')        # output mirror
 
-AWS_PROFILE_ARGS = ['--profile', 'cf']
-
 # Map raw column name -> canonical metric name (spec §Storage layout).
 METRIC_COLS = {
     'num_bikes_available': 'bikes',
@@ -58,9 +56,9 @@ OUT_COLS = ['dt', 'station_id', 'metric', 'state', 'minutes']
 
 
 def _r2_sync_in(remote_prefix: str, local_dir: Path):
-    """Download from R2 to local mirror via aws s3 sync (cf profile)."""
+    """Download from R2 to local mirror via aws s3 sync."""
     local_dir.mkdir(parents=True, exist_ok=True)
-    cmd = ['aws', 's3', 'sync', remote_prefix, str(local_dir), *AWS_PROFILE_ARGS]
+    cmd = ['aws', 's3', 'sync', remote_prefix, str(local_dir)]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         raise RuntimeError(f"aws s3 sync failed: {res.stderr}")
@@ -69,7 +67,7 @@ def _r2_sync_in(remote_prefix: str, local_dir: Path):
 def _r2_cp_in(remote_uri: str, local_path: Path) -> bool:
     """Download one R2 object to a local file. Returns False if 404."""
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ['aws', 's3', 'cp', remote_uri, str(local_path), *AWS_PROFILE_ARGS]
+    cmd = ['aws', 's3', 'cp', remote_uri, str(local_path)]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode == 0:
         return True
@@ -82,7 +80,7 @@ def _r2_cp_in(remote_uri: str, local_path: Path) -> bool:
 
 def _r2_upload(local_path: Path, remote_uri: str):
     """Upload one file to R2."""
-    cmd = ['aws', 's3', 'cp', str(local_path), remote_uri, *AWS_PROFILE_ARGS]
+    cmd = ['aws', 's3', 'cp', str(local_path), remote_uri]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         raise RuntimeError(f"aws s3 cp failed: {res.stderr}")
