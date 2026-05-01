@@ -5,9 +5,8 @@ import { useQueryClient } from '@tanstack/react-query'
 import css from '../index.module.css'
 import controlCss from '../controls.module.css'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
-import OverviewAvailabilityChart, { pickOverviewBin } from '../components/OverviewAvailabilityChart'
 import { RangeWidthControl } from '../components/RangeWidthControl'
-import { BinSelect } from '../components/BinSelect'
+import { BinSelect, BIN_PRESETS } from '../components/BinSelect'
 import RidesTable from '../components/RidesTable'
 import RollupTripsChart from '../components/RollupTripsChart'
 import { TimeAgo } from '../components/TimeAgo'
@@ -20,7 +19,7 @@ import { Radios } from '../components/Radios'
 import { useSmartPolling } from '../hooks/useSmartPolling'
 import { useStationTrips } from '../hooks/useStationTrips'
 import {
-  useStationInfo, useStationAvailability, useAvailabilityOverview, stationsApi,
+  useStationInfo, useStationAvailability, stationsApi,
   type StationRangeResponse,
 } from '../query/stations'
 import { useRollupQuery, type Side } from '../query/rollups'
@@ -51,6 +50,34 @@ function formatMonth(yyyymm: string): string {
   return `${monthName} '${yr}`
 }
 
+const HOUR_MS = 60 * 60 * 1000
+const DAY_MS = 24 * HOUR_MS
+const MONTH_MS = 30 * DAY_MS
+
+/** Bin presets for the availability chart. Excludes very-fine sub-minute and
+ *  very-coarse multi-month bins; both are noise for this UX. Sub-hour bins
+ *  are present but disabled at runtime when range > 24h (see
+ *  `availDisabledBins`) until the unified-API work lands. */
+const AVAIL_BIN_PRESETS = BIN_PRESETS.filter(
+  (p) => p.ms >= 60 * 1000 && p.ms <= MONTH_MS,
+)
+
+/** Bin sizes that should be disabled for the avail chart given current range.
+ *  - sub-hour bins: only valid when range ≤ 24h (worker rejects bin < 3600
+ *    on `/totals`; pending unified-API + /day raw to lift this).
+ *  - bins ≥ range: would render < 2 points; disable.
+ *  - bins that violate the current tier-floor (would request too many files)
+ *    are still allowed but the worker handles them — we just trust the user.
+ */
+function availDisabledBins(rangeMs: number): ReadonlySet<number> {
+  const out = new Set<number>()
+  for (const p of AVAIL_BIN_PRESETS) {
+    if (p.ms < HOUR_MS && rangeMs > DAY_MS) out.add(p.ms)
+    if (p.ms >= rangeMs) out.add(p.ms)
+  }
+  return out
+}
+
 export default function StationDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -62,6 +89,8 @@ export default function StationDetail() {
 
   // Availability time range (URL param `r`; minute-granularity codec, default Latest + 7d).
   const [range, setRange] = useUrlState('r', timeRangeParam(7 * 24 * 60 * 60 * 1000))
+  // Availability bin width (URL param `b`; ms; 0 = Auto, mirrors `tripsBinMs`).
+  const [binMs, setBinMs] = useUrlState('b', intParam(0))
 
   const { data: info } = useStationInfo(id)
 
@@ -117,7 +146,10 @@ export default function StationDetail() {
       if (timer) clearTimeout(timer)
     }
   }, [])
-  const rangeQuery = useStationAvailability(id, info?.gbfs_station_id, bufFromS, bufToS, availViewportPx, info?.capacity ?? null)
+  const rangeQuery = useStationAvailability(
+    id, info?.gbfs_station_id, bufFromS, bufToS, availViewportPx, info?.capacity ?? null,
+    binMs > 0 ? Math.floor(binMs / 1000) : undefined,
+  )
   const data = rangeQuery.data ?? null
   const error = rangeQuery.error ? String(rangeQuery.error) : null
 
@@ -403,8 +435,15 @@ export default function StationDetail() {
         )}
       </Typography>
 
-      <Box my={1}>
+      <Box my={1} display="flex" alignItems="center" gap={2} flexWrap="wrap">
         <RangeWidthControl value={range} onChange={setRange} />
+        <BinSelect
+          value={binMs > 0 ? binMs : undefined}
+          onChange={(ms) => setBinMs(ms ?? 0)}
+          presets={AVAIL_BIN_PRESETS}
+          disabledMs={availDisabledBins(rangeDuration)}
+          disabledTitle={'Sub-hour bins for ranges > 24h need the unified-API work (specs/avail-unified-api.md). Coming next.'}
+        />
       </Box>
 
       {error && (
@@ -439,7 +478,10 @@ export default function StationDetail() {
         <Typography>No data yet for today.</Typography>
       )}
 
-      <OverviewSection gbfsId={info?.gbfs_station_id ?? null} capacity={info?.capacity ?? null} />
+      {/* OverviewAvailabilityChart was a separate "Mean bikes — daily bins"
+        * plot showing the full station history. It's been folded into the
+        * main chart's controls (Range + Bin selectors above) — pick e.g.
+        * Range=1y, Bin=1d to reproduce that view. Removed 2026-05-01. */}
 
       {mapCenter && mapShortName && (
         <>
@@ -673,73 +715,3 @@ export default function StationDetail() {
  *  of any GBFS-availability query — older data simply doesn't exist). The
  *  compactor + backfill cover data from 2026-04-07 onward. */
 const GENESIS_S = Math.floor(new Date('2026-04-07T00:00:00Z').getTime() / 1000)
-const OVERVIEW_FLOOR_S = GENESIS_S
-
-/** "Mean bikes-available across the longest-available window" chart.
- *  Renders below the per-minute chart on the station detail page; uses
- *  `/api/totals?kind=availability&bin=<seconds>` with auto-picked bin. */
-function OverviewSection({
-  gbfsId,
-  capacity,
-}: {
-  gbfsId: string | null
-  capacity: number | null
-}) {
-  // Snapshot `toS` once at mount + refresh every 5 min so the chart isn't
-  // stale forever but doesn't churn the query key on every parent re-render.
-  const [toS, setToS] = useState(() => Math.floor(Date.now() / 1000))
-  useEffect(() => {
-    const i = setInterval(() => setToS(Math.floor(Date.now() / 1000)), 5 * 60 * 1000)
-    return () => clearInterval(i)
-  }, [])
-
-  // Re-pick bin on viewport resize — debounced so the query key doesn't churn
-  // mid-drag.
-  const [widthPx, setWidthPx] = useState(() =>
-    typeof window === 'undefined' ? 800 : Math.max(400, Math.min(1400, window.innerWidth - 40))
-  )
-  useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const onResize = () => {
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => {
-        setWidthPx(Math.max(400, Math.min(1400, window.innerWidth - 40)))
-      }, 250)
-    }
-    window.addEventListener('resize', onResize)
-    return () => {
-      window.removeEventListener('resize', onResize)
-      if (timer) clearTimeout(timer)
-    }
-  }, [])
-
-  const fromS = OVERVIEW_FLOOR_S
-  const binS = useMemo(() => pickOverviewBin(toS - fromS, widthPx), [toS, fromS, widthPx])
-
-  const overview = useAvailabilityOverview(gbfsId ?? undefined, fromS, toS, binS)
-
-  if (!gbfsId) return null
-  if (overview.isLoading) {
-    return (
-      <Box mt={3} display="flex" justifyContent="center"><CircularProgress size={20} /></Box>
-    )
-  }
-  if (overview.error || !overview.data || overview.data.rows.length === 0) return null
-
-  const binLabel = binS >= 2592000 ? 'monthly' : binS >= 86400 * 7 ? 'weekly' : binS >= 86400 ? 'daily' : binS >= 3600 ? `${binS / 3600}h` : `${binS}s`
-
-  return (
-    <Box mt={3}>
-      <Typography variant="subtitle2" sx={{ opacity: 0.7, mb: 0.5 }}>
-        Mean bikes available — {binLabel} bins, since {new Date(fromS * 1000).toISOString().slice(0, 10)}
-      </Typography>
-      <OverviewAvailabilityChart
-        rows={overview.data.rows}
-        capacity={capacity}
-        fromS={fromS}
-        toS={toS}
-        binS={binS}
-      />
-    </Box>
-  )
-}

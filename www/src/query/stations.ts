@@ -214,8 +214,19 @@ export function useStationAvailability(
   toS: number,
   viewportPx: number,
   capacityHint: number | null,
+  /** Manual bin override in seconds. When set, force `/totals` with this bin
+   *  (must be ≥ 3600 — worker rejects sub-hour). When undefined, fall back to
+   *  `pickAvailBinMode`'s auto choice. */
+  binOverrideS?: number,
 ) {
-  const { binS, useRaw } = pickAvailBinMode(toS - fromS, viewportPx)
+  let binS: number
+  let useRaw: boolean
+  if (binOverrideS != null && binOverrideS >= 3600) {
+    binS = binOverrideS
+    useRaw = false
+  } else {
+    ({ binS, useRaw } = pickAvailBinMode(toS - fromS, viewportPx))
+  }
   return useQuery<StationRangeResponse & { binS: number; useRaw: boolean }>({
     queryKey: ['station-avail', id, gbfsId, fromS, toS, useRaw ? 'raw' : `bin${binS}`],
     enabled: !!id && (useRaw || !!gbfsId),

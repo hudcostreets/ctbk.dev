@@ -53,12 +53,21 @@ interface Props {
   value: number | undefined
   onChange: (ms: number | undefined) => void
   className?: string
+  /** Subset of `BIN_PRESETS` (by `ms`) to render — defaults to all. Use to
+   *  scope the dropdown to bins that make sense for a particular chart. */
+  presets?: readonly BinOption[]
+  /** Bin sizes (in ms) to grey out + disable. Use for capability gates that
+   *  the parent knows about — e.g. "sub-hour bins not available for ranges
+   *  longer than 24h yet" (pending unified-API work). */
+  disabledMs?: ReadonlySet<number>
+  /** Tooltip to attach to disabled options, explaining why. */
+  disabledTitle?: string
 }
 
-export function BinSelect({ value, onChange, className }: Props) {
+export function BinSelect({ value, onChange, className, presets = BIN_PRESETS, disabledMs, disabledTitle }: Props) {
   const selectValue = value === undefined
     ? AUTO
-    : (BIN_PRESETS.find(p => p.ms === value)?.label ?? AUTO)
+    : (presets.find(p => p.ms === value)?.label ?? AUTO)
 
   return (
     <div className={`${css.row}${className ? ` ${className}` : ''}`}>
@@ -70,14 +79,24 @@ export function BinSelect({ value, onChange, className }: Props) {
         onChange={(e) => {
           const next = e.target.value
           if (next === AUTO) { onChange(undefined); return }
-          const p = BIN_PRESETS.find(pp => pp.label === next)
+          const p = presets.find(pp => pp.label === next)
           if (p) onChange(p.ms)
         }}
       >
         <option value={AUTO}>Auto</option>
-        {BIN_PRESETS.map(p => (
-          <option key={p.label} value={p.label}>{p.label}</option>
-        ))}
+        {presets.map(p => {
+          const disabled = disabledMs?.has(p.ms) ?? false
+          return (
+            <option
+              key={p.label}
+              value={p.label}
+              disabled={disabled}
+              title={disabled ? disabledTitle : undefined}
+            >
+              {p.label}{disabled ? ' (n/a)' : ''}
+            </option>
+          )
+        })}
       </select>
     </div>
   )
