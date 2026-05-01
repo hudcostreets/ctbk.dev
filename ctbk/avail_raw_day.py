@@ -71,6 +71,10 @@ class AvailRawDay:
 
         out_path = Path(self.url)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        # Tried `stations_per_rg=1` (≈1440 rows/rg per spec); regressed worker
+        # latency 7-13× because hyparquet parses the full footer eagerly and
+        # rg-count dominates parse time on CFW. Stick with shared default
+        # (10 stations/rg) until the worker switches to range-read metadata.
         _write_sorted_parquet(df, out_path)
         err(f"avail-raw-day {self.date}: {len(df):,} rows, {out_path.stat().st_size/1024/1024:.1f} MB")
         if upload:

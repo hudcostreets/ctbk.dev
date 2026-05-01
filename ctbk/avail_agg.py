@@ -147,20 +147,20 @@ HOUR_S = 3600
 DAY_S = 86400
 
 
-def _write_sorted_parquet(df: DataFrame, out_path: Path) -> None:
-    """Write df to parquet with row-group size ≈ STATIONS_PER_RG stations' rows.
+def _write_sorted_parquet(df: DataFrame, out_path: Path, stations_per_rg: int = 10) -> None:
+    """Write df to parquet with row-group size ≈ `stations_per_rg` stations' rows.
 
-    Each row group holds ~10 stations' rows. Combined with parquet's
-    per-row-group min/max stats on the leading sort column (`station_id`),
-    the Worker prunes to ~1 row group when filtering by one station.
-    Decoded rows: ~10 stations' worth (a few thousand). Cheap.
+    Combined with parquet's per-row-group min/max stats on the leading sort
+    column (`station_id`), the Worker prunes to a small set of row groups when
+    filtering by one station. Tradeoff: smaller RGs blow up footer metadata
+    (~4× file size at 1 station/rg with histogram-shape data); larger RGs
+    defeat pruning. Default 10 is the sweet spot for histogram /agg files.
 
-    Smaller RGs (1 station each) blow up footer metadata (~4× file size).
-    Larger RGs (~all stations) defeat pruning. ~10 is the sweet spot.
+    Pass `stations_per_rg=1` for /day raw bundles where per-station rows are
+    dense (~1440/day) and tighter rg pruning is worth the extra metadata.
 
     No-ops cleanly on empty DataFrame (writes a 0-row parquet with schema only).
     """
-    STATIONS_PER_RG = 10
     n = len(df)
     if n == 0:
         df.to_parquet(out_path, index=False)
@@ -168,7 +168,7 @@ def _write_sorted_parquet(df: DataFrame, out_path: Path) -> None:
     n_stations = df['station_id'].nunique()
     # +20% slack for variance in per-station row count (some stations have
     # more states active than others). Floor at 100.
-    rg = max(100, int(n / n_stations * STATIONS_PER_RG * 1.2))
+    rg = max(100, int(n / n_stations * stations_per_rg * 1.2))
     df.to_parquet(out_path, index=False, engine='pyarrow', row_group_size=rg)
 
 
