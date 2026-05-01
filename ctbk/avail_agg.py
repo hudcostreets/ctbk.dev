@@ -253,7 +253,13 @@ class AvailAggD1Month:
         h1_dir = LOCAL_AGG / 'h1'
         return sorted(h1_dir.glob(f'{self.ym}-??.parquet'))
 
-    def create(self) -> Path:
+    def create(self, sync: bool = True) -> Path:
+        # Pull all h1 files for the month from R2 so a fresh CI runner sees
+        # the full month (the daily compaction cron only builds + uploads one
+        # day's h1 file per run).
+        if sync:
+            h1_dir = LOCAL_AGG / 'h1'
+            _r2_sync_in(f'{R2_AVAIL_AGG}/h1/', h1_dir)
         files = self._h1_paths()
         if not files:
             raise FileNotFoundError(f"No h1 shards for {self.ym} at {LOCAL_AGG/'h1'}")
@@ -308,7 +314,12 @@ class AvailAggMo1Year:
         d1_dir = LOCAL_AGG / 'd1'
         return sorted(d1_dir.glob(f'{self.year}-??.parquet'))
 
-    def create(self) -> Path:
+    def create(self, sync: bool = True) -> Path:
+        # Pull all d1 files for the year from R2 (same rationale as
+        # `AvailAggD1Month.create`).
+        if sync:
+            d1_dir = LOCAL_AGG / 'd1'
+            _r2_sync_in(f'{R2_AVAIL_AGG}/d1/', d1_dir)
         files = self._d1_paths()
         if not files:
             raise FileNotFoundError(f"No d1 shards for {self.year} at {LOCAL_AGG/'d1'}")
