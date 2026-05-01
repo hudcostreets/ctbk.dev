@@ -1,7 +1,12 @@
 # Spec: /day raw bundle tier for availability
 
-Status: design, ready for implementation. Companion to
-`specs/multiscale-timeseries-v2.md` Phase 3.
+Status: **done** (producer side, 2026-05-01). `ctbk avail-raw-day` ships
+the daily compactor; backfill covers 2026-04-20 → 2026-04-30 (11 days);
+GHA cron in `.github/workflows/gbfs-compact.yml` writes the new day
+post-/h1 each morning. Worker reader path is tracked separately in
+`specs/avail-unified-api.md`.
+
+Companion to `specs/multiscale-timeseries-v2.md` Phase 3.
 
 ## Goal
 

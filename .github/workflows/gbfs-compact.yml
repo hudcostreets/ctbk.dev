@@ -56,6 +56,13 @@ jobs:
                     "s3://ctbk/avail/agg/h1/${{ steps.date.outputs.date }}.parquet" \
                     --endpoint-url "$AWS_ENDPOINT_URL"
 
+      - name: Build /day raw bundle for the day
+        run: |
+          python3 -c "from ctbk.avail_raw_day import AvailRawDay; AvailRawDay('${{ steps.date.outputs.date }}').create()"
+          aws s3 cp "r2/ctbk/gbfs/avail/raw/day/${{ steps.date.outputs.date }}.parquet" \
+                    "s3://ctbk/gbfs/avail/raw/day/${{ steps.date.outputs.date }}.parquet" \
+                    --endpoint-url "$AWS_ENDPOINT_URL"
+
       - name: Build /d1 avail-agg for closed month
         if: ${{ steps.date.outputs.trigger_d1 == 'true' }}
         run: |
