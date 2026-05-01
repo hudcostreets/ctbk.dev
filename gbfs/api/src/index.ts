@@ -460,19 +460,22 @@ import {
 import { binAndAggregate } from './bin';
 import {
 	aggregateTotals,
-	availAggKeys,
 	availFinalize,
 	availFold,
+	daysIn,
+	decadesIn,
 	parseTotalsParams,
 	pickAvailAggTier,
 	pickTripsAggTier,
 	projectionForAvailTotals,
 	tripsAggKeys,
 	tripsTotalsFallbackPaths,
+	type AggTier,
 	type AvailHistRow,
 	type TotalsParams,
 	type TotalsResponse,
 } from './totals';
+import { monthsInDashed } from './planQuery';
 
 /**
  * Read one parquet from R2, returning rows as plain objects. Returns `null` if
@@ -733,54 +736,207 @@ async function executeTotalsQuery(
 }
 
 /**
- * Execute an `/api/totals` request (availability path). Reads the
- * `avail/agg/<tier>/<window>.parquet` shards (built by `ctbk avail-agg-*`)
- * one at a time, folding each into a per-group histogram, then finalizes
- * with the requested reducer.
+ * Convert a stream of per-minute poll rows (`AvailRow[]`) into the long-format
+ * histogram rows (`AvailHistRow[]`) that `availFold` consumes. Each input row
+ * yields 5 output rows (one per metric); each cell carries `minutes=1`.
+ *
+ * Used to stitch raw, per-minute data from in-progress periods (today's h1
+ * shards + WAL JSONs) into the same `availFold` pipeline that consumes closed-
+ * day h1-agg parquets — so the answer for any window is identical regardless
+ * of whether the agg file existed.
+ */
+function pollRowsToHistRows(rows: AvailRow[]): AvailHistRow[] {
+	const out: AvailHistRow[] = [];
+	for (const r of rows) {
+		out.push({ dt: r.ts, station_id: r.station_id, metric: 'bikes',    state: r.num_bikes_available,  minutes: 1 });
+		out.push({ dt: r.ts, station_id: r.station_id, metric: 'ebikes',   state: r.num_ebikes_available, minutes: 1 });
+		out.push({ dt: r.ts, station_id: r.station_id, metric: 'docks',    state: r.num_docks_available,  minutes: 1 });
+		out.push({ dt: r.ts, station_id: r.station_id, metric: 'disabled', state: r.num_bikes_disabled,   minutes: 1 });
+		out.push({ dt: r.ts, station_id: r.station_id, metric: 'pending',  state: r.num_docks_disabled,   minutes: 1 });
+	}
+	return out;
+}
+
+/** Enumerate UTC days (YYYY-MM-DD) of the calendar month identified by ym
+ *  (YYYY-MM). Used by the avail-tier resolver to roll up an in-progress month
+ *  from per-day h1 sources. */
+function daysInMonth(ym: string): string[] {
+	const y = parseInt(ym.slice(0, 4), 10);
+	const m = parseInt(ym.slice(5, 7), 10);
+	const days: string[] = [];
+	for (let d = 1; d <= 31; d++) {
+		const dt = new Date(Date.UTC(y, m - 1, d));
+		if (dt.getUTCMonth() !== m - 1) break;  // d overflowed past last day of month
+		days.push(`${y}-${pad2(m)}-${pad2(d)}`);
+	}
+	return days;
+}
+
+/** Enumerate YYYY-MM strings for all 12 calendar months of `year`. */
+function monthsInYear(year: number): string[] {
+	const out: string[] = [];
+	for (let m = 1; m <= 12; m++) out.push(`${year}-${pad2(m)}`);
+	return out;
+}
+
+/**
+ * Stitch one in-progress UTC day's per-minute poll data into the running
+ * histogram `groups`. Sources (in `getStationDay`'s priority order) are
+ * h1 raw shards for closed hours + WAL JSONs for the current incomplete
+ * hour — same path that serves `/api/stations/:id/range?date=…` for today.
+ *
+ * Per-station — relies on `stationFilter` being non-empty. (Multi-station
+ * stitch over thousands of stations would require a different approach;
+ * the FE only hits this path with a single station_id today.)
+ */
+async function stitchInProgressDay(
+	r2: R2Bucket,
+	date: string,
+	stationFilter: string[],
+	p: TotalsParams,
+	groups: Map<string, ReturnType<typeof initGroupsType>>,
+): Promise<void> {
+	const dayResults = await Promise.all(
+		stationFilter.map((sid) => getStationDay(r2, sid, date)),
+	);
+	for (const rows of dayResults) {
+		const hist = pollRowsToHistRows(rows as unknown as AvailRow[]);
+		availFold(hist, p, groups as never);
+	}
+}
+
+/**
+ * Resolve one period (h1 day / d1 month / mo1 decade) into the running
+ * histogram `groups`, transparently falling through to finer tiers when the
+ * agg file for an in-progress period doesn't exist yet.
+ *
+ *   h1  | period = YYYY-MM-DD: try `avail/agg/h1/<date>.parquet`. If missing
+ *       | and date == today (UTC): stitch raw via `stitchInProgressDay`.
+ *       | If missing and date is past: silently skip (true backfill gap).
+ *
+ *   d1  | period = YYYY-MM: try `avail/agg/d1/<ym>.parquet`. If missing and
+ *       | ym is the current calendar month: recurse h1 over each day of the
+ *       | month up through today. If missing and past: skip.
+ *
+ *   mo1 | period = YYYY (decade-aligned, e.g. "2020"): try
+ *       | `avail/agg/mo1/<decade>.parquet`. If missing and decade contains
+ *       | the current year: recurse d1 over months in the in-progress year.
+ *       | If missing and past: skip.
+ *
+ * Coarser tiers fall through to the next-finer one only when needed; closed
+ * past periods read one agg file and stop. The total file count for a typical
+ * "last 7d at 1h bins" query is ≤ 7, all h1.
+ */
+async function resolveAvailTier(
+	r2: R2Bucket,
+	tier: AggTier,
+	period: string,
+	stationFilter: string[] | null,
+	p: TotalsParams,
+	groups: Map<string, ReturnType<typeof initGroupsType>>,
+	now: Date = new Date(),
+): Promise<void> {
+	const projection = projectionForAvailTotals(p);
+	const key =
+		tier === 'h1'  ? `avail/agg/h1/${period}.parquet` :
+		tier === 'd1'  ? `avail/agg/d1/${period}.parquet` :
+		                 `avail/agg/mo1/${period}.parquet`;
+	const rows = stationFilter
+		? await readR2ParquetStationPruned(r2, key, stationFilter, projection)
+		: await readR2Parquet(r2, key, projection);
+	if (rows !== null) {
+		if (rows.length > 0) availFold(rows as unknown as AvailHistRow[], p, groups as never);
+		return;
+	}
+
+	// Agg file missing. Fall through to finer tier IFF this period is in-progress.
+	const today = now.toISOString().slice(0, 10);
+	const currentYm = today.slice(0, 7);
+	const currentYear = parseInt(today.slice(0, 4), 10);
+
+	if (tier === 'h1') {
+		if (period === today) {
+			if (stationFilter) await stitchInProgressDay(r2, period, stationFilter, p, groups);
+			// else: multi-station stitch would require iterating all stations; deferred.
+		}
+		return;
+	}
+
+	if (tier === 'd1') {
+		if (period !== currentYm) return;  // past month with backfill gap
+		const days = daysInMonth(period).filter((d) => d <= today);
+		await Promise.all(days.map((d) => resolveAvailTier(r2, 'h1', d, stationFilter, p, groups, now)));
+		return;
+	}
+
+	// mo1
+	const decade = parseInt(period, 10);
+	if (currentYear < decade || currentYear >= decade + 10) return;  // past decade
+	// In-progress decade: roll up from d1 for each year in [decade, currentYear].
+	// Closed years (< currentYear) should already be in the missing mo1 file —
+	// but since the file is missing, fall through and read each year's d1.
+	const months: string[] = [];
+	for (let y = decade; y <= currentYear; y++) {
+		for (const ym of monthsInYear(y)) {
+			if (ym <= currentYm) months.push(ym);
+		}
+	}
+	await Promise.all(months.map((ym) => resolveAvailTier(r2, 'd1', ym, stationFilter, p, groups, now)));
+}
+
+/**
+ * Execute an `/api/totals` request (availability path).
+ *
+ * Multi-tier read with transparent stitching for in-progress periods (today,
+ * current calendar month, current decade): when the agg file doesn't exist
+ * yet, fall through to the next-finer tier — recursively, all the way down
+ * to per-minute polls (h1 raw shards + WAL JSONs) for today.
  *
  * Streaming fold avoids holding all parsed rows in JS-object form at once
  * — h1 daily shards can be ~3.5M rows over a 7-day window which OOMs the
  * Worker at the 128MB cap. Per-group histogram state is bounded by
  * (n_stations × n_distinct_states) per metric — typically <5000 entries
  * even at a year-wide query.
+ *
+ * For station-filtered queries, parquet reads use row-group pruning on the
+ * `(station_id, …)`-sorted layout (~1 station per row group → ~few KB
+ * decoded per file). Without a station filter, reads are sequential to
+ * keep peak heap bounded by one file at a time.
  */
 async function executeAvailTotalsQuery(
 	r2: R2Bucket,
 	p: TotalsParams,
 ): Promise<TotalsResponse> {
 	const tier = pickAvailAggTier(p.fromS, p.toS, p.binS);
-	const projection = projectionForAvailTotals(p);
-	const keys = availAggKeys(tier, p.fromS, p.toS);
 	const groups = new Map<string, ReturnType<typeof initGroupsType>>();
 	const stationFilter = p.filterStationId?.length ? p.filterStationId : null;
-	// When filtering by station_id, use row-group pruning: avail-agg files
-	// are sorted by (station_id, dt, ...) with ~1 station per row group, so
-	// we decode ~few KB per file instead of the whole 1-30 MB shard. This
-	// also makes parallel reads safe (each pruned read holds only the
-	// matching rows in heap).
-	//
-	// Without a station filter, we have to scan the whole file → sequential
-	// to keep peak heap bounded by one file at a time.
+	const now = new Date();
+
+	// Periods to resolve, at the picked tier's natural granularity.
+	const periods: string[] =
+		tier === 'h1'  ? daysIn(p.fromS, p.toS) :
+		tier === 'd1'  ? monthsInDashed(p.fromS, p.toS) :
+		                 decadesIn(p.fromS, p.toS);
+
 	if (stationFilter) {
+		// Parallelize station-filtered (rg-pruned) reads.
 		const CONCURRENCY = 6;
 		let next = 0;
 		async function worker() {
 			while (true) {
 				const i = next++;
-				if (i >= keys.length) return;
-				const rows = await readR2ParquetStationPruned(r2, keys[i], stationFilter!, projection);
-				if (rows === null || rows.length === 0) continue;
-				availFold(rows as unknown as AvailHistRow[], p, groups as never);
+				if (i >= periods.length) return;
+				await resolveAvailTier(r2, tier, periods[i], stationFilter, p, groups, now);
 			}
 		}
-		await Promise.all(Array.from({ length: Math.min(CONCURRENCY, keys.length) }, worker));
+		await Promise.all(Array.from({ length: Math.min(CONCURRENCY, periods.length) }, worker));
 	} else {
-		for (const key of keys) {
-			const rows = await readR2Parquet(r2, key, projection);
-			if (rows === null) continue;
-			availFold(rows as unknown as AvailHistRow[], p, groups as never);
+		// Sequential: full-file scans need bounded peak heap.
+		for (const period of periods) {
+			await resolveAvailTier(r2, tier, period, null, p, groups, now);
 		}
 	}
+
 	const rows = availFinalize(groups as never, p);
 	return { kind: p.kind, metric: p.metric, scope: p.scope, tier, rows };
 }
