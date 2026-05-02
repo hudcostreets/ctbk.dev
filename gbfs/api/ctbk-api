@@ -1,0 +1,301 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["click", "requests"]
+# ///
+"""Convenience CLI for the `ctbk-gbfs-api` Cloudflare Worker.
+
+Wraps `/api/totals` param assembly, station resolution, and `wrangler`
+deploy/tail/smoke operations, so common debug invocations are one short
+command instead of `python3 -c '...epoch...' && curl '...&filter.station_id=...'`.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from functools import partial
+from pathlib import Path
+from urllib.parse import urlencode
+
+import click
+import requests
+
+
+PROD = 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
+LOCAL = 'http://localhost:8787'
+API_DIR = Path(__file__).resolve().parent
+err = partial(print, file=sys.stderr)
+
+
+def now_s() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+_REL_RE = re.compile(r'^([-+])(\d+)([smhdw])$')
+_BIN_RE = re.compile(r'^(\d+)\s*(s|sec|secs?|m|min|mins?|h|hr|hrs?|d|day|days?|w|wk|wks?)$')
+_UNIT_S = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400, 'w': 7 * 86400}
+_BIN_S = {
+    's': 1, 'sec': 1, 'secs': 1,
+    'm': 60, 'min': 60, 'mins': 60,
+    'h': 3600, 'hr': 3600, 'hrs': 3600,
+    'd': 86400, 'day': 86400, 'days': 86400,
+    'w': 604800, 'wk': 604800, 'wks': 604800,
+}
+
+
+def parse_time(s: str) -> int:
+    """`'now'`, `'-7d'`/`'+1h'`, ISO 8601, or epoch int → epoch seconds."""
+    s = s.strip()
+    if s == 'now':
+        return now_s()
+    m = _REL_RE.match(s)
+    if m:
+        sign = -1 if m.group(1) == '-' else 1
+        return now_s() + sign * int(m.group(2)) * _UNIT_S[m.group(3)]
+    if s.lstrip('-').isdigit():
+        return int(s)
+    iso = s.replace('Z', '+00:00') if s.endswith('Z') else s
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError as e:
+        raise click.BadParameter(f"can't parse time: {s!r}") from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def parse_bin(s: str) -> int:
+    """`'5m'` / `'1h'` / `'300'` → seconds."""
+    s = s.strip().lower()
+    if s.isdigit():
+        return int(s)
+    m = _BIN_RE.match(s)
+    if not m:
+        raise click.BadParameter(f"can't parse bin: {s!r}")
+    return int(m.group(1)) * _BIN_S[m.group(2)]
+
+
+def fmt_dt(s: int) -> str:
+    return datetime.fromtimestamp(s, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def resolve_station(base: str, ident: str, verbose: bool) -> dict:
+    """Resolve a slug/short_name/UUID → station info dict via `/api/stations/<id>/info`."""
+    url = f'{base}/api/stations/{ident}/info'
+    if verbose:
+        err(f'GET {url}')
+    r = requests.get(url, timeout=10)
+    if not r.ok:
+        raise click.ClickException(f'station lookup failed: HTTP {r.status_code} {r.text}')
+    return r.json()
+
+
+def get_with_timing(url: str, params: dict, timeout: int = 60):
+    """`requests.get` with wall-clock timing. Returns `(response, elapsed_s)`."""
+    t0 = datetime.now()
+    r = requests.get(url, params=params, timeout=timeout)
+    return r, (datetime.now() - t0).total_seconds()
+
+
+@click.group(context_settings={'help_option_names': ['-h', '--help']})
+@click.option('-l', '--local', is_flag=True, help='Use local dev URL (http://localhost:8787).')
+@click.option('-u', '--url', envvar='CTBK_API_URL', help='Worker base URL (default: prod, or $CTBK_API_URL).')
+@click.pass_context
+def cli(ctx, local, url):
+    """`ctbk-gbfs-api` Cloudflare Worker CLI."""
+    ctx.ensure_object(dict)
+    if local and url:
+        raise click.UsageError('--local and --url are mutually exclusive')
+    ctx.obj['url'] = LOCAL if local else (url or PROD)
+
+
+@cli.command()
+@click.option('-a', '--agg', default='mean', show_default=True, help='Availability agg: mean|p10|p50|p90|...')
+@click.option('-b', '--bin', 'bin_', help="Bin size: '5m', '1h', '1d', or seconds.")
+@click.option('-d', '--dims', help='Comma-separated dim columns.')
+@click.option('-f', '--from', 'from_', default='-1d', show_default=True, help="Start: 'now', '-7d', ISO, or epoch.")
+@click.option('-k', '--kind', type=click.Choice(['trips', 'availability']), default='availability', show_default=True)
+@click.option('-m', '--metric', help="Default: 'count' (trips) / 'bikes' (avail). Use 'all' for all avail metrics.")
+@click.option('-o', '--output', type=click.Path(dir_okay=False), help='Write full JSON response to FILE.')
+@click.option('-P', '--print-json', is_flag=True, help='Print full JSON response to stdout.')
+@click.option('-r', '--region', help='filter.region (comma-separated).')
+@click.option('-s', '--scope', type=click.Choice(['stations', 'regions', 'all']), default='stations', show_default=True)
+@click.option('-S', '--station', help='Slug / short_name / UUID. Resolved to filter.station_id.')
+@click.option('-t', '--to', default='now', show_default=True, help="End: 'now', '+1h', ISO, or epoch.")
+@click.option('-v', '--verbose', is_flag=True, help='Print full URL.')
+@click.option('--short-name', help='filter.short_name (comma-separated, raw).')
+@click.option('--side', type=click.Choice(['start', 'end']), help='filter.side.')
+@click.option('--station-id', help='filter.station_id (UUID, comma-separated, raw).')
+@click.pass_context
+def totals(ctx, agg, bin_, dims, from_, kind, metric, output, print_json,
+           region, scope, station, to, verbose, short_name, side, station_id):
+    """Hit `/api/totals`."""
+    base = ctx.obj['url']
+    from_s = parse_time(from_)
+    to_s = parse_time(to)
+    bin_s = parse_bin(bin_) if bin_ else None
+
+    if station:
+        if station_id:
+            raise click.UsageError('-S/--station and --station-id are mutually exclusive')
+        info = resolve_station(base, station, verbose)
+        station_id = info.get('gbfs_station_id')
+        if not station_id:
+            raise click.ClickException(f"station has no gbfs_station_id: {info}")
+        if verbose:
+            err(f'  → station_id={station_id}  short_name={info.get("short_name")}  name={info.get("name")!r}')
+
+    if metric is None:
+        metric = 'count' if kind == 'trips' else 'bikes'
+
+    params: dict = {
+        'kind': kind,
+        'metric': metric,
+        'scope': scope,
+        'from': from_s,
+        'to': to_s,
+    }
+    if bin_s is not None:
+        params['bin'] = bin_s
+    if kind == 'availability':
+        params['agg'] = agg
+    if dims:
+        params['dims'] = dims
+    if region:
+        params['filter.region'] = region
+    if short_name:
+        params['filter.short_name'] = short_name
+    if station_id:
+        params['filter.station_id'] = station_id
+    if side:
+        params['filter.side'] = side
+
+    url = f'{base}/api/totals'
+    if verbose:
+        err(f'GET {url}?{urlencode(params)}')
+        err(f'  window: {fmt_dt(from_s)} → {fmt_dt(to_s)} ({(to_s - from_s) / 86400:.2f}d)'
+            + (f', bin={bin_s}s' if bin_s else ''))
+
+    r, dt = get_with_timing(url, params)
+    cache = r.headers.get('X-Cache', 'MISS')
+    print(f'HTTP {r.status_code}  {dt:.2f}s  {len(r.content):,}B  cache={cache}')
+
+    if r.status_code != 200:
+        err(r.text)
+        sys.exit(1)
+
+    data = r.json()
+    rows = data.get('rows', [])
+    print(f'tier={data.get("tier")}  metric={data.get("metric")}  scope={data.get("scope")}  rows={len(rows)}')
+    if rows:
+        print(f'first: {json.dumps(rows[0])}')
+        if len(rows) > 1:
+            print(f'last:  {json.dumps(rows[-1])}')
+
+    if print_json:
+        print(json.dumps(data, indent=2))
+    if output:
+        Path(output).write_text(json.dumps(data, indent=2) + '\n')
+        err(f'wrote {output}')
+
+
+@cli.command()
+@click.argument('ident')
+@click.pass_context
+def station(ctx, ident):
+    """Look up a station by slug / short_name / UUID."""
+    info = resolve_station(ctx.obj['url'], ident, verbose=False)
+    print(json.dumps(info, indent=2))
+
+
+@cli.command()
+@click.option('-d', '--dry-run', is_flag=True, help='wrangler deploy --dry-run')
+@click.option('-p', '--pin-deps', is_flag=True, help='Run `pds gh hyparquet` before deploying.')
+def deploy(dry_run, pin_deps):
+    """`wrangler deploy` (run inside `gbfs/api/`)."""
+    if pin_deps:
+        err(f'→ pds gh hyparquet  (cwd={API_DIR})')
+        subprocess.run(['pds', 'gh', 'hyparquet'], cwd=API_DIR, check=True)
+    cmd = ['pnpm', 'wrangler', 'deploy']
+    if dry_run:
+        cmd.append('--dry-run')
+    err(f'→ {" ".join(cmd)}  (cwd={API_DIR})')
+    subprocess.run(cmd, cwd=API_DIR, check=True)
+
+
+@cli.command(context_settings={'ignore_unknown_options': True})
+@click.argument('extra', nargs=-1, type=click.UNPROCESSED)
+def tail(extra):
+    """`wrangler tail` (extra args passed through)."""
+    cmd = ['pnpm', 'wrangler', 'tail', *extra]
+    err(f'→ {" ".join(cmd)}  (cwd={API_DIR})')
+    subprocess.run(cmd, cwd=API_DIR, check=False)
+
+
+# Default avail-totals smoke matrix. Each entry: (label, from_offset_s, bin_s).
+_AVAIL_MATRIX = [
+    ('1d   × 5m   (raw)', -86400,        300),
+    ('1d   × 1h   (h1) ', -86400,        3600),
+    ('7d   × 5m   (raw)', -7 * 86400,    300),
+    ('7d   × 30m  (raw)', -7 * 86400,    1800),
+    ('14d  × 30m  (raw)', -14 * 86400,   1800),
+    ('14d  × 1h   (h1) ', -14 * 86400,   3600),
+]
+
+
+@cli.command()
+@click.option('-S', '--station', help='Slug / short_name / UUID for /api/totals avail-matrix.')
+@click.option('-s', '--short-name', default='HB101', show_default=True, help='Used by smoke.sh for /api/stations/* probes.')
+@click.option('-T', '--no-totals', is_flag=True, help='Skip /api/totals avail-matrix.')
+@click.option('-X', '--no-stations', is_flag=True, help='Skip smoke.sh /api/stations/* probes.')
+@click.pass_context
+def smoke(ctx, station, short_name, no_totals, no_stations):
+    """Latency matrix: smoke.sh + /api/totals avail-matrix."""
+    base = ctx.obj['url']
+
+    if not no_stations:
+        err(f'=== /api/stations/{short_name}/* (smoke.sh against {base}) ===')
+        env = {**os.environ, 'API': base, 'STATION': short_name}
+        subprocess.run(['./smoke.sh'], cwd=API_DIR, env=env, check=False)
+
+    if no_totals:
+        return
+    if not station:
+        err('skipping /api/totals matrix (-S/--station required for avail-matrix)')
+        return
+
+    info = resolve_station(base, station, verbose=False)
+    sid = info.get('gbfs_station_id')
+    if not sid:
+        raise click.ClickException(f'station has no gbfs_station_id: {info}')
+    err(f'\n=== /api/totals avail-matrix  station={info.get("short_name")} ({sid}) ===')
+
+    now = now_s()
+    fail = 0
+    for label, off, bin_s in _AVAIL_MATRIX:
+        params = {
+            'kind': 'availability', 'metric': 'all', 'scope': 'stations', 'agg': 'mean',
+            'from': now + off, 'to': now,
+            'filter.station_id': sid, 'bin': bin_s,
+        }
+        r, dt = get_with_timing(f'{base}/api/totals', params)
+        ok = r.status_code == 200
+        tag = 'OK  ' if ok else 'FAIL'
+        if not ok:
+            fail += 1
+        rows = ''
+        if ok:
+            try:
+                rows = f'rows={len(r.json().get("rows", []))}'
+            except Exception:
+                pass
+        print(f'  {tag} {label}  HTTP {r.status_code}  {dt:6.2f}s  {len(r.content):>10,}B  {rows}')
+
+    if fail:
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    cli(obj={})
