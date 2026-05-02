@@ -1,130 +1,131 @@
-# Spec: h1 raw shards lack `station_id` min/max stats — fix compactor + regen
+# Spec: h1 raw shards have 2407 rgs → CFW memory limit; reduce rg count
 
-Status: **open** (2026-05-02).
+Status: **open** (2026-05-02). _Renamed/rewritten — first draft incorrectly
+diagnosed missing stats; see Background._
 
 ## Background
 
 After d25397ae was reverted (1102) and replaced by `4c34aa01` (range-read
 parquet w/ `columnChunkAggregation`) + `398acc60` (pin hyparquet fork dist),
-the worker `/api/totals` raw-tier path is **still 1102** for any window that
-hits the **h1 fallback** (current day + most-recent closed day before the
-GHA daily compaction cron runs).
+the worker `/api/totals` raw-tier path is **still failing** for any window
+that hits the **h1 fallback** (current day, recent days before the GHA
+daily compaction's /day raw bundle exists).
 
-Repro (with the new `gbfs/api/ctbk-api` CLI added in `6ced98e9`):
+Repro (using `gbfs/api/ctbk-api`, added in `6ced98e9`):
 
 ```
 $ cd gbfs/api
 $ ./ctbk-api totals -S hoboken-terminal-hudson-st-hudson-pl \
     -f 2026-04-29T00:00:00Z -t 2026-04-30T00:00:00Z -b 5m -m all
-HTTP 200  0.33s  165,378B  cache=MISS    # ← /day raw bundle path (has stats)
+HTTP 200  0.33s  165,378B  cache=MISS    # /day raw bundle (201 rgs)
 
 $ ./ctbk-api totals -S hoboken-terminal-hudson-st-hudson-pl \
     -f 2026-05-01T00:00:00Z -t 2026-05-02T00:00:00Z -b 5m -m all
-HTTP 503  9.50s   4,696B  cache=MISS     # ← h1 fallback (no stats → 1102)
+HTTP 503   9.50s   4,696B  cache=MISS    # h1 fallback (24 × 2407 rgs)
 ```
 
-Both queries are single-station, sub-hour-bin avail-totals. The first hits
-`gbfs/avail/raw/day/2026-04-29.parquet` (~17 MB, 201 row groups, ~14k
-rows/rg, **`has_min_max: true`** for `station_id`). The second hits
-`gbfs/avail/h1/2026-05-01/<HH>.parquet` × 24 (~5 MB each, **2407 row
-groups, 60 rows/rg, `has_min_max: false`**).
+`wrangler tail` on the failing call shows:
 
-## Root cause
+```
+GET .../api/totals?...&bin=300&filter.station_id=...
+  - Exceeded Memory Limit
+```
 
-`gbfs/compactor/src/index.ts:181` writes h1 shards via:
+It is **memory**, not CPU — Workers have a 128 MB ceiling and the worker
+is blowing it.
+
+## Root cause: rg-count, not stats
+
+(First-draft diagnosis was wrong: I read `pqm`'s `has_min_max: false` and
+concluded h1 shards lacked stats. They actually do have stats — just
+in the new Parquet 2.0 `min_value`/`max_value` fields, truncated to 16
+chars per `hyparquet-writer/src/unconvert.js:153`. `pqm` (pyarrow) only
+exposes the legacy `min`/`max` fields, hence the false negative.
+hyparquet — what the worker uses — reads them fine.)
+
+The actual problem: **the h1 compactor writes 2407 row groups per shard
+(60 rows each)**. `gbfs/compactor/src/index.ts:181`:
 
 ```ts
 return parquetWriteBuffer({ columnData, rowGroupSize: 60 });
 ```
 
-The comment on line 178 claims:
-> codec defaults to 'SNAPPY'; statistics on by default → free index on
-> station_id.
+The intent was: one rg ≈ one station × one hour ≈ ~5 KB of values, so
+per-station queries decode just one rg. Data-wise this works (prune
+matches 1/2407 rgs locally). But hyparquet parses the **entire footer**
+eagerly, holding all 2407 rgs' column-chunk metadata in memory. With
+~12 cols × ~24 shards in flight under `executeAvailTotalsQuery`'s
+CONCURRENCY=6 + `getStationDay`'s parallel hours, the metadata pile
+exceeds 128 MB.
 
-But the actual on-disk parquet has `is_stats_set: true` while every
-`station_id` rg's `statistics` block is `{has_min_max: false, min: null,
-max: null, ...}`. Verify with:
+This lesson was already encoded in `ctbk/avail_raw_day.py:95-98` (commit
+`284182ba`):
 
-```
-$ AWS_PROFILE=cf aws s3 cp s3://ctbk/gbfs/avail/h1/2026-04-30/12.parquet /tmp/h1.parquet
-$ pqm /tmp/h1.parquet | jq '.row_groups[0].columns[] | select(.path_in_schema=="station_id") | .statistics'
-{
-  "has_min_max": false,
-  "min": null,
-  "max": null,
-  ...
-}
-```
+> Tried `stations_per_rg=1` (≈1440 rows/rg per spec); regressed worker
+> latency 7-13× because hyparquet parses the full footer eagerly and
+> **rg-count dominates parse time on CFW**.
 
-That breaks `readR2ParquetStationPruned` (`gbfs/api/src/index.ts:564`):
+The Python /day raw and agg writers were updated to ~10 stations/rg
+(~600 rows/rg → ~200 rgs/file) and work fine. The TS h1 compactor was
+**not** updated to the same lesson, so it still emits 2407 rgs/shard.
+
+## Fix
+
+Change `gbfs/compactor/src/index.ts:181` to a much larger rowGroupSize.
+Pick to match the /day raw bundle's profile (~200 rgs/file, ~14k rows/rg):
 
 ```ts
-const inRange =
-    min === undefined ||
-    max === undefined ||
-    ids.some(...);   // ← fall-through: ALL rgs marked in-range
+// h1 shard: 144000 rows / hour / ~2400 stations = ~60 rows/station/hour.
+// At ~10 stations/rg (matching /day raw bundle layout), aim for ~600
+// rows/rg → ~240 rgs/shard. Keeps station_id min/max stats useful for
+// pruning while keeping footer size O(few hundred rgs) so the worker
+// can parse 24 shards' metadata without exceeding 128 MB.
+return parquetWriteBuffer({ columnData, rowGroupSize: 600 });
 ```
 
-For a single-station query against an h1 shard, every one of the 2407 rgs
-gets read & decoded — that's the 1102.
-
-## Fix (option A)
-
-Make the h1 compactor emit real `min_value` / `max_value` for the
-`station_id` column. Two sub-questions:
-
-1. **Why is `hyparquet-writer` dropping STRING stats?**
-   - Plausible: pinned to an old version that doesn't write BYTE_ARRAY
-     min/max even with stats enabled. The repo just pinned `hyparquet`
-     (read-side) to `runsascoded/hyparquet@fae8d22` for
-     `columnChunkAggregation`; `hyparquet-writer` may be on an older
-     upstream.
-   - Check `gbfs/compactor/package.json` → `hyparquet-writer` version,
-     and the upstream changelog for STRING-stats handling.
-   - If the writer is the bug, fork & pin (parallel to the read-side
-     fork) or upgrade.
-2. **Are 60-row rgs the right target?**
-   - With proper stats, 60-row rgs should be ~optimal (one rg ≈ one
-     station × one hour ≈ ~5 KB on the wire). Keep `rowGroupSize: 60`.
-   - If the writer fork is intractable, an interim is `rowGroupSize: ~14000`
-     (~1 rg/file) — but then station-filtered queries decode all rows,
-     which only works because the file is 5 MB and `metric=all` projects
-     a few cols. Prefer the proper-stats fix.
+(Any value in `[600, 14000]` should work; lower bound preserves prune
+selectivity, upper bound is "one rg per file" which would force full
+decode.)
 
 ### Acceptance
 
-- Newly-written h1 shards have `has_min_max: true` for `station_id`,
-  `min`/`max` matching the actual sorted range of the rg.
-- After regenerating historical h1 shards (`gbfs/avail/h1/<date>/<HH>.parquet`),
-  `./ctbk-api smoke -S hoboken-terminal-hudson-st-hudson-pl` shows OK
-  and < 2s for **every** matrix cell — including the `1d × 5m (raw)` cell
-  that currently uses h1 fallback.
-- `4/29-4/30` ( /day raw bundle) latency unchanged (~0.3s).
+- Newly-written h1 shards have ≤ ~250 row groups (vs. 2407 today).
+- `station_id` `min_value`/`max_value` stats remain present per-rg
+  (verify with hyparquet not pyarrow — the latter only shows legacy
+  fields).
+- After regenerating historical h1 shards, `./ctbk-api smoke -S
+  hoboken-terminal-hudson-st-hudson-pl` shows OK and < 2s for **every**
+  matrix cell — including the `1d × 5m (raw)` cell (h1 fallback) and
+  the `7d × 5m (raw)` (mostly /day-raw, today via h1 stitch).
 
 ### Regen
 
-The historical h1 shards live at `s3://ctbk/gbfs/avail/h1/<date>/<HH>.parquet`,
-2026-04-20+ per the existing comment. Either:
-- Re-trigger the compactor's hourly cron to overwrite each shard, OR
-- A one-shot script that reads the source minute JSONs (`gbfs/status/<...>`)
-  and re-pivots through the same `buildColumnData` + (fixed)
-  `parquetWriteBuffer`.
+Historical h1 shards live at `s3://ctbk/gbfs/avail/h1/<date>/<HH>.parquet`
+(2026-04-20+). Either:
+- Re-trigger the hourly compactor cron over the historical window, OR
+- A one-shot `compactHour` driver script that iterates the date×hour
+  matrix and overwrites each shard.
 
-Idempotency: re-runs are safe (same key, same content modulo stats).
+Idempotent: same key, same content modulo rg layout.
 
-## Out of scope (rejected)
+### Out of scope
 
-- **B.** Bump `rowGroupSize` to ~14k and skip pruning. Fewer rgs but
-  full-decode for station-filtered → only OK because files are small.
-  Doesn't help the *general* case (e.g. multi-day fallback ranges).
-  Real fix is stats; rg-size tuning is independent.
-- **C.** Worker-side hack: read the dictionary page of the first column
-  chunk to recover bounds. Adds CPU + complexity for a workaround;
-  upstream stats are the right place to fix this.
+- **Switching writers / forking `hyparquet-writer`.** First draft
+  proposed this thinking stats were missing. They aren't; the writer
+  is fine for our needs once rg-size is right.
+- **Worker-side range-read of footer.** The reverted lesson in
+  `avail_raw_day.py:95-98` mentions "until the worker switches to
+  range-read metadata" as an alternative future. That's a hyparquet
+  feature ask (`suffixStart`-style partial footer parse for huge files);
+  out of scope here. Tuning rg-count solves it for our scale.
+- **Going to 1 rg/file** (`rowGroupSize: 144000`). Disables station_id
+  pruning entirely; `metric=all` would full-decode 144k rows × 5 cols
+  per shard. Still small in absolute terms, but loses the pruning win
+  the /day raw bundle relies on.
 
 ## Why this matters
 
 Without this fix, the new `/api/totals`-only FE (`f0333dac` + `bf0c159a`,
 local-only at present) cannot ship: any sub-hour avail chart that
-includes today or yesterday's window will 1102. Holding the FE push on
-`h main` + `h main:www` until acceptance criteria above are met.
+includes today or yesterday's window will hit memory limit. Holding the
+FE push on `h main` + `h main:www` until acceptance criteria are met.
