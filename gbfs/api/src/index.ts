@@ -115,28 +115,8 @@ async function readH1ShardForStation(
 	}
 
 	const key = `gbfs/avail/h1/${date}/${hour}.parquet`;
-	const bytesCacheUrl = `https://avail.cache.internal/${key}`;
-	let buf: ArrayBuffer | null = null;
-
-	const bytesCached = await caches.default.match(bytesCacheUrl);
-	if (bytesCached) {
-		buf = await bytesCached.arrayBuffer();
-	} else {
-		const obj = await r2.get(key);
-		if (!obj) return null;
-		buf = await obj.arrayBuffer();
-		void caches.default.put(
-			bytesCacheUrl,
-			new Response(buf, {
-				headers: { 'Cache-Control': 'public, max-age=86400' },
-			}),
-		);
-	}
-
-	const file = {
-		byteLength: buf.byteLength,
-		slice: (s: number, e?: number) => buf!.slice(s, e),
-	};
+	const file = await asyncBufferFromR2(r2, key);
+	if (!file) return null;
 	const { parquetMetadataAsync, parquetReadObjects } = await import('hyparquet');
 	const meta = await parquetMetadataAsync(file);
 
@@ -167,7 +147,13 @@ async function readH1ShardForStation(
 
 	const stationRows: AvailRow[] = [];
 	for (const { rowStart, rowEnd } of targetRanges) {
-		const rows = (await parquetReadObjects({ file, rowStart, rowEnd })) as Record<string, unknown>[];
+		const rows = (await parquetReadObjects({
+			file,
+			metadata: meta,
+			rowStart,
+			rowEnd,
+			columnChunkAggregation: RG_COALESCE_BYTES,
+		})) as Record<string, unknown>[];
 		for (const r of rows) {
 			if (r.station_id !== stationId) continue;
 			for (const k of Object.keys(r)) {
@@ -481,6 +467,43 @@ import {
 import { monthsInDashed } from './planQuery';
 
 /**
+ * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
+ * R2 byte-range reads. Returns null if the object is missing.
+ *
+ * One `r2.head` round trip up front to learn `size`; subsequent `slice(start,
+ * end)` calls become `r2.get(key, { range: { offset, length } })`. All
+ * `parquetReadObjects` calls below should pass `columnChunkAggregation: 32 <<
+ * 20` so hyparquet's planner coalesces all selected column chunks within a
+ * row group into ONE byte range — without that, `columns: [...]` makes the
+ * planner emit one fetch per column chunk, and on R2 each fetch carries
+ * non-trivial CPU overhead. 5+ projected cols × N files trips the 1102
+ * limit.
+ */
+async function asyncBufferFromR2(
+	r2: R2Bucket,
+	key: string,
+): Promise<{ byteLength: number; slice: (start: number, end?: number) => Promise<ArrayBuffer> } | null> {
+	const head = await r2.head(key);
+	if (!head) return null;
+	const byteLength = head.size;
+	return {
+		byteLength,
+		slice: async (start: number, end?: number): Promise<ArrayBuffer> => {
+			const length = (end ?? byteLength) - start;
+			if (length <= 0) return new ArrayBuffer(0);
+			const obj = await r2.get(key, { range: { offset: start, length } });
+			if (!obj) throw new Error(`r2.get failed: ${key} [${start}, ${end ?? byteLength})`);
+			return obj.arrayBuffer();
+		},
+	};
+}
+
+// Within-rg column-chunk coalescing threshold for R2 reads. Row groups in our
+// avail/trips parquets are well under this, so this effectively means "always
+// coalesce within an rg".
+const RG_COALESCE_BYTES = 32 << 20;
+
+/**
  * Read one parquet from R2, returning rows as plain objects. Returns `null` if
  * the object doesn't exist (so the caller can distinguish missing shards from
  * empty ones). BigInt columns (int64) are coerced to Number.
@@ -490,15 +513,14 @@ async function readR2Parquet(
 	key: string,
 	columns?: string[],
 ): Promise<Record<string, unknown>[] | null> {
-	const obj = await r2.get(key);
-	if (!obj) return null;
-	const buf = await obj.arrayBuffer();
-	const file = {
-		byteLength: buf.byteLength,
-		slice: (start: number, end?: number) => buf.slice(start, end),
-	};
+	const file = await asyncBufferFromR2(r2, key);
+	if (!file) return null;
 	const { parquetReadObjects } = await import('hyparquet');
-	const rows = await parquetReadObjects({ file, columns }) as Record<string, unknown>[];
+	const rows = await parquetReadObjects({
+		file,
+		columns,
+		columnChunkAggregation: RG_COALESCE_BYTES,
+	}) as Record<string, unknown>[];
 	for (const r of rows) {
 		for (const k of Object.keys(r)) {
 			if (typeof r[k] === 'bigint') r[k] = Number(r[k]);
@@ -529,13 +551,8 @@ async function readR2ParquetStationPruned(
 	columns?: string[],
 	idCol: string = 'station_id',
 ): Promise<Record<string, unknown>[] | null> {
-	const obj = await r2.get(key);
-	if (!obj) return null;
-	const buf = await obj.arrayBuffer();
-	const file = {
-		byteLength: buf.byteLength,
-		slice: (start: number, end?: number) => buf.slice(start, end),
-	};
+	const file = await asyncBufferFromR2(r2, key);
+	if (!file) return null;
 	const { parquetMetadataAsync, parquetReadObjects } = await import('hyparquet');
 	const meta = await parquetMetadataAsync(file);
 
@@ -567,7 +584,17 @@ async function readR2ParquetStationPruned(
 	const sidSet = new Set(ids);
 	const out: Record<string, unknown>[] = [];
 	for (const { rowStart, rowEnd } of targetRanges) {
-		const rows = (await parquetReadObjects({ file, rowStart, rowEnd, columns })) as Record<string, unknown>[];
+		// Pass `metadata` to skip footer re-parse; pass `columnChunkAggregation`
+		// so hyparquet's planner coalesces all selected column chunks of this rg
+		// into ONE R2 GET (see `asyncBufferFromR2` doc).
+		const rows = (await parquetReadObjects({
+			file,
+			metadata: meta,
+			rowStart,
+			rowEnd,
+			columns,
+			columnChunkAggregation: RG_COALESCE_BYTES,
+		})) as Record<string, unknown>[];
 		for (const r of rows) {
 			if (!sidSet.has(r[idCol] as string)) continue;
 			for (const k of Object.keys(r)) {
