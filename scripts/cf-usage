@@ -1,0 +1,490 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["click", "requests"]
+# ///
+"""Cloudflare account-usage probe via the GraphQL Analytics API.
+
+Pulls Workers (`workersInvocationsAdaptive`), R2 ops + storage
+(`r2OperationsAdaptiveGroups`, `r2StorageAdaptiveGroups`), and D1
+(`d1AnalyticsAdaptiveGroups`) for arbitrary windows.
+
+Token from `$CLOUDFLARE_API_TOKEN` (read inside the script — bash inline
+env-var workaround). $ amounts NOT exposed here; only on dashboard
+Billing tab and they settle overnight.
+
+Subcommands:
+    report            Workers + R2 + D1 totals over a window.
+    compare-mtd       MTD-so-far vs. prior month at the same offset.
+    r2-ops            Drill into R2 ops with responseStatusCode +
+                      objectName breakdown (e.g. "which keys 404'd").
+
+Granularity: 1-min buckets, ~1-2 min lag for workers/R2/D1. R2 storage
+samples ~hourly. Older data rolls into hourly (≤30d) then daily (>30d).
+"""
+import json
+import os
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from functools import partial
+
+import click
+import requests
+
+
+GQL = 'https://api.cloudflare.com/client/v4/graphql'
+ACCOUNT_DEFAULT = '0dcad5654e9744de6616f74b8df4af63'
+err = partial(print, file=sys.stderr)
+
+
+def get_token() -> str:
+    t = os.environ.get('CLOUDFLARE_API_TOKEN') or os.environ.get('CF_API_TOKEN')
+    if not t:
+        err('error: $CLOUDFLARE_API_TOKEN not set')
+        sys.exit(1)
+    return t
+
+
+def gql(token: str, query: str, variables: dict) -> list[dict]:
+    """POST a query and return the `accounts[0].<root>` rows. `<root>` is
+    inferred from the query — it's the first top-level field under accounts."""
+    r = requests.post(
+        GQL,
+        headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+        json={'query': query, 'variables': variables},
+        timeout=30,
+    )
+    r.raise_for_status()
+    body = r.json()
+    if body.get('errors'):
+        err(f'GraphQL errors: {json.dumps(body["errors"], indent=2)}')
+    accounts = ((body.get('data') or {}).get('viewer', {}).get('accounts') or [{}])
+    acc = accounts[0] if accounts else {}
+    # Take the first non-meta key (skip __typename etc.)
+    for k, v in acc.items():
+        if not k.startswith('__'):
+            return v or []
+    return []
+
+
+_REL = re.compile(r'^([-+]?)(\d+)([smhdw])$')
+_UNIT_S = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400, 'w': 7 * 86400}
+
+
+def parse_when(s: str) -> datetime:
+    """`'now'`, `'-7d'`, ISO 8601, or `'YYYY-MM-DD'` → UTC datetime."""
+    s = s.strip()
+    if s == 'now':
+        return datetime.now(timezone.utc)
+    m = _REL.match(s)
+    if m:
+        sign = -1 if m.group(1) == '-' else 1
+        return datetime.now(timezone.utc) + timedelta(seconds=sign * int(m.group(2)) * _UNIT_S[m.group(3)])
+    iso = s.replace('Z', '+00:00') if s.endswith('Z') else s
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError as e:
+        raise click.BadParameter(f"can't parse time: {s!r}") from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def iso_z(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def fmt_int(n) -> str:
+    return f'{int(n):,}' if n is not None else '-'
+
+
+def fmt_bytes(n) -> str:
+    if n is None:
+        return '-'
+    n = int(n)
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if n < 1024:
+            return f'{n:.1f} {unit}'
+        n /= 1024
+    return f'{n:.1f} PB'
+
+
+def section(title: str):
+    click.echo()
+    click.echo(f'=== {title} ===')
+
+
+# -----------------------------------------------------------------------------
+# Queries
+# -----------------------------------------------------------------------------
+
+WORKERS_Q = """
+query($accountTag: String!, $start: Time!, $end: Time!) {
+  viewer { accounts(filter: { accountTag: $accountTag }) {
+    workersInvocationsAdaptive(filter: { datetime_geq: $start, datetime_lt: $end }, limit: 1000) {
+      sum { requests errors subrequests }
+      quantiles { cpuTimeP50 cpuTimeP99 wallTimeP50 wallTimeP99 }
+      dimensions { scriptName }
+    }
+  } }
+}
+"""
+
+R2_OPS_Q = """
+query($accountTag: String!, $start: Time!, $end: Time!) {
+  viewer { accounts(filter: { accountTag: $accountTag }) {
+    r2OperationsAdaptiveGroups(filter: { datetime_geq: $start, datetime_lt: $end }, limit: 1000) {
+      sum { requests responseObjectSize }
+      dimensions { bucketName actionType actionStatus }
+    }
+  } }
+}
+"""
+
+R2_OPS_DETAIL_Q = """
+query($accountTag: String!, $start: Time!, $end: Time!, $bucket: String, $status: String, $action: String) {
+  viewer { accounts(filter: { accountTag: $accountTag }) {
+    r2OperationsAdaptiveGroups(
+      filter: {
+        datetime_geq: $start, datetime_lt: $end,
+        bucketName: $bucket, actionStatus: $status, actionType: $action
+      }
+      limit: 5000
+      orderBy: [sum_requests_DESC]
+    ) {
+      sum { requests responseObjectSize }
+      dimensions { bucketName actionType actionStatus responseStatusCode objectName }
+    }
+  } }
+}
+"""
+
+R2_STORAGE_Q = """
+query($accountTag: String!, $start: Time!, $end: Time!) {
+  viewer { accounts(filter: { accountTag: $accountTag }) {
+    r2StorageAdaptiveGroups(
+      filter: { datetime_geq: $start, datetime_lt: $end },
+      limit: 10000, orderBy: [datetime_DESC]
+    ) {
+      max { payloadSize metadataSize objectCount }
+      dimensions { bucketName datetime }
+    }
+  } }
+}
+"""
+
+D1_Q = """
+query($accountTag: String!, $start: Time!, $end: Time!) {
+  viewer { accounts(filter: { accountTag: $accountTag }) {
+    d1AnalyticsAdaptiveGroups(filter: { datetime_geq: $start, datetime_lt: $end }, limit: 1000) {
+      sum { readQueries writeQueries rowsRead rowsWritten }
+      dimensions { databaseId }
+    }
+  } }
+}
+"""
+
+
+# -----------------------------------------------------------------------------
+# Aggregators (return a flat dict per kind, keyed by dim tuple)
+# -----------------------------------------------------------------------------
+
+def fetch_workers(token: str, account: str, start: datetime, end: datetime) -> dict:
+    """Returns {scriptName: {requests, errors, subrequests, cpuP99, wallP99}}."""
+    rows = gql(token, WORKERS_Q, {
+        'accountTag': account, 'start': iso_z(start), 'end': iso_z(end),
+    })
+    out = {}
+    for r in rows:
+        d = r['dimensions']
+        s = r['sum']
+        q = r['quantiles']
+        out[d.get('scriptName') or '<unknown>'] = {
+            'requests': s.get('requests') or 0,
+            'errors': s.get('errors') or 0,
+            'subrequests': s.get('subrequests') or 0,
+            'cpuP50': q.get('cpuTimeP50') or 0,
+            'cpuP99': q.get('cpuTimeP99') or 0,
+            'wallP50': q.get('wallTimeP50') or 0,
+            'wallP99': q.get('wallTimeP99') or 0,
+        }
+    return out
+
+
+def fetch_r2_ops(token: str, account: str, start: datetime, end: datetime) -> dict:
+    """Returns {(bucket, action, status): {requests, bytes}}."""
+    rows = gql(token, R2_OPS_Q, {
+        'accountTag': account, 'start': iso_z(start), 'end': iso_z(end),
+    })
+    out = {}
+    for r in rows:
+        d = r['dimensions']
+        s = r['sum']
+        out[(d.get('bucketName') or '', d.get('actionType') or '', d.get('actionStatus') or '')] = {
+            'requests': s.get('requests') or 0,
+            'bytes': s.get('responseObjectSize') or 0,
+        }
+    return out
+
+
+def fetch_r2_storage(token: str, account: str, start: datetime, end: datetime) -> dict:
+    """Returns {bucket: {payload, metadata, objects}} from latest sample."""
+    rows = gql(token, R2_STORAGE_Q, {
+        'accountTag': account, 'start': iso_z(start), 'end': iso_z(end),
+    })
+    latest = {}
+    for r in rows:
+        b = r['dimensions'].get('bucketName')
+        if b not in latest:
+            latest[b] = {
+                'payload': r['max'].get('payloadSize') or 0,
+                'metadata': r['max'].get('metadataSize') or 0,
+                'objects': r['max'].get('objectCount') or 0,
+                'when': r['dimensions'].get('datetime'),
+            }
+    return latest
+
+
+def fetch_d1(token: str, account: str, start: datetime, end: datetime) -> dict:
+    """Returns {databaseId: {readQueries, writeQueries, rowsRead, rowsWritten}}."""
+    rows = gql(token, D1_Q, {
+        'accountTag': account, 'start': iso_z(start), 'end': iso_z(end),
+    })
+    out = {}
+    for r in rows:
+        d = r['dimensions']
+        s = r['sum']
+        out[d.get('databaseId') or '<unknown>'] = {
+            'readQueries': s.get('readQueries') or 0,
+            'writeQueries': s.get('writeQueries') or 0,
+            'rowsRead': s.get('rowsRead') or 0,
+            'rowsWritten': s.get('rowsWritten') or 0,
+        }
+    return out
+
+
+# -----------------------------------------------------------------------------
+# Renderers
+# -----------------------------------------------------------------------------
+
+def print_workers(d: dict):
+    if not d:
+        click.echo('  (no rows)')
+        return
+    click.echo(f'  {"script":<32} {"requests":>10} {"errors":>8} {"subreq":>10}'
+               f'  {"cpu P50/P99 (ms)":>22}  {"wall P50/P99 (ms)":>22}')
+    for name, v in sorted(d.items(), key=lambda kv: -kv[1]['requests']):
+        click.echo(
+            f'  {name:<32} {fmt_int(v["requests"]):>10} {fmt_int(v["errors"]):>8} {fmt_int(v["subrequests"]):>10}  '
+            f'{v["cpuP50"]/1000:>10.1f}/{v["cpuP99"]/1000:>10.1f}  '
+            f'{v["wallP50"]/1000:>10.1f}/{v["wallP99"]/1000:>10.1f}'
+        )
+
+
+def print_r2_ops(d: dict):
+    if not d:
+        click.echo('  (no rows)')
+        return
+    click.echo(f'  {"bucket":<18} {"action":<24} {"status":<10} {"requests":>10} {"resp bytes":>14}')
+    for (bucket, action, status), v in sorted(d.items(), key=lambda kv: -kv[1]['requests']):
+        click.echo(f'  {bucket:<18} {action:<24} {status:<10} '
+                   f'{fmt_int(v["requests"]):>10} {fmt_bytes(v["bytes"]):>14}')
+
+
+def print_r2_storage(d: dict):
+    if not d:
+        click.echo('  (no rows)')
+        return
+    click.echo(f'  {"bucket":<18} {"payload":>10} {"metadata":>10} {"objects":>10} {"when":>22}')
+    for b, v in sorted(d.items()):
+        click.echo(f'  {b:<18} {fmt_bytes(v["payload"]):>10} {fmt_bytes(v["metadata"]):>10} '
+                   f'{fmt_int(v["objects"]):>10} {(v["when"] or ""):>22}')
+
+
+def print_d1(d: dict):
+    if not d:
+        click.echo('  (no rows)')
+        return
+    click.echo(f'  {"database":<40} {"reads":>8} {"writes":>8} {"rowsRead":>14} {"rowsWritten":>13}')
+    for db, v in sorted(d.items(), key=lambda kv: -kv[1]['readQueries']):
+        click.echo(f'  {db:<40} {fmt_int(v["readQueries"]):>8} {fmt_int(v["writeQueries"]):>8} '
+                   f'{fmt_int(v["rowsRead"]):>14} {fmt_int(v["rowsWritten"]):>13}')
+
+
+def report_one(token: str, account: str, label: str, start: datetime, end: datetime):
+    section(f'Workers — {label}  ({iso_z(start)} → {iso_z(end)})')
+    print_workers(fetch_workers(token, account, start, end))
+    section(f'R2 ops — {label}')
+    print_r2_ops(fetch_r2_ops(token, account, start, end))
+    section(f'R2 storage — {label} (latest sample)')
+    print_r2_storage(fetch_r2_storage(token, account, start, end))
+    section(f'D1 — {label}')
+    print_d1(fetch_d1(token, account, start, end))
+
+
+# -----------------------------------------------------------------------------
+# CLI
+# -----------------------------------------------------------------------------
+
+@click.group(context_settings={'help_option_names': ['-h', '--help']})
+@click.option('-a', '--account', default=ACCOUNT_DEFAULT, show_default=True)
+@click.pass_context
+def cli(ctx, account):
+    """Cloudflare account-usage probe."""
+    ctx.ensure_object(dict)
+    ctx.obj['account'] = account
+    ctx.obj['token'] = get_token()
+
+
+@cli.command()
+@click.option('-s', '--since', default='-1d', show_default=True, help="Window start: '-7d', ISO, or YYYY-MM-DD.")
+@click.option('-u', '--until', default='now', show_default=True, help='Window end (default `now`).')
+@click.option('-m', '--mtd', is_flag=True, help='Also include a MTD report.')
+@click.pass_context
+def report(ctx, since, until, mtd):
+    """Workers + R2 + D1 totals over a window."""
+    token, account = ctx.obj['token'], ctx.obj['account']
+    start, end = parse_when(since), parse_when(until)
+    label = f'{since} → {until}'
+    report_one(token, account, label, start, end)
+    if mtd:
+        now = datetime.now(timezone.utc)
+        mtd_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        report_one(token, account, 'month-to-date', mtd_start, now)
+
+
+@cli.command('compare-mtd')
+@click.pass_context
+def compare_mtd(ctx):
+    """MTD-so-far vs. prior month at the same offset (same elapsed time).
+
+    NOTE: CF GraphQL Analytics retention is ~30 days for fine-grained data.
+    Early in a new month (esp. days 1-3), the prior-MTD window may straddle
+    the retention edge and report 0s for older periods. For shorter
+    rolling comparisons not bound to month start, use `report` with
+    explicit `--since` / `--until`.
+    """
+    token, account = ctx.obj['token'], ctx.obj['account']
+    now = datetime.now(timezone.utc)
+    cur_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    cur_end = now
+    elapsed = cur_end - cur_start
+    # Prior month start: subtract one month (handle Jan→Dec)
+    if cur_start.month == 1:
+        prev_start = cur_start.replace(year=cur_start.year - 1, month=12)
+    else:
+        prev_start = cur_start.replace(month=cur_start.month - 1)
+    prev_end = prev_start + elapsed
+
+    cur_label = f'{iso_z(cur_start)} → {iso_z(cur_end)} ({elapsed.total_seconds()/3600:.1f}h)'
+    prev_label = f'{iso_z(prev_start)} → {iso_z(prev_end)}'
+
+    section(f'CURRENT MTD: {cur_label}')
+    section(f'PRIOR-MONTH MTD: {prev_label}')
+
+    days_back = (now - prev_start).days
+    if days_back > 30:
+        click.echo(f'  ⚠ prev window starts {days_back}d ago — past CF Analytics ~30d retention; '
+                   f'expect 0s or partial data on the prior side.', err=True)
+
+    # Side-by-side: workers
+    cur_w = fetch_workers(token, account, cur_start, cur_end)
+    prev_w = fetch_workers(token, account, prev_start, prev_end)
+    section('Workers — current vs. prior')
+    scripts = sorted(set(cur_w) | set(prev_w))
+    click.echo(f'  {"script":<32} {"reqs (cur)":>12} {"reqs (prev)":>13} {"Δ%":>8}'
+               f'  {"errors (cur)":>14} {"errors (prev)":>14}')
+    for s in scripts:
+        c = cur_w.get(s, {})
+        p = prev_w.get(s, {})
+        cr, pr = c.get('requests', 0), p.get('requests', 0)
+        delta = (cr - pr) / pr * 100 if pr else float('inf') if cr else 0
+        click.echo(f'  {s:<32} {fmt_int(cr):>12} {fmt_int(pr):>13} '
+                   f'{(f"{delta:+.0f}%" if delta != float("inf") else "  new"):>8}  '
+                   f'{fmt_int(c.get("errors", 0)):>14} {fmt_int(p.get("errors", 0)):>14}')
+
+    # Side-by-side: R2 ops summary
+    cur_r2 = fetch_r2_ops(token, account, cur_start, cur_end)
+    prev_r2 = fetch_r2_ops(token, account, prev_start, prev_end)
+    section('R2 ops — current vs. prior')
+    keys = sorted(set(cur_r2) | set(prev_r2))
+    click.echo(f'  {"bucket":<18} {"action":<24} {"status":<10}'
+               f' {"reqs (cur)":>12} {"reqs (prev)":>13} {"Δ%":>8}')
+    for k in keys:
+        c = cur_r2.get(k, {})
+        p = prev_r2.get(k, {})
+        cr, pr = c.get('requests', 0), p.get('requests', 0)
+        if cr == 0 and pr == 0:
+            continue
+        delta = (cr - pr) / pr * 100 if pr else float('inf') if cr else 0
+        b, a, st = k
+        click.echo(f'  {b:<18} {a:<24} {st:<10} '
+                   f'{fmt_int(cr):>12} {fmt_int(pr):>13} '
+                   f'{(f"{delta:+.0f}%" if delta != float("inf") else "  new"):>8}')
+
+    # D1
+    cur_d1 = fetch_d1(token, account, cur_start, cur_end)
+    prev_d1 = fetch_d1(token, account, prev_start, prev_end)
+    section('D1 — current vs. prior')
+    dbs = sorted(set(cur_d1) | set(prev_d1))
+    click.echo(f'  {"database":<40} {"reads (cur)":>12} {"reads (prev)":>13}'
+               f' {"writes (cur)":>14} {"writes (prev)":>14}')
+    for db in dbs:
+        c = cur_d1.get(db, {})
+        p = prev_d1.get(db, {})
+        click.echo(f'  {db:<40} {fmt_int(c.get("readQueries", 0)):>12} {fmt_int(p.get("readQueries", 0)):>13}'
+                   f' {fmt_int(c.get("writeQueries", 0)):>14} {fmt_int(p.get("writeQueries", 0)):>14}')
+
+
+@cli.command('r2-ops')
+@click.option('-b', '--bucket', help='Filter by bucket name.')
+@click.option('-A', '--action', help='Filter by actionType (GetObject, PutObject, ...).')
+@click.option('-n', '--limit', default=30, show_default=True, help='Top N rows by request count.')
+@click.option('-S', '--status', default='userError', show_default=True,
+              help="actionStatus: 'success' | 'userError' | 'adminError'.")
+@click.option('-s', '--since', default='-1d', show_default=True)
+@click.option('-u', '--until', default='now', show_default=True)
+@click.pass_context
+def r2_ops(ctx, bucket, action, limit, status, since, until):
+    """Drill into R2 ops with responseStatusCode + objectName breakdown.
+
+    Example: which keys 404'd in the last day?
+        cf-usage r2-ops -b ctbk -A GetObject -S userError
+    """
+    token, account = ctx.obj['token'], ctx.obj['account']
+    start, end = parse_when(since), parse_when(until)
+    rows = gql(token, R2_OPS_DETAIL_Q, {
+        'accountTag': account, 'start': iso_z(start), 'end': iso_z(end),
+        'bucket': bucket, 'status': status, 'action': action,
+    })
+
+    section(f'R2 ops — {since} → {until}, status={status}, action={action or "all"}, bucket={bucket or "all"}')
+    if not rows:
+        click.echo('  (no rows)')
+        return
+
+    # Per-statusCode rollup
+    by_code = defaultdict(lambda: {'requests': 0, 'bytes': 0})
+    for r in rows:
+        code = r['dimensions'].get('responseStatusCode')
+        by_code[code]['requests'] += r['sum'].get('requests') or 0
+        by_code[code]['bytes'] += r['sum'].get('responseObjectSize') or 0
+    section('  by HTTP status code')
+    for code, v in sorted(by_code.items(), key=lambda kv: -kv[1]['requests']):
+        click.echo(f'    {str(code):>5}  {fmt_int(v["requests"]):>10}  {fmt_bytes(v["bytes"]):>12}')
+
+    # Top N keys
+    section(f'  top {limit} keys by request count')
+    top = sorted(rows, key=lambda r: -(r['sum'].get('requests') or 0))[:limit]
+    click.echo(f'    {"reqs":>8} {"code":>4} {"action":<14}  {"key":<60}')
+    for r in top:
+        d = r['dimensions']
+        s = r['sum']
+        click.echo(f'    {fmt_int(s.get("requests")):>8} {str(d.get("responseStatusCode")):>4} '
+                   f'{d.get("actionType", ""):<14}  {d.get("objectName", ""):<60}')
+
+
+if __name__ == '__main__':
+    cli(obj={})
