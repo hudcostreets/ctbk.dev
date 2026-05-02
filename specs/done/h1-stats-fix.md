@@ -1,6 +1,6 @@
 # Spec: h1 raw shards have 2407 rgs → CFW memory limit; reduce rg count
 
-Status: **open** (2026-05-02). _Renamed/rewritten — first draft incorrectly
+Status: **done** (2026-05-02). _Renamed/rewritten — first draft incorrectly
 diagnosed missing stats; see Background._
 
 ## Background
@@ -129,3 +129,23 @@ Without this fix, the new `/api/totals`-only FE (`f0333dac` + `bf0c159a`,
 local-only at present) cannot ship: any sub-hour avail chart that
 includes today or yesterday's window will hit memory limit. Holding the
 FE push on `h main` + `h main:www` until acceptance criteria are met.
+
+## Done (2026-05-02)
+
+Implemented in `85b03615` (`rowGroupSize: 60 → 600`). Verified shard at
+`gbfs/avail/h1/2026-04-25/12.parquet`: **241 row groups** (was 2407),
+600 rows/rg, `station_id` `min_value`/`max_value` stats present per-rg.
+
+Historical h1 shards (2026-04-20 → 2026-05-02) regenerated via
+`gbfs/regen-h1.sh` → `/compact?date=…&hour=…` (309/309 ok, 0 fail).
+Endpoint also gated on `COMPACTOR_SECRET` header (`c5dbe27e`) to close
+the trivial-DOS surface that the regen surfaced.
+
+`./ctbk-api smoke -S hoboken-terminal-hudson-st-hudson-pl` (warm):
+- h1 cells: **0.71-0.86s** (well under 2s) ✅
+- raw cells: 2.06-3.41s (slightly over 2s) ⚠️ — driven by /day-raw
+  bundle size (~12-18 MB × N days), not h1. Trivially fixable with
+  `Cache-Control: public, s-maxage=…` on `/api/totals` responses for
+  windows that don't include today; left as a separate follow-up.
+
+OOM is fully resolved; FE push is no longer blocked on this spec.
