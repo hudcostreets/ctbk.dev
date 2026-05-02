@@ -15,6 +15,6 @@
     "wrangler": "^4.0.0"
   },
   "dependencies": {
-    "hyparquet": "^1.25.6"
+    "hyparquet": "https://github.com/runsascoded/hyparquet#0f355ea5a37dcb9b29a43e33a3d45ce660c80798"
   }
 }
