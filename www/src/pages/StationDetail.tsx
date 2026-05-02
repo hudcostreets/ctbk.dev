@@ -69,6 +69,19 @@ function availDisabledBins(rangeMs: number): ReadonlySet<number> {
   return out
 }
 
+/** Human label for a bin size in seconds — looks up the matching preset, falls
+ *  back to a generic "Ns" / "Nm" / "Nh" / "Nd" formatter. */
+function binLabel(binS: number): string {
+  const ms = binS * 1000
+  const hit = BIN_PRESETS.find(p => p.ms === ms)
+  if (hit) return hit.label
+  if (binS < 60) return `${binS}s`
+  if (binS < 3600) return `${Math.round(binS / 60)}m`
+  if (binS < 86400) return `${Math.round(binS / 3600)}h`
+  if (binS < 30 * 86400) return `${Math.round(binS / 86400)}d`
+  return `${Math.round(binS / (30 * 86400))}mo`
+}
+
 export default function StationDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -390,8 +403,13 @@ export default function StationDetail() {
           onChange={(ms) => setBinMs(ms ?? 0)}
           presets={AVAIL_BIN_PRESETS}
           disabledMs={availDisabledBins(rangeDuration)}
-          disabledTitle={'Sub-hour bins for ranges > 24h need the unified-API work (specs/avail-unified-api.md). Coming next.'}
+          disabledTitle={'Bin ≥ range — would render < 2 points.'}
         />
+        {binMs === 0 && data?.binS != null && (
+          <Typography variant="body2" sx={{ opacity: 0.7 }}>
+            ({binLabel(data.binS)})
+          </Typography>
+        )}
       </Box>
 
       {error && (
