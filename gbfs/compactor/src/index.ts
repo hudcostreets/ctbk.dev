@@ -19,11 +19,13 @@
  *                          either way)
  *   last_reported INT64
  *
- * Idempotent: re-runs overwrite the same h1 key. Manual trigger:
+ * Idempotent: re-runs overwrite the same h1 key. Manual trigger (gated by
+ * the `COMPACTOR_SECRET` env var, set via `wrangler secret put`):
  *
- *   GET /compact?date=YYYY-MM-DD&hour=HH
+ *   curl -H 'x-compactor-secret: ...' \
+ *     'https://.../compact?date=YYYY-MM-DD&hour=HH'
  *
- * Useful for backfill or testing.
+ * Useful for backfill or after writer-config changes (e.g. rg-size bumps).
  */
 
 interface StationRow {
@@ -47,6 +49,7 @@ interface Snapshot {
 
 interface Env {
 	R2: R2Bucket;
+	COMPACTOR_SECRET?: string;
 }
 
 const INT16_COLS = [
@@ -220,6 +223,15 @@ export default {
 	async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		if (url.pathname === '/compact') {
+			// Manual backfill is a privileged operation (R2 reads/writes, CPU);
+			// the cron path skips this since it doesn't go through `fetch`.
+			// Fail closed if no secret is configured — never expose to anonymous.
+			if (!env.COMPACTOR_SECRET) {
+				return new Response('compactor secret not configured\n', { status: 503 });
+			}
+			if (request.headers.get('x-compactor-secret') !== env.COMPACTOR_SECRET) {
+				return new Response('unauthorized\n', { status: 401 });
+			}
 			const date = url.searchParams.get('date');
 			const hour = url.searchParams.get('hour');
 			if (!date || !hour || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}$/.test(hour)) {
@@ -230,6 +242,6 @@ export default {
 				headers: { 'content-type': 'application/json' },
 			});
 		}
-		return new Response('GBFS hourly compactor.\n  GET /compact?date=YYYY-MM-DD&hour=HH\n');
+		return new Response('GBFS hourly compactor.\n  GET /compact?date=YYYY-MM-DD&hour=HH (secret-gated)\n');
 	},
 } satisfies ExportedHandler<Env>;
