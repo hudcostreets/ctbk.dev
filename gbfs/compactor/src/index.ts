@@ -176,9 +176,12 @@ async function snapshotsToParquet(snapshots: Snapshot[]): Promise<ArrayBuffer | 
 
 	const { parquetWriteBuffer } = await import('hyparquet-writer');
 	// codec defaults to 'SNAPPY'; statistics on by default → free index on station_id.
-	// rowGroupSize ≈ 60 means one row group ≈ one station × one hour, so per-station
-	// queries can read just one row group (~5-10 KB) instead of the whole file.
-	return parquetWriteBuffer({ columnData, rowGroupSize: 60 });
+	// rowGroupSize ~600 ≈ 10 stations × 1 hour: keeps station_id min/max stats
+	// useful for pruning, while bounding rg-count to ~250/shard. hyparquet
+	// parses the full footer eagerly, so rg-count dominates worker parse cost
+	// — tighter (e.g. 60 → 1 station/rg) hits the 128 MB memory limit when
+	// many shards are read concurrently.
+	return parquetWriteBuffer({ columnData, rowGroupSize: 600 });
 }
 
 /** Compact one (date, hour) window. Returns the count of minutes compacted. */
