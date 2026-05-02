@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Box, CircularProgress, Typography } from '@mui/material'
 import css from '../index.module.css'
@@ -17,6 +17,7 @@ import { Checklist } from '../components/Checklist'
 import { Radios } from '../components/Radios'
 import { useStationTrips } from '../hooks/useStationTrips'
 import {
+  pickAvailBinAuto,
   useStationInfo, useStationAvailability,
 } from '../query/stations'
 import { useRollupQuery, type Side } from '../query/rollups'
@@ -28,7 +29,7 @@ import {
   codeParam, codesParam,
 } from '../data'
 import { boolParam, intParam, numberArrayParam, stringParam, useUrlState } from 'use-prms'
-import { bufferedBounds, formatTimeRange, roundDuration, timeRangeParam } from '../time-range'
+import { bufferedBounds, formatDuration, formatTimeRange, roundDuration, timeRangeParam } from '../time-range'
 
 const MANIFEST_URL = '/assets/station-urls.json'
 
@@ -134,22 +135,24 @@ export default function StationDetail() {
   // routes the request through the right tier (mo1/d1/h1/raw) for the chosen
   // bin. `liveRefresh` flips on a 60s TSQ refetch interval in Latest mode so
   // newly-polled values bubble in without a manual reload.
+  //
+  // `availViewportPx` is the *chart container's* width, observed via
+  // `ResizeObserver` on `chartContainerRef`. Used by `pickAvailBinAuto` to
+  // pick a bin size that matches the available pixels (mobile = coarser bin
+  // = cheaper query and less crowded chart). Falls back to a sensible
+  // estimate during SSR / first paint.
+  const chartContainerRef = useRef<HTMLDivElement | null>(null)
   const [availViewportPx, setAvailViewportPx] = useState(() =>
-    typeof window === 'undefined' ? 1000 : Math.max(400, Math.min(2000, window.innerWidth - 40))
+    typeof window === 'undefined' ? 1000 : Math.min(window.innerWidth, 1200) - 48
   )
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const onResize = () => {
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => {
-        setAvailViewportPx(Math.max(400, Math.min(2000, window.innerWidth - 40)))
-      }, 250)
-    }
-    window.addEventListener('resize', onResize)
-    return () => {
-      window.removeEventListener('resize', onResize)
-      if (timer) clearTimeout(timer)
-    }
+    if (!chartContainerRef.current) return
+    const ro = new ResizeObserver(([entry]) => {
+      const w = Math.round(entry.contentRect.width)
+      if (w > 0) setAvailViewportPx(w)
+    })
+    ro.observe(chartContainerRef.current)
+    return () => ro.disconnect()
   }, [])
   const rangeQuery = useStationAvailability(
     info?.gbfs_station_id, bufFromS, bufToS, availViewportPx, info?.capacity ?? null,
@@ -361,7 +364,7 @@ export default function StationDetail() {
     : null
 
   return (
-    <Box p={3} maxWidth={1200} mx="auto">
+    <Box p={{ xs: 1, sm: 2, md: 3 }} maxWidth={1200} mx="auto">
       <Typography variant="h5" gutterBottom>{title}</Typography>
       {(subtitleParts.length > 0 || mapsUrl) && (
         <Typography variant="body2" color="text.secondary" gutterBottom>
@@ -416,33 +419,49 @@ export default function StationDetail() {
         <Typography color="error">Error: {error}</Typography>
       )}
 
-      {!data && !error && (
-        <Box display="flex" justifyContent="center" p={4}><CircularProgress /></Box>
-      )}
+      {/* `chartContainerRef` measures the chart's available width for
+        * `pickAvailBinAuto`. Wrapping the spinner + chart together keeps the
+        * observed width stable across loading→loaded transitions. */}
+      <Box ref={chartContainerRef}>
+        {!data && !error && (
+          <Box display="flex" flexDirection="column" alignItems="center" gap={1} p={4}>
+            <CircularProgress />
+            <Typography variant="body2" sx={{ opacity: 0.7 }}>
+              Loading availability — {formatDuration(rangeDuration)}
+              {(() => {
+                const binS = binMs > 0
+                  ? Math.floor(binMs / 1000)
+                  : pickAvailBinAuto(rangeDuration / 1000, availViewportPx)
+                return ` × ${binLabel(binS)}`
+              })()}
+            </Typography>
+          </Box>
+        )}
 
-      {data && data.rows.length > 0 && (
-        <StationAvailabilityChart
-          rows={data.rows}
-          capacity={info?.capacity ?? null}
-          visibleFromS={fromS}
-          visibleToS={toS}
-          binS={data.binS}
-          onPan={(minS, maxS) => {
-            const duration = roundDuration((maxS - minS) * 1000)
-            const nowS = Date.now() / 1000
-            // Snap to Latest when drag ends within 10 min of now (matches awair UX).
-            const snapToLatest = maxS >= nowS - 10 * 60
-            setRange({
-              timestamp: snapToLatest ? null : new Date(maxS * 1000),
-              duration,
-            })
-          }}
-        />
-      )}
+        {data && data.rows.length > 0 && (
+          <StationAvailabilityChart
+            rows={data.rows}
+            capacity={info?.capacity ?? null}
+            visibleFromS={fromS}
+            visibleToS={toS}
+            binS={data.binS}
+            onPan={(minS, maxS) => {
+              const duration = roundDuration((maxS - minS) * 1000)
+              const nowS = Date.now() / 1000
+              // Snap to Latest when drag ends within 10 min of now (matches awair UX).
+              const snapToLatest = maxS >= nowS - 10 * 60
+              setRange({
+                timestamp: snapToLatest ? null : new Date(maxS * 1000),
+                duration,
+              })
+            }}
+          />
+        )}
 
-      {data && data.rows.length === 0 && (
-        <Typography>No data yet for today.</Typography>
-      )}
+        {data && data.rows.length === 0 && (
+          <Typography>No data yet for today.</Typography>
+        )}
+      </Box>
 
       {/* OverviewAvailabilityChart was a separate "Mean bikes — daily bins"
         * plot showing the full station history. It's been folded into the
