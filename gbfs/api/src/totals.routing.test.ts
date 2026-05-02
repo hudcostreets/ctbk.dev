@@ -46,20 +46,11 @@ interface Fix {
 
 function makeFix(): Fix {
 	const calls: string[] = [];
-	// Range-read path: parquet readers call `r2.head` first (via
-	// `asyncBufferFromR2`); when head returns null the reader short-circuits
-	// without calling `r2.get`. Record both so routing assertions work
-	// regardless of which entry point hit each key.
 	const r2 = {
-		head: vi.fn((key: string) => {
-			calls.push(key);
-			return Promise.resolve(null);
-		}),
 		get: vi.fn((key: string) => {
 			calls.push(key);
 			return Promise.resolve(null);
 		}),
-		list: vi.fn(() => Promise.resolve({ objects: [] })),
 	};
 	return {
 		calls,

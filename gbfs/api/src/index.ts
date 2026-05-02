@@ -115,8 +115,28 @@ async function readH1ShardForStation(
 	}
 
 	const key = `gbfs/avail/h1/${date}/${hour}.parquet`;
-	const file = await asyncBufferFromR2(r2, key);
-	if (!file) return null;
+	const bytesCacheUrl = `https://avail.cache.internal/${key}`;
+	let buf: ArrayBuffer | null = null;
+
+	const bytesCached = await caches.default.match(bytesCacheUrl);
+	if (bytesCached) {
+		buf = await bytesCached.arrayBuffer();
+	} else {
+		const obj = await r2.get(key);
+		if (!obj) return null;
+		buf = await obj.arrayBuffer();
+		void caches.default.put(
+			bytesCacheUrl,
+			new Response(buf, {
+				headers: { 'Cache-Control': 'public, max-age=86400' },
+			}),
+		);
+	}
+
+	const file = {
+		byteLength: buf.byteLength,
+		slice: (s: number, e?: number) => buf!.slice(s, e),
+	};
 	const { parquetMetadataAsync, parquetReadObjects } = await import('hyparquet');
 	const meta = await parquetMetadataAsync(file);
 
@@ -147,7 +167,7 @@ async function readH1ShardForStation(
 
 	const stationRows: AvailRow[] = [];
 	for (const { rowStart, rowEnd } of targetRanges) {
-		const rows = (await parquetReadObjects({ file, metadata: meta, rowStart, rowEnd })) as Record<string, unknown>[];
+		const rows = (await parquetReadObjects({ file, rowStart, rowEnd })) as Record<string, unknown>[];
 		for (const r of rows) {
 			if (r.station_id !== stationId) continue;
 			for (const k of Object.keys(r)) {
@@ -461,50 +481,22 @@ import {
 import { monthsInDashed } from './planQuery';
 
 /**
- * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
- * R2 byte-range reads. Footer parse + per-rg decode each become small range
- * fetches instead of a full-file download. Returns null if the object is
- * missing.
- *
- * The `r2.head` is one extra round trip up front to learn `size`, but it's
- * lighter than a full `r2.get` and the savings on body bytes for large
- * parquets (40 MB → ~50 KB per per-station query) more than pay for it.
- */
-async function asyncBufferFromR2(
-	r2: R2Bucket,
-	key: string,
-): Promise<{ byteLength: number; slice: (start: number, end?: number) => Promise<ArrayBuffer> } | null> {
-	const head = await r2.head(key);
-	if (!head) return null;
-	const byteLength = head.size;
-	return {
-		byteLength,
-		slice: async (start: number, end?: number): Promise<ArrayBuffer> => {
-			const length = (end ?? byteLength) - start;
-			if (length <= 0) return new ArrayBuffer(0);
-			const obj = await r2.get(key, { range: { offset: start, length } });
-			if (!obj) throw new Error(`r2.get failed: ${key} [${start}, ${end ?? byteLength})`);
-			return obj.arrayBuffer();
-		},
-	};
-}
-
-/**
  * Read one parquet from R2, returning rows as plain objects. Returns `null` if
  * the object doesn't exist (so the caller can distinguish missing shards from
  * empty ones). BigInt columns (int64) are coerced to Number.
- *
- * Uses range-read fetches via `asyncBufferFromR2` — for files with `columns`
- * projection or `rowStart/rowEnd` range, hyparquet only fetches the relevant
- * column-chunk byte ranges, not the full body.
  */
 async function readR2Parquet(
 	r2: R2Bucket,
 	key: string,
 	columns?: string[],
 ): Promise<Record<string, unknown>[] | null> {
-	const file = await asyncBufferFromR2(r2, key);
-	if (!file) return null;
+	const obj = await r2.get(key);
+	if (!obj) return null;
+	const buf = await obj.arrayBuffer();
+	const file = {
+		byteLength: buf.byteLength,
+		slice: (start: number, end?: number) => buf.slice(start, end),
+	};
 	const { parquetReadObjects } = await import('hyparquet');
 	const rows = await parquetReadObjects({ file, columns }) as Record<string, unknown>[];
 	for (const r of rows) {
@@ -537,8 +529,13 @@ async function readR2ParquetStationPruned(
 	columns?: string[],
 	idCol: string = 'station_id',
 ): Promise<Record<string, unknown>[] | null> {
-	const file = await asyncBufferFromR2(r2, key);
-	if (!file) return null;
+	const obj = await r2.get(key);
+	if (!obj) return null;
+	const buf = await obj.arrayBuffer();
+	const file = {
+		byteLength: buf.byteLength,
+		slice: (start: number, end?: number) => buf.slice(start, end),
+	};
 	const { parquetMetadataAsync, parquetReadObjects } = await import('hyparquet');
 	const meta = await parquetMetadataAsync(file);
 
@@ -570,8 +567,7 @@ async function readR2ParquetStationPruned(
 	const sidSet = new Set(ids);
 	const out: Record<string, unknown>[] = [];
 	for (const { rowStart, rowEnd } of targetRanges) {
-		// Pass `metadata` so hyparquet skips re-parsing the footer per rg.
-		const rows = (await parquetReadObjects({ file, metadata: meta, rowStart, rowEnd, columns })) as Record<string, unknown>[];
+		const rows = (await parquetReadObjects({ file, rowStart, rowEnd, columns })) as Record<string, unknown>[];
 		for (const r of rows) {
 			if (!sidSet.has(r[idCol] as string)) continue;
 			for (const k of Object.keys(r)) {
