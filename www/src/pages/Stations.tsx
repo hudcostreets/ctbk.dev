@@ -11,13 +11,22 @@ import { RangeWidthControl } from '../components/RangeWidthControl'
 import { useTheme } from '../contexts/ThemeContext'
 import { useStationsKeyboardShortcuts } from '../hooks/useStationsKeyboardShortcuts'
 import { useStationsOmnibarEndpoint } from '../hooks/useStationsOmnibarEndpoint'
+import { useTotalsQuery, type Side } from '../query/rollups'
 import { timeRangeParam } from '../time-range'
 import css from "../stations.module.css"
 
 const DAY_MS = 24 * 60 * 60 * 1000
-/** Default time window for `?pies=1` mode: last 30 days, so we don't run
- *  per-station queries against decades of sparse historical data by default. */
+/** Default time window for the API-backed circles + `?pies=1` overlay: last
+ *  30 days, so we don't run per-station queries against decades of data by
+ *  default. Both modes share the `?pr=` URL state. */
 const DEFAULT_PIES_DURATION = 30 * DAY_MS
+
+/** URL codec for the side filter. Encoded as `s`/`e`/`b` to match other
+ *  one-char URL params; decoded as `'start'`/`'end'`/`'both'`. Default `both`. */
+const sideParam: Param<'start' | 'end' | 'both'> = {
+  encode: (v) => (v === 'both' ? undefined : v === 'start' ? 's' : 'e'),
+  decode: (raw) => (raw === 's' ? 'start' : raw === 'e' ? 'end' : 'both'),
+}
 
 const MANIFEST_URL = '/assets/station-urls.json'
 const BIRTHS_URL = '/assets/station-births.json'
@@ -87,6 +96,13 @@ export default function Stations() {
   // POC: render each station as a starts-vs-ends pie. Strictly opt-in.
   const [pies] = useUrlState('pies', boolParam)
   const [pieRange, setPieRange] = useUrlState('pr', timeRangeParam(DEFAULT_PIES_DURATION))
+  // Phase-1 of `specs/map-modes-and-ranges.md` — opt-in API-backed circle
+  // counts (instead of monthly static `stations[ym].json`). When `?api=1`,
+  // station counts come from `/api/totals?kind=trips&scope=stations` over the
+  // window in `?pr=` (re-uses the pies range). `?side=s|e|b` filters to
+  // start- or end-side trips only (default both).
+  const [api] = useUrlState('api', boolParam)
+  const [side, setSide] = useUrlState('side', sideParam)
 
   // Load manifest on mount
   useEffect(() => {
@@ -159,6 +175,44 @@ export default function Stations() {
         setLoading(false)
       })
   }, [manifest, effectiveMonth])
+
+  // API-backed counts (Phase 1). When `?api=1`, fetch
+  // `/api/totals?kind=trips&scope=stations` over the active range and use
+  // those counts in place of the monthly-static `stations[ym].json` `ends`.
+  // `dims` is omitted (no `side` breakdown needed; the side filter is handled
+  // server-side via `filter.side`).
+  const apiTotals = useTotalsQuery({
+    kind: 'trips',
+    scope: 'stations',
+    end: pieRange.timestamp,
+    duration: pieRange.duration,
+    filterSide: side === 'both' ? undefined : side as Side,
+  })
+  const apiCountByShortName = useMemo(() => {
+    if (!api) return null
+    const rows = apiTotals.data?.rows
+    if (!rows) return null
+    const m = new Map<string, number>()
+    for (const row of rows) {
+      const sn = row.short_name
+      if (typeof sn !== 'string') continue
+      const c = typeof row.count === 'number' ? row.count : 0
+      m.set(sn, (m.get(sn) ?? 0) + c)
+    }
+    return m
+  }, [api, apiTotals.data])
+
+  // Stations object passed into the map: when `?api=1`, override `.ends` with
+  // the API count for each station (or 0 if the API didn't return that station).
+  const effectiveStations: Stations | null = useMemo(() => {
+    if (!stations) return null
+    if (!api || !apiCountByShortName) return stations
+    const out: Stations = {}
+    for (const [id, st] of Object.entries(stations)) {
+      out[id] = { ...st, ends: apiCountByShortName.get(id) ?? 0 }
+    }
+    return out
+  }, [stations, api, apiCountByShortName])
 
   // Get sorted list of available months (newest first)
   const availableMonths = useMemo(() => {
@@ -238,7 +292,7 @@ export default function Stations() {
     <div className={css.container}>
       <main className={css.main}>
         <StationMap
-          stations={stations ?? {}}
+          stations={effectiveStations ?? {}}
           selectedId={selectedId}
           setSelectedId={setSelectedId}
           pairCounts={pairCounts}
@@ -253,17 +307,34 @@ export default function Stations() {
           pies={pies}
           pieRange={pies ? pieRange : undefined}
         />
-        {loading && <div className={css.loading}>Loading...</div>}
+        {(loading || (api && apiTotals.isPending && !apiTotals.data)) && (
+          <div className={css.loading}>Loading...</div>
+        )}
         {colorByAge && births && <ColorLegend births={births} actualTheme={actualTheme} />}
-        {pies && (
+        {(pies || api) && (
           <div className={css.piesControl}>
             <RangeWidthControl value={pieRange} onChange={setPieRange} />
-            <span className={css.piesLegend}>
-              <span className={css.piesSwatch} style={{ background: '#3498db' }} />
-              starts
-              <span className={css.piesSwatch} style={{ background: '#e67e22' }} />
-              ends
-            </span>
+            {api && (
+              <FormControl variant="standard" size="small">
+                <Select
+                  value={side}
+                  onChange={(e) => setSide(e.target.value as 'start' | 'end' | 'both')}
+                  disableUnderline
+                >
+                  <MenuItem value="both">starts + ends</MenuItem>
+                  <MenuItem value="start">starts</MenuItem>
+                  <MenuItem value="end">ends</MenuItem>
+                </Select>
+              </FormControl>
+            )}
+            {pies && (
+              <span className={css.piesLegend}>
+                <span className={css.piesSwatch} style={{ background: '#3498db' }} />
+                starts
+                <span className={css.piesSwatch} style={{ background: '#e67e22' }} />
+                ends
+              </span>
+            )}
           </div>
         )}
         <div className={css.titleContainer} style={{ color: currentColors.title }}>

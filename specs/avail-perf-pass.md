@@ -44,32 +44,69 @@ Add an intermediate **`m15`** tier:
 
 ### File layout
 
-`avail/agg/m15/<date>.parquet` — one file per UTC date.
+Mirror **h1**'s two-level pattern so the in-progress day is also fast:
 
-- Schema: `{station_id, dt, bikes_mean, ebikes_mean, docks_avail_mean, docks_disabled_mean, pending_mean, sample_count}` (× whatever the agg fields are; mirror what `avail_agg.py` writes for h1/d1).
-- One row per `(station, 15m bucket)` → 3,000 stations × 96 buckets/day = ~288k rows/file.
-- Compressed size estimate: ~3 MB (h1 agg is ~3 MB at 24 bins/station/day; m15 has 4× more bins but doubles rather than multiplies once dictionary encoding kicks in).
-- Sorted `(station_id, dt)`, `_write_sorted_parquet` with `stations_per_rg=10` → ~300 row groups, station-pruned reads.
+| layer            | key                                          | written by                  |
+|------------------|----------------------------------------------|-----------------------------|
+| per-hour shard   | `gbfs/avail/m15/<date>/<HH>.parquet`         | hourly cron (closes the hour) |
+| daily cons       | `avail/agg/m15/<date>.parquet`               | daily cron (closes the day) |
+
+- Per-hour shard: 4 buckets × ~3000 stations = ~12k rows/file. ~150 KB compressed.
+  Written by the same per-hour compactor that builds `gbfs/avail/h1/<date>/<HH>.parquet`
+  (one extra step, reusing the in-memory rows it already has).
+- Daily cons: 96 buckets × ~3000 stations = ~288k rows/file. ~3 MB compressed.
+  Written by the daily compactor by `concat`ing the day's 24 per-hour shards.
+- Both: schema `{station_id, dt, bikes_mean, ebikes_mean, docks_avail_mean,
+  docks_disabled_mean, pending_mean, sample_count}` (mirror `avail_agg.py`
+  for h1/d1). Sorted `(station_id, dt)`, `_write_sorted_parquet` with
+  `stations_per_rg=10` → station-pruned reads.
 
 ### Compactor
 
-New CLI subcommand mirroring `ctbk avail-agg`:
+Two CLI subcommands paralleling the h1 split (`avail-h1` per-hour vs.
+`avail-agg-h1` daily):
 
 ```
-ctbk avail-agg-m15 create <date>          # build one closed day
-ctbk avail-agg-m15 create -d 2026-04-01-2026-05-01  # range
+ctbk avail-m15 create <date>/<HH>          # build one closed hour
+ctbk avail-agg-m15 create <date>           # cons 24 closed-hour shards into a daily file
 ```
 
-Driven by reading the day's `gbfs/avail/raw/day/<date>.parquet`, grouping
-by `(station_id, floor(ts / 900) * 900)`, computing means + sample_count,
-sorting, writing.
+Per-hour: read that hour's source rows (currently the WAL JSONs OR the
+already-built `gbfs/avail/h1/<date>/<HH>.parquet`, whichever is the existing
+input to `avail-h1`), group by `(station_id, floor(ts / 900) * 900)`,
+write sorted.
 
-In-progress day: do **not** write `m15` for today. Same fall-through as
-the existing h1 tier — worker tries `m15`, gets 404, falls through to raw +
-WAL stitch (already wired in `resolveAvailTier`).
+Daily: simple `concat` of the day's 24 per-hour m15 shards. No per-row
+recomputation needed — m15 is sum-monoid-aggregable so concat is correct.
 
-GHA daily compaction (`gbfs-compact.yml`) gains an `m15` step alongside
-the existing `raw-day`/`h1`/`d1`/`mo1` outputs.
+GHA `gbfs-compact.yml` gains:
+- An `m15-hour` step that runs alongside the existing per-hour `h1` step
+  (in the same job; reuses the input read).
+- An `m15-day` step that runs after the daily `avail-raw-day` step.
+
+### Worker stitching
+
+`resolveAvailTier` adds an `'m15'` case mirroring `'h1'`:
+
+1. Try `avail/agg/m15/<date>.parquet` (daily cons) for each day in the window.
+2. For the in-progress day (today), the daily cons is missing → fall back
+   to per-hour shards `gbfs/avail/m15/<date>/<HH>.parquet` for closed
+   hours.
+3. For the current incomplete hour, fall back to the existing raw + WAL
+   stitch (`stitchInProgressDay`) — same path h1 uses today. The 30m
+   query reads ≤ 60 per-minute JSONs for one hour, same as today.
+
+Net read pattern for D=7d B=30m today (vs. status quo):
+
+| period            | today                                | with m15                                |
+|-------------------|--------------------------------------|-----------------------------------------|
+| 6 closed days     | 6 × `raw/day/<date>.parquet` (~5MB ea) | 6 × `agg/m15/<date>.parquet` (~3MB ea) |
+| today closed hours | up to 23 × `avail/h1/<date>/<HH>.parquet` (~5MB ea, station-pruned) | up to 23 × `avail/m15/<date>/<HH>.parquet` (~150KB ea) |
+| today current hour | up to 60 × `gbfs/status/<date>/<HH>-<MM>.json` | (unchanged) |
+
+Decode time is dominated by the closed-hours shards on the in-progress
+day — the m15 per-hour shards are ~30× smaller than the h1 raw ones, which
+is where the bulk of the speedup comes from.
 
 ### Worker routing
 
@@ -83,16 +120,14 @@ if (binS >= 900)         return 'm15';   // NEW
 return 'raw';
 ```
 
-`resolveAvailTier` adds the m15 case (parallel to h1: read agg parquet,
-station-prune, sum into groups; on 404 for in-progress days fall through
-to raw + WAL).
-
 ### Acceptance
 
-- `m15` files present at `s3://ctbk/avail/agg/m15/<date>.parquet` for all
-  closed days from h1's earliest date forward.
+- `gbfs/avail/m15/<date>/<HH>.parquet` shards present for all closed hours
+  from h1's earliest date forward.
+- `avail/agg/m15/<date>.parquet` daily cons present for all closed days.
 - `gbfs/api/ctbk-api smoke -S hoboken-terminal-...` shows 7d/14d × 15m and
-  7d/14d × 30m queries at < 1s (cold).
+  7d/14d × 30m queries at < 1s (cold), including for windows that include
+  the in-progress day.
 - 7d × 5m (still raw) unchanged or improved.
 
 ## Quick wins (independent of m15)
@@ -180,6 +215,12 @@ budget. If they don't, revisit before introducing per-station snapshots.
 Independent enough to interleave; suggested sequence by ROI:
 
 1. **Cache-Control header** (lines of code, big repeat-load win) — half a day.
-2. **m15 tier** (Python compactor + worker resolver + GHA cron + regen) — 1-2 days.
+2. **m15 tier** — 1-2 days; can land in two checkpoints:
+   - 2a. Daily cons only (`avail/agg/m15/<date>.parquet`) + worker routing.
+     Closed-day windows fast immediately; in-progress day still slow (falls
+     through to raw + WAL stitch via existing path).
+   - 2b. Per-hour shards (`gbfs/avail/m15/<date>/<HH>.parquet`) + worker
+     stitch updated to read m15-hour shards for the in-progress day's
+     closed hours. This is the change that makes "now-7d" queries fast.
 3. **Reshape `metric=all`** (worker + FE pivot point) — half a day.
 4. **`station_id` strip** (worker + FE fallback) — small, ship with #3.
