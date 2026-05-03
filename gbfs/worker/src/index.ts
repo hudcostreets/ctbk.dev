@@ -2,19 +2,25 @@
  * GBFS station status poller — Cloudflare Worker with cron trigger.
  *
  * Fetches Citi Bike station_status.json every minute, writes per-minute
- * JSON snapshots to R2 plus a 1m@1m parquet shard (Phase 0 of the
- * multi-scale grid; see specs/avail-perf-pass.md). Daily compaction to
- * parquet is handled by GHA (gbfs-compact.yml) using compact-r2.py.
+ * JSON snapshots to R2. Daily compaction to parquet is handled by GHA
+ * (gbfs-compact.yml) using compact-r2.py.
  *
  * R2 layout:
  *   gbfs/status/YYYY-MM-DD/HH-MM.json     — per-minute WAL snapshots (JSON)
- *   avail/agg=1m/cons=1m/YYYY-MM-DD/HHMM.parquet — per-minute monoid shard
+ *   gbfs/heartbeat/YYYY-MM-DD/HH-MM.txt   — cron-fire trace (3 bytes/tick)
  *   gbfs/info/YYYY-MM-DD.json             — daily station_information
  *
- * JSON write is the durable record (cron tick succeeds even if parquet
- * write fails). Parquet is best-effort; the cascade compactor (TBD)
- * tolerates missing 1m@1m shards via existence-check barriers, and a
- * periodic backfill from JSON archive repairs any gaps.
+ * Cron observability: heartbeat is the very first thing each tick writes,
+ * so missing heartbeat ⇒ CF skipped the cron; heartbeat present + JSON
+ * missing ⇒ pollStatus failed (fetch/put error).
+ *
+ * Note: an earlier revision (commit 6bf804a1) wrote a 1m@1m monoid parquet
+ * shard inline alongside JSON. That added ~50–200 ms CPU + a sub-request
+ * per tick and correlated with a ~10% drop in cron delivery
+ * (2026-05-02 baseline 0/480; 2026-05-03 04–11 UTC 48/480 ≈ 10%). The
+ * parquet write is being moved to a decoupled R2-event consumer; helpers
+ * (buildMinuteShard, buildMinuteParquet) remain exported for that
+ * consumer's use.
  */
 
 const STATUS_URL = 'https://gbfs.lyft.com/gbfs/1.1/bkn/en/station_status.json';
@@ -66,10 +72,6 @@ function utcDateStr(d: Date): string {
 
 function utcTimeStr(d: Date): string {
 	return `${pad2(d.getUTCHours())}-${pad2(d.getUTCMinutes())}`;
-}
-
-function utcTimeStrCompact(d: Date): string {
-	return `${pad2(d.getUTCHours())}${pad2(d.getUTCMinutes())}`;
 }
 
 function slimStation(s: Record<string, unknown>): StationStatus {
@@ -166,7 +168,7 @@ async function buildMinuteParquet(record: MinuteRecord): Promise<ArrayBuffer | n
 	return parquetWriteBuffer({ columnData: cols, rowGroupSize: 600 });
 }
 
-async function pollStatus(bucket: R2Bucket, ctx?: ExecutionContext): Promise<void> {
+async function pollStatus(bucket: R2Bucket): Promise<void> {
 	const now = new Date();
 	const resp = await fetch(STATUS_URL);
 	if (!resp.ok) throw new Error(`station_status fetch failed: ${resp.status}`);
@@ -181,31 +183,11 @@ async function pollStatus(bucket: R2Bucket, ctx?: ExecutionContext): Promise<voi
 		stations,
 	};
 
-	const dateStr = utcDateStr(now);
-	const timeStr = utcTimeStr(now);
-	const jsonKey = `gbfs/status/${dateStr}/${timeStr}.json`;
-
-	// JSON is the durable write; parquet is best-effort. If parquet write
-	// fails (e.g. hyparquet-writer regression, R2 hiccup), the cron tick
-	// still succeeds and the JSON archive remains the source of truth.
+	const jsonKey = `gbfs/status/${utcDateStr(now)}/${utcTimeStr(now)}.json`;
 	await bucket.put(jsonKey, JSON.stringify(record), {
 		httpMetadata: { contentType: 'application/json' },
 	});
 	console.log(`Polled ${stations.length} stations, ts=${ts} → ${jsonKey}`);
-
-	const pqKey = `avail/agg=1m/cons=1m/${dateStr}/${utcTimeStrCompact(now)}.parquet`;
-	const pqWrite = (async () => {
-		const buf = await buildMinuteParquet(record);
-		if (!buf) return;
-		await bucket.put(pqKey, buf, {
-			httpMetadata: { contentType: 'application/octet-stream' },
-		});
-		console.log(`Wrote 1m@1m shard (${buf.byteLength} bytes) → ${pqKey}`);
-	})().catch((err) => {
-		console.warn(`1m@1m parquet write failed for ${pqKey}: ${err}`);
-	});
-	if (ctx) ctx.waitUntil(pqWrite);
-	else await pqWrite;
 }
 
 async function pollInfo(bucket: R2Bucket): Promise<void> {
@@ -231,16 +213,26 @@ async function pollInfo(bucket: R2Bucket): Promise<void> {
 	console.log(`Saved station_information → ${key}`);
 }
 
+/** First action of every cron tick: write a 3-byte heartbeat to R2.
+ *  Lets us distinguish "CF skipped the trigger" from "trigger fired but
+ *  pollStatus failed" when JSON shards go missing. */
+function writeHeartbeat(bucket: R2Bucket, scheduledTime: number): Promise<unknown> {
+	const now = new Date(scheduledTime);
+	const key = `gbfs/heartbeat/${utcDateStr(now)}/${utcTimeStr(now)}.txt`;
+	return bucket.put(key, 'ok\n', { httpMetadata: { contentType: 'text/plain' } });
+}
+
 export default {
 	async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-		ctx.waitUntil(pollStatus(env.BUCKET, ctx));
+		ctx.waitUntil(writeHeartbeat(env.BUCKET, event.scheduledTime));
+		ctx.waitUntil(pollStatus(env.BUCKET));
 		ctx.waitUntil(pollInfo(env.BUCKET));
 	},
 
-	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+	async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		if (url.pathname === '/poll') {
-			await pollStatus(env.BUCKET, ctx);
+			await pollStatus(env.BUCKET);
 			await pollInfo(env.BUCKET);
 			return new Response('OK\n');
 		}
