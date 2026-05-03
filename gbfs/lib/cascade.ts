@@ -26,6 +26,34 @@ export const CONS_LEVELS_AT_1M: CascadeLevel[] = [
 	{ cons: '1h',  bucketMin: 60, fromCons: '15m', fromCount: 4 },
 ];
 
+/** Agg-self cascade: the {agg}@{agg} shard at each level is one row per
+ *  station per bucket, monoid-merged from the next-finer agg's outputs.
+ *  Each row's `n`/`sum`/`sum_sq` is the sum of the input rows for that
+ *  station, so a query at bin=B picks agg=B and decodes 2407 rows per
+ *  bucket — vs. agg=1m at the same B which would decode B/1m × 2407.
+ *
+ *  Build relations:
+ *    5m@5m  ← 1 × 5m@1m  (5 rows/station → 1 row/station, sum across)
+ *    15m@15m ← 3 × 5m@5m
+ *    1h@1h  ← 4 × 15m@15m
+ *    1d@1d  ← 24 × 1h@1h
+ *  All inputs are small (<10MB total decompressed) so each level fits
+ *  comfortably in CFW heap. */
+export interface AggLevel {
+	agg: string;        // '5m', '15m', '1h', '1d'
+	bucketMin: number;  // bucket size in minutes
+	fromAgg: string;    // input agg level
+	fromCons: string;   // input cons level
+	fromCount: number;  // number of input shards
+}
+
+export const AGG_LEVELS: AggLevel[] = [
+	{ agg: '5m',  bucketMin: 5,    fromAgg: '1m',  fromCons: '5m',  fromCount: 1  },
+	{ agg: '15m', bucketMin: 15,   fromAgg: '5m',  fromCons: '5m',  fromCount: 3  },
+	{ agg: '1h',  bucketMin: 60,   fromAgg: '15m', fromCons: '15m', fromCount: 4  },
+	{ agg: '1d',  bucketMin: 1440, fromAgg: '1h',  fromCons: '1h',  fromCount: 24 },
+];
+
 function pad2(n: number): string {
 	return n.toString().padStart(2, '0');
 }
@@ -89,6 +117,79 @@ export function inputKeysForBucket(
 	return Array.from({ length: level.fromCount }, (_, i) =>
 		consKey(agg, level.fromCons, bucketStartMin + i * stride),
 	);
+}
+
+/** Same as `bucketJustClosed` but for an `AggLevel` (the alignment math
+ *  is identical; both share the 1-minute slack convention). */
+export function aggBucketJustClosed(level: AggLevel, tickMin: number): number | null {
+	const bucketEnd = tickMin - 1;
+	if (bucketEnd < level.bucketMin) return null;
+	if (bucketEnd % level.bucketMin !== 0) return null;
+	return bucketEnd - level.bucketMin;
+}
+
+/** Per-bucket input keys for an agg-self attempt. */
+export function aggInputKeysForBucket(level: AggLevel, bucketStartMin: number): string[] {
+	const stride = level.bucketMin / level.fromCount;
+	if (!Number.isInteger(stride)) {
+		throw new Error(`bucketMin ${level.bucketMin} not divisible by fromCount ${level.fromCount}`);
+	}
+	return Array.from({ length: level.fromCount }, (_, i) =>
+		consKey(level.fromAgg, level.fromCons, bucketStartMin + i * stride),
+	);
+}
+
+/** Monoid-merge rows for an agg-self bucket: group by station_id, sum
+ *  n/sum/sum_sq across all rows for each station, output 1 row per
+ *  station with dt=bucketStartSec. Rows from the input shards may have
+ *  any agg level — we just sum their sketch fields. */
+export function aggMergeRows(
+	rows: Record<string, unknown>[],
+	bucketStartMin: number,
+): ColumnSource[] {
+	const dt = BigInt(bucketStartMin * 60);
+	interface Acc { n: number[]; sum: number[]; sum_sq: number[] }
+	const byStation = new Map<string, Record<string, { n: number; sum: number; sum_sq: number }>>();
+	for (const r of rows) {
+		const sid = r.station_id as string;
+		let acc = byStation.get(sid);
+		if (!acc) {
+			acc = {};
+			for (const m of AVAIL_METRICS) acc[m.name] = { n: 0, sum: 0, sum_sq: 0 };
+			byStation.set(sid, acc);
+		}
+		for (const m of AVAIL_METRICS) {
+			acc[m.name].n      += (r[`${m.name}_n`]      as number) ?? 0;
+			acc[m.name].sum    += (r[`${m.name}_sum`]    as number) ?? 0;
+			acc[m.name].sum_sq += (r[`${m.name}_sum_sq`] as number) ?? 0;
+		}
+	}
+	const stationIds = [...byStation.keys()].sort();
+	const n = stationIds.length;
+	const dts = new Array<bigint>(n).fill(dt);
+	const perMetric: Record<string, Acc> = {};
+	for (const m of AVAIL_METRICS) {
+		perMetric[m.name] = { n: new Array(n), sum: new Array(n), sum_sq: new Array(n) };
+	}
+	for (let i = 0; i < n; i++) {
+		const sid = stationIds[i];
+		const acc = byStation.get(sid)!;
+		for (const m of AVAIL_METRICS) {
+			perMetric[m.name].n[i]      = acc[m.name].n;
+			perMetric[m.name].sum[i]    = acc[m.name].sum;
+			perMetric[m.name].sum_sq[i] = acc[m.name].sum_sq;
+		}
+	}
+	const cols: ColumnSource[] = [
+		{ name: 'station_id', data: stationIds, type: 'STRING' },
+		{ name: 'dt',         data: dts,        type: 'INT64'  },
+	];
+	for (const m of AVAIL_METRICS) {
+		cols.push({ name: `${m.name}_n`,      data: perMetric[m.name].n,      type: 'INT32'  });
+		cols.push({ name: `${m.name}_sum`,    data: perMetric[m.name].sum,    type: 'DOUBLE' });
+		cols.push({ name: `${m.name}_sum_sq`, data: perMetric[m.name].sum_sq, type: 'DOUBLE' });
+	}
+	return cols;
 }
 
 /** Concatenate per-shard rows (objects from `parquetReadObjects`) into a
