@@ -18,13 +18,54 @@ export interface CascadeLevel {
 	fromCount: number; // number of input shards per bucket
 }
 
-/** Cons-only cascade for agg=1m. Each level is built from the next-finer
- *  cons of the same agg, keeping per-bucket input read size bounded. */
-export const CONS_LEVELS_AT_1M: CascadeLevel[] = [
-	{ cons: '5m',  bucketMin: 5,  fromCons: '1m', fromCount: 5 },
-	{ cons: '15m', bucketMin: 15, fromCons: '5m', fromCount: 3 },
-	{ cons: '1h',  bucketMin: 60, fromCons: '15m', fromCount: 4 },
-];
+/** Cons-only cascade levels for each agg, in finest-to-coarsest order.
+ *  Each level is built from `fromCount` shards of the next-finer cons
+ *  in the same agg series, keeping per-bucket input read size bounded.
+ *
+ *  Skipping 1w/1mo/3mo/1y for v1 — those have variable bucket sizes
+ *  (months) or different period encodings (ISO week) that need separate
+ *  period helpers. Add later when the planner needs them.
+ *
+ *  Build relations (per agg):
+ *    1m → 5m → 15m → 1h
+ *    5m → 15m → 1h → 3h, 8h → 1d
+ *    15m → 1h → 3h, 8h → 1d
+ *    1h → 1d
+ *
+ *  agg=1m caps at 1h: a 3h@1m would be ~433K rows / ~30MB read-and-sort
+ *  in CFW heap, which 1101s (memory exceeded). Coarse-window queries
+ *  (>1h) should use agg=5m or coarser anyway — that's the point of the
+ *  multi-scale grid.
+ *
+ *  8h doesn't divide cleanly from 3h (8/3 not integer); both 8h and 1d
+ *  reach back to 1h. 1d is reached via 8h (3 × 8h = 1d) for fewer
+ *  inputs than 24 × 1h. */
+export const CONS_LEVELS_BY_AGG: Record<string, CascadeLevel[]> = {
+	'1m': [
+		{ cons: '5m',  bucketMin: 5,    fromCons: '1m',  fromCount: 5  },
+		{ cons: '15m', bucketMin: 15,   fromCons: '5m',  fromCount: 3  },
+		{ cons: '1h',  bucketMin: 60,   fromCons: '15m', fromCount: 4  },
+	],
+	'5m': [
+		{ cons: '15m', bucketMin: 15,   fromCons: '5m',  fromCount: 3  },
+		{ cons: '1h',  bucketMin: 60,   fromCons: '15m', fromCount: 4  },
+		{ cons: '3h',  bucketMin: 180,  fromCons: '1h',  fromCount: 3  },
+		{ cons: '8h',  bucketMin: 480,  fromCons: '1h',  fromCount: 8  },
+		{ cons: '1d',  bucketMin: 1440, fromCons: '8h',  fromCount: 3  },
+	],
+	'15m': [
+		{ cons: '1h',  bucketMin: 60,   fromCons: '15m', fromCount: 4  },
+		{ cons: '3h',  bucketMin: 180,  fromCons: '1h',  fromCount: 3  },
+		{ cons: '8h',  bucketMin: 480,  fromCons: '1h',  fromCount: 8  },
+		{ cons: '1d',  bucketMin: 1440, fromCons: '8h',  fromCount: 3  },
+	],
+	'1h': [
+		{ cons: '1d',  bucketMin: 1440, fromCons: '1h',  fromCount: 24 },
+	],
+};
+
+/** @deprecated use CONS_LEVELS_BY_AGG['1m'] */
+export const CONS_LEVELS_AT_1M = CONS_LEVELS_BY_AGG['1m'];
 
 /** Agg-self cascade: the {agg}@{agg} shard at each level is one row per
  *  station per bucket, monoid-merged from the next-finer agg's outputs.
@@ -70,9 +111,9 @@ export function consPeriod(cons: string, bucketStartMin: number): string {
 	const HH = pad2(d.getUTCHours());
 	const MM = pad2(d.getUTCMinutes());
 	switch (cons) {
-		case '1m': case '5m': case '15m': return `${date}/${HH}${MM}`;
-		case '1h':                        return `${date}/${HH}`;
-		case '1d':                        return date;
+		case '1m': case '5m': case '15m':       return `${date}/${HH}${MM}`;
+		case '1h': case '3h':  case '8h':       return `${date}/${HH}`;
+		case '1d':                              return date;
 		default: throw new Error(`unsupported cons period encoding: ${cons}`);
 	}
 }

@@ -240,9 +240,12 @@ describe('worker.scheduled (cron tick)', () => {
 		expect(rows.slice(5).map((r) => r.bikes_sum)).toEqual([2, 3, 4, 5, 6]);
 	});
 
-	test('barrier missing → no write', async () => {
+	test('barrier missing (last input absent) → no write', async () => {
+		// Barrier = last input shard. Stage the first 4 of 5 1m@1m inputs but
+		// drop the last one (T13_29) — attemptCons should bail at the head()
+		// check before reading any shard.
 		const initial: Record<string, ArrayBuffer> = {};
-		for (let i = 0; i < 5; i++) {
+		for (let i = 0; i < 4; i++) {
 			initial[consKey('1m', '1m', T13_25 + i)] = build1mShard((T13_25 + i) * 60, [station('A')]);
 		}
 		const { r2, puts } = makeR2(initial);

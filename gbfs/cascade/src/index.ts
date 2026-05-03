@@ -47,7 +47,7 @@ import {
 	aggInputKeysForBucket,
 	aggMergeRows,
 	bucketJustClosed,
-	CONS_LEVELS_AT_1M,
+	CONS_LEVELS_BY_AGG,
 	type CascadeLevel,
 	consKey,
 	inputKeysForBucket,
@@ -83,21 +83,28 @@ async function readShardRows(r2: R2Bucket, keys: string[]): Promise<{ rows: Reco
 	return { rows, present: present.length };
 }
 
-/** Attempt a cons-only cascade for one bucket at agg=1m. */
+/** Attempt a cons-only cascade for one bucket at the given agg level.
+ *  Reads `level.fromCount` inputs from `agg`@`level.fromCons`, concatenates
+ *  rows, sorts by (station_id, dt), writes to `agg`@`level.cons`. */
 async function attemptCons(
 	r2: R2Bucket,
+	agg: string,
 	level: CascadeLevel,
 	bucketStartMin: number,
 ): Promise<AttemptResult> {
-	const outKey = consKey('1m', level.cons, bucketStartMin);
+	const outKey = consKey(agg, level.cons, bucketStartMin);
 	if (await r2.head(outKey)) return { status: 'exists' };
 
-	// Barrier: 1m@1m at the bucket's exclusive end must exist (proves the
-	// loader has attempted writes for all of this bucket's input minutes).
-	const barrierKey = consKey('1m', '1m', bucketStartMin + level.bucketMin);
-	if (!(await r2.head(barrierKey))) return { status: 'barrier_missing' };
+	const inputKeys = inputKeysForBucket(agg, level, bucketStartMin);
+	// Barrier: the LAST input shard must exist. For agg=1m cons-only this
+	// is the 1m@1m at minute `bucketEnd-1`, written by the loader within
+	// ~1s of the cron tick at minute `bucketEnd-1`. By the cascade tick at
+	// `bucketEnd+1` (per `bucketJustClosed`'s 1-minute slack), the loader
+	// has finished. For higher-agg cons the last input is the previous
+	// finer-cons shard, written either in this tick (cascade-of-cascades,
+	// finer-runs-first ordering) or an earlier one.
+	if (!(await r2.head(inputKeys[inputKeys.length - 1]))) return { status: 'barrier_missing' };
 
-	const inputKeys = inputKeysForBucket('1m', level, bucketStartMin);
 	const { rows, present } = await readShardRows(r2, inputKeys);
 	if (present === 0) return { status: 'no_inputs' };
 
@@ -140,52 +147,83 @@ async function attemptAgg(
 	return { status: 'wrote', bytes: out.byteLength, rows: cols[0].data.length, inputs: present };
 }
 
-/** Per-tick cron handler: cons-only first (so finer-cons inputs land
- *  before agg-self reads them), then agg-self in finest-to-coarsest
- *  order (so each agg-self level can read the previous level's just-
- *  written shards in the same tick). */
+/** Per-tick cron handler. Order matters because each level may read
+ *  shards just written by an earlier level in the same tick:
+ *
+ *   1. Cons-only at agg=1m, finest-to-coarsest (5m@1m → 15m@1m → ... → 1d@1m)
+ *      Each level reads the previous's just-written 1m@... shards.
+ *
+ *   2. Agg-self, finest-to-coarsest (5m@5m → 15m@15m → 1h@1h → 1d@1d)
+ *      Each reads the previous agg-self's just-written shards.
+ *
+ *   3. Cons at higher aggs (5m, 15m, 1h), finest-to-coarsest within each.
+ *      Each reads the just-written agg-self at the same agg level
+ *      (e.g., 1h@5m reads 4 × 15m@5m which was written in step 3 itself,
+ *      and the chain bottoms out at agg-self from step 2).
+ *
+ *  R2 strong read-after-write makes the same-tick cascade safe. */
 async function cronTick(r2: R2Bucket, tickMin: number): Promise<void> {
 	const summary: string[] = [];
 	const note = (key: string, r: AttemptResult) => {
 		if (r.status === 'wrote') summary.push(`${key}: wrote ${r.bytes}B from ${r.inputs}`);
 		else if (r.status !== 'exists' && r.status !== 'barrier_missing') summary.push(`${key}: ${r.status}`);
 	};
-	for (const level of CONS_LEVELS_AT_1M) {
+
+	// Step 1: cons-only at agg=1m
+	for (const level of CONS_LEVELS_BY_AGG['1m']) {
 		const bs = bucketJustClosed(level, tickMin);
 		if (bs === null) continue;
 		try {
-			const r = await attemptCons(r2, level, bs);
-			note(consKey('1m', level.cons, bs), r);
+			note(consKey('1m', level.cons, bs), await attemptCons(r2, '1m', level, bs));
 		} catch (err) {
 			summary.push(`${consKey('1m', level.cons, bs)}: error ${err}`);
 		}
 	}
+
+	// Step 2: agg-self
 	for (const level of AGG_LEVELS) {
 		const bs = aggBucketJustClosed(level, tickMin);
 		if (bs === null) continue;
 		try {
-			const r = await attemptAgg(r2, level, bs);
-			note(consKey(level.agg, level.agg, bs), r);
+			note(consKey(level.agg, level.agg, bs), await attemptAgg(r2, level, bs));
 		} catch (err) {
 			summary.push(`${consKey(level.agg, level.agg, bs)}: error ${err}`);
 		}
 	}
+
+	// Step 3: cons at higher aggs (skip agg=1m, already done)
+	for (const agg of Object.keys(CONS_LEVELS_BY_AGG)) {
+		if (agg === '1m') continue;
+		for (const level of CONS_LEVELS_BY_AGG[agg]) {
+			const bs = bucketJustClosed(level, tickMin);
+			if (bs === null) continue;
+			try {
+				note(consKey(agg, level.cons, bs), await attemptCons(r2, agg, level, bs));
+			} catch (err) {
+				summary.push(`${consKey(agg, level.cons, bs)}: error ${err}`);
+			}
+		}
+	}
+
 	if (summary.length) console.log(`cascade tick min=${tickMin}: ${summary.join(' | ')}`);
 }
 
-/** Backfill one (date, cons) cell for the cons-only cascade at agg=1m. */
+/** Backfill one (date, agg, cons) cell for the cons-only cascade. */
 async function backfillCons(
 	r2: R2Bucket,
 	date: string,
+	agg: string,
 	consName: string,
 ): Promise<{ wrote: number; exists: number; barrier_missing: number; no_inputs: number; empty: number; bytes: number }> {
-	const level = CONS_LEVELS_AT_1M.find((l) => l.cons === consName);
-	if (!level) throw new Error(`unknown cons level: ${consName}`);
+	const levels = CONS_LEVELS_BY_AGG[agg];
+	if (!levels) throw new Error(`unknown agg level: ${agg}`);
+	const level = levels.find((l) => l.cons === consName);
+	if (!level) throw new Error(`unknown cons level for agg=${agg}: ${consName}`);
 	const dayStartMin = Math.floor(Date.parse(`${date}T00:00:00Z`) / 60000);
 	const dayEndMin = dayStartMin + 1440;
 	const tally = { wrote: 0, exists: 0, barrier_missing: 0, no_inputs: 0, empty: 0, bytes: 0 };
 	for (let bs = dayStartMin; bs + level.bucketMin <= dayEndMin; bs += level.bucketMin) {
-		const r = await attemptCons(r2, level, bs);
+		const r = await attemptCons(r2, agg, level, bs);
 		tally[r.status]++;
 		if (r.bytes) tally.bytes += r.bytes;
 	}
@@ -230,16 +268,22 @@ export default {
 			const date = url.searchParams.get('date');
 			const cons = url.searchParams.get('cons');
 			const agg  = url.searchParams.get('agg');
-			if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || (!cons && !agg) || (cons && agg)) {
+			// cons → backfillCons (defaults agg=1m if not specified, or agg+cons together)
+			// agg alone → backfillAgg (agg-self)
+			if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || (!cons && !agg)) {
 				return new Response(
-					'usage: /backfill?date=YYYY-MM-DD&{cons={5m|15m|1h} | agg={5m|15m|1h|1d}}\n',
+					'usage: /backfill?date=YYYY-MM-DD&{cons=<C>[&agg=<A>] | agg=<A>}\n' +
+					'  cons alone:   backfill cons=<C> at agg=1m\n' +
+					'  cons + agg:   backfill cons=<C> at agg=<A> (e.g., 1h@5m)\n' +
+					'  agg alone:    backfill agg-self <A>@<A>\n',
 					{ status: 400 },
 				);
 			}
 			const result = cons
-				? await backfillCons(env.R2, date, cons)
+				? await backfillCons(env.R2, date, agg ?? '1m', cons)
 				: await backfillAgg(env.R2, date, agg!);
-			return new Response(JSON.stringify({ date, ...(cons ? { cons } : { agg }), ...result }, null, 2) + '\n', {
+			const params = cons ? { agg: agg ?? '1m', cons } : { agg };
+			return new Response(JSON.stringify({ date, ...params, ...result }, null, 2) + '\n', {
 				headers: { 'content-type': 'application/json' },
 			});
 		}
