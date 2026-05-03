@@ -1,0 +1,21 @@
+{
+  "name": "ctbk-gbfs-cascade",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241218.0",
+    "hyparquet": "^1.25.6",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8",
+    "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "hyparquet-writer": "^0.13.0"
+  }
+}

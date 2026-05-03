@@ -1,0 +1,14 @@
+name = "ctbk-gbfs-cascade"
+main = "src/index.ts"
+compatibility_date = "2026-05-03"
+
+# Fires every minute. At each tick, checks which cons-bucket boundaries
+# just passed and writes the corresponding cons shards. Most ticks are
+# barrier-checks only (no-op). Boundary ticks (M%5==1, M%15==1, M%60==1)
+# do bounded reads + concat + write.
+[triggers]
+crons = ["* * * * *"]
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "ctbk"
