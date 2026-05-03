@@ -1,17 +1,30 @@
 /**
  * GBFS loader — Cloudflare Worker queue consumer.
  *
- * Triggered by R2 PutObject events on `gbfs/status/*` and `gbfs/info/*`.
+ * Triggered by R2 PutObject events on `gbfs/status/*` and `gbfs/info/*`,
+ * delivered via the `gbfs-status-events` queue.
  *
- * Per-minute availability JSONs are now ignored — the api worker reads
- * availability directly from R2 (h1 shards + monthly parquet); the D1
- * `availability_YYYYMMDD` hot-cache has been retired (P3 of
- * `specs/gbfs-r2-only.md`).
+ * Per-minute availability (`gbfs/status/<date>/HH-MM.json`):
+ *   - Build the 1m@1m monoid parquet shard and write it to
+ *     `avail/agg=1m/cons=1m/<date>/HHMM.parquet`. (avail-perf-pass
+ *     Phase 0; was inline in the cron worker until 609512e9, where
+ *     it correlated with ~10% cron-tick loss — see worker docstring.)
  *
- * Daily station_information snapshots are still upserted into D1's
- * `stations` metadata table (low-volume, used for slug/name/region
- * lookups).
+ * Daily station_information (`gbfs/info/<date>.json`):
+ *   - Upsert into D1's `stations` metadata table (low-volume, used for
+ *     slug/name/region lookups).
+ *
+ * Per-minute availability is no longer cached in D1 (the
+ * `availability_YYYYMMDD` table was retired in P3 of
+ * `specs/gbfs-r2-only.md`); the api worker reads from R2 directly.
  */
+
+import {
+	AVAIL_1M_ROW_GROUP_SIZE,
+	availParquetKeyFromStatusKey,
+	buildMinuteShard,
+	type MinuteRecord,
+} from '../../lib/avail-monoid';
 
 interface InfoStation {
 	station_id: string;       // GBFS UUID
@@ -51,6 +64,30 @@ function isInfoKey(key: string): boolean {
 	return /^gbfs\/info\/\d{4}-\d{2}-\d{2}\.json$/.test(key);
 }
 
+/** Build + write the 1m@1m parquet shard for a per-minute availability JSON.
+ *  Idempotent: re-deliveries overwrite with byte-identical output. */
+async function writeAvailShard(bucket: R2Bucket, statusKey: string): Promise<void> {
+	const obj = await bucket.get(statusKey);
+	if (!obj) {
+		// R2 PutObject event may arrive before the object is globally readable
+		// in extreme cases; treat as transient and let the queue retry.
+		throw new Error(`status object missing: ${statusKey}`);
+	}
+	const record = (await obj.json()) as MinuteRecord;
+	const cols = buildMinuteShard(record);
+	if (cols[0].data.length === 0) {
+		console.warn(`empty status (no stations): ${statusKey}`);
+		return;
+	}
+	const { parquetWriteBuffer } = await import('hyparquet-writer');
+	const buf = parquetWriteBuffer({ columnData: cols, rowGroupSize: AVAIL_1M_ROW_GROUP_SIZE });
+	const pqKey = availParquetKeyFromStatusKey(statusKey);
+	await bucket.put(pqKey, buf, {
+		httpMetadata: { contentType: 'application/octet-stream' },
+	});
+	console.log(`Wrote 1m@1m shard (${buf.byteLength} bytes, ${cols[0].data.length} rows) → ${pqKey}`);
+}
+
 /** Upsert all stations from a station_information snapshot.
  * Marks them in_gbfs=1 and updates GBFS-only fields. Preserves
  * tripdata-sourced fields via COALESCE in the conflict handler. */
@@ -87,30 +124,31 @@ async function upsertStationsInfo(db: D1Database, info: InfoResponse): Promise<n
 }
 
 export default {
-	async queue(batch: MessageBatch<unknown>, _env: Env, _ctx: ExecutionContext): Promise<void> {
+	async queue(batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext): Promise<void> {
 		const typed = batch as MessageBatch<R2EventMessage>;
 		for (const msg of typed.messages) {
 			try {
 				const key = msg.body.object.key;
 
-				// Per-minute availability JSON — ack without touching D1.
-				// Availability is now served from R2 (h1 shards + monthly parquet)
-				// directly by the api worker; no hot-cache needed.
+				// Per-minute availability JSON — write the 1m@1m parquet
+				// shard. msg.retry() (in the outer catch) puts the message
+				// back; max_retries in wrangler.toml caps the attempt count.
 				if (isAvailKey(key)) {
+					await writeAvailShard(env.BUCKET, key);
 					msg.ack();
 					continue;
 				}
 
 				// Daily station_information snapshot
 				if (isInfoKey(key)) {
-					const obj = await _env.BUCKET.get(key);
+					const obj = await env.BUCKET.get(key);
 					if (!obj) {
 						console.warn(`Object missing: ${key}`);
 						msg.ack();
 						continue;
 					}
 					const info = JSON.parse(await obj.text()) as InfoResponse;
-					const n = await upsertStationsInfo(_env.DB, info);
+					const n = await upsertStationsInfo(env.DB, info);
 					console.log(`Upserted ${n} stations from ${key}`);
 					msg.ack();
 					continue;
