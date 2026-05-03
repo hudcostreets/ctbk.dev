@@ -234,3 +234,65 @@ describe('routing: input validation 4xx — no R2 calls', () => {
 		expect(calls).toEqual([]);
 	});
 });
+
+async function totalsHeaders(
+	params: Record<string, string | number>,
+): Promise<{ status: number; cacheControl: string }> {
+	const { default: worker } = await import('./index.js');
+	const fix = makeFix();
+	const u = new URL('http://test/api/totals');
+	for (const [k, v] of Object.entries(params)) u.searchParams.set(k, String(v));
+	const res = await worker.fetch(
+		new Request(u.toString()),
+		fix.env as never,
+		fix.ctx as never,
+	);
+	await res.text();
+	return { status: res.status, cacheControl: res.headers.get('cache-control') ?? '' };
+}
+
+describe('Cache-Control: closed-window vs open-window', () => {
+	const FROZEN_NOW_MS = 1746230400_000; // 2026-05-03 00:00:00 UTC
+	const FROZEN_NOW_S = FROZEN_NOW_MS / 1000;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(FROZEN_NOW_MS);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('closed window (toS far in past) → max-age=86400, immutable', async () => {
+		const { status, cacheControl } = await totalsHeaders({
+			kind: 'trips', from: Y2025, to: FEB1_2025, 'filter.short_name': 'HB101',
+		});
+		expect(status).toBe(200);
+		expect(cacheControl).toBe('public, max-age=86400, immutable');
+	});
+
+	it('open window (toS = now) → max-age=60', async () => {
+		const { status, cacheControl } = await totalsHeaders({
+			kind: 'trips', from: FROZEN_NOW_S - 3600, to: FROZEN_NOW_S, 'filter.short_name': 'HB101',
+		});
+		expect(status).toBe(200);
+		expect(cacheControl).toBe('public, max-age=60');
+	});
+
+	it('window ending at slack boundary (toS = now - 300) still treated as open', async () => {
+		const { status, cacheControl } = await totalsHeaders({
+			kind: 'trips', from: FROZEN_NOW_S - 7200, to: FROZEN_NOW_S - 300, 'filter.short_name': 'HB101',
+		});
+		expect(status).toBe(200);
+		expect(cacheControl).toBe('public, max-age=60');
+	});
+
+	it('window ending just past slack (toS = now - 301) treated as closed', async () => {
+		const { status, cacheControl } = await totalsHeaders({
+			kind: 'trips', from: FROZEN_NOW_S - 7200, to: FROZEN_NOW_S - 301, 'filter.short_name': 'HB101',
+		});
+		expect(status).toBe(200);
+		expect(cacheControl).toBe('public, max-age=86400, immutable');
+	});
+});

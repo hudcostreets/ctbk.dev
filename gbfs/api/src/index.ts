@@ -1156,7 +1156,16 @@ export default {
 			const result = p.kind === 'availability'
 				? await executeAvailTotalsQuery(env.R2, p)
 				: await executeTotalsQuery(env.R2, p);
-			const resp = jsonResponse(result, env);
+			// Closed-window responses are immutable: underlying parquet shards
+			// for any (from, to) entirely in the past don't change. Cache them
+			// for 24h on both browser and edge — repeat loads / pan-into-window
+			// hits go to disk cache (~0 latency) instead of recomputing.
+			// 5-min slack covers cron lag + cascade-compactor write latency.
+			const nowS = Date.now() / 1000;
+			const cacheControl = p.toS < nowS - 300
+				? 'public, max-age=86400, immutable'
+				: 'public, max-age=60';
+			const resp = jsonResponse(result, env, { headers: { 'Cache-Control': cacheControl } });
 			ctx.waitUntil(cache.put(cacheKey, resp.clone()));
 			return resp;
 		}
