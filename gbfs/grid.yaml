@@ -1,0 +1,67 @@
+# Multi-scale grid spec for GBFS availability shards.
+# See specs/avail-grid.md.
+#
+# Layout per (agg, cons): `avail/agg=<A>/cons=<C>/dt=<period>.parquet`.
+# Period encoding by cons size:
+#   ≤15m: YYYY-MM-DD_HHMM
+#   1h, 3h, 8h: YYYY-MM-DD_HH
+#   1d, 3d: YYYY-MM-DD
+#   1w: YYYY-Www (ISO 8601)
+#   1mo, 2mo, 3mo: YYYYMM
+#   1y, 3y: YYYY
+#
+# `runner` selects compute env. CFW limit is ~80MB conservative on the
+# 128MB heap. Levels likely to exceed go to GHA (CFW-dispatched).
+# Actual thresholds will be refined from WAE empirics.
+
+# Agg-self levels: one row per station per bucket, monoid-merged.
+# Each level reads from the previous agg-self.
+agg_self:
+  - { agg: 5m,  bucket_min: 5,    from_agg: 1m,  from_count: 1,  runner: cfw }
+  - { agg: 15m, bucket_min: 15,   from_agg: 5m,  from_count: 3,  runner: cfw }
+  - { agg: 1h,  bucket_min: 60,   from_agg: 15m, from_count: 4,  runner: cfw }
+  - { agg: 1d,  bucket_min: 1440, from_agg: 1h,  from_count: 24, runner: cfw }
+
+# Cons-only levels per agg series. Each level reads `from_count` shards
+# of the next-finer cons in the same agg series and concatenates rows.
+cons:
+  1m:
+    - { cons: 5m,  bucket_min: 5,    from_cons: 1m,  from_count: 5, runner: cfw }
+    - { cons: 15m, bucket_min: 15,   from_cons: 5m,  from_count: 3, runner: cfw }
+    - { cons: 1h,  bucket_min: 60,   from_cons: 15m, from_count: 4, runner: cfw }
+    - { cons: 3h,  bucket_min: 180,  from_cons: 1h,  from_count: 3, runner: gha }
+    - { cons: 8h,  bucket_min: 480,  from_cons: 1h,  from_count: 8, runner: gha }
+    - { cons: 1d,  bucket_min: 1440, from_cons: 8h,  from_count: 3, runner: gha }
+  5m:
+    - { cons: 15m, bucket_min: 15,   from_cons: 5m,  from_count: 3, runner: cfw }
+    - { cons: 1h,  bucket_min: 60,   from_cons: 15m, from_count: 4, runner: cfw }
+    - { cons: 3h,  bucket_min: 180,  from_cons: 1h,  from_count: 3, runner: cfw }
+    - { cons: 8h,  bucket_min: 480,  from_cons: 1h,  from_count: 8, runner: cfw }
+    - { cons: 1d,  bucket_min: 1440, from_cons: 8h,  from_count: 3, runner: cfw }
+    - { cons: 5d,  bucket_min: 7200, from_cons: 1d,  from_count: 5, runner: cfw }
+  # Some chain steps have non-integer SUF (e.g., 10d from 3d = 10/3). For
+  # those, the BUILD relation (from_cons) skips back to the closest
+  # clean-dividing ancestor; the planner's logical step order (for
+  # boundary-fill cost estimation) is independent of from_cons.
+  15m:
+    - { cons: 1h,  bucket_min: 60,    from_cons: 15m, from_count: 4,  runner: cfw }
+    - { cons: 3h,  bucket_min: 180,   from_cons: 1h,  from_count: 3,  runner: cfw }
+    - { cons: 8h,  bucket_min: 480,   from_cons: 1h,  from_count: 8,  runner: cfw }
+    - { cons: 1d,  bucket_min: 1440,  from_cons: 8h,  from_count: 3,  runner: cfw }
+    - { cons: 3d,  bucket_min: 4320,  from_cons: 1d,  from_count: 3,  runner: cfw }
+    - { cons: 10d, bucket_min: 14400, from_cons: 1d,  from_count: 10, runner: cfw } # logical SUF 10/3 from 3d
+  1h:
+    - { cons: 3h,  bucket_min: 180,    from_cons: 1h,  from_count: 3,  runner: cfw }
+    - { cons: 8h,  bucket_min: 480,    from_cons: 1h,  from_count: 8,  runner: cfw } # logical SUF 8/3 from 3h
+    - { cons: 1d,  bucket_min: 1440,   from_cons: 8h,  from_count: 3,  runner: cfw }
+    - { cons: 3d,  bucket_min: 4320,   from_cons: 1d,  from_count: 3,  runner: cfw }
+    - { cons: 1w,  bucket_min: 10080,  from_cons: 1d,  from_count: 7,  runner: cfw } # logical SUF 7/3 from 3d; period uses ISO week
+    - { cons: 1mo, bucket_min: 43200,  from_cons: 1w,  from_count: 4,  runner: cfw } # SUF 4.3 (calendar month avg)
+    - { cons: 2mo, bucket_min: 86400,  from_cons: 1mo, from_count: 2,  runner: cfw }
+  1d:
+    - { cons: 3d,  bucket_min: 4320,    from_cons: 1d,  from_count: 3,  runner: cfw }
+    - { cons: 1w,  bucket_min: 10080,   from_cons: 1d,  from_count: 7,  runner: cfw } # logical SUF 7/3 from 3d
+    - { cons: 1mo, bucket_min: 43200,   from_cons: 1w,  from_count: 4,  runner: cfw }
+    - { cons: 3mo, bucket_min: 129600,  from_cons: 1mo, from_count: 3,  runner: cfw }
+    - { cons: 1y,  bucket_min: 525600,  from_cons: 3mo, from_count: 4,  runner: cfw }
+    - { cons: 3y,  bucket_min: 1576800, from_cons: 1y,  from_count: 3,  runner: cfw }
