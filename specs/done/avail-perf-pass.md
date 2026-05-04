@@ -1,8 +1,14 @@
 # Spec: availability /api/totals — multi-scale grid pass
 
-Status: **open** (2026-05-02). Supersedes the prior m15-only draft of this
-spec (which targeted only the `30m`/`15m` bin gap). The framework here is
-broader and addresses the same symptoms.
+Status: **superseded** (2026-05-04) by `specs/avail-grid.md`, which
+locks the v2 design (CLI-driven, D1 manifest, ShardStore abstraction).
+Phase 0 (cron writes 1m@1m parquet via loader) and the initial cascade
+compactor (`gbfs/cascade/`) from this spec are in production; the
+remaining items follow the v2 spec.
+
+Originally **open** (2026-05-02). Superseded the prior m15-only draft of
+this spec (which targeted only the `30m`/`15m` bin gap). The framework
+here is broader and addresses the same symptoms.
 
 ## Goal
 
