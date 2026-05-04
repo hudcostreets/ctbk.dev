@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# `gbfs` CLI launcher — runs the TypeScript entry via tsx.
+#
+# Resolves the package root from this script's location so symlinks /
+# direct invocations work regardless of cwd.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+exec "$ROOT/node_modules/.bin/tsx" "$ROOT/src/index.ts" "$@"

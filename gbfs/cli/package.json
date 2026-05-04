@@ -1,0 +1,26 @@
+{
+    "name": "ctbk-gbfs-cli",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "bin": {
+        "gbfs": "./bin/gbfs"
+    },
+    "scripts": {
+        "gbfs": "tsx src/index.ts",
+        "test": "vitest run",
+        "typecheck": "tsc --noEmit"
+    },
+    "dependencies": {
+        "commander": "^12.1.0",
+        "hyparquet": "^1.25.6",
+        "hyparquet-writer": "^0.13.0",
+        "yaml": "^2.6.0"
+    },
+    "devDependencies": {
+        "@types/node": "^22.10.0",
+        "tsx": "^4.19.0",
+        "typescript": "^5.7.0",
+        "vitest": "^2.1.8"
+    }
+}
