@@ -1,0 +1,7 @@
+{
+    "name": "ctbk-gbfs-lib",
+    "version": "0.0.0",
+    "private": true,
+    "type": "module",
+    "description": "Shared TS modules consumed by gbfs/{cli,cascade,loader,worker,api}. No build, no install — imported via relative path."
+}

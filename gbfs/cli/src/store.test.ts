@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LocalStore } from '../../lib/store.js';
+import { LocalStore } from '../../lib/storeLocal.js';
 
 describe('LocalStore', () => {
     let root: string;
