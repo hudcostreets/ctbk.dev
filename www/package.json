@@ -21,7 +21,7 @@
     "leaflet": "^1.9.4",
     "lodash": "^4.17.21",
     "moment": "^2.30.1",
-    "plotly.js": "https://github.com/runsascoded/plotly.js#4b74cad1dc53d5c14b46a7ce3fbe4a85be8ed709",
+    "plotly.js": "https://github.com/runsascoded/plotly.js#1aa3c51cfd293aefb31ea8861dcc6b14105848fe",
     "pltly": "https://gitlab.com/runsascoded/js/pltly/-/archive/9c64c11de2aa3656c308dfdad56eafbc5c2fb32e/pltly-9c64c11de2aa3656c308dfdad56eafbc5c2fb32e.tar.gz",
     "pnpm-dep-source": "^0.1.0",
     "react": "^18.2.0",

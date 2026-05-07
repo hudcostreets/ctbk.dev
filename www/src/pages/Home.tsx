@@ -223,17 +223,6 @@ export default function Home() {
     isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor,
   }), [data, yAxis, stackBy, stackPercents, regions, userTypes, genders, rideableTypes, start, end, rollingAvgs, isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor])
 
-  // Remount the Plot whenever the trace shape changes — `Plotly.react` keeps
-  // stale per-slot styling AND skips full SVG redraws under stable uirevision
-  // when client-side navigating (e.g. clicking an Examples Link sets new
-  // dateRange + yAxis + stackBy, but the legend / axis ticks render stale
-  // until reload). Same fix as `YmrgtbChart` (commit eaa5fb5e); was missed
-  // here because Home.tsx uses `<Plot>` directly.
-  // const plotKey = useMemo(  /* TEMP DISABLED for repro of plotly.js stale-redraw spec */
-  //   () => traces.map(t => (t as { name?: string }).name ?? '').join('|'),
-  //   [traces],
-  // )
-
   // Compute data bounds for pan constraints
   const dataBounds = useMemo(() => {
     if (allMonths.length === 0) return null
@@ -390,7 +379,6 @@ export default function Home() {
 
         <div className={css.plot}>
           <Plot
-            // key={plotKey}  /* TEMP DISABLED for repro of plotly.js stale-redraw spec */
             data={traces}
             layout={layout}
             style={{ height: '100%' }}
