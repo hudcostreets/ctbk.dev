@@ -40,9 +40,13 @@ export function buildLayout(cfg: BuildLayoutConfig): Partial<Layout> {
 
   let tickDtick: string
   let tickAxisFormat: string
-  let tickFormat: 'quarterly' | 'semiannual' | 'annual'
+  let tickFormat: 'monthly' | 'quarterly' | 'semiannual' | 'annual'
 
-  if (quarterlyTicks <= maxTicks && totalMonths <= 60) {
+  if (totalMonths <= maxTicks) {
+    tickFormat = 'monthly'
+    tickDtick = 'M1'
+    tickAxisFormat = "%b '%y"
+  } else if (quarterlyTicks <= maxTicks && totalMonths <= 60) {
     tickFormat = 'quarterly'
     tickDtick = 'M3'
     tickAxisFormat = "%b '%y"

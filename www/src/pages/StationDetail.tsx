@@ -83,6 +83,10 @@ function binLabel(binS: number): string {
   return `${Math.round(binS / (30 * 86400))}mo`
 }
 
+const MAP_HEIGHT_SS_KEY = 'stationDetail.mapHeightPx'
+const DEFAULT_MAP_HEIGHT_PX = 400
+const MIN_MAP_HEIGHT_PX = 200
+
 export default function StationDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -90,6 +94,37 @@ export default function StationDetail() {
   const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [mapMonth, setMapMonth] = useState<string | null>(null)
+
+  // User-resizable map height, persisted to sessionStorage so it survives
+  // navigation between station detail pages within the same tab. Custom
+  // drag handle (rather than CSS `resize: vertical`) because Leaflet's
+  // absolutely-positioned tile layers cover the browser's native handle.
+  const [mapHeight, setMapHeight] = useState<number>(() => {
+    if (typeof window === 'undefined') return DEFAULT_MAP_HEIGHT_PX
+    const saved = window.sessionStorage.getItem(MAP_HEIGHT_SS_KEY)
+    const n = saved ? parseInt(saved, 10) : NaN
+    return Number.isFinite(n) && n >= MIN_MAP_HEIGHT_PX ? n : DEFAULT_MAP_HEIGHT_PX
+  })
+  const handleResizeStart = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    const startY = e.clientY
+    const startH = mapHeight
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.max(MIN_MAP_HEIGHT_PX, startH + (ev.clientY - startY))
+      setMapHeight(next)
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+  // Persist mapHeight to sessionStorage whenever it changes (small number of
+  // writes per second during a drag — no debounce needed).
+  useEffect(() => {
+    window.sessionStorage.setItem(MAP_HEIGHT_SS_KEY, String(mapHeight))
+  }, [mapHeight])
 
   // Availability time range (URL param `r`; minute-granularity codec, default Latest + 7d).
   const [range, setRange] = useUrlState('r', timeRangeParam(7 * 24 * 60 * 60 * 1000))
@@ -470,7 +505,15 @@ export default function StationDetail() {
 
       {mapCenter && mapShortName && (
         <>
-          <Box sx={{ height: 400, width: '100%', mt: 3, borderRadius: 1, overflow: 'hidden' }}>
+          <Box
+            sx={{
+              height: mapHeight,
+              width: '100%',
+              mt: 3,
+              borderRadius: 1,
+              overflow: 'hidden',
+            }}
+          >
             <StationMap
               stations={mapStations}
               selectedId={mapShortName}
@@ -506,6 +549,24 @@ export default function StationDetail() {
               }
             />
           </Box>
+          {/* Drag handle: 6px-tall strip beneath the map; cursor changes to
+            * ns-resize on hover. Drags adjust `mapHeight`, persisted in
+            * `sessionStorage` via the `useEffect` above. */}
+          <Box
+            onMouseDown={handleResizeStart}
+            sx={{
+              height: 6,
+              width: '100%',
+              cursor: 'ns-resize',
+              backgroundColor: (theme) =>
+                theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)',
+              '&:hover': {
+                backgroundColor: (theme) =>
+                  theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.20)' : 'rgba(0,0,0,0.16)',
+              },
+              userSelect: 'none',
+            }}
+          />
           <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
             <a href={`/stations?lat=${mapCenter[0].toFixed(4)}&lng=${mapCenter[1].toFixed(4)}&z=16&s=${mapShortName}`}>
               view on full map →
