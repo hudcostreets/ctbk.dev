@@ -100,6 +100,15 @@ function StationMarkers({
   const [hoveringLine, setHoveringLine] = useState(false)
   const isPinned = !!pinnedId && pinnedId === selectedId
 
+  // Visible circles stay area-proportional to `sqrt(ends)` — no floor —
+  // so the volume-ranking of stations reads at a glance. To keep small
+  // stations clickable, render an invisible co-located circle with a
+  // larger radius (≥ HIT_RADIUS_PX) carrying the eventHandlers + tooltip.
+  // At zoom 12 in NYC (~5m/px), 6px = 30m hit radius, plenty for the
+  // dense Manhattan grid without overlapping neighbors much.
+  const HIT_RADIUS_PX = 6
+  const hitRadius = HIT_RADIUS_PX * mPerPx
+
   const lines = useMemo(() => {
     if (!selectedStation || !selectedId || !pairCounts) return null
     if (!(selectedId in pairCounts)) return null
@@ -150,15 +159,15 @@ function StationMarkers({
   // unmount/remount race that caused clicks to fall through to the map.
   const selectedCircle = useMemo(() => {
     if (!selectedStation || !selectedId) return null
-    const radius = sqrt(selectedStation.ends)
-    if (isNaN(radius)) return null
+    const dataRadius = sqrt(selectedStation.ends)
+    if (isNaN(dataRadius)) return null
     return (
       <Pane name="selected" className={css.selected}>
         <Circle
           key={`${selectedId}-${colors.selected}-${isPinned ? 'pin' : 'hov'}`}
           center={{ lat: selectedStation.lat, lng: selectedStation.lng }}
           color={colors.selected}
-          radius={radius}
+          radius={dataRadius}
           weight={isPinned ? 4 : 3}
           interactive={false}
         >
@@ -178,16 +187,31 @@ function StationMarkers({
   const circles = useMemo(() => {
     return (
       <Pane name="circles" className={css.circles}>
-        {Object.entries(stations).map(([id, station]) => {
-          const radius = sqrt(station.ends)
-          if (isNaN(radius)) return null
+        {Object.entries(stations).flatMap(([id, station]) => {
+          const dataRadius = sqrt(station.ends)
+          if (isNaN(dataRadius)) return []
           const circleColor = stationColors?.[id] ?? colors.circle
-          return (
+          // Visible circle: area-proportional, non-interactive (clicks pass
+          // through to the invisible hit-test circle below).
+          const visible = (
             <Circle
-              key={`${id}-${circleColor}`}
+              key={`${id}-vis-${circleColor}`}
               center={{ lat: station.lat, lng: station.lng }}
               color={circleColor}
-              radius={radius}
+              radius={dataRadius}
+              interactive={false}
+            />
+          )
+          // Hit-test circle: invisible (fillOpacity 0, weight 0), but with
+          // a clickable radius of at least HIT_RADIUS_PX. Carries the
+          // eventHandlers + tooltip.
+          const hit = (
+            <Circle
+              key={`${id}-hit`}
+              center={{ lat: station.lat, lng: station.lng }}
+              radius={max(hitRadius, dataRadius)}
+              fillOpacity={0}
+              weight={0}
               bubblingMouseEvents={false}
               eventHandlers={(onPin || setSelectedId) ? {
                 click: () => (onPin ?? setSelectedId)?.(id),
@@ -205,10 +229,11 @@ function StationMarkers({
               )}
             </Circle>
           )
+          return [visible, hit]
         })}
       </Pane>
     )
-  }, [stations, selectedId, setSelectedId, onPin, colors, stationColors, hoverToSelect, isPinned])
+  }, [stations, selectedId, setSelectedId, onPin, colors, stationColors, hoverToSelect, isPinned, hitRadius])
 
   return <>{selectedCircle}{lines}{circles}</>
 }
