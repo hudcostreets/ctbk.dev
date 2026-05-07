@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useTheme } from '../contexts/ThemeContext'
@@ -99,6 +99,12 @@ function StationMarkers({
   // suppress the line tooltips entirely so the pinned-station TT stays put.)
   const isPinned = !!pinnedId && pinnedId === selectedId
 
+  // Hovered-edge destination ID. Lets us pop a permanent tooltip on the
+  // destination station while the cursor is over the edge connecting it
+  // to the selected source — completing the "edge hover is a subset of
+  // both endpoints' station hover" mental model.
+  const [hoveredEdgeDstId, setHoveredEdgeDstId] = useState<string | null>(null)
+
   // Visible circles stay area-proportional to `sqrt(ends)` — no floor —
   // so the volume-ranking of stations reads at a glance. To keep small
   // stations clickable, render an invisible co-located circle with a
@@ -136,6 +142,10 @@ function StationMarkers({
                 // selected so the "View station details" link below the map
                 // resolves to something useful.
                 click: () => (onPin ?? setSelectedId)?.(selectedId),
+                // Pop the destination's tooltip while the cursor is on this
+                // edge — handled by `edgeDstTooltip` below.
+                mouseover: () => setHoveredEdgeDstId(dstId),
+                mouseout: () => setHoveredEdgeDstId((cur) => (cur === dstId ? null : cur)),
               }}
             >
               {/* Edge tooltip: anchored at the segment midpoint (no `sticky`,
@@ -232,7 +242,32 @@ function StationMarkers({
     )
   }, [stations, selectedId, setSelectedId, onPin, colors, stationColors, hoverToSelect, isPinned, hitRadius])
 
-  return <>{selectedCircle}{lines}{circles}</>
+  // Permanent tooltip on the destination station while hovering an edge that
+  // ends there. Anchored at the dst's lat/lng with a tiny invisible Circle
+  // so leaflet has a layer to bind the tooltip to.
+  const edgeDstTooltip = useMemo(() => {
+    if (!hoveredEdgeDstId) return null
+    const dst = stations[hoveredEdgeDstId]
+    if (!dst) return null
+    return (
+      <Pane name="edge-dst-tooltip" className={css.selected}>
+        <Circle
+          key={`edge-dst-${hoveredEdgeDstId}`}
+          center={{ lat: dst.lat, lng: dst.lng }}
+          radius={1}
+          fillOpacity={0}
+          weight={0}
+          interactive={false}
+        >
+          <Tooltip className={css.tooltip} permanent direction="top" pane="tooltipPane">
+            <p>{dst.name}{dst.ends > 0 ? `: ${dst.ends.toLocaleString()}` : ''}</p>
+          </Tooltip>
+        </Circle>
+      </Pane>
+    )
+  }, [hoveredEdgeDstId, stations])
+
+  return <>{selectedCircle}{lines}{circles}{edgeDstTooltip}</>
 }
 
 /** Sync map view to URL state (or via callbacks). */
