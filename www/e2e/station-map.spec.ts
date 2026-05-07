@@ -2,9 +2,12 @@ import { test, expect, Page } from '@playwright/test'
 
 /**
  * /stations map: hover/click interactions + tooltip overlap behavior.
- * Tooltip overlap: when a station is selected and the user hovers one
- * of its destination lines, the permanent station tooltip must hide so
- * the line tooltip isn't stacked on top of it at the source station.
+ *
+ * When a station is selected and the user hovers one of its destination
+ * lines, three tooltips are visible together (per
+ * `3562f8d8` + `b676d3d1`): the permanent source-station tooltip, a
+ * mid-edge tooltip (`→ {dst}: {count}`), and a destination-station
+ * tooltip popped at the line's other end.
  */
 
 /** Wait until the first-month station data has rendered. */
@@ -62,52 +65,60 @@ test.describe('Station map — selection + overlap', () => {
     expect(await lines.count()).toBeGreaterThan(100)
   })
 
-  test('hovering a destination line hides the selected-station tooltip', async ({ page }) => {
+  test('hovering a destination line shows source + edge + dest tooltips', async ({ page }) => {
     await page.goto('/stations')
     await waitForStations(page)
     const station = await selectBiggestStation(page)
 
-    // Baseline: one tooltip visible — the permanent selected-station one.
+    // Move cursor off the source station's hit area first — otherwise the
+    // station's hover tooltip stacks on top of its permanent tooltip
+    // (`hoverToSelect` mode renders both when cursor is on the hit circle).
+    await page.mouse.move(5, 5)
+
     const tooltips = page.locator('.leaflet-container .leaflet-tooltip')
-    await expect(tooltips).toHaveCount(1)
-    const stationTipText = await tooltips.first().textContent()
-    expect(stationTipText).not.toMatch(/→/)  // station TT, not a line TT
+    await expect.poll(async () => await tooltips.count(),
+      { timeout: 3000, message: 'baseline: source-station permanent tooltip only' }).toBe(1)
+    expect(await tooltips.first().textContent()).not.toMatch(/→/)
 
     // Hover a location where a destination line should run (a short radial
     // offset from the source station, where the fan is densest).
     await page.mouse.move(station.x + 40, station.y + 40)
 
-    // While hovering the line: still exactly one tooltip, but now it's the
-    // line tooltip ("{src} → {dst}: {count}"). The permanent station tooltip
-    // is suppressed.
+    // While hovering the line: three tooltips. The source station's permanent
+    // tooltip stays put, the mid-edge tooltip ("→ {dst}: {count}") appears,
+    // and a permanent destination tooltip pops at the line's other end.
     await expect.poll(async () => {
       const texts = await tooltips.allTextContents()
-      return texts.length === 1 && /→/.test(texts[0])
-    }, { timeout: 3000, message: 'exactly one tooltip, containing "→"' }).toBe(true)
+      const arrowTips = texts.filter(t => /→/.test(t))
+      const plainTips = texts.filter(t => !/→/.test(t))
+      return texts.length === 3 && arrowTips.length === 1 && plainTips.length === 2
+    }, { timeout: 3000, message: '3 tooltips: 1 with "→", 2 plain (source + dest)' }).toBe(true)
   })
 
-  test('moving the cursor off the line restores the selected-station tooltip', async ({ page }) => {
+  test('moving the cursor off the line collapses back to the source tooltip', async ({ page }) => {
     await page.goto('/stations')
     await waitForStations(page)
     const station = await selectBiggestStation(page)
 
+    // Settle to baseline (just the permanent source TT, see test above).
+    await page.mouse.move(5, 5)
     const tooltips = page.locator('.leaflet-container .leaflet-tooltip')
-    await expect(tooltips).toHaveCount(1)
+    await expect.poll(async () => await tooltips.count(), { timeout: 3000 }).toBe(1)
 
-    // Hover a line (confirm transition to line-tooltip state), then move far
+    // Hover a line (confirm transition to 3-tooltip state), then move far
     // away off the map.
     await page.mouse.move(station.x + 40, station.y + 40)
     await expect.poll(async () => {
       const texts = await tooltips.allTextContents()
-      return texts.length === 1 && /→/.test(texts[0])
+      return texts.length === 3 && texts.some(t => /→/.test(t))
     }, { timeout: 3000 }).toBe(true)
 
     await page.mouse.move(5, 5)
 
-    // Station tooltip should return — exactly one tooltip, without "→".
+    // Back to just the source-station tooltip — 1 TT, no arrow.
     await expect.poll(async () => {
       const texts = await tooltips.allTextContents()
       return texts.length === 1 && !/→/.test(texts[0])
-    }, { timeout: 3000, message: 'station tooltip restored' }).toBe(true)
+    }, { timeout: 3000, message: 'collapsed to source tooltip only' }).toBe(true)
   })
 })
