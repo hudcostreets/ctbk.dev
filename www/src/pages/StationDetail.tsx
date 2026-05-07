@@ -84,7 +84,7 @@ function binLabel(binS: number): string {
 }
 
 const MAP_HEIGHT_SS_KEY = 'stationDetail.mapHeightPx'
-const DEFAULT_MAP_HEIGHT_PX = 400
+const DEFAULT_MAP_HEIGHT_PX = 600
 const MIN_MAP_HEIGHT_PX = 200
 
 export default function StationDetail() {
@@ -456,8 +456,12 @@ export default function StationDetail() {
 
       {/* `chartContainerRef` measures the chart's available width for
         * `pickAvailBinAuto`. Wrapping the spinner + chart together keeps the
-        * observed width stable across loading→loaded transitions. */}
-      <Box ref={chartContainerRef}>
+        * observed width stable across loading→loaded transitions.
+        *
+        * Negative `mx` cancels the page-level `Box p={{ xs: 1, sm: 2, md: 3 }}`
+        * padding so the chart spans edge-to-edge — important on mobile where
+        * the y-axis (40px) already eats a meaningful chunk. */}
+      <Box ref={chartContainerRef} sx={{ mx: { xs: -1, sm: -2, md: -3 } }}>
         {!data && !error && (
           <Box display="flex" flexDirection="column" alignItems="center" gap={1} p={4}>
             <CircularProgress />
@@ -549,24 +553,42 @@ export default function StationDetail() {
               }
             />
           </Box>
-          {/* Drag handle: 6px-tall strip beneath the map; cursor changes to
-            * ns-resize on hover. Drags adjust `mapHeight`, persisted in
+          {/* Drag handle: 14px-tall strip beneath the map with a centered
+            * "grip" mark for visual affordance. Cursor changes to ns-resize
+            * on hover. Drags adjust `mapHeight`, persisted in
             * `sessionStorage` via the `useEffect` above. */}
           <Box
             onMouseDown={handleResizeStart}
             sx={{
-              height: 6,
+              height: 14,
               width: '100%',
               cursor: 'ns-resize',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
               backgroundColor: (theme) =>
-                theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)',
+                theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+              borderRadius: '0 0 4px 4px',
               '&:hover': {
                 backgroundColor: (theme) =>
-                  theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.20)' : 'rgba(0,0,0,0.16)',
+                  theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.12)',
               },
               userSelect: 'none',
             }}
-          />
+            aria-label="Resize map"
+            role="separator"
+          >
+            {/* Grip mark: a short horizontal bar centered in the strip */}
+            <Box
+              sx={{
+                width: 40,
+                height: 4,
+                borderRadius: 2,
+                backgroundColor: (theme) =>
+                  theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.35)',
+              }}
+            />
+          </Box>
           <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
             <a href={`/stations?lat=${mapCenter[0].toFixed(4)}&lng=${mapCenter[1].toFixed(4)}&z=16&s=${mapShortName}`}>
               view on full map →

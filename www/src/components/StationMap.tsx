@@ -294,6 +294,20 @@ function MapEvents({
   return null
 }
 
+/** Tell Leaflet when the map's container changes size (e.g. user drags the
+ *  resize handle on station detail). Without this, tiles only render up to the
+ *  size at mount; the new area paints as empty white. */
+function MapResizeObserver() {
+  const map = useMap()
+  useEffect(() => {
+    const container = map.getContainer()
+    const ro = new ResizeObserver(() => map.invalidateSize())
+    ro.observe(container)
+    return () => ro.disconnect()
+  }, [map])
+  return null
+}
+
 export interface StationMapProps {
   stations: Stations
   selectedId?: string
@@ -394,6 +408,7 @@ export default function StationMap({
         <StationPies stations={stations} pieRange={pieRange} />
       )}
       {(onMove || onClick) && <MapEvents onMove={onMove} onClick={onClick} />}
+      <MapResizeObserver />
     </MapContainer>
     {overlay && (
       <div style={{
