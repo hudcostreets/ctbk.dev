@@ -229,10 +229,10 @@ export default function Home() {
   // dateRange + yAxis + stackBy, but the legend / axis ticks render stale
   // until reload). Same fix as `YmrgtbChart` (commit eaa5fb5e); was missed
   // here because Home.tsx uses `<Plot>` directly.
-  const plotKey = useMemo(
-    () => traces.map(t => (t as { name?: string }).name ?? '').join('|'),
-    [traces],
-  )
+  // const plotKey = useMemo(  /* TEMP DISABLED for repro of plotly.js stale-redraw spec */
+  //   () => traces.map(t => (t as { name?: string }).name ?? '').join('|'),
+  //   [traces],
+  // )
 
   // Compute data bounds for pan constraints
   const dataBounds = useMemo(() => {
@@ -390,7 +390,7 @@ export default function Home() {
 
         <div className={css.plot}>
           <Plot
-            key={plotKey}
+            // key={plotKey}  /* TEMP DISABLED for repro of plotly.js stale-redraw spec */
             data={traces}
             layout={layout}
             style={{ height: '100%' }}

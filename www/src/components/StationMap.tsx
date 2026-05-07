@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useTheme } from '../contexts/ThemeContext'
@@ -97,7 +97,6 @@ function StationMarkers({
   // destination line — otherwise both tooltips pile up at the source station,
   // overlapping awkwardly. (Only used in unpinned/hover mode; when pinned we
   // suppress the line tooltips entirely so the pinned-station TT stays put.)
-  const [hoveringLine, setHoveringLine] = useState(false)
   const isPinned = !!pinnedId && pinnedId === selectedId
 
   // Visible circles stay area-proportional to `sqrt(ends)` — no floor —
@@ -130,28 +129,27 @@ function StationMarkers({
               weight={weight}
               opacity={0.7}
               eventHandlers={{
-                // Clicks near the source station often land on a fan
-                // polyline rather than the underlying circle. Route such
-                // clicks to pin the source — that's the user's intent.
+                // Edge clicks pin the source station — treat edge interaction
+                // as a subset of station interaction. The user can still click
+                // the destination station directly through any non-occluded
+                // neighbor; clicking the edge falls back to keeping the source
+                // selected so the "View station details" link below the map
+                // resolves to something useful.
                 click: () => (onPin ?? setSelectedId)?.(selectedId),
-                mouseover: () => setHoveringLine(true),
-                mouseout: () => setHoveringLine(false),
               }}
             >
-              {/* Suppress edge tooltips entirely once the station is pinned —
-                  moving the cursor off the station (e.g. toward the caption
-                  link below) shouldn't flash neighbor-edge tooltips. */}
-              {/* Pin to default `tooltipPane` (z=650) — without this,
-                  react-leaflet inherits the parent layer's pane (here our
-                  custom "lines" pane at z=450), so the tooltip would
-                  render UNDER neighboring lines + circles. */}
-              {!isPinned && <Tooltip sticky pane="tooltipPane">{src.name} → {dst.name}: {count}</Tooltip>}
+              {/* Edge tooltip: anchored at the segment midpoint (no `sticky`,
+                  so it doesn't follow the cursor — fixes flicker as the cursor
+                  transitions between edges). Source name omitted: the source's
+                  own permanent tooltip already shows it. Pin to default
+                  `tooltipPane` (z=650) so it renders above neighbor edges. */}
+              <Tooltip pane="tooltipPane">→ {dst.name}: {count}</Tooltip>
             </Polyline>
           )
         })}
       </Pane>
     )
-  }, [selectedStation, selectedId, pairCounts, stations, mPerPx, zoom, colors, onPin, setSelectedId, isPinned])
+  }, [selectedStation, selectedId, pairCounts, stations, mPerPx, zoom, colors, onPin, setSelectedId])
 
   // Selected-station overlay: visual-only (pointer-events: none via `.selected`
   // CSS). Clicks pass through to the base Circle in the `circles` Pane below,
@@ -171,18 +169,17 @@ function StationMarkers({
           weight={isPinned ? 4 : 3}
           interactive={false}
         >
-          {/* When pinned, the station TT is always on (edge TTs are
-              suppressed). When unpinned/hovering, we hide it while the
-              cursor is over an edge so the edge TT doesn't stack on top. */}
-          {(isPinned || !hoveringLine) && (
-            <Tooltip className={`${css.tooltip} ${isPinned ? css.pinnedTooltip : ''}`} sticky permanent pane="selected">
-              <p>{selectedStation.name}{selectedStation.ends > 0 ? `: ${selectedStation.ends.toLocaleString()}` : ''}</p>
-            </Tooltip>
-          )}
+          {/* Source-station tooltip: always shown when a station is selected,
+              including while hovering an edge from/to it (edge hover is a
+              subset of station hover). Edge tooltips now anchor at edge
+              midpoints, so they don't collide with this one positionally. */}
+          <Tooltip className={`${css.tooltip} ${isPinned ? css.pinnedTooltip : ''}`} sticky permanent pane="selected">
+            <p>{selectedStation.name}{selectedStation.ends > 0 ? `: ${selectedStation.ends.toLocaleString()}` : ''}</p>
+          </Tooltip>
         </Circle>
       </Pane>
     )
-  }, [selectedStation, selectedId, colors, hoveringLine, isPinned])
+  }, [selectedStation, selectedId, colors, isPinned])
 
   const circles = useMemo(() => {
     return (
