@@ -1,6 +1,7 @@
 import calendar
 from dataclasses import dataclass
 from functools import cached_property
+from glob import glob
 from os.path import basename, join
 from typing import IO, Iterator, Literal
 from zipfile import ZipFile, BadZipFile
@@ -59,20 +60,30 @@ class TripdataMonth(DvcBlob):
     def name(self):
         return f'{self.region_str}{self.ym}'
 
-    @property
+    @cached_property
     def zip_basename(self) -> str:
-        if self.name == 'JC-202207':
-            return f'{self.name}-citbike-tripdata.csv.zip'  # Typo: "citbike"
-        elif self.name == 'JC-201708':
-            return f'{self.name} citibike-tripdata.csv.zip'  # Typo: " citibike" (space)
-        elif self.name in ('JC-202510', 'JC-202601'):
-            return f'{self.name}-citibike-tripdata.zip'  # Missing ".csv" segment
-        elif self.region == 'JC':
-            return f'{self.name}-citibike-tripdata.csv.zip'  # JC files have extra ".csv" segment
-        elif self.region == 'NYC' and self.ym.y <= 2023:
-            return f'{self.ym.y}-citibike-tripdata.zip'  # Full-year zips
+        """Basename of the source .zip in `s3/tripdata/`.
+
+        Citi Bike's naming has varied — `.csv.zip` vs `.zip`, full-year NYC
+        zips (≤2023), historic typos ("citbike", stray space). The committed
+        `.dvc` file is the source of truth: find whichever matches.
+        """
+        if self.region == 'JC':
+            prefix = f'JC-{self.ym}'  # JC-201708 has a space (not dash) after the prefix
+        elif self.ym.y <= 2023:
+            prefix = f'{self.ym.y}-'  # Full-year NYC zips
         else:
-            return f'{self.name}-citibike-tripdata.zip'
+            prefix = f'{self.ym}-'
+        matches = sorted(glob(join(self.DIR, f'{prefix}*.zip.dvc')))
+        if not matches:
+            raise FileNotFoundError(f'No .dvc found under {self.DIR} for {self.name} (prefix={prefix!r})')
+        if len(matches) > 1:
+            # 202503 has both .zip.dvc and .csv.zip.dvc; prefer canonical .zip.
+            non_csv = [m for m in matches if not m.endswith('.csv.zip.dvc')]
+            matches = non_csv or matches
+            if len(matches) > 1:
+                raise ValueError(f'Multiple .dvc candidates for {self.name}: {matches}')
+        return basename(matches[0]).removesuffix('.dvc')
 
     @cached_property
     def zip_path(self) -> str:
