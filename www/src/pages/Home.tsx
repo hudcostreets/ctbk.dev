@@ -326,8 +326,10 @@ export default function Home() {
   const gridcolor = isDark ? '#505050' : '#ccc'
   const tickcolor = isDark ? '#e0e0e0' : '#333'
 
-  // Generate a revision key that changes when date range, y-axis scale, or snap changes
-  // This forces Plotly to reset its UI state (including pan/zoom) to our specified ranges
+  // Layout-level uirevision: stable across data changes so plotly preserves
+  // legend toggles and other persistent UI state. Only changes on explicit
+  // resets (snap-to-default) or x-axis-defining changes (date range, y-axis
+  // scale switch).
   const uiRevision = (() => {
     const suffix = `${snapCounter}-${stackPercents}-${yAxis}`
     if (dateRange === "All") return `All-${suffix}`
@@ -336,6 +338,17 @@ export default function Home() {
     }
     return `exp-${dateRange.start.getTime()}-${dateRange.end?.getTime() ?? "present"}-${suffix}`
   })()
+  // y-axis uirevision: bumps whenever filter state changes, so plotly recomputes
+  // the autoranged y-axis on filter toggles. Per-attribute uirevision means
+  // legend toggles (above) persist across these changes.
+  const yAxisRevision = [
+    [...regions].sort().join(','),
+    stackBy,
+    [...userTypes].sort().join(','),
+    [...genders].sort().join(','),
+    [...rideableTypes].sort().join(','),
+    rollingAvgs.join(','),
+  ].join('|')
 
   const layout = buildLayout({
     months,
@@ -344,6 +357,7 @@ export default function Home() {
     showLegend: showLegendValue,
     tickcolor, gridcolor, isDark,
     uiRevision,
+    yAxisRevision,
   })
 
   // Duration buttons - clicking sets duration anchored to present

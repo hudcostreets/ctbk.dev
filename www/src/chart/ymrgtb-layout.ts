@@ -20,12 +20,16 @@ export interface BuildLayoutConfig {
   isDark: boolean
   /** Any string that uniquely IDs the plot state; Plotly resets UI state on change. */
   uiRevision: string
+  /** Optional per-yaxis uirevision. Bump on data-affecting changes (filter
+   *  toggles) to force y-axis autorange recompute without resetting other
+   *  preserved UI state (legend toggles). Falls through to `uiRevision`. */
+  yAxisRevision?: string
 }
 
 export function buildLayout(cfg: BuildLayoutConfig): Partial<Layout> {
   const {
     months, plotWidth, stackPercents, showLegend,
-    tickcolor, gridcolor, isDark, uiRevision,
+    tickcolor, gridcolor, isDark, uiRevision, yAxisRevision,
   } = cfg
 
   // Adaptive tick intervals based on date range AND viewport width
@@ -98,6 +102,7 @@ export function buildLayout(cfg: BuildLayoutConfig): Partial<Layout> {
       tickformat: stackPercents ? '.0%' : undefined,
       range: stackPercents ? [0, 1.01] : undefined,
       fixedrange: true,
+      ...(yAxisRevision !== undefined ? { uirevision: yAxisRevision } : {}),
     },
     paper_bgcolor: 'rgba(0,0,0,0)',
     plot_bgcolor: 'rgba(0,0,0,0)',

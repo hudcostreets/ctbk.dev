@@ -21,13 +21,17 @@ export interface YmrgtbChartProps {
   showLegend?: boolean
   /** Cache-busting key for Plotly's uirevision (resets pan/zoom). */
   uiRevision?: string
+  /** Per-yaxis uirevision. Bump on data-affecting state (filter toggles) so
+   *  plotly recomputes the autoranged y-axis without resetting layout-level
+   *  preserved UI state (legend toggles). */
+  yAxisRevision?: string
   onRelayout?: (e: Readonly<PlotRelayoutEvent>) => void
   className?: string
   style?: React.CSSProperties
 }
 
 export default function YmrgtbChart({
-  rows, config, showLegend, uiRevision, onRelayout, className, style,
+  rows, config, showLegend, uiRevision, yAxisRevision, onRelayout, className, style,
 }: YmrgtbChartProps) {
   const { actualTheme } = useTheme()
   const isDark = actualTheme === 'dark'
@@ -59,7 +63,8 @@ export default function YmrgtbChart({
     showLegend: showLegendEffective,
     tickcolor, gridcolor, isDark,
     uiRevision: uiRevision ?? 'static',
-  }), [months, windowWidth, config.stackPercents, showLegendEffective, tickcolor, gridcolor, isDark, uiRevision])
+    yAxisRevision,
+  }), [months, windowWidth, config.stackPercents, showLegendEffective, tickcolor, gridcolor, isDark, uiRevision, yAxisRevision])
 
   return (
     <div className={className} style={style}>

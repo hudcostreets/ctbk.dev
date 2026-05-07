@@ -613,6 +613,16 @@ export default function StationDetail() {
               rollingAvgs: tripsRollingAvgs,
               extraFilter: (r) => !r.Docking || tripsDocking === 'both' || r.Docking === tripsDocking,
             }}
+            yAxisRevision={[
+              tripsYAxis,
+              tripsStackBy,
+              tripsStackPercent,
+              [...tripsUserTypes].sort().join(','),
+              [...tripsGenders].sort().join(','),
+              [...tripsRideableTypes].sort().join(','),
+              tripsDocking,
+              tripsRollingAvgs.join(','),
+            ].join('|')}
           />
           <details
             className={css.controls}
