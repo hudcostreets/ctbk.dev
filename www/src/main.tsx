@@ -24,6 +24,7 @@ import { Footer } from "./components/Footer"
 const Stations = lazy(() => import("./pages/Stations"))
 const StationDetail = lazy(() => import("./pages/StationDetail"))
 const PipelineMdx = lazy(() => import("./pages/Pipeline.mdx"))
+const Files = lazy(() => import("./pages/Files"))
 
 function Pipeline() {
   return (
@@ -51,6 +52,8 @@ function AppContent() {
           {/* Back-compat: redirect old /stations/:id form to /s/:id */}
           <Route path="/stations/:id" element={<StationDetail />} />
           <Route path="/pipeline" element={<Pipeline />} />
+          <Route path="/files" element={<Files />} />
+          <Route path="/files/*" element={<Files />} />
         </Routes>
       </Suspense>
       <ThemeToggle onOpenShortcuts={openModal} hideThemeButton={isStationsPage}>

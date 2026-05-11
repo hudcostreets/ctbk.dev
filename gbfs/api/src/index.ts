@@ -465,6 +465,8 @@ import {
 	type TotalsResponse,
 } from './totals';
 import { monthsInDashed } from './planQuery';
+import { R2Store } from '@rdub/file-tree/stores/r2';
+import { createHandlers } from '@rdub/file-tree/server';
 
 /**
  * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
@@ -1329,6 +1331,22 @@ export default {
 				getStationCapacity(env.DB, gbfsId),
 			]);
 			return jsonResponse({ station_id: gbfsId, date: dateStr, capacity, rows }, env);
+		}
+
+		// /api/files/* — generic R2 browser via @rdub/file-tree. PoC for the
+		// new shared package; will back the GBFS health page's tree-view.
+		if (url.pathname.startsWith('/api/files/')) {
+			const handlers = createHandlers(
+				R2Store(env.R2, { prefixes: ['gbfs/', 'avail/'] }),
+				{ basePath: '/api/files', corsOrigin: env.CORS_ORIGIN ?? '*' },
+			);
+			const resp = await handlers.handle(request);
+			if (resp) {
+				const headers = new Headers(resp.headers);
+				const ch = corsHeaders(env);
+				for (const k of Object.keys(ch)) headers.set(k, (ch as Record<string, string>)[k]);
+				return new Response(resp.body, { status: resp.status, headers });
+			}
 		}
 
 		return errorResponse('Not found', 404, env);

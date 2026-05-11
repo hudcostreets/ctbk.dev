@@ -15,6 +15,7 @@
     "wrangler": "^4.0.0"
   },
   "dependencies": {
+    "@rdub/file-tree": "https://github.com/runsascoded/file-tree#272a09296aaef6f4d1ad9d8497dd2523db29412c",
     "hyparquet": "https://github.com/runsascoded/hyparquet#0f355ea5a37dcb9b29a43e33a3d45ce660c80798"
   }
 }
