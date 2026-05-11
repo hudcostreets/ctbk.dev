@@ -15,8 +15,26 @@
    has no cascade shards.
 2. **Deployed but empty** (1 cell today): `avail/agg=5m/cons=1d/` —
    declared in `gbfs/lib/cascade.ts` `CONS_LEVELS_BY_AGG['5m']` but R2
-   has zero shards. Likely cascade-worker bug: bucket boundary never
-   fires or the level's input chain breaks at one step. **TODO**: dig.
+   has zero shards. **Probable cause**: CFW heap OOM. Inputs for one
+   bucket = 3 × `agg=5m/cons=8h` shards. Each 8h shard has 8 h ×
+   12 (5-min buckets/hour) = 96 buckets × ~2,407 stations = ~230K
+   rows. 3 of them = ~690K rows in heap, larger than the ~433K rows
+   that the cascade.ts header comment flags as already OOM-ing for
+   `agg=1m × cons=3h`. The day-boundary tick fires but writes never
+   land (likely an unhandled exception swallowed by `try { … } catch`
+   in `cronTick` step 3 — the error gets pushed to `summary` but
+   doesn't fail the worker; next tick retries with same OOM).
+
+   **Fix options**:
+   - **(a)** Move `5m × 1d` from `CONS_LEVELS_BY_AGG['5m']`
+     (CFW-deployed) into the GHA-runner set. Most direct.
+   - **(b)** Stream-concat inputs (read one input shard at a time,
+     append rows, drop reference) to keep working-set bounded.
+   - **(c)** Bigger-fromCons step: read 24 × `5m × 1h` (smaller
+     individual shards, ~57K rows each = 1.36M total — worse) or
+     bypass via raw `5m × 5m` (288 × 5-min buckets/day × 2,407 = 693K,
+     no help).
+   - **(b)** is the structural fix; **(a)** is the quick band-aid.
 3. **Specced but not deployed** (18 cells per `gbfs/grid.yaml` but not
    in `gbfs/lib/cascade.ts`): higher-cons levels at `agg=1m` (3h/8h/1d),
    `agg=5m × cons=5d`, `agg=15m × {3d,10d}`, `agg=1h × {3h,8h,3d,1w,1mo,2mo}`,
