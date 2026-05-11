@@ -467,6 +467,7 @@ import {
 import { monthsInDashed } from './planQuery';
 import { R2Store } from '@rdub/file-tree/stores/r2';
 import { createHandlers } from '@rdub/file-tree/server';
+import { getHealthSnapshot } from './health';
 
 /**
  * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
@@ -1093,6 +1094,17 @@ export default {
 
 		if (url.pathname === '/health') {
 			return jsonResponse({ status: 'ok' }, env);
+		}
+
+		// /api/health — pipeline health snapshot (feed + compactions +
+		// cascade tier coverage). See specs/gbfs-health-page.md.
+		if (url.pathname === '/api/health') {
+			try {
+				const snapshot = await getHealthSnapshot(env.R2);
+				return jsonResponse(snapshot, env);
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'health snapshot failed', 500, env);
+			}
 		}
 
 		// /api/query — unified multi-scale time-series (trips + availability).
