@@ -226,9 +226,13 @@ describe('worker.scheduled (cron tick)', () => {
 		const { r2, puts } = makeR2(initial);
 		await runScheduled(worker, T13_31, r2);
 
+		// Dual-write during the `specs/r2-layout.md` Phase A migration:
+		// each cons write lands at the old key AND its `gbfs/`-prefixed twin.
 		const writes = puts.filter((p) => p.key.includes('agg=1m/cons=5m'));
-		expect(writes).toHaveLength(1);
-		expect(writes[0].key).toBe(consKey('1m', '5m', T13_25));
+		expect(writes.map((p) => p.key).sort()).toEqual([
+			'avail/agg=1m/cons=5m/2026-05-03/1325.parquet',
+			'gbfs/avail/agg=1m/cons=5m/2026-05-03/1325.parquet',
+		]);
 
 		const buf = writes[0].body as ArrayBuffer;
 		const file = { byteLength: buf.byteLength, slice: (s: number, e?: number) => buf.slice(s, e) };

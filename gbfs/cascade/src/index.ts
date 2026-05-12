@@ -50,6 +50,7 @@ import {
 	CONS_LEVELS_BY_AGG,
 	type CascadeLevel,
 	consKey,
+	gbfsKey,
 	inputKeysForBucket,
 	rowsToCols,
 } from '../../lib/cascade';
@@ -113,7 +114,13 @@ async function attemptCons(
 
 	const { parquetWriteBuffer } = await import('hyparquet-writer');
 	const out = parquetWriteBuffer({ columnData: cols, rowGroupSize: AVAIL_1M_ROW_GROUP_SIZE });
-	await r2.put(outKey, out, { httpMetadata: { contentType: 'application/octet-stream' } });
+	// Dual-write during the `specs/r2-layout.md` Phase A migration:
+	// `gbfsKey(outKey)` is the new home; `outKey` stays until readers cut over.
+	const httpMetadata = { contentType: 'application/octet-stream' };
+	await Promise.all([
+		r2.put(outKey, out, { httpMetadata }),
+		r2.put(gbfsKey(outKey), out, { httpMetadata }),
+	]);
 	return { status: 'wrote', bytes: out.byteLength, rows: cols[0].data.length, inputs: present };
 }
 
@@ -143,7 +150,12 @@ async function attemptAgg(
 
 	const { parquetWriteBuffer } = await import('hyparquet-writer');
 	const out = parquetWriteBuffer({ columnData: cols, rowGroupSize: AVAIL_1M_ROW_GROUP_SIZE });
-	await r2.put(outKey, out, { httpMetadata: { contentType: 'application/octet-stream' } });
+	// Dual-write during the `specs/r2-layout.md` Phase A migration.
+	const httpMetadata = { contentType: 'application/octet-stream' };
+	await Promise.all([
+		r2.put(outKey, out, { httpMetadata }),
+		r2.put(gbfsKey(outKey), out, { httpMetadata }),
+	]);
 	return { status: 'wrote', bytes: out.byteLength, rows: cols[0].data.length, inputs: present };
 }
 

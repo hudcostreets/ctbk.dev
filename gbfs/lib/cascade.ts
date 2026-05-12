@@ -123,6 +123,14 @@ export function consKey(agg: string, cons: string, bucketStartMin: number): stri
 	return `avail/agg=${agg}/cons=${cons}/${consPeriod(cons, bucketStartMin)}.parquet`;
 }
 
+/** Same shard, prefixed with `gbfs/`. Target of the r2-layout migration
+ *  (`specs/r2-layout.md`). During the dual-write window writers `put`
+ *  to BOTH `consKey(...)` and `gbfsKey(consKey(...))`; readers stay on
+ *  the old key until cut over. */
+export function gbfsKey(oldKey: string): string {
+	return `gbfs/${oldKey}`;
+}
+
 /** At cascade tick T (wall-clock minute), return the bucket-start for
  *  the cons level whose bucket is "safe to cons now" — i.e., its barrier
  *  (1m@1m at the bucket's exclusive-end minute) is reliably present.

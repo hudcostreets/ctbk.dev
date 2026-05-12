@@ -52,6 +52,8 @@ function makeMsg(key: string) {
 
 const STATUS_KEY = 'gbfs/status/2026-05-03/12-45.json';
 const PQ_KEY     = 'avail/agg=1m/cons=1m/2026-05-03/1245.parquet';
+// Dual-write during the `specs/r2-layout.md` Phase A migration.
+const PQ_KEY_NEW = `gbfs/${PQ_KEY}`;
 
 beforeEach(() => {
 	vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -94,8 +96,7 @@ describe('queue handler: per-minute avail key', () => {
 
 		expect(acks).toEqual({ ack: 1, retry: 0 });
 		expect(bucket.get).toHaveBeenCalledWith(STATUS_KEY);
-		expect(puts).toHaveLength(1);
-		expect(puts[0].key).toBe(PQ_KEY);
+		expect(puts.map((p) => p.key).sort()).toEqual([PQ_KEY, PQ_KEY_NEW].sort());
 
 		// Verify shard is decodable + has the right rows.
 		const buf = puts[0].body as ArrayBuffer;
