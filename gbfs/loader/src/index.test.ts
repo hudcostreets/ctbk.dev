@@ -51,9 +51,9 @@ function makeMsg(key: string) {
 }
 
 const STATUS_KEY = 'gbfs/status/2026-05-03/12-45.json';
-const PQ_KEY     = 'avail/agg=1m/cons=1m/2026-05-03/1245.parquet';
-// Dual-write during the `specs/r2-layout.md` Phase A migration.
-const PQ_KEY_NEW = `gbfs/${PQ_KEY}`;
+const PQ_KEY     = 'gbfs/avail/agg=1m/cons=1m/2026-05-03/1245.parquet';
+// Dual-write retains the legacy unprefixed path through Phase A.2 → A.3.
+const PQ_KEY_OLD = 'avail/agg=1m/cons=1m/2026-05-03/1245.parquet';
 
 beforeEach(() => {
 	vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -68,7 +68,7 @@ afterEach(() => {
 describe('availParquetKeyFromStatusKey', () => {
 	test('per-minute status → parquet key', () => {
 		expect(availParquetKeyFromStatusKey('gbfs/status/2026-05-03/12-45.json')).toBe(
-			'avail/agg=1m/cons=1m/2026-05-03/1245.parquet',
+			'gbfs/avail/agg=1m/cons=1m/2026-05-03/1245.parquet',
 		);
 	});
 
@@ -96,7 +96,7 @@ describe('queue handler: per-minute avail key', () => {
 
 		expect(acks).toEqual({ ack: 1, retry: 0 });
 		expect(bucket.get).toHaveBeenCalledWith(STATUS_KEY);
-		expect(puts.map((p) => p.key).sort()).toEqual([PQ_KEY, PQ_KEY_NEW].sort());
+		expect(puts.map((p) => p.key).sort()).toEqual([PQ_KEY, PQ_KEY_OLD].sort());
 
 		// Verify shard is decodable + has the right rows.
 		const buf = puts[0].body as ArrayBuffer;

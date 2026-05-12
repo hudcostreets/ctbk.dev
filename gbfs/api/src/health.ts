@@ -245,7 +245,7 @@ async function probeCell(
 	agg: string,
 	cons: string,
 ): Promise<CascadeCell> {
-	const prefix = `avail/agg=${agg}/cons=${cons}/`;
+	const prefix = `gbfs/avail/agg=${agg}/cons=${cons}/`;
 	const { objects, truncated } = await listAll(r2, prefix, 3);
 	const sorted = [...objects].sort((a, b) => a.uploaded.getTime() - b.uploaded.getTime());
 	const latest = sorted.length > 0 ? sorted[sorted.length - 1] : null;

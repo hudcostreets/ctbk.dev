@@ -254,7 +254,7 @@ function BrowseSection({ feed }: { feed: FeedHealth; compactions: CompactionHeal
     <Section title="Browse">
       <ul style={{ margin: 0, paddingLeft: '1.2em', lineHeight: 1.8 }}>
         <li><Link to={`/files/gbfs/status/${today}/`}>Today's WAL JSONs</Link> <Hint>raw minute polls</Hint></li>
-        <li><Link to={`/files/avail/agg=1m/cons=1m/${today}/`}>Today's cascade (1m@1m)</Link> <Hint>per-minute parquets</Hint></li>
+        <li><Link to={`/files/gbfs/avail/agg=1m/cons=1m/${today}/`}>Today's cascade (1m@1m)</Link> <Hint>per-minute parquets</Hint></li>
         <li><Link to="/files/gbfs/status/">Daily compactions</Link> <Hint>parquet per day</Hint></li>
         <li><Link to={`/files/gbfs/avail/h1/${today}/`}>Today's hourly compactions</Link> <Hint>h1 parquets</Hint></li>
         <li><Link to="/files/">All files (root)</Link></li>

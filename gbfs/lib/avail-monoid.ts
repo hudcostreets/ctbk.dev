@@ -99,10 +99,19 @@ export function buildMinuteShard(record: MinuteRecord): ColumnSource[] {
  *  compactor settled on (specs/done/h1-stats-fix.md). */
 export const AVAIL_1M_ROW_GROUP_SIZE = 600;
 
-/** Map per-minute JSON key → corresponding 1m@1m parquet key.
- *  `gbfs/status/2026-05-03/12-45.json` → `avail/agg=1m/cons=1m/2026-05-03/1245.parquet`
+/** Map per-minute JSON key → corresponding 1m@1m parquet key. End state
+ *  of the `specs/r2-layout.md` migration: under `gbfs/`.
+ *  `gbfs/status/2026-05-03/12-45.json` → `gbfs/avail/agg=1m/cons=1m/2026-05-03/1245.parquet`
  *  Throws if the key doesn't match the per-minute JSON shape. */
 export function availParquetKeyFromStatusKey(statusKey: string): string {
+	const m = statusKey.match(/^gbfs\/status\/(\d{4}-\d{2}-\d{2})\/(\d{2})-(\d{2})\.json$/);
+	if (!m) throw new Error(`not a per-minute status key: ${statusKey}`);
+	return `gbfs/avail/agg=1m/cons=1m/${m[1]}/${m[2]}${m[3]}.parquet`;
+}
+
+/** Pre-migration form (unprefixed `avail/...`). Loader continues
+ *  dual-writing during the Phase A.2 → A.3 window; removed in A.3. */
+export function availParquetKeyOldFromStatusKey(statusKey: string): string {
 	const m = statusKey.match(/^gbfs\/status\/(\d{4}-\d{2}-\d{2})\/(\d{2})-(\d{2})\.json$/);
 	if (!m) throw new Error(`not a per-minute status key: ${statusKey}`);
 	return `avail/agg=1m/cons=1m/${m[1]}/${m[2]}${m[3]}.parquet`;

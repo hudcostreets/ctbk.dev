@@ -6,9 +6,12 @@
  *
  * Per-minute availability (`gbfs/status/<date>/HH-MM.json`):
  *   - Build the 1m@1m monoid parquet shard and write it to
- *     `avail/agg=1m/cons=1m/<date>/HHMM.parquet`. (avail-perf-pass
+ *     `gbfs/avail/agg=1m/cons=1m/<date>/HHMM.parquet`. (avail-perf-pass
  *     Phase 0; was inline in the cron worker until 609512e9, where
  *     it correlated with ~10% cron-tick loss — see worker docstring.)
+ *   - Through Phase A.2 → A.3 of `specs/r2-layout.md`, the unprefixed
+ *     legacy path (`avail/agg=1m/cons=1m/...`) is also dual-written for
+ *     rollback safety.
  *
  * Daily station_information (`gbfs/info/<date>.json`):
  *   - Upsert into D1's `stations` metadata table (low-volume, used for
@@ -22,10 +25,10 @@
 import {
 	AVAIL_1M_ROW_GROUP_SIZE,
 	availParquetKeyFromStatusKey,
+	availParquetKeyOldFromStatusKey,
 	buildMinuteShard,
 	type MinuteRecord,
 } from '../../lib/avail-monoid';
-import { gbfsKey } from '../../lib/cascade';
 
 interface InfoStation {
 	station_id: string;       // GBFS UUID
@@ -83,14 +86,16 @@ async function writeAvailShard(bucket: R2Bucket, statusKey: string): Promise<voi
 	const { parquetWriteBuffer } = await import('hyparquet-writer');
 	const buf = parquetWriteBuffer({ columnData: cols, rowGroupSize: AVAIL_1M_ROW_GROUP_SIZE });
 	const pqKey = availParquetKeyFromStatusKey(statusKey);
-	// Dual-write during `specs/r2-layout.md` Phase A migration:
-	// `gbfsKey(pqKey)` is the new home; `pqKey` stays until readers cut over.
+	const oldKey = availParquetKeyOldFromStatusKey(statusKey);
+	// Dual-write during `specs/r2-layout.md` Phase A.2 → A.3 window:
+	// `pqKey` is the new home (`gbfs/avail/...`); `oldKey` retained for
+	// rollback until A.3 drops it.
 	const httpMetadata = { contentType: 'application/octet-stream' };
 	await Promise.all([
 		bucket.put(pqKey, buf, { httpMetadata }),
-		bucket.put(gbfsKey(pqKey), buf, { httpMetadata }),
+		bucket.put(oldKey, buf, { httpMetadata }),
 	]);
-	console.log(`Wrote 1m@1m shard (${buf.byteLength} bytes, ${cols[0].data.length} rows) → ${pqKey} + ${gbfsKey(pqKey)}`);
+	console.log(`Wrote 1m@1m shard (${buf.byteLength} bytes, ${cols[0].data.length} rows) → ${pqKey} + ${oldKey}`);
 }
 
 /** Upsert all stations from a station_information snapshot.

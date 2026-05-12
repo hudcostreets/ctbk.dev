@@ -118,17 +118,17 @@ export function consPeriod(cons: string, bucketStartMin: number): string {
 	}
 }
 
-/** R2 key for an avail shard. */
+/** R2 key for an avail shard. End state of the `specs/r2-layout.md`
+ *  migration: all derived availability shards live under `gbfs/`. */
 export function consKey(agg: string, cons: string, bucketStartMin: number): string {
-	return `avail/agg=${agg}/cons=${cons}/${consPeriod(cons, bucketStartMin)}.parquet`;
+	return `gbfs/avail/agg=${agg}/cons=${cons}/${consPeriod(cons, bucketStartMin)}.parquet`;
 }
 
-/** Same shard, prefixed with `gbfs/`. Target of the r2-layout migration
- *  (`specs/r2-layout.md`). During the dual-write window writers `put`
- *  to BOTH `consKey(...)` and `gbfsKey(consKey(...))`; readers stay on
- *  the old key until cut over. */
-export function gbfsKey(oldKey: string): string {
-	return `gbfs/${oldKey}`;
+/** Pre-migration R2 key (unprefixed `avail/...`). Writers continue
+ *  dual-writing during the Phase A.2 → A.3 window so a rollback is
+ *  trivial; removed in Phase A.3. */
+export function consKeyOld(agg: string, cons: string, bucketStartMin: number): string {
+	return `avail/agg=${agg}/cons=${cons}/${consPeriod(cons, bucketStartMin)}.parquet`;
 }
 
 /** At cascade tick T (wall-clock minute), return the bucket-start for

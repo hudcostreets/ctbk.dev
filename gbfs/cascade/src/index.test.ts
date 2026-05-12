@@ -35,17 +35,17 @@ afterEach(() => {
 describe('consKey + period encoding', () => {
 	const T_2026_05_03_13_30 = Math.floor(Date.parse('2026-05-03T13:30:00Z') / 60000);
 	test('1m → date/HHMM', () => {
-		expect(consKey('1m', '1m', T_2026_05_03_13_30)).toBe('avail/agg=1m/cons=1m/2026-05-03/1330.parquet');
+		expect(consKey('1m', '1m', T_2026_05_03_13_30)).toBe('gbfs/avail/agg=1m/cons=1m/2026-05-03/1330.parquet');
 	});
 	test('5m → date/HHMM', () => {
-		expect(consKey('1m', '5m', T_2026_05_03_13_30)).toBe('avail/agg=1m/cons=5m/2026-05-03/1330.parquet');
+		expect(consKey('1m', '5m', T_2026_05_03_13_30)).toBe('gbfs/avail/agg=1m/cons=5m/2026-05-03/1330.parquet');
 	});
 	test('15m → date/HHMM', () => {
-		expect(consKey('1m', '15m', T_2026_05_03_13_30)).toBe('avail/agg=1m/cons=15m/2026-05-03/1330.parquet');
+		expect(consKey('1m', '15m', T_2026_05_03_13_30)).toBe('gbfs/avail/agg=1m/cons=15m/2026-05-03/1330.parquet');
 	});
 	test('1h → date/HH (drops MM)', () => {
 		const T_2026_05_03_13_00 = Math.floor(Date.parse('2026-05-03T13:00:00Z') / 60000);
-		expect(consKey('1m', '1h', T_2026_05_03_13_00)).toBe('avail/agg=1m/cons=1h/2026-05-03/13.parquet');
+		expect(consKey('1m', '1h', T_2026_05_03_13_00)).toBe('gbfs/avail/agg=1m/cons=1h/2026-05-03/13.parquet');
 	});
 });
 
@@ -84,28 +84,28 @@ describe('inputKeysForBucket', () => {
 	const T13_25 = Math.floor(Date.parse('2026-05-03T13:25:00Z') / 60000);
 	test('5m@1m bucket 13:25 → 5 1m@1m inputs at minutes 25..29', () => {
 		expect(inputKeysForBucket('1m', FIVE_M, T13_25)).toEqual([
-			'avail/agg=1m/cons=1m/2026-05-03/1325.parquet',
-			'avail/agg=1m/cons=1m/2026-05-03/1326.parquet',
-			'avail/agg=1m/cons=1m/2026-05-03/1327.parquet',
-			'avail/agg=1m/cons=1m/2026-05-03/1328.parquet',
-			'avail/agg=1m/cons=1m/2026-05-03/1329.parquet',
+			'gbfs/avail/agg=1m/cons=1m/2026-05-03/1325.parquet',
+			'gbfs/avail/agg=1m/cons=1m/2026-05-03/1326.parquet',
+			'gbfs/avail/agg=1m/cons=1m/2026-05-03/1327.parquet',
+			'gbfs/avail/agg=1m/cons=1m/2026-05-03/1328.parquet',
+			'gbfs/avail/agg=1m/cons=1m/2026-05-03/1329.parquet',
 		]);
 	});
 	test('15m@1m bucket → 3 5m@1m inputs at 5-min stride', () => {
 		const T13_15 = T13_25 - 10;
 		expect(inputKeysForBucket('1m', FIFTEEN, T13_15)).toEqual([
-			'avail/agg=1m/cons=5m/2026-05-03/1315.parquet',
-			'avail/agg=1m/cons=5m/2026-05-03/1320.parquet',
-			'avail/agg=1m/cons=5m/2026-05-03/1325.parquet',
+			'gbfs/avail/agg=1m/cons=5m/2026-05-03/1315.parquet',
+			'gbfs/avail/agg=1m/cons=5m/2026-05-03/1320.parquet',
+			'gbfs/avail/agg=1m/cons=5m/2026-05-03/1325.parquet',
 		]);
 	});
 	test('1h@1m bucket → 4 15m@1m inputs at 15-min stride', () => {
 		const T13_00 = T13_25 - 25;
 		expect(inputKeysForBucket('1m', ONE_H, T13_00)).toEqual([
-			'avail/agg=1m/cons=15m/2026-05-03/1300.parquet',
-			'avail/agg=1m/cons=15m/2026-05-03/1315.parquet',
-			'avail/agg=1m/cons=15m/2026-05-03/1330.parquet',
-			'avail/agg=1m/cons=15m/2026-05-03/1345.parquet',
+			'gbfs/avail/agg=1m/cons=15m/2026-05-03/1300.parquet',
+			'gbfs/avail/agg=1m/cons=15m/2026-05-03/1315.parquet',
+			'gbfs/avail/agg=1m/cons=15m/2026-05-03/1330.parquet',
+			'gbfs/avail/agg=1m/cons=15m/2026-05-03/1345.parquet',
 		]);
 	});
 });
@@ -226,8 +226,9 @@ describe('worker.scheduled (cron tick)', () => {
 		const { r2, puts } = makeR2(initial);
 		await runScheduled(worker, T13_31, r2);
 
-		// Dual-write during the `specs/r2-layout.md` Phase A migration:
-		// each cons write lands at the old key AND its `gbfs/`-prefixed twin.
+		// Dual-write during the `specs/r2-layout.md` Phase A.2 → A.3 window:
+		// each cons write lands at both `gbfs/avail/...` (new) and the
+		// legacy unprefixed `avail/...` path.
 		const writes = puts.filter((p) => p.key.includes('agg=1m/cons=5m'));
 		expect(writes.map((p) => p.key).sort()).toEqual([
 			'avail/agg=1m/cons=5m/2026-05-03/1325.parquet',
@@ -349,31 +350,31 @@ describe('aggInputKeysForBucket', () => {
 
 	test('5m@5m bucket → 1 input shard from agg=1m/cons=5m', () => {
 		expect(aggInputKeysForBucket(AGG_5M, T13_25)).toEqual([
-			'avail/agg=1m/cons=5m/2026-05-03/1325.parquet',
+			'gbfs/avail/agg=1m/cons=5m/2026-05-03/1325.parquet',
 		]);
 	});
 	test('15m@15m bucket → 3 inputs from agg=5m/cons=5m at 5-min stride', () => {
 		const T13_15 = T13_25 - 10;
 		expect(aggInputKeysForBucket(AGG_15M, T13_15)).toEqual([
-			'avail/agg=5m/cons=5m/2026-05-03/1315.parquet',
-			'avail/agg=5m/cons=5m/2026-05-03/1320.parquet',
-			'avail/agg=5m/cons=5m/2026-05-03/1325.parquet',
+			'gbfs/avail/agg=5m/cons=5m/2026-05-03/1315.parquet',
+			'gbfs/avail/agg=5m/cons=5m/2026-05-03/1320.parquet',
+			'gbfs/avail/agg=5m/cons=5m/2026-05-03/1325.parquet',
 		]);
 	});
 	test('1h@1h bucket → 4 inputs from agg=15m/cons=15m at 15-min stride', () => {
 		expect(aggInputKeysForBucket(AGG_1H, T13_00)).toEqual([
-			'avail/agg=15m/cons=15m/2026-05-03/1300.parquet',
-			'avail/agg=15m/cons=15m/2026-05-03/1315.parquet',
-			'avail/agg=15m/cons=15m/2026-05-03/1330.parquet',
-			'avail/agg=15m/cons=15m/2026-05-03/1345.parquet',
+			'gbfs/avail/agg=15m/cons=15m/2026-05-03/1300.parquet',
+			'gbfs/avail/agg=15m/cons=15m/2026-05-03/1315.parquet',
+			'gbfs/avail/agg=15m/cons=15m/2026-05-03/1330.parquet',
+			'gbfs/avail/agg=15m/cons=15m/2026-05-03/1345.parquet',
 		]);
 	});
 	test('1d@1d bucket → 24 inputs from agg=1h/cons=1h at 1h stride', () => {
 		const MIDNIGHT_MAY3 = Math.floor(Date.parse('2026-05-03T00:00:00Z') / 60000);
 		const keys = aggInputKeysForBucket(AGG_1D, MIDNIGHT_MAY3);
 		expect(keys).toHaveLength(24);
-		expect(keys[0]).toBe('avail/agg=1h/cons=1h/2026-05-03/00.parquet');
-		expect(keys[23]).toBe('avail/agg=1h/cons=1h/2026-05-03/23.parquet');
+		expect(keys[0]).toBe('gbfs/avail/agg=1h/cons=1h/2026-05-03/00.parquet');
+		expect(keys[23]).toBe('gbfs/avail/agg=1h/cons=1h/2026-05-03/23.parquet');
 	});
 });
 
@@ -444,10 +445,10 @@ describe('worker.scheduled: agg-self path (5m@5m)', () => {
 		await runScheduled(worker, T13_31, r2);
 
 		// Cons-only writes 5m@1m for 1325 (5 rows)
-		const consWrite = puts.find((p) => p.key === 'avail/agg=1m/cons=5m/2026-05-03/1325.parquet');
+		const consWrite = puts.find((p) => p.key === 'gbfs/avail/agg=1m/cons=5m/2026-05-03/1325.parquet');
 		expect(consWrite).toBeDefined();
 		// Agg-self writes 5m@5m for 1325 (1 row, summed)
-		const aggWrite = puts.find((p) => p.key === 'avail/agg=5m/cons=5m/2026-05-03/1325.parquet');
+		const aggWrite = puts.find((p) => p.key === 'gbfs/avail/agg=5m/cons=5m/2026-05-03/1325.parquet');
 		expect(aggWrite).toBeDefined();
 
 		// Verify agg=5m output: 1 row per station, with summed n + sum + sum_sq

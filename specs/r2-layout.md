@@ -112,7 +112,7 @@ Verify next tick: `aws s3 ls s3://ctbk/gbfs/avail/agg=1m/cons=1m/<today>/ | tail
 should grow by ~1 file/minute. Same for the cascade outputs (5m, 15m,
 1h, agg-self at each level) on their respective tick cadences.
 
-#### Phase A.2 — historical copy + reader cut-over
+#### Phase A.2 — historical copy + reader cut-over [code staged]
 
 **Step 1 — historical copy** (user-gated, only after A.1 deploy is live
 and confirmed dual-writing):
@@ -125,18 +125,26 @@ aws s3 cp s3://ctbk/avail/agg=1d/  s3://ctbk/gbfs/avail/agg=1d/  --recursive --p
 ```
 Skip `avail/agg/` (legacy daily-flat) — that's Phase B's problem.
 
-**Step 2 — reader cut-over** (next commit after copy completes):
-- `gbfs/lib/cascade.ts`: swap `consKey` to return the `gbfs/`-prefixed
-  path; rename current implementation to `consKeyOld`.
-- Writers: dual-write becomes `put(consKeyOld(...))` + `put(consKey(...))`
-  (still both paths; just swapped which is "old").
-- `gbfs/api/src/health.ts:248`: `avail/agg=...` → `gbfs/avail/agg=...`
-  (the cascade-cell probe).
-- Note: `gbfs/api/src/planQuery.ts` does NOT yet consume the cascade
-  pyramid (its `avail/region/...` paths are a different sub-tree, no
-  writer); nothing to cut over there.
-- Note: `gbfs/api/src/index.ts:1352` allow-list keeps `'avail/'` until
-  Phase C (when top-level `avail/` is empty).
+**Step 2 — reader cut-over** [staged; deploy only after Step 1 is done]:
+- `gbfs/lib/cascade.ts`: `consKey` now returns the `gbfs/`-prefixed
+  path; `consKeyOld` retained for the dual-write.
+- `gbfs/lib/avail-monoid.ts`: `availParquetKeyFromStatusKey` returns
+  the `gbfs/`-prefixed path; `availParquetKeyOldFromStatusKey` retained
+  for the dual-write.
+- `gbfs/cascade`, `gbfs/loader`: dual-write `put(<new>)` + `put(<old>)`
+  via the helpers above.
+- `gbfs/api/src/health.ts:248`: probe prefix swapped to `gbfs/avail/agg=...`.
+- `www/src/pages/Health.tsx`: "Today's cascade" link points at
+  `/files/gbfs/avail/agg=1m/cons=1m/...`.
+
+**Not in scope (deferred)**:
+- `gbfs/api/src/planQuery.ts` does NOT yet consume the cascade pyramid
+  (its `avail/region/...` paths are a different sub-tree, no writer);
+  nothing to cut over there.
+- `gbfs/api/src/index.ts:1352` file-tree allow-list keeps `'avail/'`
+  until Phase C (when top-level `avail/` is empty).
+- `gbfs/lib/ensureCell.ts` uses a separate `dt=` key format only
+  consumed by the `gbfs` CLI's `ensure` cmd; not wired to live workers.
 
 #### Phase A.3 — stop old writes
 
