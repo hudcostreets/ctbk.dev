@@ -92,38 +92,66 @@ This is the bulk of the migration — every-minute writes plus large
 historical volume. Worth doing first because every other derived path
 either already lives under `gbfs/avail/` or is low-traffic.
 
-**Writers** to dual-write:
-- `gbfs/loader/src/index.ts` — writes `avail/agg=1m/cons=1m/<date>/<HHMM>.parquet`
-  on each R2 event. Add a parallel `gbfs/avail/agg=1m/cons=1m/...` put.
-- `gbfs/cascade/src/index.ts` — `attemptCons` (line 116) and `attemptAgg`
-  put outputs derived from `consKey(agg, cons, bucketStartMin)` in
-  `gbfs/lib/cascade.ts`. Cleanest fix: update `consKey` to prefix
-  `gbfs/`. With one source-of-truth helper, all writers + readers
-  using it move atomically. But that breaks compat for readers still on
-  the old path — so instead, add a `consKeyOld` returning the
-  unprefixed path, dual-write to both, then swap `consKey` to the new
-  path when readers are ready.
+#### Phase A.1 — writer dual-write [DONE, commit `b2af3233`]
 
-**Readers** to cut over (after writers dual-writing for a few cycles):
-- `gbfs/api/src/planQuery.ts` (multi-scale path) — derives keys via
-  `consKey`. Cut over by swapping the import target.
-- `gbfs/api/src/health.ts` (`/api/health`) — derives keys for the
-  cascade-cell probe. Update prefix.
-- `gbfs/api/src/index.ts` (`/api/files/*` R2Store) — extend allow-list
-  from `['gbfs/', 'avail/']` to just `['gbfs/']` once `avail/` is empty.
-- Local test fixtures + `gbfs/cli/src/store.test.ts` — update test
-  paths.
+Both writers `put()` to the old key AND its `gbfs/`-prefixed twin in
+parallel. Additive; reversible by dropping the new puts.
 
-**Historical copy** (user-gated):
-```
-aws s3 cp s3://ctbk/avail/ s3://ctbk/gbfs/avail/ --recursive --profile cf
-```
-(Filter to skip `avail/agg/` legacy if retiring rather than moving.)
+- `gbfs/lib/cascade.ts`: new `gbfsKey(oldKey)` helper.
+- `gbfs/cascade/src/index.ts`: `attemptCons` + `attemptAgg`
+  `Promise.all([r2.put(outKey, ...), r2.put(gbfsKey(outKey), ...)])`.
+- `gbfs/loader/src/index.ts`: `writeAvailShard` does the same for
+  `pqKey` and `gbfsKey(pqKey)`.
 
-**Delete old** (user-gated, after a grace window):
+**To deploy A.1**:
 ```
-aws s3 rm s3://ctbk/avail/agg=1m/ --recursive --profile cf
-# ... and for each other agg level
+cd gbfs/cascade && pnpm deploy
+cd gbfs/loader  && pnpm deploy
+```
+Verify next tick: `aws s3 ls s3://ctbk/gbfs/avail/agg=1m/cons=1m/<today>/ | tail`
+should grow by ~1 file/minute. Same for the cascade outputs (5m, 15m,
+1h, agg-self at each level) on their respective tick cadences.
+
+#### Phase A.2 — historical copy + reader cut-over
+
+**Step 1 — historical copy** (user-gated, only after A.1 deploy is live
+and confirmed dual-writing):
+```
+aws s3 cp s3://ctbk/avail/agg=1m/  s3://ctbk/gbfs/avail/agg=1m/  --recursive --profile cf
+aws s3 cp s3://ctbk/avail/agg=5m/  s3://ctbk/gbfs/avail/agg=5m/  --recursive --profile cf
+aws s3 cp s3://ctbk/avail/agg=15m/ s3://ctbk/gbfs/avail/agg=15m/ --recursive --profile cf
+aws s3 cp s3://ctbk/avail/agg=1h/  s3://ctbk/gbfs/avail/agg=1h/  --recursive --profile cf
+aws s3 cp s3://ctbk/avail/agg=1d/  s3://ctbk/gbfs/avail/agg=1d/  --recursive --profile cf
+```
+Skip `avail/agg/` (legacy daily-flat) — that's Phase B's problem.
+
+**Step 2 — reader cut-over** (next commit after copy completes):
+- `gbfs/lib/cascade.ts`: swap `consKey` to return the `gbfs/`-prefixed
+  path; rename current implementation to `consKeyOld`.
+- Writers: dual-write becomes `put(consKeyOld(...))` + `put(consKey(...))`
+  (still both paths; just swapped which is "old").
+- `gbfs/api/src/health.ts:248`: `avail/agg=...` → `gbfs/avail/agg=...`
+  (the cascade-cell probe).
+- Note: `gbfs/api/src/planQuery.ts` does NOT yet consume the cascade
+  pyramid (its `avail/region/...` paths are a different sub-tree, no
+  writer); nothing to cut over there.
+- Note: `gbfs/api/src/index.ts:1352` allow-list keeps `'avail/'` until
+  Phase C (when top-level `avail/` is empty).
+
+#### Phase A.3 — stop old writes
+
+After A.2 deploy + ≥24h verifying readers happy, drop the old `put()`
+calls (and the `consKeyOld` helper). Cascade + loader write only the
+`gbfs/`-prefixed path.
+
+#### Phase A.4 — delete old data (user-gated, destructive)
+
+```
+aws s3 rm s3://ctbk/avail/agg=1m/  --recursive --profile cf
+aws s3 rm s3://ctbk/avail/agg=5m/  --recursive --profile cf
+aws s3 rm s3://ctbk/avail/agg=15m/ --recursive --profile cf
+aws s3 rm s3://ctbk/avail/agg=1h/  --recursive --profile cf
+aws s3 rm s3://ctbk/avail/agg=1d/  --recursive --profile cf
 ```
 
 ### Phase B — legacy daily-flat (`avail/agg/{h1,d1,mo1}/`)
