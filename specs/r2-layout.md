@@ -1,162 +1,176 @@
-# Spec: R2 storage layout cleanup (`gbfs/` vs `avail/`)
+# Spec: R2 storage layout cleanup — consolidate under `gbfs/`
 
-> Status: **draft** (2026-05-10). Settles the destination layout that the
-> GBFS health page (`specs/gbfs-health-page.md`, forthcoming) targets.
-> Physical migration sequenced last, after the health page lands.
+> Status: **draft** (2026-05-12, v2). Settles the destination layout the
+> health page targets. Physical migration sequenced after the page lands.
 
 ## Problem
 
-Derived GBFS-availability data is currently split across two top-level
-prefixes (`gbfs/avail/...` and `avail/...`) with three+ generations of
-naming overlapping each other. The split has no organizing principle —
-it's an accumulation of layers added over time.
+Derived GBFS data is split across two top-level R2 prefixes (`gbfs/...`
+and `avail/...`) with three+ generations of naming overlapping each
+other. The split has no organizing principle — `avail/` ≠ "not GBFS";
+it's just GBFS data at a different processing stage.
 
-Surfaced when the file browser (`/files/*`) showed `avail/` and `gbfs/`
-as siblings: "isn't it all GBFS data (or derived from it)?" Yes. The
-layout fails the "principle of least surprise" test.
+Surfaced when the file browser at `/files/*` showed `avail/` and `gbfs/`
+as siblings: *"isn't this all GBFS data?"* Yes.
 
 ## Current state
 
 ```
-gbfs/                                                     ← raw + early compactions
+gbfs/                                                     ← raw + some derived
 ├── status/<date>/<HH-MM>.json                            n0 — raw minute poll      [cron worker writes]
 ├── status/<date>.parquet                                 daily WAL bundle          [compact-r2.py writes]
 ├── stations/<uuid>/<yyyymm>.parquet                      per-station month slice   [compact-r2.py slice writes]
 ├── info/<date>.json                                      daily station info        [cron worker writes]
 ├── heartbeat/...                                         cron heartbeat            [cron worker writes]
-└── avail/                                                ← derived: misplaced here, should be under avail/
-    ├── raw/day/<date>.parquet                            d0 — raw daily bundle     [compact-r2.py writes]
+└── avail/                                                ← already a derived sub-tree, just incomplete
+    ├── raw/day/<date>.parquet                            d0 — raw daily bundle     [avail_raw_day.py writes]
     └── h1/<date>/<HH>.parquet                            h1 — hourly aggregate     [compactor CFW writes]
 
-avail/                                                    ← derived availability rollups
-├── agg/                                                  ← legacy daily-flat
-│   ├── h1/<date>.parquet                                 hourly agg, file-per-day  [legacy]
-│   ├── d1/<yyyymm>.parquet                               daily agg, file-per-month [legacy]
-│   └── mo1/<year>.parquet                                monthly agg, file-per-year [legacy]
-└── agg=<A>/cons=<C>/<period>.parquet                     multi-scale grid (Hive)   [cascade CFW + loader write]
+avail/                                                    ← should NOT be a top-level
+├── agg/                                                  legacy daily-flat
+│   ├── h1/<date>.parquet                                 hourly agg, file-per-day
+│   ├── d1/<yyyymm>.parquet                               daily agg, file-per-month
+│   └── mo1/<year>.parquet                                monthly agg, file-per-year
+└── agg=<A>/cons=<C>/<period>.parquet                     multi-scale grid (current)
 ```
 
-Three generations of derived layouts:
-1. **`gen-1` daily-flat** (`avail/agg/{h1,d1,mo1}/`) — earliest, mirrored from the trips-pipeline naming
-2. **`gen-2` hive-style hourly** (`gbfs/avail/h1/`) — compactor CFW output (under `gbfs/`, not `avail/`)
-3. **`gen-3` hive-style multi-scale** (`avail/agg=A/cons=C/`) — current cascade pyramid
-
-Plus a raw daily bundle (`gbfs/avail/raw/day/`) sitting on its own under `gbfs/avail/`.
-
-### Readers (blast radius of any path change)
+### Readers (blast radius)
 
 | Path | Reader |
 |------|--------|
-| `gbfs/status/<date>/<HH-MM>.json` | loader CFW (R2 event consumer), daily compactor, api worker (`readMinuteJsonsForHour`) |
+| `gbfs/status/<date>/<HH-MM>.json` | loader CFW, daily compactor, api worker |
 | `gbfs/status/<date>.parquet` | compactor downstream phases |
 | `gbfs/stations/<uuid>/<yyyymm>.parquet` | api worker `getStationMonthFromR2` |
 | `gbfs/info/<date>.json` | `load_gbfs_info.py` |
 | `gbfs/avail/raw/day/<date>.parquet` | api worker `totals.ts:rawDayKey` |
-| `gbfs/avail/h1/<date>/<HH>.parquet` | api worker `index.ts:117,896`, `ctbk/avail_agg.py` |
+| `gbfs/avail/h1/<date>/<HH>.parquet` | api worker `index.ts`, `ctbk/avail_agg.py` |
 | `avail/agg/h1/<date>.parquet` | api `totals.ts:317` |
 | `avail/agg/d1/<yyyymm>.parquet` | api `totals.ts:316` |
 | `avail/agg/mo1/<year>.parquet` | api `totals.ts:315` |
-| `avail/agg=A/cons=C/<period>.parquet` | api `planQuery.ts` (the multi-scale path) |
+| `avail/agg=A/cons=C/<period>.parquet` | api `planQuery.ts` (multi-scale path), cascade CFW, loader CFW, `/api/health` |
 
-## End state
-
-One root for derived availability data. Raw + per-station-month stays
-under `gbfs/` since it's a 1:1 mirror of the upstream feed.
+## End state — everything under `gbfs/`
 
 ```
-gbfs/                                                     ← raw GBFS feed mirror, unchanged
-├── status/<date>/<HH-MM>.json
-├── status/<date>.parquet
-├── stations/<uuid>/<yyyymm>.parquet
-├── info/<date>.json
-└── heartbeat/...
+gbfs/
+├── status/<date>/<HH-MM>.json                            unchanged
+├── status/<date>.parquet                                 unchanged
+├── stations/<uuid>/<yyyymm>.parquet                      unchanged
+├── info/<date>.json                                      unchanged
+├── heartbeat/...                                         unchanged
+└── avail/                                                ← single home for ALL derived availability
+    ├── raw/day/<date>.parquet                            unchanged (already here)
+    ├── h1/<date>/<HH>.parquet                            unchanged (already here)
+    └── agg=<A>/cons=<C>/<period>.parquet                 ← moved from top-level `avail/agg=*/cons=*/`
 
-avail/                                                    ← all derived availability data
-├── raw/day/<date>.parquet                                ← moved from gbfs/avail/raw/day/
-├── h1/<date>/<HH>.parquet                                ← moved from gbfs/avail/h1/  (gen-2)
-├── agg/{h1,d1,mo1}/...                                   ← gen-1 legacy: retire if unused, else move under avail/
-└── agg=<A>/cons=<C>/<period>.parquet                     ← gen-3 (current cascade)
+(top-level `avail/` deleted)
 ```
 
-This makes the file-browser virtual root cleaner: top-level is
-`gbfs/` (raw upstream) and `avail/` (analytical product), with no
-deep-derived data hiding under `gbfs/avail/`.
+Legacy daily-flat `avail/agg/{h1,d1,mo1}/` retire or relocate as part
+of the migration (recommended: retire once cascade-pyramid coverage in
+the multi-scale path is broad enough that `/api/totals` doesn't depend
+on them — see `specs/cascade-backfill.md`).
 
-The `avail/agg=*/cons=*/` cascade is the long-term target format. The
-legacy `gen-1` daily-flat dirs (`avail/agg/{h1,d1,mo1}/`) should be
-retired once the cascade covers their consumers — the planner already
-selects from the cascade for `/api/query`; `/api/totals` still routes
-through them.
+Top-level becomes `{gbfs/, trips/, …}` with each top-level corresponding
+to one upstream data source.
 
 ## Migration
 
-Each rename is two-step: dual-write → reader cut-over → drop old. Renames
-are reversible until the drop step.
+Standard four-phase pattern, per user:
 
-### Phase 1 — Cleanup `gbfs/avail/` (move derived data out of the raw prefix)
+1. **Dual-write**: every writer pushes to both old and new keys.
+2. **Reader cut-over**: each reader switches to the new key.
+3. **Stop old writes**: once readers verified, drop the old write site.
+4. **Delete old data**: `aws s3 rm --recursive` against the old prefix.
 
-#### Step 1a: `gbfs/avail/h1/` → `avail/h1/`
-1. Compactor CFW: write to both keys (≤6 LOC change). One cron tick.
-2. Reader cut-over:
-   - `gbfs/api/src/index.ts:117,896` — switch to new key (api reads `avail/h1/...`).
-   - `ctbk/avail_agg.py` — switch to new key.
-3. Copy historical `gbfs/avail/h1/*` → `avail/h1/*` via `aws s3 cp --recursive` (one-shot).
-4. Verify api reads from new path for both today + historical.
-5. Stop the dual write; drop old path.
+Each phase is reversible until the next. Phases 1-3 are code-only; phase
+4 is destructive and user-gated.
 
-Blast radius: 1 worker write site, 2 reader sites, 18 days of historical
-data (~432 files × ~1 MB each ≈ 450 MB).
+### Phase A — cascade pyramid (`avail/agg=*/cons=*/` → `gbfs/avail/agg=*/cons=*/`)
 
-#### Step 1b: `gbfs/avail/raw/day/` → `avail/raw/day/`
-Same pattern, single writer (compact-r2.py), single reader
-(`totals.ts:rawDayKey`).
+This is the bulk of the migration — every-minute writes plus large
+historical volume. Worth doing first because every other derived path
+either already lives under `gbfs/avail/` or is low-traffic.
 
-### Phase 2 — Legacy daily-flat retirement decision
+**Writers** to dual-write:
+- `gbfs/loader/src/index.ts` — writes `avail/agg=1m/cons=1m/<date>/<HHMM>.parquet`
+  on each R2 event. Add a parallel `gbfs/avail/agg=1m/cons=1m/...` put.
+- `gbfs/cascade/src/index.ts` — `attemptCons` (line 116) and `attemptAgg`
+  put outputs derived from `consKey(agg, cons, bucketStartMin)` in
+  `gbfs/lib/cascade.ts`. Cleanest fix: update `consKey` to prefix
+  `gbfs/`. With one source-of-truth helper, all writers + readers
+  using it move atomically. But that breaks compat for readers still on
+  the old path — so instead, add a `consKeyOld` returning the
+  unprefixed path, dual-write to both, then swap `consKey` to the new
+  path when readers are ready.
 
-Three options for `avail/agg/{h1,d1,mo1}/`:
+**Readers** to cut over (after writers dual-writing for a few cycles):
+- `gbfs/api/src/planQuery.ts` (multi-scale path) — derives keys via
+  `consKey`. Cut over by swapping the import target.
+- `gbfs/api/src/health.ts` (`/api/health`) — derives keys for the
+  cascade-cell probe. Update prefix.
+- `gbfs/api/src/index.ts` (`/api/files/*` R2Store) — extend allow-list
+  from `['gbfs/', 'avail/']` to just `['gbfs/']` once `avail/` is empty.
+- Local test fixtures + `gbfs/cli/src/store.test.ts` — update test
+  paths.
 
-A. **Retire entirely**. `/api/totals` switches to cascade-pyramid reads for
-   the same query. Test parity first; once equivalent, stop writing
-   `gen-1`. Drop the historical data after a grace window.
+**Historical copy** (user-gated):
+```
+aws s3 cp s3://ctbk/avail/ s3://ctbk/gbfs/avail/ --recursive --profile cf
+```
+(Filter to skip `avail/agg/` legacy if retiring rather than moving.)
 
-B. **Move under `avail/legacy/` and freeze**. Acknowledges the format
-   exists but signals "don't add more." Simpler than A but keeps two code
-   paths.
+**Delete old** (user-gated, after a grace window):
+```
+aws s3 rm s3://ctbk/avail/agg=1m/ --recursive --profile cf
+# ... and for each other agg level
+```
 
-C. **Leave alone**. Lowest risk, highest mess.
+### Phase B — legacy daily-flat (`avail/agg/{h1,d1,mo1}/`)
 
-Recommendation: A, once the cascade-pyramid coverage (Task #53) is broad
-enough that `/api/totals` doesn't depend on `gen-1`. Until then: B.
+Two options:
+- **B.1 Retire**: `/api/totals` switches to cascade-pyramid reads.
+  Requires cascade coverage to be broad enough (`specs/cascade-backfill.md`).
+- **B.2 Relocate**: move to `gbfs/avail/legacy/{h1,d1,mo1}/`. Same
+  dual-write pattern.
 
-### Phase 3 — Idempotency check
+Recommendation: B.1 once cascade coverage is sufficient. Until then: do
+nothing (these are low-traffic GHA-written shards; leaving them at
+`avail/agg/...` doesn't block Phase A which targets `avail/agg=*/`).
 
-After every rename: re-run the daily compactor / cascade workers for the
-last few days, byte-compare outputs to ensure no path-derived state
-leaked in. The schema is path-independent — but worth verifying.
+### Phase C — verify + drop top-level `avail/`
+
+Once Phase A complete and Phase B resolved, top-level `avail/` should
+be empty. Verify:
+```
+aws s3 ls s3://ctbk/avail/ --recursive --profile cf | head
+```
+Then drop the file-browser allow-list entry (`['gbfs/']` only) and
+remove `avail/` references from docs.
 
 ## Out of scope (this spec)
 
-- Migrating the `trips/` tree (`trips/stations/<short_name>.parquet`,
-  `aggregated/`, `consolidated/`, etc.) — separate top-level concern.
-- Changing the cascade-pyramid's `agg=A/cons=C/<period>.parquet`
-  internal naming — Hive-style is stable; no proposed change.
-- Retiring DVC-tracked `s3/ctbk/...` paths — different pipeline entirely.
+- `trips/` tree migration — separate top-level concern.
+- Renaming the cascade-pyramid's internal `agg=A/cons=C/<period>.parquet`
+  format — Hive-style is stable; only the parent prefix changes.
+- DVC-tracked `s3/ctbk/...` paths.
 
 ## Open questions
 
-- Is `avail/agg/{h1,d1,mo1}/` (gen-1) still used by anything outside
-  `/api/totals`? Notebooks? Scripts? If so, the deprecation has more
-  surface to cover. `grep -r 'avail/agg/'` outside `gbfs/` returned
-  only test fixtures and the api file; should be sufficient but
-  worth a second pass before Phase 2.
-- The `gbfs/avail/` cleanup (Phase 1) and the cascade-coverage work
-  (Task #53) are independent. Phase 1 is small and safe; do first.
-  Phase 2 needs Task #53 substantially complete.
+- **`consKey` swap vs. dual-key**: simpler to dual-write via two
+  parallel `put()` calls (no source-of-truth helper churn) until
+  ready, then swap. Recommended: explicit dual-`put` in each writer.
+- **Worker memory**: dual-writes double each `put()` cost — small
+  (~200KB to ~6MB per shard), negligible compared to the input read +
+  parquet encode work. No risk.
+- **R2 event consumers**: loader is a queue consumer. When it dual-writes,
+  does the queue need to fire twice? No — `r2.put` doesn't trigger our
+  own queue; only PutObject events from the original WAL write do.
 
 ## References
 
-- `specs/done/gbfs-scraper.md` — original raw feed pipeline
-- `specs/done/avail-perf-pass.md` — multi-scale grid design
-- `specs/done/gbfs-r2-only.md` — D1 → R2 migration (introduced `gbfs/avail/h1/`)
-- `specs/avail-grid.md` — current cascade-pyramid grid spec
-- Task #53 (cascade backfill) — needed before Phase 2
+- `specs/cascade-backfill.md` — gates Phase B
+- `specs/done/avail-perf-pass.md` — cascade design (`consKey` source)
+- `specs/done/gbfs-r2-only.md` — introduced `gbfs/avail/h1/`
+- `gbfs/lib/cascade.ts` `consKey` — single helper used by all
+  cascade-pyramid writers/readers
