@@ -50,7 +50,6 @@ import {
 	CONS_LEVELS_BY_AGG,
 	type CascadeLevel,
 	consKey,
-	consKeyOld,
 	inputKeysForBucket,
 	rowsToCols,
 } from '../../lib/cascade';
@@ -94,7 +93,6 @@ async function attemptCons(
 	bucketStartMin: number,
 ): Promise<AttemptResult> {
 	const outKey = consKey(agg, level.cons, bucketStartMin);
-	const oldKey = consKeyOld(agg, level.cons, bucketStartMin);
 	if (await r2.head(outKey)) return { status: 'exists' };
 
 	const inputKeys = inputKeysForBucket(agg, level, bucketStartMin);
@@ -115,14 +113,7 @@ async function attemptCons(
 
 	const { parquetWriteBuffer } = await import('hyparquet-writer');
 	const out = parquetWriteBuffer({ columnData: cols, rowGroupSize: AVAIL_1M_ROW_GROUP_SIZE });
-	// Dual-write during `specs/r2-layout.md` Phase A.2 → A.3 window:
-	// `outKey` is the new home (`gbfs/avail/...`); `oldKey` retained
-	// for rollback until A.3 drops it.
-	const httpMetadata = { contentType: 'application/octet-stream' };
-	await Promise.all([
-		r2.put(outKey, out, { httpMetadata }),
-		r2.put(oldKey, out, { httpMetadata }),
-	]);
+	await r2.put(outKey, out, { httpMetadata: { contentType: 'application/octet-stream' } });
 	return { status: 'wrote', bytes: out.byteLength, rows: cols[0].data.length, inputs: present };
 }
 
@@ -135,7 +126,6 @@ async function attemptAgg(
 	bucketStartMin: number,
 ): Promise<AttemptResult> {
 	const outKey = consKey(level.agg, level.agg, bucketStartMin);
-	const oldKey = consKeyOld(level.agg, level.agg, bucketStartMin);
 	if (await r2.head(outKey)) return { status: 'exists' };
 
 	// Barrier: the LAST input shard must exist (proves the cons cascade
@@ -153,12 +143,7 @@ async function attemptAgg(
 
 	const { parquetWriteBuffer } = await import('hyparquet-writer');
 	const out = parquetWriteBuffer({ columnData: cols, rowGroupSize: AVAIL_1M_ROW_GROUP_SIZE });
-	// Dual-write during `specs/r2-layout.md` Phase A.2 → A.3 window.
-	const httpMetadata = { contentType: 'application/octet-stream' };
-	await Promise.all([
-		r2.put(outKey, out, { httpMetadata }),
-		r2.put(oldKey, out, { httpMetadata }),
-	]);
+	await r2.put(outKey, out, { httpMetadata: { contentType: 'application/octet-stream' } });
 	return { status: 'wrote', bytes: out.byteLength, rows: cols[0].data.length, inputs: present };
 }
 

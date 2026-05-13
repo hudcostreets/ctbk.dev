@@ -148,9 +148,9 @@ Skip `avail/agg/` (legacy daily-flat) — that's Phase B's problem.
 
 #### Phase A.3 — stop old writes
 
-After A.2 deploy + ≥24h verifying readers happy, drop the old `put()`
-calls (and the `consKeyOld` helper). Cascade + loader write only the
-`gbfs/`-prefixed path.
+Drop the old `put()` calls + `consKeyOld` / `availParquetKeyOldFromStatusKey`
+helpers. Cascade + loader write only the `gbfs/`-prefixed path.
+Reversible by reverting the commit until A.4 runs.
 
 #### Phase A.4 — delete old data (user-gated, destructive)
 

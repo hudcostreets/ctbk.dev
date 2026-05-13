@@ -52,8 +52,6 @@ function makeMsg(key: string) {
 
 const STATUS_KEY = 'gbfs/status/2026-05-03/12-45.json';
 const PQ_KEY     = 'gbfs/avail/agg=1m/cons=1m/2026-05-03/1245.parquet';
-// Dual-write retains the legacy unprefixed path through Phase A.2 → A.3.
-const PQ_KEY_OLD = 'avail/agg=1m/cons=1m/2026-05-03/1245.parquet';
 
 beforeEach(() => {
 	vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -96,7 +94,7 @@ describe('queue handler: per-minute avail key', () => {
 
 		expect(acks).toEqual({ ack: 1, retry: 0 });
 		expect(bucket.get).toHaveBeenCalledWith(STATUS_KEY);
-		expect(puts.map((p) => p.key).sort()).toEqual([PQ_KEY, PQ_KEY_OLD].sort());
+		expect(puts.map((p) => p.key)).toEqual([PQ_KEY]);
 
 		// Verify shard is decodable + has the right rows.
 		const buf = puts[0].body as ArrayBuffer;

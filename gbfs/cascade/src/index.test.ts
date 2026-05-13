@@ -226,12 +226,8 @@ describe('worker.scheduled (cron tick)', () => {
 		const { r2, puts } = makeR2(initial);
 		await runScheduled(worker, T13_31, r2);
 
-		// Dual-write during the `specs/r2-layout.md` Phase A.2 → A.3 window:
-		// each cons write lands at both `gbfs/avail/...` (new) and the
-		// legacy unprefixed `avail/...` path.
 		const writes = puts.filter((p) => p.key.includes('agg=1m/cons=5m'));
-		expect(writes.map((p) => p.key).sort()).toEqual([
-			'avail/agg=1m/cons=5m/2026-05-03/1325.parquet',
+		expect(writes.map((p) => p.key)).toEqual([
 			'gbfs/avail/agg=1m/cons=5m/2026-05-03/1325.parquet',
 		]);
 
