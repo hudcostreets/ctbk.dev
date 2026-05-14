@@ -4,6 +4,11 @@ compatibility_date = "2024-09-23"
 
 [vars]
 CORS_ORIGIN = "*"
+# R2 bucket name (S3-compat presigned URL path-style addressing).
+R2_BUCKET_NAME = "ctbk"
+# r2.dev public URL — anonymous direct reads from R2. Used as a sync
+# `getUrl(path)` fallback when the browser opts out of presigning.
+R2_PUBLIC_BASE_URL = "https://pub-4856603e85b34753b7e6bffb89411803.r2.dev"
 
 [[d1_databases]]
 binding = "DB"

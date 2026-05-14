@@ -36,6 +36,11 @@ interface Env {
 	DB: D1Database;
 	R2: R2Bucket;
 	CORS_ORIGIN: string;
+	R2_BUCKET_NAME: string;
+	R2_PUBLIC_BASE_URL: string;
+	R2_S3_ENDPOINT: string;
+	R2_ACCESS_KEY_ID: string;
+	R2_SECRET_ACCESS_KEY: string;
 }
 
 function todayUtc(): string {
@@ -1349,7 +1354,16 @@ export default {
 		// new shared package; will back the GBFS health page's tree-view.
 		if (url.pathname.startsWith('/api/files/')) {
 			const handlers = createHandlers(
-				R2Store(env.R2, { prefixes: ['gbfs/', 'avail/'] }),
+				R2Store(env.R2, {
+					prefixes: ['gbfs/', 'avail/'],
+					publicBaseUrl: env.R2_PUBLIC_BASE_URL,
+					presign: {
+						endpoint: env.R2_S3_ENDPOINT,
+						bucket: env.R2_BUCKET_NAME,
+						accessKeyId: env.R2_ACCESS_KEY_ID,
+						secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+					},
+				}),
 				{ basePath: '/api/files', corsOrigin: env.CORS_ORIGIN ?? '*' },
 			);
 			const resp = await handlers.handle(request);
