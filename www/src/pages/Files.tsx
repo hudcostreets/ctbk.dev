@@ -6,13 +6,16 @@
 import { useMemo } from 'react'
 import { FileTree } from '@rdub/file-tree/react'
 import { HttpStore } from '@rdub/file-tree/stores/http'
+import { ParquetViewer } from '../components/ParquetViewer'
 
-const API_BASE = import.meta.env.DEV
-  ? 'http://localhost:51896'
-  : 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
+// Default to prod worker so `pnpm dev` works without a local api.
+// Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
+const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
 
 export default function Files() {
-  const store = useMemo(() => HttpStore(`${API_BASE}/api/files`), [])
+  // `presign: true` → download icon resolves via `/api/files/presign`,
+  // so the browser streams bytes directly from R2 (no worker proxy).
+  const store = useMemo(() => HttpStore(`${API_BASE}/api/files`, { presign: true }), [])
   return (
     <div style={{
       maxWidth: 1200,
@@ -24,6 +27,7 @@ export default function Files() {
         store={store}
         routeBase="/files"
         title="Files (PoC: @rdub/file-tree)"
+        parquetRenderer={ParquetViewer}
       />
     </div>
   )
