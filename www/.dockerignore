@@ -7,6 +7,7 @@
 !Dockerfile.screenshots
 !ROADMAP.md
 !e2e/bundle.spec.ts
+!e2e/home-chart.spec.ts
 !e2e/map-embed.spec.ts
 !e2e/month-range.spec.ts
 !e2e/shortcuts.spec.ts
@@ -109,6 +110,7 @@
 !src/components/Heading.tsx
 !src/components/MonthRangePicker.tsx
 !src/components/OverviewAvailabilityChart.tsx
+!src/components/ParquetViewer.tsx
 !src/components/PipelineContext.tsx
 !src/components/PipelineDiagram.tsx
 !src/components/Radios.tsx
@@ -153,6 +155,8 @@
 !src/index.module.css
 !src/main.tsx
 !src/mdx.d.ts
+!src/pages/Files.tsx
+!src/pages/Health.tsx
 !src/pages/Home.tsx
 !src/pages/Pipeline.mdx
 !src/pages/StationDetail.tsx
