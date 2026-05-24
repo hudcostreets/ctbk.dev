@@ -6,6 +6,7 @@ import {
 	hourlyCompactionStaleMinutes,
 	trailingHourMissing,
 	type AlertState,
+	type FiringEntry,
 	type Rule,
 } from './alerts';
 
@@ -103,39 +104,37 @@ describe('diffRules', () => {
 		firingText: () => 'should not appear',
 	};
 
+	function entry(firingSince: string): FiringEntry {
+		return { firingSince, threadTs: `ts-${firingSince}`, firingText: 'prior firing text' };
+	}
+
 	it('emits firing transition for newly-firing rule', () => {
-		const prev: AlertState = { firing: {} };
-		const { next, transitions } = diffRules([fireRule], prev, snap(), '2026-05-24T12:00:00Z');
-		expect(transitions).toEqual([{ rule: fireRule, kind: 'firing', text: 'firing!' }]);
-		expect(next.firing).toEqual({ 'always-fire': '2026-05-24T12:00:00Z' });
+		const transitions = diffRules([fireRule], { firing: {} }, snap());
+		expect(transitions).toEqual([{ rule: fireRule, kind: 'firing', firingText: 'firing!' }]);
 	});
 
 	it('emits resolved transition when rule clears', () => {
-		const prev: AlertState = { firing: { 'always-fire': '2026-05-24T11:00:00Z' } };
-		const { next, transitions } = diffRules([restRule], prev, snap(), '2026-05-24T12:00:00Z');
-		// `restRule` has different id — `always-fire` is in prev but not in current rules, so no transition.
-		// Test the actual resolved path with matching id:
 		const resolvedRule: Rule = { id: 'always-fire', description: 'desc', check: () => false, firingText: () => '' };
-		const r2 = diffRules([resolvedRule], prev, snap(), '2026-05-24T12:00:00Z');
-		expect(r2.transitions).toEqual([
-			{ rule: resolvedRule, kind: 'resolved', firingSince: '2026-05-24T11:00:00Z', text: ':white_check_mark: *Resolved* — desc' },
+		const prior = entry('2026-05-24T11:00:00Z');
+		const transitions = diffRules([resolvedRule], { firing: { 'always-fire': prior } }, snap());
+		expect(transitions).toEqual([
+			{ rule: resolvedRule, kind: 'resolved', priorEntry: prior },
 		]);
-		expect(r2.next.firing).toEqual({});
-		// And the earlier no-op result:
+	});
+
+	it('no resolved transition when rule isn\'t in current rule set', () => {
+		// `restRule` is `never-fire`; `always-fire` from prev isn't in this rule set, so no transition.
+		const transitions = diffRules([restRule], { firing: { 'always-fire': entry('2026-05-24T11:00:00Z') } }, snap());
 		expect(transitions).toEqual([]);
-		expect(next.firing).toEqual({ 'always-fire': '2026-05-24T11:00:00Z' });
 	});
 
 	it('no transition when rule keeps firing (deduped)', () => {
-		const prev: AlertState = { firing: { 'always-fire': '2026-05-24T11:00:00Z' } };
-		const { next, transitions } = diffRules([fireRule], prev, snap(), '2026-05-24T12:00:00Z');
+		const transitions = diffRules([fireRule], { firing: { 'always-fire': entry('2026-05-24T11:00:00Z') } }, snap());
 		expect(transitions).toEqual([]);
-		expect(next.firing).toEqual({ 'always-fire': '2026-05-24T11:00:00Z' });
 	});
 
 	it('no transition when rule keeps not-firing', () => {
-		const prev: AlertState = { firing: {} };
-		const { transitions } = diffRules([restRule], prev, snap(), '2026-05-24T12:00:00Z');
+		const transitions = diffRules([restRule], { firing: {} }, snap());
 		expect(transitions).toEqual([]);
 	});
 
@@ -143,16 +142,17 @@ describe('diffRules', () => {
 		const ruleA: Rule = { id: 'a', description: 'A', check: () => true, firingText: () => 'A fires' };
 		const ruleB: Rule = { id: 'b', description: 'B', check: () => false, firingText: () => 'B fires' };
 		const ruleC: Rule = { id: 'c', description: 'C', check: () => true, firingText: () => 'C fires' };
-		const prev: AlertState = { firing: { b: '2026-05-24T11:00:00Z', c: '2026-05-24T11:00:00Z' } };
-		const { next, transitions } = diffRules([ruleA, ruleB, ruleC], prev, snap(), '2026-05-24T12:00:00Z');
+		const prev: AlertState = {
+			firing: {
+				b: entry('2026-05-24T11:00:00Z'),
+				c: entry('2026-05-24T11:00:00Z'),
+			},
+		};
+		const transitions = diffRules([ruleA, ruleB, ruleC], prev, snap());
 		expect(transitions.map((t) => [t.rule.id, t.kind])).toEqual([
 			['a', 'firing'],   // new
 			['b', 'resolved'], // was firing, now not
 			// c stays firing — no transition
 		]);
-		expect(next.firing).toEqual({
-			a: '2026-05-24T12:00:00Z',
-			c: '2026-05-24T11:00:00Z',
-		});
 	});
 });

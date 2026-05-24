@@ -11,6 +11,9 @@ importers:
       '@rdub/file-tree':
         specifier: https://github.com/runsascoded/file-tree#d3476b0d2cb398197f3a1383f41fe3b0216be39f
         version: https://codeload.github.com/runsascoded/file-tree/tar.gz/d3476b0d2cb398197f3a1383f41fe3b0216be39f(react-dom@18.3.1(react@18.3.1))(react-router-dom@6.30.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)
+      '@rdub/thrds':
+        specifier: https://github.com/runsascoded/thrds#ts-dist
+        version: https://codeload.github.com/runsascoded/thrds/tar.gz/fa1b54a560508de161d0912ed0156c044d46bc9c
       hyparquet:
         specifier: https://github.com/runsascoded/hyparquet#0f355ea5a37dcb9b29a43e33a3d45ce660c80798
         version: https://codeload.github.com/runsascoded/hyparquet/tar.gz/0f355ea5a37dcb9b29a43e33a3d45ce660c80798
@@ -592,6 +595,11 @@ packages:
         optional: true
       react-router-dom:
         optional: true
+
+  '@rdub/thrds@https://codeload.github.com/runsascoded/thrds/tar.gz/fa1b54a560508de161d0912ed0156c044d46bc9c':
+    resolution: {tarball: https://codeload.github.com/runsascoded/thrds/tar.gz/fa1b54a560508de161d0912ed0156c044d46bc9c}
+    version: 0.1.1-dist.0a0b7d8
+    engines: {node: '>=18'}
 
   '@remix-run/router@1.23.2':
     resolution: {integrity: sha512-Ic6m2U/rMjTkhERIa/0ZtXJP17QUi2CbWE7cqx4J58M8aA3QTfW+2UlQ4psvTX9IO1RfNVhK3pcpdjej7L+t2w==}
@@ -1582,6 +1590,8 @@ snapshots:
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
       react-router-dom: 6.30.3(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+
+  '@rdub/thrds@https://codeload.github.com/runsascoded/thrds/tar.gz/fa1b54a560508de161d0912ed0156c044d46bc9c': {}
 
   '@remix-run/router@1.23.2': {}
 
