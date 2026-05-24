@@ -8,7 +8,8 @@
  */
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 
-const API_BASE = 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
+// Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
+const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
 
 export interface StationInfo {
   short_name: string
