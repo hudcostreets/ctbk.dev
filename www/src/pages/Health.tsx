@@ -30,11 +30,19 @@ interface CascadeHealth {
   cells: CascadeCell[]
   expectedCells: Array<{ agg: string; cons: string; deployed: boolean }>
 }
+interface TripdataHealth {
+  generatedAt: string | null
+  latestZip: string | null
+  latestMonth: string | null
+  recentMonths: string[]
+  totalZips: number
+}
 interface HealthSnapshot {
   generatedAt: number
   feed: FeedHealth
   compactions: CompactionHealth
   cascade: CascadeHealth
+  tripdata: TripdataHealth | null
 }
 
 async function fetchHealth(): Promise<HealthSnapshot> {
@@ -75,6 +83,7 @@ export default function Health() {
   return (
     <Page>
       <h1 style={{ fontSize: '1.6em', margin: '0 0 0.5em' }}>GBFS pipeline health</h1>
+      <TripdataSection tripdata={data.tripdata} />
       <FeedSection feed={data.feed} />
       <CompactionsSection compactions={data.compactions} />
       <CascadeSection cascade={data.cascade} />
@@ -109,6 +118,61 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       </h2>
       {children}
     </section>
+  )
+}
+
+function fmtMonth(yyyymm: string): string {
+  const y = yyyymm.slice(0, 4), m = yyyymm.slice(4)
+  const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  return `${names[parseInt(m, 10) - 1]} ${y}`
+}
+
+function monthsSince(yyyymm: string): number {
+  const y = parseInt(yyyymm.slice(0, 4), 10), m = parseInt(yyyymm.slice(4), 10)
+  const now = new Date()
+  return (now.getUTCFullYear() - y) * 12 + (now.getUTCMonth() + 1 - m)
+}
+
+function TripdataSection({ tripdata }: { tripdata: TripdataHealth | null }) {
+  if (!tripdata || !tripdata.latestMonth) {
+    return (
+      <Section title="Tripdata (upstream s3://tripdata)">
+        <div style={{ opacity: 0.6 }}>no summary yet — waiting for `tripdata.yml` to refresh</div>
+      </Section>
+    )
+  }
+  const since = monthsSince(tripdata.latestMonth)
+  // Citi Bike publishes new months around the 10th–15th of the following
+  // month, so 1 month behind UTC-now is normal; ≥2 months is suspicious.
+  const status: 'ok' | 'warn' | 'bad' = since <= 1 ? 'ok' : since === 2 ? 'warn' : 'bad'
+  const refreshAge = tripdata.generatedAt
+    ? fmtAge(Math.floor(new Date(tripdata.generatedAt).getTime() / 1000))
+    : null
+  return (
+    <Section title="Tripdata (upstream s3://tripdata)">
+      <div style={{ display: 'flex', gap: '2em', alignItems: 'baseline', flexWrap: 'wrap' }}>
+        <Stat
+          label="Latest month"
+          value={fmtMonth(tripdata.latestMonth)}
+          sub={since === 0 ? 'current month' : since === 1 ? '1 month behind' : `${since} months behind`}
+          status={status}
+        />
+        <Stat
+          label="Latest file"
+          value={tripdata.latestZip ?? '—'}
+          sub={`${tripdata.totalZips} zips tracked`}
+          status="ok"
+        />
+        {refreshAge && (
+          <Stat
+            label="Summary refreshed"
+            value={refreshAge}
+            sub="from `tripdata.yml`"
+            status="ok"
+          />
+        )}
+      </div>
+    </Section>
   )
 }
 

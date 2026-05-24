@@ -29,6 +29,7 @@ export interface HealthR2 {
 		cursor?: string;
 		limit?: number;
 	}): Promise<R2ListResult>;
+	get(key: string): Promise<{ json<T = unknown>(): Promise<T> } | null>;
 }
 
 export interface FeedHealth {
@@ -56,11 +57,23 @@ export interface CascadeHealth {
 	expectedCells: Array<{ agg: string; cons: string; deployed: boolean }>;
 }
 
+/** Recency of `s3://tripdata` — the upstream Citi Bike monthly publish.
+ *  Sourced from `tripdata/latest.json` in R2, refreshed every `tripdata.yml`
+ *  run (independent of whether new files were imported). */
+export interface TripdataHealth {
+	generatedAt: string | null;          // ISO-8601 from the refresher
+	latestZip: string | null;            // e.g. "JC-202604-citibike-tripdata.zip"
+	latestMonth: string | null;          // YYYYMM
+	recentMonths: string[];              // last ~12 months found
+	totalZips: number;
+}
+
 export interface HealthSnapshot {
 	generatedAt: number;
 	feed: FeedHealth;
 	compactions: CompactionHealth;
 	cascade: CascadeHealth;
+	tripdata: TripdataHealth | null;
 }
 
 /** UTC-date + minute helpers — avoid Date methods that pull in locale. */
@@ -267,16 +280,40 @@ export async function getCascadeHealth(r2: HealthR2): Promise<CascadeHealth> {
 	return { cells, expectedCells };
 }
 
+/** Python-side snake_case → camelCase mapping for the R2 JSON payload. */
+interface RawTripdataSummary {
+	generated_at: string;
+	latest_zip: string | null;
+	latest_month: string | null;
+	recent_months: string[];
+	total_zips: number;
+}
+
+export async function getTripdataHealth(r2: HealthR2): Promise<TripdataHealth | null> {
+	const obj = await r2.get('tripdata/latest.json');
+	if (!obj) return null;
+	const raw = await obj.json<RawTripdataSummary>();
+	return {
+		generatedAt: raw.generated_at ?? null,
+		latestZip: raw.latest_zip ?? null,
+		latestMonth: raw.latest_month ?? null,
+		recentMonths: raw.recent_months ?? [],
+		totalZips: raw.total_zips ?? 0,
+	};
+}
+
 export async function getHealthSnapshot(r2: HealthR2): Promise<HealthSnapshot> {
-	const [feed, compactions, cascade] = await Promise.all([
+	const [feed, compactions, cascade, tripdata] = await Promise.all([
 		getFeedHealth(r2),
 		getCompactionHealth(r2),
 		getCascadeHealth(r2),
+		getTripdataHealth(r2),
 	]);
 	return {
 		generatedAt: Math.floor(Date.now() / 1000),
 		feed,
 		compactions,
 		cascade,
+		tripdata,
 	};
 }
