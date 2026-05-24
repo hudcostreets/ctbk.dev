@@ -33,7 +33,7 @@
     "react-router-dom": "^6.28.0",
     "uplot": "^1.6.32",
     "use-kbd": "https://github.com/runsascoded/use-kbd#e8de7954c2d39b639dc1b99203659b91fd8fd269",
-    "use-prms": "https://github.com/runsascoded/use-prms#b357b48290740ae53a0ccc5fe837cf312c29f81d"
+    "use-prms": "https://github.com/runsascoded/use-prms#3db90a820b4372cea3efb7e02bac317dc049fa04"
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",

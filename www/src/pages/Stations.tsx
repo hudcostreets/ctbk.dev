@@ -1,6 +1,6 @@
 import { FormControl, MenuItem, Select, SelectChangeEvent } from '@mui/material'
-import { useUrlState, boolParam, floatParam, stringParam } from 'use-prms'
-import type { Param } from 'use-prms'
+import { useUrlState, boolParam, cleanUrl, llzParam, stringParam } from 'use-prms'
+import type { LLZ, Param } from 'use-prms'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { SpeedDial, useHotkeysContext } from 'use-kbd'
@@ -30,9 +30,12 @@ const sideParam: Param<'start' | 'end' | 'both'> = {
 
 const MANIFEST_URL = '/assets/station-urls.json'
 const BIRTHS_URL = '/assets/station-births.json'
-const DEFAULT_CENTER: [number, number] = [40.758, -73.965]
-const DEFAULT_ZOOM = 12
+const DEFAULT_LLZ: LLZ = { lat: 40.758, lng: -73.965, zoom: 12 }
 const DEFAULT_TILE_CODE = 'a'
+
+/** `latLngDecimals: 3` matches the `Math.round(...*1000)/1000` rounding the
+ *  Leaflet `onMove` handler historically applied to lat/lng. */
+const viewParam = llzParam({ default: DEFAULT_LLZ, latLngDecimals: 3 })
 
 /** Format YYYYMM to "MMM 'YY" */
 function formatMonth(yyyymm: string): string {
@@ -86,9 +89,7 @@ export default function Stations() {
 
   // URL parameters
   const [colorByAge, setColorByAge] = useUrlState('c', boolParam)
-  const [lat, setLat] = useUrlState('lat', floatParam(DEFAULT_CENTER[0]))
-  const [lng, setLng] = useUrlState('lng', floatParam(DEFAULT_CENTER[1]))
-  const [zoom, setZoom] = useUrlState('z', floatParam(DEFAULT_ZOOM))
+  const [view, setView] = useUrlState('ll', viewParam)
   const [selectedId, setSelectedId] = useUrlState('s', stringParam())
   const [month, setMonth] = useUrlState('m', monthParam)
   const [tileCode] = useUrlState('t', stringParam(DEFAULT_TILE_CODE))
@@ -103,6 +104,24 @@ export default function Stations() {
   // start- or end-side trips only (default both).
   const [api] = useUrlState('api', boolParam)
   const [side, setSide] = useUrlState('side', sideParam)
+
+  // One-time legacy URL migration: ?lat=&lng=&z= → ?ll=lat+lng+zoom.
+  // Each migrate callback reassembles the full `LLZ` from current URL
+  // params (idempotent — running 1–3x produces the same `ll`). Drop the
+  // old keys after.
+  useEffect(() => {
+    const migrate = () => {
+      const sp = new URLSearchParams(window.location.search)
+      return {
+        ll: {
+          lat: sp.has('lat') ? parseFloat(sp.get('lat')!) : DEFAULT_LLZ.lat,
+          lng: sp.has('lng') ? parseFloat(sp.get('lng')!) : DEFAULT_LLZ.lng,
+          zoom: sp.has('z') ? parseFloat(sp.get('z')!) : DEFAULT_LLZ.zoom,
+        },
+      }
+    }
+    cleanUrl({ ll: viewParam }, { deprecated: { lat: migrate, lng: migrate, z: migrate } })
+  }, [])
 
   // Load manifest on mount
   useEffect(() => {
@@ -297,12 +316,12 @@ export default function Stations() {
           setSelectedId={setSelectedId}
           pairCounts={pairCounts}
           stationColors={stationColors}
-          center={[lat, lng]}
-          zoom={zoom}
+          center={[view.lat, view.lng]}
+          zoom={view.zoom}
           tileCode={tileCode}
           tileBase={tileBase}
           hoverToSelect
-          onMove={(la, ln, z) => { setLat(la); setLng(ln); setZoom(z) }}
+          onMove={(la, ln, z) => setView({ lat: la, lng: ln, zoom: z })}
           onClick={() => setSelectedId(undefined)}
           pies={pies}
           pieRange={pies ? pieRange : undefined}
