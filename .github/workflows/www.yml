@@ -115,41 +115,86 @@ jobs:
         if: github.ref == 'refs/heads/www' && steps.deploy.outcome == 'success' && steps.smoke.outcome == 'success'
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
           MSG: ${{ github.event.head_commit.message }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          REPO_SLUG: ${{ github.repository }}
         run: |
           python - <<'PY'
           import json, os, urllib.request
-          token = os.environ['SLACK_BOT_TOKEN']
+          slack_token = os.environ['SLACK_BOT_TOKEN']
+          gh_token = os.environ['GITHUB_TOKEN']
           sha = os.environ['SHA']
+          before = os.environ.get('BEFORE') or ''
           short = sha[:7]
-          # Commit subject only — drop body to keep the Slack message tight.
           subject = (os.environ.get('MSG') or '').splitlines()[0] if os.environ.get('MSG') else '(no message)'
           repo = os.environ['REPO_URL']
           run_url = os.environ['RUN_URL']
-          text = (
-              f":rocket: *ctbk.dev deployed* — <{repo}/commit/{sha}|`{short}`> {subject}\n"
-              f"<https://ctbk.dev|ctbk.dev> · <{run_url}|run>"
-          )
-          payload = {
+          repo_slug = os.environ['REPO_SLUG']
+
+          # Fetch commits in the push range via GH compare API. `before` is
+          # all-zeros on initial-branch pushes and absent on workflow_dispatch
+          # — fall back to the single-HEAD-commit shape.
+          commits = []
+          if before and not all(c == '0' for c in before):
+              api = f'https://api.github.com/repos/{repo_slug}/compare/{before}...{sha}'
+              req = urllib.request.Request(api, headers={
+                  'Authorization': f'Bearer {gh_token}',
+                  'Accept': 'application/vnd.github+json',
+              })
+              with urllib.request.urlopen(req) as r:
+                  commits = json.load(r).get('commits', [])
+
+          n = len(commits)
+          if n <= 1:
+              # Single commit (or unknown range): show that commit's subject inline.
+              text = (
+                  f":rocket: *ctbk.dev deployed* — <{repo}/commit/{sha}|`{short}`> {subject}\n"
+                  f"<https://ctbk.dev|ctbk.dev> · <{run_url}|run>"
+              )
+          else:
+              # Multi-commit push: show range + count, defer per-commit detail to a thread reply.
+              short_before = before[:7]
+              compare_url = f"{repo}/compare/{before}...{sha}"
+              text = (
+                  f":rocket: *ctbk.dev deployed* — <{compare_url}|`{short_before}..{short}`> ({n} commits)\n"
+                  f"<https://ctbk.dev|ctbk.dev> · <{run_url}|run>"
+              )
+
+          base_payload = {
               'channel': 'C0B5MKF28NP',
-              'text': text,
               'username': 'ctbk-bot',
               'icon_emoji': ':bike:',
               'unfurl_links': False,
           }
-          req = urllib.request.Request(
-              'https://slack.com/api/chat.postMessage',
-              data=json.dumps(payload).encode(),
-              headers={
-                  'Authorization': f'Bearer {token}',
-                  'Content-Type': 'application/json; charset=utf-8',
-              },
-          )
-          with urllib.request.urlopen(req) as r:
-              resp = json.load(r)
-          if not resp.get('ok'):
-              raise SystemExit(f"slack postMessage failed: {resp}")
+
+          def post(extra):
+              payload = {**base_payload, **extra}
+              req = urllib.request.Request(
+                  'https://slack.com/api/chat.postMessage',
+                  data=json.dumps(payload).encode(),
+                  headers={
+                      'Authorization': f'Bearer {slack_token}',
+                      'Content-Type': 'application/json; charset=utf-8',
+                  },
+              )
+              with urllib.request.urlopen(req) as r:
+                  body = json.load(r)
+              if not body.get('ok'):
+                  raise SystemExit(f"slack postMessage failed: {body}")
+              return body
+
+          op = post({'text': text})
+
+          # Per-commit bullets in a thread reply when there's more than one.
+          if n > 1:
+              lines = []
+              for c in commits:
+                  c_sha = c['sha']
+                  c_subject = (c['commit']['message'] or '').splitlines()[0]
+                  lines.append(f"• <{repo}/commit/{c_sha}|`{c_sha[:7]}`> {c_subject}")
+              post({'thread_ts': op['ts'], 'text': '\n'.join(lines)})
           PY
