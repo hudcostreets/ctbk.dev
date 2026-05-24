@@ -143,19 +143,26 @@ jobs:
               with urllib.request.urlopen(req) as r:
                   return json.load(r)
 
-          # Range floor = last *successful* run of this workflow on `www`,
-          # NOT this push's `event.before`. Failed deploys can pile up
-          # between successful ones; the user-facing site only changed at
-          # the last green run, so the range should reflect that.
-          # (The current run is in-progress when this step runs, so the
-          # `status=success` filter naturally excludes it.)
+          # Range floor = last run that *actually deployed* (not just
+          # passed). Failed deploys stack between successes; the
+          # screenshot-regen branch of this workflow finishes successfully
+          # but skips the Deploy step. Querying `status=success` alone
+          # would pick up those no-op runs, so we additionally check each
+          # run's `Deploy to GH Pages` step conclusion.
           prev_sha = None
           runs = gh(f'/repos/{repo_slug}/actions/workflows/www.yml/runs?status=success&branch=www&per_page=10')
           for r in runs.get('workflow_runs', []):
               if str(r['id']) == run_id:
                   continue   # belt-and-suspenders; shouldn't appear
-              prev_sha = r['head_sha']
-              break
+              jobs = gh(f'/repos/{repo_slug}/actions/runs/{r["id"]}/jobs')
+              deployed = any(
+                  s.get('name') == 'Deploy to GH Pages' and s.get('conclusion') == 'success'
+                  for j in jobs.get('jobs', [])
+                  for s in j.get('steps', [])
+              )
+              if deployed:
+                  prev_sha = r['head_sha']
+                  break
 
           commits = []
           if prev_sha and prev_sha != sha:
