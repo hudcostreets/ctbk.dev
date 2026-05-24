@@ -117,7 +117,7 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.sha }}
-          BEFORE: ${{ github.event.before }}
+          RUN_ID: ${{ github.run_id }}
           MSG: ${{ github.event.head_commit.message }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
@@ -128,25 +128,42 @@ jobs:
           slack_token = os.environ['SLACK_BOT_TOKEN']
           gh_token = os.environ['GITHUB_TOKEN']
           sha = os.environ['SHA']
-          before = os.environ.get('BEFORE') or ''
+          run_id = os.environ['RUN_ID']
           short = sha[:7]
           subject = (os.environ.get('MSG') or '').splitlines()[0] if os.environ.get('MSG') else '(no message)'
           repo = os.environ['REPO_URL']
           run_url = os.environ['RUN_URL']
           repo_slug = os.environ['REPO_SLUG']
 
-          # Fetch commits in the push range via GH compare API. `before` is
-          # all-zeros on initial-branch pushes and absent on workflow_dispatch
-          # — fall back to the single-HEAD-commit shape.
-          commits = []
-          if before and not all(c == '0' for c in before):
-              api = f'https://api.github.com/repos/{repo_slug}/compare/{before}...{sha}'
-              req = urllib.request.Request(api, headers={
+          def gh(path):
+              req = urllib.request.Request(f'https://api.github.com{path}', headers={
                   'Authorization': f'Bearer {gh_token}',
                   'Accept': 'application/vnd.github+json',
               })
               with urllib.request.urlopen(req) as r:
-                  commits = json.load(r).get('commits', [])
+                  return json.load(r)
+
+          # Range floor = last *successful* run of this workflow on `www`,
+          # NOT this push's `event.before`. Failed deploys can pile up
+          # between successful ones; the user-facing site only changed at
+          # the last green run, so the range should reflect that.
+          # (The current run is in-progress when this step runs, so the
+          # `status=success` filter naturally excludes it.)
+          prev_sha = None
+          runs = gh(f'/repos/{repo_slug}/actions/workflows/www.yml/runs?status=success&branch=www&per_page=10')
+          for r in runs.get('workflow_runs', []):
+              if str(r['id']) == run_id:
+                  continue   # belt-and-suspenders; shouldn't appear
+              prev_sha = r['head_sha']
+              break
+
+          commits = []
+          if prev_sha and prev_sha != sha:
+              try:
+                  commits = gh(f'/repos/{repo_slug}/compare/{prev_sha}...{sha}').get('commits', [])
+              except Exception as e:
+                  # Force-push or rebase can make `prev_sha` unreachable; degrade gracefully.
+                  print(f'compare {prev_sha}..{sha} failed: {e}; falling back to single-commit shape')
 
           n = len(commits)
           if n <= 1:
@@ -156,11 +173,11 @@ jobs:
                   f"<https://ctbk.dev|ctbk.dev> · <{run_url}|run>"
               )
           else:
-              # Multi-commit push: show range + count, defer per-commit detail to a thread reply.
-              short_before = before[:7]
-              compare_url = f"{repo}/compare/{before}...{sha}"
+              # Multi-commit deploy: show range + count, defer per-commit detail to a thread reply.
+              short_prev = prev_sha[:7]
+              compare_url = f"{repo}/compare/{prev_sha}...{sha}"
               text = (
-                  f":rocket: *ctbk.dev deployed* — <{compare_url}|`{short_before}..{short}`> ({n} commits)\n"
+                  f":rocket: *ctbk.dev deployed* — <{compare_url}|`{short_prev}..{short}`> ({n} commits since last deploy)\n"
                   f"<https://ctbk.dev|ctbk.dev> · <{run_url}|run>"
               )
 
