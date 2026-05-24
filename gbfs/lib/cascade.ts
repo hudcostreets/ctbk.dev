@@ -58,9 +58,21 @@ export const CONS_LEVELS_BY_AGG: Record<string, CascadeLevel[]> = {
 		{ cons: '3h',  bucketMin: 180,  fromCons: '1h',  fromCount: 3  },
 		{ cons: '8h',  bucketMin: 480,  fromCons: '1h',  fromCount: 8  },
 		{ cons: '1d',  bucketMin: 1440, fromCons: '8h',  fromCount: 3  },
+		// Borderline: 3 × 226K = 679K rows. Watch for OOM after deploy; if
+		// it fails the same way `5m × 1d` does, drop this line.
+		{ cons: '3d',  bucketMin: 4320, fromCons: '1d',  fromCount: 3  },
 	],
 	'1h': [
+		// 3h/8h built from 1h@1h (~2.4K rows each); both well under heap.
+		{ cons: '3h',  bucketMin: 180,  fromCons: '1h',  fromCount: 3  },
+		{ cons: '8h',  bucketMin: 480,  fromCons: '1h',  fromCount: 8  },
 		{ cons: '1d',  bucketMin: 1440, fromCons: '1h',  fromCount: 24 },
+		// 3 × 58K = 174K rows — comparable scale to the working 5m × 8h.
+		{ cons: '3d',  bucketMin: 4320, fromCons: '1d',  fromCount: 3  },
+	],
+	'1d': [
+		// 1d@1d is the agg-self (one row per station per day); 3 × 2.4K = 7K rows.
+		{ cons: '3d',  bucketMin: 4320, fromCons: '1d',  fromCount: 3  },
 	],
 };
 

@@ -221,8 +221,14 @@ const DEPLOYED_CELLS: Array<{ agg: string; cons: string }> = [
 	{ agg: '15m', cons: '3h' },
 	{ agg: '15m', cons: '8h' },
 	{ agg: '15m', cons: '1d' },
+	{ agg: '15m', cons: '3d' },
 	// cons-only @ agg=1h
+	{ agg: '1h', cons: '3h' },
+	{ agg: '1h', cons: '8h' },
 	{ agg: '1h', cons: '1d' },
+	{ agg: '1h', cons: '3d' },
+	// cons-only @ agg=1d
+	{ agg: '1d', cons: '3d' },
 ];
 
 /** Per `gbfs/grid.yaml` but not yet deployed. Worth surfacing so the
@@ -235,17 +241,12 @@ const SPECCED_BUT_NOT_DEPLOYED: Array<{ agg: string; cons: string }> = [
 	// agg=5m wide cons
 	{ agg: '5m', cons: '5d' },
 	// agg=15m wider cons
-	{ agg: '15m', cons: '3d' },
 	{ agg: '15m', cons: '10d' },
 	// agg=1h wider cons
-	{ agg: '1h', cons: '3h' },
-	{ agg: '1h', cons: '8h' },
-	{ agg: '1h', cons: '3d' },
 	{ agg: '1h', cons: '1w' },
 	{ agg: '1h', cons: '1mo' },
 	{ agg: '1h', cons: '2mo' },
 	// agg=1d wider cons
-	{ agg: '1d', cons: '3d' },
 	{ agg: '1d', cons: '1w' },
 	{ agg: '1d', cons: '1mo' },
 	{ agg: '1d', cons: '3mo' },
