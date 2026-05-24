@@ -84,7 +84,13 @@ jobs:
               f"Files: `{os.environ['NEW_FILES']}`\n"
               f"<{os.environ['RUN_URL']}|sync run> · <{os.environ['CI_URL']}|ingest workflow>"
           )
-          payload = {'channel': 'C0B5MKF28NP', 'text': text, 'unfurl_links': False}
+          payload = {
+              'channel': 'C0B5MKF28NP',
+              'text': text,
+              'username': 'ctbk-bot',
+              'icon_emoji': ':bike:',
+              'unfurl_links': False,
+          }
           req = urllib.request.Request(
               'https://slack.com/api/chat.postMessage',
               data=json.dumps(payload).encode(),

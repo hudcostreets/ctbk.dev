@@ -34,6 +34,10 @@ const STATE_KEY = 'gbfs/alerts/state.json';
 /** Slack channel — kept in code (not secret) for grep-ability. */
 const SLACK_CHANNEL = 'C0B5MKF28NP';
 
+/** Bot identity overrides for `#ctbk-bot`. Requires `chat:write.customize`. */
+const SLACK_USERNAME = 'ctbk-bot';
+const SLACK_ICON_EMOJI = ':bike:';
+
 /** Minutes between "now" and the latest WAL poll. Uses snapshot's
  *  `latestPoll.uploadedAt`. Returns Infinity if no poll observed. */
 export function feedStaleMinutes(s: HealthSnapshot): number {
@@ -170,6 +174,8 @@ export async function postToSlack(token: string, text: string): Promise<void> {
 		body: JSON.stringify({
 			channel: SLACK_CHANNEL,
 			text,
+			username: SLACK_USERNAME,
+			icon_emoji: SLACK_ICON_EMOJI,
 			unfurl_links: false,
 		}),
 	});
