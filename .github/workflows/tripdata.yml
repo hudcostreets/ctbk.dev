@@ -75,32 +75,23 @@ jobs:
           MONTH: ${{ steps.sync.outputs.month }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CI_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/ci.yml
+        # Git-SHA pin: pre-release `username`/`icon_emoji` support
+        # (commit b07db0e). Promote to a PyPI version once the `py` branch
+        # cuts a release.
         run: |
+          pip install --quiet 'git+https://github.com/runsascoded/thrds.git@b693a48d987cd0a66bf0cad0beb424f85c3cba4f'
           python - <<'PY'
-          import json, os, urllib.request
-          token = os.environ['SLACK_BOT_TOKEN']
+          import os
+          from thrds import SlackClient, Thread
           text = (
               f":bike: *New Citi Bike tripdata imported* — `{os.environ['MONTH']}`\n"
               f"Files: `{os.environ['NEW_FILES']}`\n"
               f"<{os.environ['RUN_URL']}|sync run> · <{os.environ['CI_URL']}|ingest workflow>"
           )
-          payload = {
-              'channel': 'C0B5MKF28NP',
-              'text': text,
-              'username': 'ctbk-bot',
-              'icon_emoji': ':bike:',
-              'unfurl_links': False,
-          }
-          req = urllib.request.Request(
-              'https://slack.com/api/chat.postMessage',
-              data=json.dumps(payload).encode(),
-              headers={
-                  'Authorization': f'Bearer {token}',
-                  'Content-Type': 'application/json; charset=utf-8',
-              },
-          )
-          with urllib.request.urlopen(req) as r:
-              resp = json.load(r)
-          if not resp.get('ok'):
-              raise SystemExit(f"slack postMessage failed: {resp}")
+          SlackClient(
+              token=os.environ['SLACK_BOT_TOKEN'],
+              channel='C0B5MKF28NP',
+              username='ctbk-bot',
+              icon_emoji=':bike:',
+          ).sync(Thread(messages=[text]))
           PY

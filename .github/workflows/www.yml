@@ -22,6 +22,10 @@ jobs:
           node-version: 20
           cache: 'pnpm'
           cache-dependency-path: www/pnpm-lock.yaml
+      # Python for the Slack-deploy-notification step (`thrds`).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Install
         working-directory: www
         run: pnpm install
@@ -122,10 +126,14 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           REPO_SLUG: ${{ github.repository }}
+        # Git-SHA pin: pre-release `username`/`icon_emoji` support
+        # (commit b07db0e). Promote to a PyPI version once the `py` branch
+        # cuts a release.
         run: |
+          pip install --quiet 'git+https://github.com/runsascoded/thrds.git@b693a48d987cd0a66bf0cad0beb424f85c3cba4f'
           python - <<'PY'
           import json, os, urllib.request
-          slack_token = os.environ['SLACK_BOT_TOKEN']
+          from thrds import SlackClient, Thread
           gh_token = os.environ['GITHUB_TOKEN']
           sha = os.environ['SHA']
           run_id = os.environ['RUN_ID']
@@ -175,50 +183,31 @@ jobs:
           n = len(commits)
           if n <= 1:
               # Single commit (or unknown range): show that commit's subject inline.
-              text = (
+              op_text = (
                   f":rocket: *ctbk.dev deployed* — <{repo}/commit/{sha}|`{short}`> {subject}\n"
                   f"<https://ctbk.dev|ctbk.dev> · <{run_url}|run>"
               )
+              messages = [op_text]
           else:
-              # Multi-commit deploy: show range + count, defer per-commit detail to a thread reply.
+              # Multi-commit deploy: OP shows range + count, thread reply has per-commit detail.
               short_prev = prev_sha[:7]
               compare_url = f"{repo}/compare/{prev_sha}...{sha}"
-              text = (
+              op_text = (
                   f":rocket: *ctbk.dev deployed* — <{compare_url}|`{short_prev}..{short}`> ({n} commits since last deploy)\n"
                   f"<https://ctbk.dev|ctbk.dev> · <{run_url}|run>"
               )
-
-          base_payload = {
-              'channel': 'C0B5MKF28NP',
-              'username': 'ctbk-bot',
-              'icon_emoji': ':bike:',
-              'unfurl_links': False,
-          }
-
-          def post(extra):
-              payload = {**base_payload, **extra}
-              req = urllib.request.Request(
-                  'https://slack.com/api/chat.postMessage',
-                  data=json.dumps(payload).encode(),
-                  headers={
-                      'Authorization': f'Bearer {slack_token}',
-                      'Content-Type': 'application/json; charset=utf-8',
-                  },
+              bullets = '\n'.join(
+                  f"• <{repo}/commit/{c['sha']}|`{c['sha'][:7]}`> {(c['commit']['message'] or '').splitlines()[0]}"
+                  for c in commits
               )
-              with urllib.request.urlopen(req) as r:
-                  body = json.load(r)
-              if not body.get('ok'):
-                  raise SystemExit(f"slack postMessage failed: {body}")
-              return body
+              messages = [op_text, bullets]
 
-          op = post({'text': text})
-
-          # Per-commit bullets in a thread reply when there's more than one.
-          if n > 1:
-              lines = []
-              for c in commits:
-                  c_sha = c['sha']
-                  c_subject = (c['commit']['message'] or '').splitlines()[0]
-                  lines.append(f"• <{repo}/commit/{c_sha}|`{c_sha[:7]}`> {c_subject}")
-              post({'thread_ts': op['ts'], 'text': '\n'.join(lines)})
+          # `Thread.sync` posts `messages[0]` as the thread OP, the rest
+          # as replies — no manual `thread_ts` plumbing.
+          SlackClient(
+              token=os.environ['SLACK_BOT_TOKEN'],
+              channel='C0B5MKF28NP',
+              username='ctbk-bot',
+              icon_emoji=':bike:',
+          ).sync(Thread(messages=messages))
           PY
