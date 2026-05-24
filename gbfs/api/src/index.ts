@@ -41,6 +41,9 @@ interface Env {
 	R2_S3_ENDPOINT: string;
 	R2_ACCESS_KEY_ID: string;
 	R2_SECRET_ACCESS_KEY: string;
+	/** Optional — when present, the scheduled handler posts threshold-breach
+	 *  alerts to Slack (`#ctbk-bot`). Absent ⇒ alerts disabled. */
+	SLACK_BOT_TOKEN?: string;
 }
 
 function todayUtc(): string {
@@ -473,6 +476,7 @@ import { monthsInDashed } from './planQuery';
 import { R2Store } from '@rdub/file-tree/stores/r2';
 import { createHandlers } from '@rdub/file-tree/server';
 import { getHealthSnapshot } from './health';
+import { runAlerts } from './alerts';
 
 /**
  * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
@@ -1376,5 +1380,15 @@ export default {
 		}
 
 		return errorResponse('Not found', 404, env);
+	},
+
+	/** Scheduled handler — every-5-minutes cron triggers Slack alerting on
+	 *  threshold breaches. See `alerts.ts` for rules + state mgmt. */
+	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+		if (!env.SLACK_BOT_TOKEN) {
+			console.log('alerts: SLACK_BOT_TOKEN not set; skipping');
+			return;
+		}
+		ctx.waitUntil(runAlerts(env.R2, env.SLACK_BOT_TOKEN));
 	},
 } satisfies ExportedHandler<Env>;

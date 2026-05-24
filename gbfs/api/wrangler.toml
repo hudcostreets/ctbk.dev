@@ -18,3 +18,9 @@ database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
 [[r2_buckets]]
 binding = "R2"
 bucket_name = "ctbk"
+
+# Slack alerting cron — `alerts.ts` evaluates threshold rules against the
+# health snapshot and posts to #ctbk-bot on firing/resolved transitions.
+# Requires `SLACK_BOT_TOKEN` wrangler secret; alerts are disabled if absent.
+[triggers]
+crons = ["*/5 * * * *"]
