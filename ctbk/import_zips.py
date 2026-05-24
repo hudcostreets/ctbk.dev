@@ -12,7 +12,7 @@ from utz.s3 import get_etags
 
 from ctbk.blob import Blob
 from ctbk.cli.base import ctbk
-from ctbk.cli.git_dvc_cmd import git_dvc_cmd
+from ctbk.cli.git_dvc_cmd import git_dvc_cmd, step_output
 
 BKT = 'tripdata'
 
@@ -92,6 +92,18 @@ def import_zips(
         if line[0] in 'AM' and line.endswith('.zip.dvc')
     ]
     if staged_zips:
-        return f'Import {", ".join([ basename(path) for path in staged_zips ])}'
+        commit_basenames = [basename(path) for path in staged_zips]
+        # Strip the `.dvc` suffix so `new_files` matches the underlying
+        # `.zip` basenames (what humans/Slack expect to see).
+        new_files = [b.removesuffix('.dvc') for b in commit_basenames]
+        step_output('new_files', ','.join(new_files))
+        # Detect month — unique YYYYMM tokens across all imported files.
+        # Emit only when exactly one month was found (e.g. JC + NYC for
+        # the same month); ambiguous multi-month imports leave it blank.
+        months = sorted({m for f in new_files for m in re.findall(r'\b(20\d{4})\b', f)})
+        step_output('month', months[0] if len(months) == 1 else '')
+        return f'Import {", ".join(commit_basenames)}'
     else:
+        step_output('new_files', '')
+        step_output('month', '')
         return None

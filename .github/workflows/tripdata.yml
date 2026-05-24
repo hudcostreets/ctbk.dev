@@ -22,7 +22,61 @@ jobs:
           git config --global user.name 'GitHub Actions'
           git config --global user.email 'ryan-williams@users.noreply.github.com'
       - name: Sync tripdata bucket
+        id: sync
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: ctbk import -ccdX html
+
+      - name: Job summary
+        if: always()
+        run: |
+          if [ -n "${{ steps.sync.outputs.new_files }}" ]; then
+            {
+              echo "## New tripdata imported"
+              echo
+              echo "Files: \`${{ steps.sync.outputs.new_files }}\`"
+              echo
+              echo "Month: \`${{ steps.sync.outputs.month }}\`"
+              echo
+              echo "[Run ingest pipeline →](https://github.com/${{ github.repository }}/actions/workflows/ci.yml)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## No new tripdata files"
+              echo
+              echo "All \`.zip\` files in \`s3://tripdata\` are already tracked."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Notify Slack — new tripdata
+        if: success() && steps.sync.outputs.new_files != ''
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          NEW_FILES: ${{ steps.sync.outputs.new_files }}
+          MONTH: ${{ steps.sync.outputs.month }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CI_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/ci.yml
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          token = os.environ['SLACK_BOT_TOKEN']
+          text = (
+              f":bike: *New Citi Bike tripdata imported* — `{os.environ['MONTH']}`\n"
+              f"Files: `{os.environ['NEW_FILES']}`\n"
+              f"<{os.environ['RUN_URL']}|sync run> · <{os.environ['CI_URL']}|ingest workflow>"
+          )
+          payload = {'channel': 'C0B5MKF28NP', 'text': text, 'unfurl_links': False}
+          req = urllib.request.Request(
+              'https://slack.com/api/chat.postMessage',
+              data=json.dumps(payload).encode(),
+              headers={
+                  'Authorization': f'Bearer {token}',
+                  'Content-Type': 'application/json; charset=utf-8',
+              },
+          )
+          with urllib.request.urlopen(req) as r:
+              resp = json.load(r)
+          if not resp.get('ok'):
+              raise SystemExit(f"slack postMessage failed: {resp}")
+          PY
