@@ -246,12 +246,16 @@ metadata).
 
 ```bash
 # Sanity check shard sizes + row counts
-ctbk avail-v2-probe --tiers all --print-stats
+ctbk avail-v2-probe -s 1
 
 # Cross-check against the existing PoC (avail-geo/h1/<date>) for the
-# h1 tier on a few dates — values should match within float-epsilon
-# (we're computing the same thing through a denser ladder).
-ctbk avail-v2-validate --against-poc --dates 2026-05-22,2026-05-23
+# h1 tier. NOTE: values do NOT match exactly — PoC reads tall-format
+# `avail/agg/h1/` (Cascade compactor's source, which has dropouts: mean
+# ~37 / max 55 minutes per (station,hour,metric)); v2 reads the loader's
+# 1m@1m shards directly (full 60 minutes when station is present). v2 is
+# more complete by design. The validator surfaces the diff for inspection
+# but a non-zero diff count is expected.
+ctbk avail-v2-validate -d 2026-05-22,2026-05-23
 
 # Hit the new endpoint dry-run from EC2 (CFW serves a dev branch
 # pyramid)
