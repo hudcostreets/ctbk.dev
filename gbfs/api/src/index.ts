@@ -44,6 +44,10 @@ interface Env {
 	/** Optional — when present, the scheduled handler posts threshold-breach
 	 *  alerts to Slack (`#ctbk-bot`). Absent ⇒ alerts disabled. */
 	SLACK_BOT_TOKEN?: string;
+	/** Optional — when `'1'`, `/api/totals?kind=availability` runs the
+	 *  pyrmts-based reader in parallel with the legacy path and logs a
+	 *  delta. Pure observation; client gets the legacy response unchanged. */
+	AVAIL_PYRMTS_SHADOW?: string;
 }
 
 function todayUtc(): string {
@@ -477,6 +481,7 @@ import { R2Store } from '@rdub/file-tree/stores/r2';
 import { createHandlers } from '@rdub/file-tree/server';
 import { getHealthSnapshot } from './health';
 import { runAlerts } from './alerts';
+import { executeAvailViaPyrmts, shadowDelta } from './avail_pyrmts';
 
 /**
  * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
@@ -1179,6 +1184,28 @@ export default {
 			const result = p.kind === 'availability'
 				? await executeAvailTotalsQuery(env.R2, p)
 				: await executeTotalsQuery(env.R2, p);
+
+			// Shadow mode: run pyrmts-based avail reader in parallel, log delta.
+			// Pure observation — no client-visible change. See `avail_pyrmts.ts`
+			// + `specs/pyrmts-avail-port.md`.
+			if (env.AVAIL_PYRMTS_SHADOW === '1' && p.kind === 'availability') {
+				ctx.waitUntil(
+					executeAvailViaPyrmts(env.R2, p)
+						.then((pyrmtsResult) => {
+							const delta = shadowDelta(result, pyrmtsResult, p.availAgg ?? 'mean');
+							console.log('avail-pyrmts-shadow', JSON.stringify({
+								reducer: p.availAgg ?? 'mean',
+								metric: p.metric,
+								fromS: p.fromS,
+								toS: p.toS,
+								...delta,
+							}));
+						})
+						.catch((err) => {
+							console.error('avail-pyrmts-shadow error:', err instanceof Error ? err.message : err);
+						}),
+				);
+			}
 			// Closed-window responses are immutable: underlying parquet shards
 			// for any (from, to) entirely in the past don't change. Cache them
 			// for 24h on both browser and edge — repeat loads / pan-into-window
