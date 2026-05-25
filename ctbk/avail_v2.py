@@ -376,6 +376,10 @@ def input_periods_for_output(
         if end.time() != datetime.min.time():
             dt_ = (end + timedelta(days=1)).date()
     starts = shard_starts(input_shard, df, dt_)
+    # For shard='all' the output window is unbounded below; accept any input start.
+    # Otherwise only inputs that start within the output window contribute.
+    if output_shard == 'all':
+        return [shard_period(input_shard, s) for s in starts]
     return [shard_period(input_shard, s) for s in starts if output_shard_start <= s < end]
 
 
