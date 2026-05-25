@@ -1,11 +1,16 @@
 /**
- * pyrmts-geo CFW glue for ctbk's avail-geo pyramid.
+ * pyrmts-geo CFW glue for ctbk's v2 avail pyramid.
  *
- * Reads h3-cell-keyed `avail-geo/<tier>/<period>.parquet` shards (built by
- * `ctbk avail-geo-build`, see `ctbk/avail_geo.py`). Each shard contains
- * rows at every materialized h3 resolution (9, 7, 5), sorted by
- * `(h3_cell, dt)`. Histograms per metric stored as JSON-string columns
- * (decoded by pyrmts's `histogram` monoid on-the-fly).
+ * Reads h3-cell-keyed `avail-v2/<tier>/<period>.parquet` shards (built by
+ * `ctbk avail-v2-build`, see `ctbk/avail_v2.py` + `specs/avail-pyramid-v2.md`).
+ * Each shard contains rows at every materialized h3 resolution (9, 7, 5),
+ * sorted by `(h3_cell, dt)`. Histograms per metric stored as JSON-string
+ * columns (decoded by pyrmts's `histogram` monoid on-the-fly).
+ *
+ * Tier coverage in this serving config: 1h, 1d, 1mo, 1y — the four
+ * non-sub-hour tiers whose `{period}` formatting already matches pyrmts's
+ * `formatPeriod` convention (sub-hour tiers in R2 use `<date>/<hh>` paths
+ * that won't match pyrmts's `<date>T<hh>` until reformatted; see TODO).
  *
  *  Schema (per row):
  *    h3_cell : STRING       (resolution encoded in high bits)
@@ -43,14 +48,26 @@ const DEFAULT_REDUCER: Reducer = 'mean';
 function basePyramidProps(bucket: R2Bucket): Omit<Pyramid, 'dims'> {
 	return {
 		storage: r2Storage(bucket),
-		keyTemplate: 'avail-geo/{tier}/{period}.parquet',
+		keyTemplate: 'avail-v2/{tier}/{period}.parquet',
 		axis: 'time',
 		binCol: 'dt',
 		metrics: METRICS.map((name) => ({ name, monoid: 'histogram' as const })),
+		// v2 ladder. Sub-hour tiers (1m, 2m, 3m, 5m, 10m, 15m, 30m) and `3mo`
+		// are also built on R2 but omitted here:
+		//   - sub-hour: path-format mismatch with pyrmts's `formatPeriod('1h')`
+		//     (R2 uses `<date>/<hh>.parquet`; pyrmts wants `<date>T<hh>.parquet`)
+		//   - 3mo: pyrmts `floorToSpan` doesn't support multi-unit calendar bins
 		tiers: [
-			{ name: 'h1', bin: '1h', shard: '1d' },
-			{ name: 'd1', bin: '1d', shard: '1mo' },
-			{ name: 'mo1', bin: '1mo', shard: '1y' },
+			{ name: '1h',  bin: '1h',  shard: '1mo' },
+			{ name: '2h',  bin: '2h',  shard: '1mo' },
+			{ name: '3h',  bin: '3h',  shard: '1mo' },
+			{ name: '6h',  bin: '6h',  shard: '1mo' },
+			{ name: '12h', bin: '12h', shard: '1mo' },
+			{ name: '1d',  bin: '1d',  shard: '1y'  },
+			{ name: '3d',  bin: '3d',  shard: '1y'  },
+			{ name: '7d',  bin: '7d',  shard: '1y'  },
+			{ name: '1mo', bin: '1mo', shard: '1y'  },
+			{ name: '1y',  bin: '1y',  shard: 'all' },
 		],
 		geo: {
 			cellCol: 'h3_cell',
