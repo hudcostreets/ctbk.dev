@@ -314,29 +314,195 @@ def r2_head(cli, key: str) -> dict | None:
         raise
 
 
+# ─── §3b: cascade derived tiers ────────────────────────────────────────
+#
+# Inline implementation of what `pyrmts.cascade_tiers` will eventually
+# offer (see ~/c/pyrmts/specs/cascade-tiers-and-geo-materializer.md).
+# Per avail-pyramid-v2.md §1, ctbk may PR these helpers upstream once
+# the build is stable.
+
+def dt_floor_ms_fixed(dt_ms: int, bin_sec: int) -> int:
+    """Floor `dt_ms` (unix ms) to the start of its `bin_sec`-second bucket."""
+    bin_ms = bin_sec * 1000
+    return (dt_ms // bin_ms) * bin_ms
+
+
+def dt_floor_ms_calendar(dt_ms: int, tier: str) -> int:
+    """Calendar-aware floor for {1mo, 3mo, 1y}."""
+    d = datetime.fromtimestamp(dt_ms / 1000, tz=timezone.utc)
+    if tier == '1mo':
+        floored = datetime(d.year, d.month, 1, tzinfo=timezone.utc)
+    elif tier == '3mo':
+        q_month = ((d.month - 1) // 3) * 3 + 1
+        floored = datetime(d.year, q_month, 1, tzinfo=timezone.utc)
+    elif tier == '1y':
+        floored = datetime(d.year, 1, 1, tzinfo=timezone.utc)
+    else:
+        raise ValueError(f"not a calendar tier: {tier!r}")
+    return int(floored.timestamp()) * 1000
+
+
+def shard_end(shard: str, t: datetime) -> datetime:
+    """Exclusive end of the shard starting at `t`."""
+    if shard == '1h':  return t + timedelta(hours=1)
+    if shard == '1d':  return t + timedelta(days=1)
+    if shard == '1mo':
+        y, m = (t.year + (1 if t.month == 12 else 0), 1 if t.month == 12 else t.month + 1)
+        return t.replace(year=y, month=m)
+    if shard == '1y':  return t.replace(year=t.year + 1)
+    if shard == 'all': return datetime(9999, 12, 31, tzinfo=timezone.utc)
+    raise ValueError(f"unknown shard granularity: {shard!r}")
+
+
+def input_periods_for_output(
+    output_shard_start: datetime,
+    output_shard: str,
+    input_shard: str,
+    all_dates: tuple[Date, Date] | None = None,
+) -> list[str]:
+    """Enumerate input-shard `period` strings that overlap one output shard window.
+
+    `all_dates=(from, to)` is required when `output_shard == 'all'` to bound
+    the input scan; ignored otherwise.
+    """
+    end = shard_end(output_shard, output_shard_start)
+    if output_shard == 'all':
+        if all_dates is None:
+            raise ValueError("output_shard='all' requires all_dates=(from, to)")
+        df, dt_ = all_dates
+    else:
+        df, dt_ = (output_shard_start.date(), end.date())
+        # If end falls exactly on midnight UTC, end.date() is already exclusive.
+        if end.time() != datetime.min.time():
+            dt_ = (end + timedelta(days=1)).date()
+    starts = shard_starts(input_shard, df, dt_)
+    return [shard_period(input_shard, s) for s in starts if output_shard_start <= s < end]
+
+
+def read_v2_shard(cli, tier: str, period: str) -> pa.Table | None:
+    """Fetch one `avail-v2/<tier>/<period>.parquet` from R2; None on 404."""
+    key = output_key(tier, period)
+    try:
+        obj = cli.get_object(Bucket=R2_BUCKET, Key=key)
+    except ClientError as e:
+        code = e.response.get('Error', {}).get('Code', '')
+        if code in ('NoSuchKey', '404'):
+            return None
+        raise
+    return pq.read_table(io.BytesIO(obj['Body'].read()))
+
+
+def build_cascade_shard(
+    tier: str,
+    shard_start: datetime,
+    all_dates: tuple[Date, Date] | None = None,
+) -> pa.Table | None:
+    """Build one cascaded output shard for `tier` covering `[shard_start, end)`.
+
+    Reads all input shards (at the derive-from tier's granularity) that
+    overlap the output window, re-buckets by the output tier's bin, and
+    combines histograms per (h3_cell, dt_out, metric). Returns None if no
+    input shards are present.
+    """
+    spec = TIER_SPECS[tier]
+    if spec.derive_from is None:
+        raise ValueError(f"tier {tier!r} has no derive_from")
+    input_spec = TIER_SPECS[spec.derive_from]
+    cli = r2_client()
+    periods = input_periods_for_output(shard_start, spec.shard, input_spec.shard, all_dates)
+
+    # Accumulator: (cell, dt_out_ms, metric) → {state_str: count}
+    accum: dict[tuple[str, int, str], dict[str, int]] = {}
+    n_present = 0
+    for p in periods:
+        tab = read_v2_shard(cli, spec.derive_from, p)
+        if tab is None:
+            continue
+        n_present += 1
+        cell_col = tab['h3_cell'].to_pylist()
+        dt_col = tab['dt'].to_pylist()
+        metric_cols_in = {m: tab[m].to_pylist() for m in AVAIL_METRICS}
+        for i in range(tab.num_rows):
+            cell = cell_col[i]
+            dt_in = dt_col[i]
+            if spec.bin_sec is not None:
+                dt_out = dt_floor_ms_fixed(dt_in, spec.bin_sec)
+            else:
+                dt_out = dt_floor_ms_calendar(dt_in, tier)
+            for m in AVAIL_METRICS:
+                js = metric_cols_in[m][i]
+                if js is None: continue
+                d = json.loads(js)
+                if not d: continue
+                key = (cell, dt_out, m)
+                acc_d = accum.get(key)
+                if acc_d is None:
+                    accum[key] = dict(d)
+                else:
+                    for k, v in d.items():
+                        acc_d[k] = acc_d.get(k, 0) + v
+
+    if n_present == 0:
+        return None
+
+    rows: dict[tuple[str, int], dict[str, str]] = {}
+    for (cell, dt_out, metric), hist in accum.items():
+        sorted_hist = dict(sorted(hist.items(), key=lambda kv: int(kv[0])))
+        rows.setdefault((cell, dt_out), {})[metric] = json.dumps(sorted_hist, separators=(',', ':'))
+
+    keys = sorted(rows.keys())
+    h3_cell_col = [k[0] for k in keys]
+    dt_ms_col = [k[1] for k in keys]
+    metric_cols_out: dict[str, list[str | None]] = {m: [] for m in AVAIL_METRICS}
+    for k in keys:
+        r = rows[k]
+        for m in AVAIL_METRICS:
+            metric_cols_out[m].append(r.get(m))
+
+    arrays = [
+        pa.array(h3_cell_col, type=pa.string()),
+        pa.array(dt_ms_col, type=pa.int64()),
+    ]
+    names = ['h3_cell', 'dt']
+    for m in AVAIL_METRICS:
+        arrays.append(pa.array(metric_cols_out[m], type=pa.string()))
+        names.append(m)
+    return pa.table(arrays, names=names)
+
+
 # ─── Per-shard worker (top-level for ProcessPool pickling) ─────────────
 
-def _build_1m_shard_task(
+def _build_shard_task(
+    tier: str,
     shard_start_iso: str,
     overwrite: bool,
     resolutions: tuple[int, ...],
+    all_dates_iso: tuple[str, str] | None,
 ) -> tuple[str, str, int]:
-    """ProcessPool worker: build + write one 1m-tier 1-hour shard.
+    """ProcessPool worker: build + write one shard (any tier).
 
+    Dispatches on `TIER_SPECS[tier].derive_from`:
+      - None → build from 1m@1m source (h3-materialize)
+      - else → cascade-combine from the derive-from tier
     Returns (period_str, status, bytes_written). Status ∈ {"wrote", "skip", "empty"}.
     """
     t = datetime.fromisoformat(shard_start_iso)
-    date_str = t.strftime('%Y-%m-%d')
-    hour = t.hour
-    period = shard_period('1h', t)
-    out_key = output_key('1m', period)
-
+    spec = TIER_SPECS[tier]
+    period = shard_period(spec.shard, t)
+    out_key = output_key(tier, period)
     cli = r2_client()
     if not overwrite and r2_head(cli, out_key) is not None:
         return (period, 'skip', 0)
-
-    geo = load_station_geo_for_date(date_str)
-    table = build_1m_hour_table(date_str, hour, geo, resolutions)
+    if spec.derive_from is None:
+        date_str = t.strftime('%Y-%m-%d')
+        geo = load_station_geo_for_date(date_str)
+        table = build_1m_hour_table(date_str, t.hour, geo, resolutions)
+    else:
+        ad = (
+            (Date.fromisoformat(all_dates_iso[0]), Date.fromisoformat(all_dates_iso[1]))
+            if all_dates_iso else None
+        )
+        table = build_cascade_shard(tier, t, ad)
     if table is None:
         return (period, 'empty', 0)
     n = write_table_to_r2(cli, table, out_key)
@@ -352,7 +518,7 @@ def _build_1m_shard_task(
 @option('-O', '--overwrite', is_flag=True, help="Rebuild even if output exists.")
 @option('-r', '--resolution', 'resolutions', multiple=True, type=int, default=DEFAULT_RESOLUTIONS,
         help="h3 resolutions to materialize (repeatable; default 9 7 5).")
-@option('-t', '--tier', required=True, type=str, help="Tier name (currently only '1m' is implemented).")
+@option('-t', '--tier', required=True, type=str, help="Tier name (see TIER_SPECS).")
 @option('-T', '--date-to', 'date_to', required=True, help="Exclusive end (YYYY-MM-DD).")
 def avail_v2_build_cmd(
     concurrency: int,
@@ -366,16 +532,14 @@ def avail_v2_build_cmd(
     if tier not in TIER_SPECS:
         raise BadParameter(f"unknown tier {tier!r}; known: {list(TIER_SPECS)}")
     spec = TIER_SPECS[tier]
-    if spec.derive_from is not None:
-        raise NotImplementedError(
-            f"tier {tier!r} cascades from {spec.derive_from!r} — not yet implemented (§3b)"
-        )
-    if tier != '1m':
-        raise NotImplementedError(f"tier {tier!r} not yet implemented")
-
     df = Date.fromisoformat(date_from)
     dt = Date.fromisoformat(date_to)
-    starts = shard_starts(spec.shard, df, dt)
+
+    # For 'all' shards there's one output globally; emit a single start (UTC midnight of date_from).
+    if spec.shard == 'all':
+        starts = [datetime.combine(df, datetime.min.time(), tzinfo=timezone.utc)]
+    else:
+        starts = shard_starts(spec.shard, df, dt)
     err(f"avail-v2-build tier={tier} {len(starts)} shards in [{date_from}, {date_to})")
 
     if dry_run:
@@ -390,10 +554,11 @@ def avail_v2_build_cmd(
 
     res_tup = tuple(resolutions)
     starts_iso = [s.isoformat() for s in starts]
+    all_dates_iso = (date_from, date_to) if spec.shard == 'all' else None
     n_wrote = n_skip = n_empty = bytes_total = 0
     if concurrency <= 1:
         for s_iso in starts_iso:
-            period, status, n = _build_1m_shard_task(s_iso, overwrite, res_tup)
+            period, status, n = _build_shard_task(tier, s_iso, overwrite, res_tup, all_dates_iso)
             err(f"  {status:5s} {period} ({n:,} B)")
             n_wrote  += (status == 'wrote')
             n_skip   += (status == 'skip')
@@ -401,7 +566,10 @@ def avail_v2_build_cmd(
             bytes_total += n
     else:
         with ProcessPoolExecutor(max_workers=concurrency) as pool:
-            futs = {pool.submit(_build_1m_shard_task, s_iso, overwrite, res_tup): s_iso for s_iso in starts_iso}
+            futs = {
+                pool.submit(_build_shard_task, tier, s_iso, overwrite, res_tup, all_dates_iso): s_iso
+                for s_iso in starts_iso
+            }
             for fut in as_completed(futs):
                 period, status, n = fut.result()
                 err(f"  {status:5s} {period} ({n:,} B)")
