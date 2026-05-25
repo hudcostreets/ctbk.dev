@@ -11,7 +11,9 @@
 > - §2 `ctbk avail-loader-replay`: shipped (`ctbk/avail_loader_replay.py`); content-verified vs loader for 2026-05-12 12:00. Replay in flight for 2026-04-07 → 2026-05-02.
 > - §3a `ctbk avail-v2-build --tier 1m`: shipped (`ctbk/avail_v2.py`); 521 1m@1h shards written for 2026-05-03 → 2026-05-25 (~216 MB ≈ 3.6 GB/y projected).
 > - §3b cascade (2m–1y): shipped inline (pure-python histogram-combine); sub-hour fan-out in flight. Hourly→day→calendar phases pending.
-> - §4–§6: pending.
+> - §4: `ctbk avail-v2-probe` + `ctbk avail-v2-validate` shipped.
+> - §5: parallel `/api/avail-v2[/cells]` endpoints wired in `gbfs/api/`; PoC `/api/avail-geo[/cells]` still served. Pending: `wrangler deploy` + CIC.
+> - §6: pending (after FE confirms parity and migrates fetches).
 
 ## Where we are
 
@@ -266,14 +268,24 @@ curl -A 'ctbk-probe' "$WORKER_URL/api/avail-v2?from=...&to=...&bbox=...&bin_budg
 
 After EC2 has written shards to R2:
 
-1. Update `gbfs/api/src/avail_geo.ts` `availGeoPyramid` to point at
-   `avail-v2/<tier>/...` paths.
-2. Keep the existing `/api/avail-geo[/cells]` endpoint names — URL
-   stays stable; only the underlying data changes.
-3. Shadow-mode dual-read against the PoC for a week to confirm parity.
-4. Cut over.
-5. Decommission predecessors (loader keeps running; everything else
-   stops or gets deleted).
+1. Expose v2 as **parallel** endpoints `/api/avail-v2[/cells]` rather
+   than repointing `/api/avail-geo[/cells]`. Both routes share the
+   serve-handler pipeline (`serveGeoReduced`); only the pyramid factory
+   differs (PoC: `avail-geo/<tier>` + 3-tier ladder; v2: `avail-v2/<tier>`
+   + 10-tier ladder). Existing FE consumers of `/api/avail-geo` stay on
+   PoC data; v2 is opt-in via URL.
+2. Shadow-mode dual-read against the PoC for a week to confirm parity
+   (or surface the expected gap, since v2 is more complete by design —
+   see §4 validator note).
+3. Cut over: switch FE fetches from `/api/avail-geo` → `/api/avail-v2`.
+4. Decommission predecessors (loader keeps running; everything else
+   stops or gets deleted). Drop `/api/avail-geo[/cells]` routes after
+   FE confirms no remaining callers.
+
+> Earlier draft of this section called for repointing `/api/avail-geo`
+> at v2 data directly (commit `67e20d50`). Replaced with the parallel
+> approach above to honor step 2's shadow-mode requirement before any
+> data the FE depends on changes shape.
 
 ## 6. Things NOT to do on EC2
 
