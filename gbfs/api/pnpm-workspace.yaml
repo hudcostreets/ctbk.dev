@@ -2,3 +2,4 @@ packages:
   - .
   - ../../../../pyrmts/js/packages/pyrmts
   - ../../../../pyrmts/js/packages/pyrmts-cfw
+  - ../../../../pyrmts/js/packages/pyrmts-geo

@@ -482,6 +482,7 @@ import { createHandlers } from '@rdub/file-tree/server';
 import { getHealthSnapshot } from './health';
 import { runAlerts } from './alerts';
 import { executeAvailViaPyrmts, shadowDelta } from './avail_pyrmts';
+import { serveAvailGeo, serveAvailGeoCells } from './avail_geo';
 
 /**
  * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
@@ -1118,6 +1119,25 @@ export default {
 				return jsonResponse(snapshot, env);
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'health snapshot failed', 500, env);
+			}
+		}
+
+		// /api/avail-geo[/cells] — pyrmts-geo serving over h3-cell-keyed avail shards.
+		// PoC; see `specs/avail-geo-pyramid.md` + `avail_geo.ts`.
+		//   /api/avail-geo        → rollup over bbox (one row per time bucket)
+		//   /api/avail-geo/cells  → per-cell breakdown (one row per (cell, bucket))
+		if (url.pathname === '/api/avail-geo') {
+			try {
+				return await serveAvailGeo(env.R2, request, env.CORS_ORIGIN ?? '*');
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'avail-geo error', 500, env);
+			}
+		}
+		if (url.pathname === '/api/avail-geo/cells') {
+			try {
+				return await serveAvailGeoCells(env.R2, request, env.CORS_ORIGIN ?? '*');
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'avail-geo/cells error', 500, env);
 			}
 		}
 
