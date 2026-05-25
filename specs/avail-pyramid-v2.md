@@ -1,11 +1,17 @@
 # Spec: port Cascade pyramid to pyrmts (with h3 + histogram monoid)
 
-> Status: **EC2-runbook draft** (2026-05-25). Replaces the laptop-PoC
-> derived from Legacy. Spirit: Cascade is the model; this is a *port*
-> onto pyrmts conventions (data, builder, CFW BE, FE) with the right
-> monoid (histogram, not Cascade's sum) + h3 + a denser ladder than
-> Cascade's. Builds on EC2 because storage is ~tens-of-GB-per-year and
-> backfill is embarrassingly parallel.
+> Status: **§2 + §3a + §3b in EC2 build** (2026-05-25). Replaces the
+> laptop-PoC derived from Legacy. Spirit: Cascade is the model; this is
+> a *port* onto pyrmts conventions (data, builder, CFW BE, FE) with the
+> right monoid (histogram, not Cascade's sum) + h3 + a denser ladder
+> than Cascade's. Builds on EC2 because storage is ~tens-of-GB-per-year
+> and backfill is embarrassingly parallel.
+>
+> Progress (2026-05-25, EC2):
+> - §2 `ctbk avail-loader-replay`: shipped (`ctbk/avail_loader_replay.py`); content-verified vs loader for 2026-05-12 12:00. Replay in flight for 2026-04-07 → 2026-05-02.
+> - §3a `ctbk avail-v2-build --tier 1m`: shipped (`ctbk/avail_v2.py`); 521 1m@1h shards written for 2026-05-03 → 2026-05-25 (~216 MB ≈ 3.6 GB/y projected).
+> - §3b cascade (2m–1y): shipped inline (pure-python histogram-combine); sub-hour fan-out in flight. Hourly→day→calendar phases pending.
+> - §4–§6: pending.
 
 ## Where we are
 
