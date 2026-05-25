@@ -9,35 +9,35 @@ pipeline changes; commit deliberate shifts. See
 
 | bbox | window | tier | res | cells planned | records | bytes | ms |
 |------|--------|------|----:|---:|---:|---:|---:|
-| `nyc-region` | `h1-1day` | `h1` | 5 | 7 | 24 | 63,661 | 999 |
-| `core-nyc` | `h1-1day` | `h1` | 7 | 62 | 24 | 63,788 | 614 |
-| `manhattan-narrow` | `h1-1day` | `h1` | 9 | 141 | 24 | 54,941 | 598 |
-| `tip-of-manhattan` | `h1-1day` | `h1` | 9 | 14 | 24 | 25,258 | 426 |
-| `nyc-region` | `h1-7day` | `h1` | 5 | 7 | 167 | 467,981 | 2063 |
-| `core-nyc` | `h1-7day` | `h1` | 7 | 62 | 167 | 464,185 | 1385 |
-| `manhattan-narrow` | `h1-7day` | `h1` | 9 | 141 | 167 | 380,208 | 1715 |
-| `tip-of-manhattan` | `h1-7day` | `h1` | 9 | 14 | 167 | 179,419 | 1429 |
-| `nyc-region` | `d1-1month` | `d1` | 5 | 7 | 24 | 103,142 | 805 |
-| `core-nyc` | `d1-1month` | `d1` | 7 | 62 | 24 | 103,435 | 775 |
-| `manhattan-narrow` | `d1-1month` | `d1` | 9 | 141 | 24 | 89,076 | 655 |
-| `tip-of-manhattan` | `d1-1month` | `d1` | 9 | 14 | 24 | 56,157 | 531 |
+| `nyc-region` | `h1-1day` | `h1` | 5 | 7 | 24 | 4,947 | 670 |
+| `core-nyc` | `h1-1day` | `h1` | 7 | 62 | 24 | 5,944 | 398 |
+| `manhattan-narrow` | `h1-1day` | `h1` | 9 | 141 | 24 | 7,316 | 860 |
+| `tip-of-manhattan` | `h1-1day` | `h1` | 9 | 14 | 24 | 4,927 | 310 |
+| `nyc-region` | `h1-7day` | `h1` | 5 | 7 | 167 | 32,166 | 1728 |
+| `core-nyc` | `h1-7day` | `h1` | 7 | 62 | 167 | 33,177 | 2151 |
+| `manhattan-narrow` | `h1-7day` | `h1` | 9 | 141 | 167 | 34,411 | 2542 |
+| `tip-of-manhattan` | `h1-7day` | `h1` | 9 | 14 | 167 | 31,408 | 1233 |
+| `nyc-region` | `d1-1month` | `d1` | 5 | 7 | 24 | 4,944 | 696 |
+| `core-nyc` | `d1-1month` | `d1` | 7 | 62 | 24 | 5,935 | 516 |
+| `manhattan-narrow` | `d1-1month` | `d1` | 9 | 141 | 24 | 7,325 | 552 |
+| `tip-of-manhattan` | `d1-1month` | `d1` | 9 | 14 | 24 | 5,093 | 521 |
 
 ## `/api/avail-geo/cells`
 
 | bbox | window | tier | res | cells planned | records | bytes | ms |
 |------|--------|------|----:|---:|---:|---:|---:|
-| `nyc-region` | `h1-1day` | `h1` | 5 | 7 | 120 | 186,269 | 578 |
-| `core-nyc` | `h1-1day` | `h1` | 7 | 62 | 1,080 | 884,672 | 651 |
-| `manhattan-narrow` | `h1-1day` | `h1` | 9 | 141 | 2,304 | 731,256 | 443 |
-| `tip-of-manhattan` | `h1-1day` | `h1` | 9 | 14 | 264 | 81,941 | 308 |
-| `nyc-region` | `h1-7day` | `h1` | 5 | 7 | 835 | 1,345,262 | 1563 |
-| `core-nyc` | `h1-7day` | `h1` | 7 | 62 | 7,515 | 6,182,112 | 1659 |
-| `manhattan-narrow` | `h1-7day` | `h1` | 9 | 141 | 16,032 | 4,979,027 | 1519 |
-| `tip-of-manhattan` | `h1-7day` | `h1` | 9 | 14 | 1,837 | 563,125 | 1376 |
-| `nyc-region` | `d1-1month` | `d1` | 5 | 7 | 120 | 303,816 | 656 |
-| `core-nyc` | `d1-1month` | `d1` | 7 | 62 | 1,080 | 1,466,587 | 494 |
-| `manhattan-narrow` | `d1-1month` | `d1` | 9 | 141 | 2,304 | 2,610,669 | 599 |
-| `tip-of-manhattan` | `d1-1month` | `d1` | 9 | 14 | 264 | 282,975 | 558 |
+| `nyc-region` | `h1-1day` | `h1` | 5 | 7 | 120 | 23,014 | 417 |
+| `core-nyc` | `h1-1day` | `h1` | 7 | 62 | 1,080 | 190,367 | 401 |
+| `manhattan-narrow` | `h1-1day` | `h1` | 9 | 141 | 2,304 | 364,960 | 377 |
+| `tip-of-manhattan` | `h1-1day` | `h1` | 9 | 14 | 264 | 42,019 | 281 |
+| `nyc-region` | `h1-7day` | `h1` | 5 | 7 | 835 | 156,771 | 1333 |
+| `core-nyc` | `h1-7day` | `h1` | 7 | 62 | 7,515 | 1,316,212 | 1606 |
+| `manhattan-narrow` | `h1-7day` | `h1` | 9 | 141 | 16,032 | 2,520,781 | 2022 |
+| `tip-of-manhattan` | `h1-7day` | `h1` | 9 | 14 | 1,837 | 288,227 | 1885 |
+| `nyc-region` | `d1-1month` | `d1` | 5 | 7 | 120 | 23,099 | 537 |
+| `core-nyc` | `d1-1month` | `d1` | 7 | 62 | 1,080 | 199,950 | 678 |
+| `manhattan-narrow` | `d1-1month` | `d1` | 9 | 141 | 2,304 | 419,611 | 1009 |
+| `tip-of-manhattan` | `d1-1month` | `d1` | 9 | 14 | 264 | 49,346 | 532 |
 
 ## Bboxes
 
