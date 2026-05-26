@@ -269,7 +269,9 @@ def build_1m_hour_table(
         sorted_hist = dict(sorted(hist.items(), key=lambda kv: int(kv[0])))
         rows.setdefault((cell, dt_sec), {})[metric] = json.dumps(sorted_hist, separators=(',', ':'))
 
-    keys = sorted(rows.keys())  # (cell, dt_sec) — cell sort clusters by resolution
+    # Sort by (dt, cell): dt-first primary key so row-group stats prune dt-range
+    # queries effectively. Keys are (cell, dt_sec) tuples, so key on (dt, cell).
+    keys = sorted(rows.keys(), key=lambda k: (k[1], k[0]))
     h3_cell_col = [k[0] for k in keys]
     dt_ms_col = [k[1] * 1000 for k in keys]
     metric_cols: dict[str, list[str | None]] = {m: [] for m in AVAIL_METRICS}
@@ -289,11 +291,14 @@ def build_1m_hour_table(
     return pa.table(arrays, names=names)
 
 
+ROW_GROUP_SIZE = 8192  # narrow `dt`-range row-group stats for read-side pruning
+
+
 def write_table_to_r2(cli, table: pa.Table, key: str) -> int:
     """Serialize `table` to parquet (snappy) and PUT to R2. Returns bytes written."""
     buf = io.BytesIO()
     # snappy: hyparquet (the CFW reader) supports snappy/gzip/none but not zstd.
-    pq.write_table(table, buf, compression='snappy')
+    pq.write_table(table, buf, compression='snappy', row_group_size=ROW_GROUP_SIZE)
     body = buf.getvalue()
     cli.put_object(
         Bucket=R2_BUCKET,
@@ -454,7 +459,8 @@ def build_cascade_shard(
         sorted_hist = dict(sorted(hist.items(), key=lambda kv: int(kv[0])))
         rows.setdefault((cell, dt_out), {})[metric] = json.dumps(sorted_hist, separators=(',', ':'))
 
-    keys = sorted(rows.keys())
+    # Sort by (dt, cell) for row-group dt-range pruning (see §7 of spec).
+    keys = sorted(rows.keys(), key=lambda k: (k[1], k[0]))
     h3_cell_col = [k[0] for k in keys]
     dt_ms_col = [k[1] for k in keys]
     metric_cols_out: dict[str, list[str | None]] = {m: [] for m in AVAIL_METRICS}
@@ -519,7 +525,7 @@ def _build_shard_task(
 @option('-c', '--concurrency', type=int, default=8, help="Worker process count.")
 @option('-f', '--date-from', 'date_from', required=True, help="Inclusive start (YYYY-MM-DD).")
 @option('-n', '--dry-run', is_flag=True, help="Print shards that would be (re)built, then exit.")
-@option('-O', '--overwrite', is_flag=True, help="Rebuild even if output exists.")
+@option('-O', '--overwrite', '--force', is_flag=True, help="Rebuild even if output exists.")
 @option('-r', '--resolution', 'resolutions', multiple=True, type=int, default=DEFAULT_RESOLUTIONS,
         help="h3 resolutions to materialize (repeatable; default 9 7 5).")
 @option('-t', '--tier', required=True, type=str, help="Tier name (see TIER_SPECS).")

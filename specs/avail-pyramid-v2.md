@@ -1,19 +1,20 @@
 # Spec: port Cascade pyramid to pyrmts (with h3 + histogram monoid)
 
-> Status: **§2 + §3a + §3b in EC2 build** (2026-05-25). Replaces the
-> laptop-PoC derived from Legacy. Spirit: Cascade is the model; this is
-> a *port* onto pyrmts conventions (data, builder, CFW BE, FE) with the
-> right monoid (histogram, not Cascade's sum) + h3 + a denser ladder
-> than Cascade's. Builds on EC2 because storage is ~tens-of-GB-per-year
-> and backfill is embarrassingly parallel.
+> Status: **§2 + §3a + §3b + §4 + §5 (BE) + §7 done** (2026-05-26).
+> Replaces the laptop-PoC derived from Legacy. Spirit: Cascade is the
+> model; this is a *port* onto pyrmts conventions (data, builder, CFW
+> BE, FE) with the right monoid (histogram, not Cascade's sum) + h3 +
+> a denser ladder than Cascade's. Builds on EC2 because storage is
+> ~tens-of-GB-per-year and backfill is embarrassingly parallel.
 >
-> Progress (2026-05-25, EC2):
-> - §2 `ctbk avail-loader-replay`: shipped (`ctbk/avail_loader_replay.py`); content-verified vs loader for 2026-05-12 12:00. Replay in flight for 2026-04-07 → 2026-05-02.
-> - §3a `ctbk avail-v2-build --tier 1m`: shipped (`ctbk/avail_v2.py`); 521 1m@1h shards written for 2026-05-03 → 2026-05-25 (~216 MB ≈ 3.6 GB/y projected).
-> - §3b cascade (2m–1y): shipped inline (pure-python histogram-combine); sub-hour fan-out in flight. Hourly→day→calendar phases pending.
+> Progress (2026-05-26, EC2):
+> - §2 `ctbk avail-loader-replay`: shipped (`ctbk/avail_loader_replay.py`); content-verified vs loader for 2026-05-12 12:00. WAL replay complete for 2026-04-07 → 2026-05-02.
+> - §3a `ctbk avail-v2-build --tier 1m`: shipped (`ctbk/avail_v2.py`).
+> - §3b cascade (2m–1y): shipped inline (pure-python histogram-combine).
 > - §4: `ctbk avail-v2-probe` + `ctbk avail-v2-validate` shipped.
-> - §5: parallel `/api/avail-v2[/cells]` endpoints wired in `gbfs/api/`; PoC `/api/avail-geo[/cells]` still served. Pending: `wrangler deploy` + CIC.
+> - §5: parallel `/api/avail-v2[/cells]` endpoints wired in `gbfs/api/`; PoC `/api/avail-geo[/cells]` still served. Pending: `wrangler deploy` (from laptop) + CIC.
 > - §6: pending (after FE confirms parity and migrates fetches).
+> - §7: shipped + full rebuild done 2026-05-26. All 18 tiers re-written with `(dt, cell)` sort + `row_group_size=8192`. 1h@2026-05 now has 128 row groups, each spanning ~4-5h instead of the full month. Total ~4.4 GB on R2. CFW OOM fix unverified pending laptop-side `wrangler deploy`.
 
 ## Where we are
 
