@@ -243,16 +243,22 @@ export async function executeAvailViaPyrmts(
 	const filter: Record<string, string> = {};
 	// Pyrmts' planner only supports `{dim}` placeholders in the keyTemplate.
 	// Our template uses `{tier}/{period}` only — no per-dim sharding — so
-	// no filter is needed for shard-key construction. Per-station filtering
-	// happens in-memory after fetch (matches the legacy path's r/g-pruning
-	// trade-off; pyrmts doesn't expose rg-prune yet).
+	// no filter is needed for shard-key construction. Per-station RG pruning
+	// happens via hyparquet's column-stats check below (pyrmts §2 added
+	// `FetchOptions.filters`); see `~/c/pyrmts/specs/done/writer-helper-and-arbitrary-col-rg-prune.md`.
 	const plan = planQuery(pyramid, { range, binBudget, watermarks, filter });
+
+	const stationFilter = p.filterStationId?.length ? new Set(p.filterStationId) : null;
+	const rgFilters = p.filterStationId?.length
+		? [{ col: 'station_id', values: p.filterStationId }]
+		: undefined;
 
 	const shardRows = await Promise.all(
 		plan.segments.map((seg) =>
 			Promise.all(seg.keys.map((k) => fetchShardData(pyramid.storage, k, {
 				binCol: pyramid.binCol,
 				range: { from: seg.from, to: seg.to },
+				filters: rgFilters,
 			}).catch(() => [] as Row[]))).then((arrs) =>
 				arrs.flat(),
 			),
@@ -262,9 +268,9 @@ export async function executeAvailViaPyrmts(
 
 	const stitched = stitch({ pyramid, plan, shardRows: widened });
 
-	// Station filter (post-fetch). The legacy path uses row-group pruning
-	// for `filterStationId`; pyrmts doesn't yet, so we filter here.
-	const stationFilter = p.filterStationId?.length ? new Set(p.filterStationId) : null;
+	// Post-fetch station filter — RG pruning above narrows reads to RGs whose
+	// `station_id` stats overlap the request, but row groups can still contain
+	// non-matching stations; final filter is exact.
 	const filtered = stationFilter
 		? stitched.filter((r) => stationFilter.has(r.station_id as string))
 		: stitched;
