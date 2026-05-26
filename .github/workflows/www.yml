@@ -126,11 +126,8 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           REPO_SLUG: ${{ github.repository }}
-        # Git-SHA pin: pre-release `username`/`icon_emoji` support
-        # (commit b07db0e). Promote to a PyPI version once the `py` branch
-        # cuts a release.
         run: |
-          pip install --quiet 'git+https://github.com/runsascoded/thrds.git@b693a48d987cd0a66bf0cad0beb424f85c3cba4f'
+          pip install --quiet 'thrds==0.3.0'
           python - <<'PY'
           import json, os, urllib.request
           from thrds import SlackClient, Thread
