@@ -289,12 +289,107 @@ After EC2 has written shards to R2:
 
 ## 6. Things NOT to do on EC2
 
-- Don't push to `h:main` (Github). Push to `e:` (EC2-mediator remote)
-  only. CI deploy on `h` would break due to `workspace:*` pyrmts deps.
+- ~~Don't push to `h:main` (Github). Push to `e:` (EC2-mediator remote)
+  only. CI deploy on `h` would break due to `workspace:*` pyrmts deps.~~
+  No longer applies (2026-05-25): pyrmts has a `dist` branch on GitHub
+  and `gbfs/api/` is on `pds gh` refs, so `git push h main` triggers a
+  clean CI deploy. Push to `h:` freely.
 - Don't run the live CFW workers from EC2. Keep `wrangler deploy` on
   the laptop (or skip it entirely until the build is verified).
 - Don't delete any of the legacy/cascade/PoC data on R2 — keep through
   the validation period.
+
+## 7. Rebuild: parquet layout for read-side pruning (EC2, follow-up)
+
+> Added 2026-05-25, after CFW OOMs surfaced on `/api/avail-v2[/cells]`
+> sub-day queries.
+
+### Diagnosis
+
+`ctbk avail-v2-build` wrote shards with pyarrow defaults:
+- `num_row_groups = 1` per shard (default `row_group_size=1M`; v2 1h
+  shards have ~956K rows, so they fit in a single RG).
+- Rows sorted `(cell, dt_sec)` (see `avail_v2.py:272`).
+
+Together this defeats hyparquet's row-group `dt`-stats pruning:
+even when the CFW reader passes `binCol='dt' + range=…` (now wired in
+`avail_geo.ts` + `avail_pyrmts.ts`), there's only one RG, and its
+`dt`-stats span the entire shard period. So every query loads the
+whole decompressed shard (~130 MB for v2 1h) → blows the 128 MB CFW
+free-tier memory limit on any sub-day query.
+
+This is the unaddressed half of pyrmts SPEC.md "Open questions" §
+("Row-group sizing" + "Sort order"). The reader has the pruning
+primitive; the writer doesn't yet have a convention or helper.
+
+### Changes
+
+In `ctbk/avail_v2.py`:
+
+1. **Resort rows by `(dt, cell)`** instead of `(cell, dt)`. h3's
+   resolution-in-high-bits property is nice-to-have for resolution
+   pruning but pyrmts doesn't currently do that pruning, so dt-first
+   is the right primary key for now. (Lines 272 + 457; both shard
+   writers.)
+2. **Set `row_group_size`** in the `pq.write_table(...)` call (line
+   296). Start with `8192`; tune if needed. Goal: each RG covers a
+   narrow `dt` window so stats prune effectively.
+3. (Optional, defer if it's not necessary for the OOM fix) **Sort
+   monoid output similarly** in the cascade step — if cascaded tiers
+   inherit the input shape this happens for free, otherwise mirror
+   the change.
+
+### Rebuild driver
+
+All built (tier × period) pairs need re-write. From EC2:
+
+```bash
+# Idempotent re-runs are fine — they overwrite. Order doesn't matter
+# semantically but build finest tiers first so cascade has its inputs.
+ctbk avail-v2-build --tier 1m --force   # ~521 shards across 49 dates
+# Then cascade up
+ctbk avail-v2-build --tier 2m --derive-from 1m --force
+# … continue through the ladder up to 1y
+```
+
+(If `--force` doesn't exist yet on `avail-v2-build`, add it — flag to
+overwrite existing R2 objects rather than skip-if-exists.)
+
+Total rebuild scope: 18 tiers × shards-per-tier. Embarrassingly
+parallel per (tier, period); current 1m build took ~hours on EC2,
+expect similar.
+
+### Validation
+
+After rebuild, the OOM-reproducer should now succeed:
+
+```bash
+curl -A 'ctbk-probe' \
+  "https://ctbk-gbfs-api.ryan-0dc.workers.dev/api/avail-v2?from=2026-05-22T00:00:00Z&to=2026-05-23T00:00:00Z&bbox=40.74,-74.00,40.78,-73.96&bin_budget=24&cell_budget=200"
+```
+
+Expect 200 + small JSON body (~few KB). If still OOMs: inspect the
+shard's `pqm` output — `num_row_groups` should be hundreds, each
+row group's `dt` stats should span minutes-to-low-hours, not the
+full shard period.
+
+### Note: read-side patches already landed
+
+- `gbfs/api/src/avail_geo.ts` threads `{ binCol, range }` to
+  `fetchSegmentRows` (commit `7ddb7104`).
+- `gbfs/api/src/avail_pyrmts.ts` (shadow mode) threads the same opts
+  to `fetchShardData` (next commit).
+
+Both are no-ops until this rebuild lands; once it does, they take
+effect without further CFW changes.
+
+### Upstream pyrmts follow-up
+
+Open SPEC.md questions §321/§323 ("Row-group sizing", "Sort order")
+become tractable now that ctbk has a real layout pin. Worth proposing
+a `pyrmts.write_tier_parquet(rows, pyramid, …)` helper that handles
+RG sizing + binCol-first sort by default, so future consumers don't
+hit this trap.
 
 ## Open
 
