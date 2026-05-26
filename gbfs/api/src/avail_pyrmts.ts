@@ -250,7 +250,10 @@ export async function executeAvailViaPyrmts(
 
 	const shardRows = await Promise.all(
 		plan.segments.map((seg) =>
-			Promise.all(seg.keys.map((k) => fetchShardData(pyramid.storage, k).catch(() => [] as Row[]))).then((arrs) =>
+			Promise.all(seg.keys.map((k) => fetchShardData(pyramid.storage, k, {
+				binCol: pyramid.binCol,
+				range: { from: seg.from, to: seg.to },
+			}).catch(() => [] as Row[]))).then((arrs) =>
 				arrs.flat(),
 			),
 		),
