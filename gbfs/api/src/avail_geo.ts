@@ -256,8 +256,18 @@ async function serveGeoReduced(
 	const reducer = reducerRaw as Reducer;
 
 	const plan = planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox, cellBudget });
+	// Thread `binCol` + per-segment range so hyparquet prunes row groups by
+	// `dt` column stats. Currently a no-op for v2 shards (`avail_v2.py` writes
+	// them as a single 956K-row RG, and rows are `(cell, dt)`-sorted so a
+	// hypothetical multi-RG file would still have each RG spanning the full
+	// month). The full read-side optimization needs the v2 build to write
+	// smaller, `dt`-first-sorted RGs; until then v2 endpoints OOM on sub-day
+	// queries and only PoC `/api/avail-geo` reliably serves.
 	const shardRows = await Promise.all(
-		plan.segments.map((seg) => fetchSegmentRows(pyramid.storage, seg.keys)),
+		plan.segments.map((seg) => fetchSegmentRows(pyramid.storage, seg.keys, {
+			binCol: pyramid.binCol,
+			range: { from: seg.from, to: seg.to },
+		})),
 	);
 	// Filter to chosen output resolution + bbox-covering cells.
 	const filtered = shardRows.map((rows) =>
