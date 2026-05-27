@@ -6,7 +6,7 @@
  *   binned per `binOverrideS` or `pickAvailBinAuto`. Single shape regardless
  *   of window size (the worker handles tier selection: mo1/d1/h1/raw).
  */
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { keepPreviousData, type QueryClient, useQuery } from '@tanstack/react-query'
 
 // Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
@@ -54,15 +54,18 @@ export interface StationRangeResponse {
   last_polled_at: number | null
 }
 
+const stationInfoKey = (id: string) => ['station-info', id] as const
+const stationInfoFn = async (id: string): Promise<StationInfo | null> => {
+  const res = await fetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/info`)
+  if (!res.ok) return null
+  return res.json()
+}
+
 export function useStationInfo(id: string | undefined) {
   return useQuery<StationInfo | null>({
-    queryKey: ['station-info', id],
+    queryKey: stationInfoKey(id ?? ''),
     enabled: !!id,
-    queryFn: async () => {
-      const res = await fetch(`${API_BASE}/api/stations/${encodeURIComponent(id!)}/info`)
-      if (!res.ok) return null
-      return res.json()
-    },
+    queryFn: () => stationInfoFn(id!),
   })
 }
 
@@ -178,6 +181,35 @@ function totalsRowsToAvailabilityRows(
  *  newly-arrived polls should appear without a manual reload). Worker
  *  stitches today's WAL into in-progress bins, so a refetch returns rows
  *  through `now`. */
+const stationAvailKey = (gbfsId: string, fromS: number, toS: number, binS: number) =>
+  ['station-avail', gbfsId, fromS, toS, `bin${binS}`] as const
+
+const stationAvailFn = async (
+  gbfsId: string, fromS: number, toS: number, binS: number, capacityHint: number | null,
+): Promise<StationRangeResponse & { binS: number }> => {
+  const url = new URL(`${API_BASE}/api/totals`)
+  url.searchParams.set('kind', 'availability')
+  url.searchParams.set('metric', 'all')
+  url.searchParams.set('scope', 'stations')
+  url.searchParams.set('from', String(fromS))
+  url.searchParams.set('to', String(toS))
+  url.searchParams.set('filter.station_id', gbfsId)
+  url.searchParams.set('agg', 'mean')
+  url.searchParams.set('bin', String(binS))
+  const res = await fetch(url.toString())
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const data = await res.json() as { rows: AvailabilityOverviewRow[] }
+  return {
+    station_id: gbfsId,
+    from: fromS,
+    to: toS,
+    capacity: capacityHint,
+    last_polled_at: null,
+    rows: totalsRowsToAvailabilityRows(data.rows),
+    binS,
+  }
+}
+
 export function useStationAvailability(
   gbfsId: string | null | undefined,  // canonical UUID — required for /totals
   fromS: number,
@@ -191,33 +223,42 @@ export function useStationAvailability(
 ) {
   const binS = binOverrideS ?? pickAvailBinAuto(toS - fromS, viewportPx)
   return useQuery<StationRangeResponse & { binS: number }>({
-    queryKey: ['station-avail', gbfsId, fromS, toS, `bin${binS}`],
+    queryKey: stationAvailKey(gbfsId ?? '', fromS, toS, binS),
     enabled: !!gbfsId,
-    queryFn: async () => {
-      const url = new URL(`${API_BASE}/api/totals`)
-      url.searchParams.set('kind', 'availability')
-      url.searchParams.set('metric', 'all')
-      url.searchParams.set('scope', 'stations')
-      url.searchParams.set('from', String(fromS))
-      url.searchParams.set('to', String(toS))
-      url.searchParams.set('filter.station_id', gbfsId!)
-      url.searchParams.set('agg', 'mean')
-      url.searchParams.set('bin', String(binS))
-      const res = await fetch(url.toString())
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json() as { rows: AvailabilityOverviewRow[] }
-      return {
-        station_id: gbfsId!,
-        from: fromS,
-        to: toS,
-        capacity: capacityHint,
-        last_polled_at: null,
-        rows: totalsRowsToAvailabilityRows(data.rows),
-        binS,
-      }
+    queryFn: () => stationAvailFn(gbfsId!, fromS, toS, binS, capacityHint),
+    // Keep stale data ONLY when the station_id hasn't changed (i.e. the user
+    // toggled range/bin on the same station). On cross-station nav, drop to
+    // `undefined` so the chart shows a spinner instead of the previous
+    // station's data — which is misleading when the new station has different
+    // capacity / activity profile.
+    placeholderData: (prev, prevQuery) => {
+      if (!prev || !prevQuery) return undefined
+      const prevGbfsId = (prevQuery.queryKey as readonly unknown[])[1]
+      return prevGbfsId === gbfsId ? prev : undefined
     },
-    placeholderData: keepPreviousData,
     refetchInterval: liveRefresh ? 60_000 : false,
+  })
+}
+
+/** Warm the cache for a station-detail navigation. Called from map hover
+ *  handlers. Idempotent — repeat calls within the cache window are no-ops.
+ *  Chains `info` → `avail` so the avail-query keys match the eventual page
+ *  request (`gbfs_station_id` is only known after `/info`). */
+export async function prefetchStationDetail(
+  qc: QueryClient,
+  slugOrShortName: string,
+  fromS: number,
+  toS: number,
+  binS: number,
+): Promise<void> {
+  const info = await qc.fetchQuery({
+    queryKey: stationInfoKey(slugOrShortName),
+    queryFn: () => stationInfoFn(slugOrShortName),
+  })
+  if (!info?.gbfs_station_id) return
+  await qc.prefetchQuery({
+    queryKey: stationAvailKey(info.gbfs_station_id, fromS, toS, binS),
+    queryFn: () => stationAvailFn(info.gbfs_station_id!, fromS, toS, binS, info.capacity ?? null),
   })
 }
 

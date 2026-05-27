@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Box, CircularProgress, Typography } from '@mui/material'
 import css from '../index.module.css'
@@ -16,8 +16,9 @@ import { Checkbox } from '../components/Checkbox'
 import { Checklist } from '../components/Checklist'
 import { Radios } from '../components/Radios'
 import { useStationTrips } from '../hooks/useStationTrips'
+import { useQueryClient } from '@tanstack/react-query'
 import {
-  pickAvailBinAuto,
+  pickAvailBinAuto, prefetchStationDetail,
   useStationInfo, useStationAvailability,
 } from '../query/stations'
 import { useRollupQuery, type Side } from '../query/rollups'
@@ -196,6 +197,18 @@ export default function StationDetail() {
   )
   const data = rangeQuery.data ?? null
   const error = rangeQuery.error ? String(rangeQuery.error) : null
+
+  // Prefetch handler for hovered map circles. Reuses the current page's
+  // (bufFromS, bufToS, binS) so the prefetched cache entries match the next
+  // page's query keys exactly — the click navigates and `useStationAvailability`
+  // there hits the warmed cache for an instant render.
+  const queryClient = useQueryClient()
+  const onMarkerHover = useCallback((id: string) => {
+    const binS = binMs > 0
+      ? Math.floor(binMs / 1000)
+      : pickAvailBinAuto(bufToS - bufFromS, availViewportPx)
+    void prefetchStationDetail(queryClient, id, bufFromS, bufToS, binS)
+  }, [queryClient, bufFromS, bufToS, binMs, availViewportPx])
 
   // Load monthly trip history from the public DVX cache
   const { rows: tripsRows } = useStationTrips(info?.short_name)
@@ -478,23 +491,36 @@ export default function StationDetail() {
         )}
 
         {data && data.rows.length > 0 && (
-          <StationAvailabilityChart
-            rows={data.rows}
-            capacity={info?.capacity ?? null}
-            visibleFromS={fromS}
-            visibleToS={toS}
-            binS={data.binS}
-            onPan={(minS, maxS) => {
-              const duration = roundDuration((maxS - minS) * 1000)
-              const nowS = Date.now() / 1000
-              // Snap to Latest when drag ends within 10 min of now (matches awair UX).
-              const snapToLatest = maxS >= nowS - 10 * 60
-              setRange({
-                timestamp: snapToLatest ? null : new Date(maxS * 1000),
-                duration,
-              })
-            }}
-          />
+          <Box sx={{ position: 'relative' }}>
+            <Box sx={{ opacity: rangeQuery.isFetching ? 0.4 : 1, transition: 'opacity 120ms' }}>
+              <StationAvailabilityChart
+                rows={data.rows}
+                capacity={info?.capacity ?? null}
+                visibleFromS={fromS}
+                visibleToS={toS}
+                binS={data.binS}
+                onPan={(minS, maxS) => {
+                  const duration = roundDuration((maxS - minS) * 1000)
+                  const nowS = Date.now() / 1000
+                  // Snap to Latest when drag ends within 10 min of now (matches awair UX).
+                  const snapToLatest = maxS >= nowS - 10 * 60
+                  setRange({
+                    timestamp: snapToLatest ? null : new Date(maxS * 1000),
+                    duration,
+                  })
+                }}
+              />
+            </Box>
+            {rangeQuery.isFetching && (
+              <Box sx={{
+                position: 'absolute', inset: 0,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                pointerEvents: 'none',
+              }}>
+                <CircularProgress />
+              </Box>
+            )}
+          </Box>
         )}
 
         {data && data.rows.length === 0 && (
@@ -522,6 +548,7 @@ export default function StationDetail() {
               stations={mapStations}
               selectedId={mapShortName}
               setSelectedId={(sid) => { if (sid && sid !== mapShortName) navigate(`/s/${sid}`) }}
+              onMarkerHover={onMarkerHover}
               pairCounts={pairCounts}
               center={mapCenter}
               zoom={15}

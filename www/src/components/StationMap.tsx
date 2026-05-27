@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useTheme } from '../contexts/ThemeContext'
@@ -72,6 +72,7 @@ function StationMarkers({
   setSelectedId,
   pinnedId,
   onPin,
+  onMarkerHover,
   pairCounts,
   colors,
   stationColors,
@@ -82,6 +83,7 @@ function StationMarkers({
   setSelectedId?: (id: string | undefined) => void
   pinnedId?: string
   onPin?: (id: string | undefined) => void
+  onMarkerHover?: (id: string) => void
   pairCounts?: StationPairCounts | null
   colors: TileColors
   stationColors?: Record<string, string> | null
@@ -92,6 +94,25 @@ function StationMarkers({
 
   const selectedStation = selectedId ? stations[selectedId] : undefined
   const mPerPx = useMemo(() => getMetersPerPixel(map), [map, zoom])
+
+  // Hover-prefetch: fire `onMarkerHover(id)` 80 ms after the cursor settles on
+  // a circle, cancelling if the cursor leaves first. Quick mouse-passes don't
+  // trigger requests; deliberate hovers warm the cache for an imminent click.
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => {
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
+  }, [])
+  const scheduleHoverPrefetch = (id: string) => {
+    if (!onMarkerHover) return
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
+    hoverTimerRef.current = setTimeout(() => onMarkerHover(id), 80)
+  }
+  const cancelHoverPrefetch = () => {
+    if (hoverTimerRef.current) {
+      clearTimeout(hoverTimerRef.current)
+      hoverTimerRef.current = null
+    }
+  }
 
   // Suppress the permanent selected-station tooltip while the cursor is over a
   // destination line — otherwise both tooltips pile up at the source station,
@@ -212,6 +233,17 @@ function StationMarkers({
           // Hit-test circle: invisible (fillOpacity 0, weight 0), but with
           // a clickable radius of at least HIT_RADIUS_PX. Carries the
           // eventHandlers + tooltip.
+          const eventHandlers: Record<string, () => void> = {}
+          if (onPin || setSelectedId) {
+            eventHandlers.click = () => (onPin ?? setSelectedId)?.(id)
+          }
+          if (onMarkerHover || (hoverToSelect && setSelectedId)) {
+            eventHandlers.mouseover = () => {
+              if (hoverToSelect && setSelectedId && id !== selectedId) setSelectedId(id)
+              scheduleHoverPrefetch(id)
+            }
+            eventHandlers.mouseout = cancelHoverPrefetch
+          }
           const hit = (
             <Circle
               key={`${id}-hit`}
@@ -220,10 +252,7 @@ function StationMarkers({
               fillOpacity={0}
               weight={0}
               bubblingMouseEvents={false}
-              eventHandlers={(onPin || setSelectedId) ? {
-                click: () => (onPin ?? setSelectedId)?.(id),
-                ...(hoverToSelect && setSelectedId ? { mouseover: () => { if (id !== selectedId) setSelectedId(id) } } : {}),
-              } : undefined}
+              eventHandlers={Object.keys(eventHandlers).length ? eventHandlers : undefined}
             >
               {/* Suppress base-circle tooltips for other stations while a
                   station is pinned — the pinned TT stays put, nothing else
@@ -240,7 +269,7 @@ function StationMarkers({
         })}
       </Pane>
     )
-  }, [stations, selectedId, setSelectedId, onPin, colors, stationColors, hoverToSelect, isPinned, hitRadius])
+  }, [stations, selectedId, setSelectedId, onPin, onMarkerHover, colors, stationColors, hoverToSelect, isPinned, hitRadius])
 
   // Permanent tooltip on the destination station while hovering an edge that
   // ends there. Anchored at the dst's lat/lng with a tiny invisible Circle
@@ -320,6 +349,10 @@ export interface StationMapProps {
    *  expected to toggle / update `pinnedId`. If omitted, clicks
    *  fall back to `setSelectedId`. */
   onPin?: (id: string | undefined) => void
+  /** Fired ~80ms after the cursor settles on a circle. Use to warm
+   *  caches for an imminent click (e.g. prefetch the station-detail
+   *  data the click will navigate to). */
+  onMarkerHover?: (id: string) => void
   pairCounts?: StationPairCounts | null
   stationColors?: Record<string, string> | null
 
@@ -352,6 +385,7 @@ export default function StationMap({
   setSelectedId,
   pinnedId,
   onPin,
+  onMarkerHover,
   pairCounts,
   stationColors,
   center,
@@ -399,6 +433,7 @@ export default function StationMap({
         setSelectedId={setSelectedId}
         pinnedId={pinnedId}
         onPin={onPin}
+        onMarkerHover={onMarkerHover}
         pairCounts={pairCounts}
         colors={colors}
         stationColors={stationColors}
