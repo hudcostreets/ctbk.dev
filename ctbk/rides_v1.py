@@ -103,6 +103,7 @@ TIER_SPECS: dict[str, TierSpec] = {
     '1d':  TierSpec('1d',  86400,   '1y',  '1h'),
     '3d':  TierSpec('3d',  259200,  '1y',  '1d'),
     '7d':  TierSpec('7d',  604800,  '1y',  '1d'),
+    '14d': TierSpec('14d', 1209600, '1y',  '7d'),
     '1mo': TierSpec('1mo', None,    '1y',  '1d'),
     '3mo': TierSpec('3mo', None,    '1y',  '1mo'),
     '1y':  TierSpec('1y',  None,    'all', '1mo'),
