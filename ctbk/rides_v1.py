@@ -97,8 +97,11 @@ class TierSpec:
 
 TIER_SPECS: dict[str, TierSpec] = {
     '1h':  TierSpec('1h',  3600,    '1mo', None),
+    '3h':  TierSpec('3h',  10800,   '1mo', '1h'),
     '6h':  TierSpec('6h',  21600,   '1mo', '1h'),
+    '12h': TierSpec('12h', 43200,   '1mo', '6h'),
     '1d':  TierSpec('1d',  86400,   '1y',  '1h'),
+    '3d':  TierSpec('3d',  259200,  '1y',  '1d'),
     '7d':  TierSpec('7d',  604800,  '1y',  '1d'),
     '1mo': TierSpec('1mo', None,    '1y',  '1d'),
     '3mo': TierSpec('3mo', None,    '1y',  '1mo'),
