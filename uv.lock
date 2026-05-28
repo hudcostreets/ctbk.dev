@@ -694,6 +694,7 @@ dependencies = [
     { name = "plotly" },
     { name = "pyarrow" },
     { name = "pyrmts" },
+    { name = "pyrmts-geo" },
     { name = "python-dateutil" },
     { name = "s3fs" },
     { name = "sqlalchemy" },
@@ -727,6 +728,7 @@ requires-dist = [
     { name = "plotly", specifier = ">=6.1.2" },
     { name = "pyarrow", specifier = "==22.0.0" },
     { name = "pyrmts", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=c8de71f" },
+    { name = "pyrmts-geo", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_geo&rev=c8de71f" },
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
     { name = "s3fs", specifier = ">=2025.5.1" },
     { name = "sqlalchemy", specifier = ">=2.0.41" },
@@ -2695,6 +2697,15 @@ source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%
 dependencies = [
     { name = "pyarrow" },
     { name = "pyyaml" },
+]
+
+[[package]]
+name = "pyrmts-geo"
+version = "0.0.0"
+source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_geo&rev=c8de71f#c8de71fdd8b3bf90bd183cfbe07ba29ffe688677" }
+dependencies = [
+    { name = "h3" },
+    { name = "pyrmts" },
 ]
 
 [[package]]
