@@ -483,6 +483,7 @@ import { getHealthSnapshot } from './health';
 import { runAlerts } from './alerts';
 import { executeAvailViaPyrmts, shadowDelta } from './avail_pyrmts';
 import { serveAvailGeo, serveAvailGeoCells, serveAvailV2, serveAvailV2Cells } from './avail_geo';
+import { serveRidesV1, serveRidesV1Cells } from './rides_v1';
 
 /**
  * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
@@ -1157,6 +1158,26 @@ export default {
 				return await serveAvailV2Cells(env.R2, request, env.CORS_ORIGIN ?? '*');
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'avail-v2/cells error', 500, env);
+			}
+		}
+
+		// /api/rides-v1[/cells] — pyrmts-geo serving of rides pyramids
+		// (`rides-v1/{start,end}/<tier>/<period>.parquet`). Two sibling pyramids
+		// selected via `?anchor=start|end` (default `start`); FE composes
+		// stacked start+end charts via two parallel requests. See
+		// `specs/rides-pyramid-v1.md` + `rides_v1.ts`.
+		if (url.pathname === '/api/rides-v1') {
+			try {
+				return await serveRidesV1(env.R2, request, env.CORS_ORIGIN ?? '*');
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'rides-v1 error', 500, env);
+			}
+		}
+		if (url.pathname === '/api/rides-v1/cells') {
+			try {
+				return await serveRidesV1Cells(env.R2, request, env.CORS_ORIGIN ?? '*');
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'rides-v1/cells error', 500, env);
 			}
 		}
 
