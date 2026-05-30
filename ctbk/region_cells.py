@@ -27,7 +27,7 @@ from utz import err
 
 DEFAULT_INPUT = 's3/ctbk/normalized/202604.parquet'
 DEFAULT_OUTPUT = 'www/public/assets/region-cells.json'
-DEFAULT_RES = 7
+DEFAULT_RES = 9
 
 # Normalized parquet uses 'HB' for Hoboken; the FE / static
 # `ymrgtb_cd.json` use 'HOB'. Mirror the FE convention in the asset.

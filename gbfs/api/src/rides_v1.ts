@@ -243,16 +243,26 @@ async function serveRidesReduced(
 	const rgFilters = parseDimFilters(url);
 
 	// Optional caller-supplied cell list — overrides bbox-derived
-	// `plan.outputCells`. Caller picks `cell_budget` to force the planner
-	// to a resolution that matches their cells (we don't validate). Used
-	// for region stacking: caller provides the h3-covering of each region.
+	// `plan.outputCells`. Used for region stacking: caller provides the
+	// h3-covering of each region. The cells' resolution is inferred from
+	// the hash (`char[1]`), overriding `plan.outputRes` too — otherwise
+	// the planner's bbox-derived `outputRes` could mismatch the cells'
+	// resolution and `filterCellsAndRes` silently drops everything.
 	const cellsRaw = url.searchParams.get('cells');
 	const userCells = cellsRaw
 		? cellsRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
 		: null;
+	if (userCells !== null && userCells.length === 0) {
+		return errorResponse(400, '`cells` param given but empty', cors);
+	}
 
 	const plan = planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox, cellBudget });
 	const outputCells = userCells ?? plan.outputCells;
+	// h3 cell-id hex string: char at index 1 encodes resolution (single hex
+	// digit, max h3 res = 15). When caller passes cells, derive from those.
+	const outputRes = userCells !== null
+		? parseInt(userCells[0]![1]!, 16)
+		: plan.outputRes;
 	const shardRows = await Promise.all(
 		plan.segments.map((seg) => fetchSegmentRows(pyramid.storage, seg.keys, {
 			binCol: pyramid.binCol,
@@ -261,7 +271,7 @@ async function serveRidesReduced(
 		})),
 	);
 	const filtered = shardRows.map((rows) =>
-		filterCellsAndRes(rows, pyramid.geo!.cellCol, plan.outputRes, outputCells),
+		filterCellsAndRes(rows, pyramid.geo!.cellCol, outputRes, outputCells),
 	);
 	const stitched = stitch({ pyramid, plan, shardRows: filtered });
 	const dropCols = dropCellCol ? [pyramid.geo!.cellCol] : [];
@@ -276,7 +286,7 @@ async function serveRidesReduced(
 		plan: {
 			outputTier: plan.outputTier.name,
 			outputBin: plan.outputBin,
-			outputRes: plan.outputRes,
+			outputRes,
 			outputCells,
 			authoritativeEnd: plan.authoritativeEnd?.toISOString() ?? null,
 			segments: plan.segments.map((s) => ({
