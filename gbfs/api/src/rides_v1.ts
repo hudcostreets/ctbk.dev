@@ -89,11 +89,9 @@ function makeBaseProps(bucket: R2Bucket, anchor: Anchor): Omit<Pyramid, 'dims'> 
 		keyTemplate: keyTemplate(anchor),
 		axis: 'time',
 		binCol: 'dt',
-		metrics: METRICS.flatMap((m) => [
-			{ name: `${m}_n`,     monoid: 'sum' as const },
-			{ name: `${m}_sum`,   monoid: 'sum' as const },
-			{ name: `${m}_sumsq`, monoid: 'sum' as const },
-		]),
+		// pyrmts's `sum` monoid stores state as `<name>{_n,_sum,_sumsq}` —
+		// one metric per logical quantity, monoid handles the triplet.
+		metrics: METRICS.map((name) => ({ name, monoid: 'sum' as const })),
 		tiers: TIERS,
 		geo: {
 			cellCol: cellCol(anchor),
