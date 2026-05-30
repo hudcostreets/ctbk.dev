@@ -138,9 +138,21 @@ function applyReducer(n: number, sum: number, sumsq: number, r: Reducer): number
 
 /** Collapse each metric's `{n, sum, sumsq}` triplet to a single scalar per
  *  the requested reducer. Non-metric columns pass through unchanged. `raw`
- *  returns rows untouched. */
-export function reduceRows(rows: Row[], reducer: Reducer): Row[] {
-	if (reducer === 'raw') return rows;
+ *  returns rows untouched.
+ *
+ *  `dropCols` strips the named columns from each output row — used by the
+ *  rollup handler to scrub the `{anchor}_h3_cell` value that pyrmts leaves
+ *  on stitched rows (it's a stale label from one of the summed source rows
+ *  — the rollup endpoint logically has no cell). */
+export function reduceRows(rows: Row[], reducer: Reducer, dropCols: string[] = []): Row[] {
+	if (reducer === 'raw') {
+		if (!dropCols.length) return rows;
+		return rows.map((row) => {
+			const out: Row = { ...row };
+			for (const c of dropCols) delete out[c];
+			return out;
+		});
+	}
 	return rows.map((row) => {
 		const out: Row = {};
 		for (const k in row) {
@@ -155,6 +167,7 @@ export function reduceRows(rows: Row[], reducer: Reducer): Row[] {
 			delete out[`${m}_sum`];
 			delete out[`${m}_sumsq`];
 		}
+		for (const c of dropCols) delete out[c];
 		return out;
 	});
 }
@@ -206,6 +219,7 @@ async function serveRidesReduced(
 	pyramid: Pyramid,
 	request: Request,
 	cors: string | null,
+	dropCellCol: boolean,
 ): Promise<Response> {
 	const url = new URL(request.url);
 	const from = parseInstant(url.searchParams.get('from'));
@@ -228,7 +242,17 @@ async function serveRidesReduced(
 
 	const rgFilters = parseDimFilters(url);
 
+	// Optional caller-supplied cell list — overrides bbox-derived
+	// `plan.outputCells`. Caller picks `cell_budget` to force the planner
+	// to a resolution that matches their cells (we don't validate). Used
+	// for region stacking: caller provides the h3-covering of each region.
+	const cellsRaw = url.searchParams.get('cells');
+	const userCells = cellsRaw
+		? cellsRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+		: null;
+
 	const plan = planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox, cellBudget });
+	const outputCells = userCells ?? plan.outputCells;
 	const shardRows = await Promise.all(
 		plan.segments.map((seg) => fetchSegmentRows(pyramid.storage, seg.keys, {
 			binCol: pyramid.binCol,
@@ -237,10 +261,11 @@ async function serveRidesReduced(
 		})),
 	);
 	const filtered = shardRows.map((rows) =>
-		filterCellsAndRes(rows, pyramid.geo!.cellCol, plan.outputRes, plan.outputCells),
+		filterCellsAndRes(rows, pyramid.geo!.cellCol, plan.outputRes, outputCells),
 	);
 	const stitched = stitch({ pyramid, plan, shardRows: filtered });
-	const reduced = reduceRows(stitched, reducer);
+	const dropCols = dropCellCol ? [pyramid.geo!.cellCol] : [];
+	const reduced = reduceRows(stitched, reducer, dropCols);
 
 	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 	if (cors) headers['Access-Control-Allow-Origin'] = cors;
@@ -252,7 +277,7 @@ async function serveRidesReduced(
 			outputTier: plan.outputTier.name,
 			outputBin: plan.outputBin,
 			outputRes: plan.outputRes,
-			outputCells: plan.outputCells,
+			outputCells,
 			authoritativeEnd: plan.authoritativeEnd?.toISOString() ?? null,
 			segments: plan.segments.map((s) => ({
 				tier: s.shardTier.name,
@@ -273,12 +298,14 @@ function parseAnchor(url: URL, cors: string | null): Anchor | Response {
 	return raw as Anchor;
 }
 
-/** HTTP handler for `/api/rides-v1` — bbox rollup, one row per (dt, dims). */
+/** HTTP handler for `/api/rides-v1` — bbox rollup, one row per (dt, dims).
+ *  Strips the `{anchor}_h3_cell` column from response rows (rollup has no
+ *  meaningful cell value). */
 export async function serveRidesV1(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
 	const cors = corsOrigin || null;
 	const anchor = parseAnchor(new URL(request.url), cors);
 	if (anchor instanceof Response) return anchor;
-	return serveRidesReduced(ridesPyramid(bucket, anchor), request, cors);
+	return serveRidesReduced(ridesPyramid(bucket, anchor), request, cors, true);
 }
 
 /** HTTP handler for `/api/rides-v1/cells` — per-cell breakdown preserved. */
@@ -286,5 +313,5 @@ export async function serveRidesV1Cells(bucket: R2Bucket, request: Request, cors
 	const cors = corsOrigin || null;
 	const anchor = parseAnchor(new URL(request.url), cors);
 	if (anchor instanceof Response) return anchor;
-	return serveRidesReduced(ridesCellsPyramid(bucket, anchor), request, cors);
+	return serveRidesReduced(ridesCellsPyramid(bucket, anchor), request, cors, false);
 }

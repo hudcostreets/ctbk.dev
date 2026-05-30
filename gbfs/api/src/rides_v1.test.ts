@@ -89,4 +89,31 @@ describe('reduceRows', () => {
 		const rows = [baseRow({ count: [5, 5, 5], duration: [5, 1500, 500_000] })];
 		expect(reduceRows(rows, 'raw')).toEqual(rows);
 	});
+
+	it('dropCols (sum): strips named columns from output (used to scrub `start_h3_cell` from rollup rows)', () => {
+		const rows = [baseRow({ count: [10, 10, 10], duration: [10, 6000, 4_800_000] })];
+		expect(reduceRows(rows, 'sum', ['start_h3_cell'])).toEqual([{
+			dt: 1779404400_000,
+			gender: 'unknown',
+			user_type: 'Subscriber',
+			bike_type: 'classic_bike',
+			count: 10,
+			duration: 6000,
+		}]);
+	});
+
+	it('dropCols (raw): scrubs without collapsing metric triplets', () => {
+		const rows = [baseRow({ count: [3, 3, 3], duration: [3, 600, 140000] })];
+		const out = reduceRows(rows, 'raw', ['start_h3_cell']);
+		expect(out).toEqual([{
+			dt: 1779404400_000,
+			gender: 'unknown',
+			user_type: 'Subscriber',
+			bike_type: 'classic_bike',
+			count_n: 3, count_sum: 3, count_sumsq: 3,
+			duration_n: 3, duration_sum: 600, duration_sumsq: 140000,
+		}]);
+		// Source array untouched — defensive copy semantics.
+		expect(rows[0]!.start_h3_cell).toBe('892a1072117ffff');
+	});
 });
