@@ -11,12 +11,15 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
         with:
-          python-version: '3.11'
-          cache: pip
-      - run: pip install -e .
+          python-version: '3.12'
+          enable-cache: true
+      - name: Sync deps + activate venv
+        run: |
+          uv sync --frozen
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Set Git author info
         run: |
           git config --global user.name 'GitHub Actions'
@@ -76,7 +79,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CI_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/ci.yml
         run: |
-          pip install --quiet 'thrds==0.3.0'
+          uv pip install --quiet 'thrds==0.3.0'
           python - <<'PY'
           import os
           from thrds import SlackClient, Thread
