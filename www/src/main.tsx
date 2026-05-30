@@ -15,6 +15,7 @@ import { HomeButton, ThemeTileToggle } from "./components/TileStyleButton"
 import { useScrollToHash } from "./hooks/useScrollToHash"
 import { useGlobalStationsOmnibar } from "./hooks/useGlobalStationsOmnibar"
 import Home from "./pages/Home"
+const HomeV2 = lazy(() => import("./pages/HomeV2"))
 import { Box } from "@mui/material"
 import { Footer } from "./components/Footer"
 
@@ -48,6 +49,7 @@ function AppContent() {
       <Suspense fallback={null}>
         <Routes>
           <Route path="/" element={<Home />} />
+          <Route path="/v2" element={<HomeV2 />} />
           <Route path="/stations" element={<Stations />} />
           <Route path="/s/:id" element={<StationDetail />} />
           {/* Back-compat: redirect old /stations/:id form to /s/:id */}
