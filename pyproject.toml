@@ -25,18 +25,14 @@ dependencies = [
     "plotly>=6.1.2",
     # Pinned for byte-reproducible parquet output
     "pyarrow==22.0.0",
-    "pyrmts",
-    "pyrmts_geo",
+    "pyrmts @ git+https://github.com/runsascoded/pyrmts.git@c8de71f#subdirectory=python/pyrmts",
+    "pyrmts_geo @ git+https://github.com/runsascoded/pyrmts.git@c8de71f#subdirectory=python/pyrmts_geo",
     "python-dateutil>=2.9.0.post0",
     "s3fs>=2025.5.1",
     "SQLAlchemy>=2.0.41",
     "utz>=0.20.0",
     "dvx==0.5.0",
 ]
-
-[tool.uv.sources]
-pyrmts = { git = "https://github.com/runsascoded/pyrmts.git", rev = "c8de71f", subdirectory = "python/pyrmts" }
-pyrmts_geo = { git = "https://github.com/runsascoded/pyrmts.git", rev = "c8de71f", subdirectory = "python/pyrmts_geo" }
 
 [project.scripts]
 ctbk = "ctbk.cli.main:main"
@@ -48,6 +44,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.version]
 source = "vcs"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["ctbk"]
