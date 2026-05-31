@@ -45,9 +45,15 @@ from utz.ym import YM
 from ctbk.cli.base import ctbk
 
 R2_BUCKET = 'ctbk'
-DST_PREFIX = 'rides-v1'
 SRC_DIR = Path(f's3/{R2_BUCKET}/normalized')
 STATION_OBS_PATH = Path(f's3/{R2_BUCKET}/stations/station-observations.parquet')
+
+Variant = Literal['v1', 'v2']
+VARIANTS: tuple[Variant, ...] = ('v1', 'v2')
+
+
+def dst_prefix(variant: Variant) -> str:
+    return f'rides-{variant}'
 
 DEFAULT_RESOLUTIONS: tuple[int, ...] = (9, 7, 5)
 
@@ -91,11 +97,11 @@ MONOID_COLS = [f'{m}_{s}' for m in METRIC_NAMES for s in ('n', 'sum', 'sumsq')]
 class TierSpec:
     name: str
     bin_sec: int | None        # None for calendar tiers (1mo, 3mo, 1y)
-    shard: str                 # '1mo' | '1y' | 'all'
+    shard: str                 # '1mo' | '3mo' | '6mo' | '1y' | 'all'
     derive_from: str | None    # None ⇒ built from normalized source
 
 
-TIER_SPECS: dict[str, TierSpec] = {
+V1_TIER_SPECS: dict[str, TierSpec] = {
     '1h':  TierSpec('1h',  3600,    '1mo', None),
     '3h':  TierSpec('3h',  10800,   '1mo', '1h'),
     '6h':  TierSpec('6h',  21600,   '1mo', '1h'),
@@ -109,9 +115,57 @@ TIER_SPECS: dict[str, TierSpec] = {
     '1y':  TierSpec('1y',  None,    'all', '1mo'),
 }
 
+V2_TIER_SPECS: dict[str, TierSpec] = {
+    '1h':  TierSpec('1h',  3600,    '1mo', None),
+    '3h':  TierSpec('3h',  10800,   '3mo', '1h'),
+    '6h':  TierSpec('6h',  21600,   '6mo', '1h'),
+    '12h': TierSpec('12h', 43200,   '1y',  '6h'),
+    '1d':  TierSpec('1d',  86400,   'all', '1h'),
+    '3d':  TierSpec('3d',  259200,  'all', '1d'),
+    '7d':  TierSpec('7d',  604800,  'all', '1d'),
+    '14d': TierSpec('14d', 1209600, 'all', '7d'),
+    '1mo': TierSpec('1mo', None,    'all', '1d'),
+    '3mo': TierSpec('3mo', None,    'all', '1mo'),
+    '1y':  TierSpec('1y',  None,    'all', '1mo'),
+}
+
+TIER_SPECS_BY_VARIANT: dict[Variant, dict[str, TierSpec]] = {
+    'v1': V1_TIER_SPECS,
+    'v2': V2_TIER_SPECS,
+}
+
+
+def tier_specs(variant: Variant) -> dict[str, TierSpec]:
+    return TIER_SPECS_BY_VARIANT[variant]
+
+
+def sort_cols(variant: Variant, cell_col: str) -> list[str]:
+    """v1: (dt, cell) — time-window queries prune via `dt` RG stats.
+    v2: (cell, dt) — cell-filter queries prune via cell RG stats.
+    """
+    if variant == 'v1':
+        return ['dt', cell_col]
+    if variant == 'v2':
+        return [cell_col, 'dt']
+    raise ValueError(f"unknown variant: {variant!r}")
+
+
+def _add_months(t: datetime, n: int) -> datetime:
+    m_idx = (t.month - 1) + n
+    y = t.year + m_idx // 12
+    m = m_idx % 12 + 1
+    return t.replace(year=y, month=m)
+
 
 def shard_period(shard: str, t: datetime) -> str:
+    """Encode a shard-start `t` as a filename-safe period string.
+
+    v2 adds quarter (3mo) and half-year (6mo) shards. Quarters are
+    encoded as `YYYY-QN` (N ∈ 1..4); half-years as `YYYY-HN` (N ∈ 1..2).
+    """
     if shard == '1mo': return t.strftime('%Y-%m')
+    if shard == '3mo': return f'{t.year}-Q{(t.month - 1) // 3 + 1}'
+    if shard == '6mo': return f'{t.year}-H{(t.month - 1) // 6 + 1}'
     if shard == '1y':  return t.strftime('%Y')
     if shard == 'all': return 'all'
     raise ValueError(f"unknown shard granularity: {shard!r}")
@@ -119,8 +173,11 @@ def shard_period(shard: str, t: datetime) -> str:
 
 def shard_end(shard: str, t: datetime) -> datetime:
     if shard == '1mo':
-        y, m = (t.year + (1 if t.month == 12 else 0), 1 if t.month == 12 else t.month + 1)
-        return t.replace(year=y, month=m)
+        return _add_months(t, 1)
+    if shard == '3mo':
+        return _add_months(t, 3)
+    if shard == '6mo':
+        return _add_months(t, 6)
     if shard == '1y':
         return t.replace(year=t.year + 1)
     if shard == 'all':
@@ -129,18 +186,33 @@ def shard_end(shard: str, t: datetime) -> datetime:
 
 
 def shard_starts_in_range(shard: str, lo: datetime, hi: datetime) -> list[datetime]:
-    """Enumerate UTC shard-start times in `[lo, hi)` for granularity `shard`."""
+    """Enumerate UTC shard-start times in `[lo, hi)` for granularity `shard`.
+
+    `3mo` shards start on Jan/Apr/Jul/Oct; `6mo` shards on Jan/Jul.
+    """
     if lo >= hi:
         return []
     out: list[datetime] = []
+    base = lo.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     if shard == '1mo':
-        cur = lo.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        cur = base
         while cur < hi:
             out.append(cur)
-            y, m = (cur.year + (1 if cur.month == 12 else 0), 1 if cur.month == 12 else cur.month + 1)
-            cur = cur.replace(year=y, month=m)
+            cur = _add_months(cur, 1)
+    elif shard == '3mo':
+        q_month = ((base.month - 1) // 3) * 3 + 1
+        cur = base.replace(month=q_month)
+        while cur < hi:
+            out.append(cur)
+            cur = _add_months(cur, 3)
+    elif shard == '6mo':
+        h_month = ((base.month - 1) // 6) * 6 + 1
+        cur = base.replace(month=h_month)
+        while cur < hi:
+            out.append(cur)
+            cur = _add_months(cur, 6)
     elif shard == '1y':
-        cur = lo.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        cur = base.replace(month=1)
         while cur < hi:
             out.append(cur)
             cur = cur.replace(year=cur.year + 1)
@@ -200,8 +272,8 @@ def r2_head(cli, key: str) -> dict | None:
         raise
 
 
-def output_key(anchor: Anchor, tier: str, period: str) -> str:
-    return f'{DST_PREFIX}/{anchor}/{tier}/{period}.parquet'
+def output_key(anchor: Anchor, tier: str, period: str, variant: Variant = 'v1') -> str:
+    return f'{dst_prefix(variant)}/{anchor}/{tier}/{period}.parquet'
 
 
 # ─── Station-id → lat/lng fallback ─────────────────────────────────────
@@ -372,11 +444,11 @@ def build_1h_month_table(
     return pa.Table.from_pandas(agg[out_cols], schema=schema, preserve_index=False)
 
 
-def write_table_to_r2(cli, table: pa.Table, key: str, cell_col: str) -> int:
-    """Serialize via `pyrmts.write_tier_parquet` (sorts by `(dt, cell)` +
-    picks RG size for hyparquet RG-pruning) and PUT to R2."""
+def write_table_to_r2(cli, table: pa.Table, key: str, cell_col: str, variant: Variant = 'v1') -> int:
+    """Serialize via `pyrmts.write_tier_parquet` (sort per `sort_cols(variant)` +
+    pick RG size for hyparquet RG-pruning) and PUT to R2."""
     buf = io.BytesIO()
-    write_tier_parquet(table, out=buf, sort=['dt', cell_col])
+    write_tier_parquet(table, out=buf, sort=sort_cols(variant, cell_col))
     body = buf.getvalue()
     cli.put_object(
         Bucket=R2_BUCKET,
@@ -387,10 +459,10 @@ def write_table_to_r2(cli, table: pa.Table, key: str, cell_col: str) -> int:
     return len(body)
 
 
-def write_table_to_local(table: pa.Table, path: Path, cell_col: str) -> int:
+def write_table_to_local(table: pa.Table, path: Path, cell_col: str, variant: Variant = 'v1') -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     buf = io.BytesIO()
-    write_tier_parquet(table, out=buf, sort=['dt', cell_col])
+    write_tier_parquet(table, out=buf, sort=sort_cols(variant, cell_col))
     body = buf.getvalue()
     path.write_bytes(body)
     return len(body)
@@ -404,9 +476,10 @@ def read_shard(
     period: str,
     local_dir: str | None,
     cli=None,
+    variant: Variant = 'v1',
 ) -> pa.Table | None:
-    """Fetch one rides-v1/<anchor>/<tier>/<period>.parquet. None on 404."""
-    key = output_key(anchor, tier, period)
+    """Fetch one rides-<variant>/<anchor>/<tier>/<period>.parquet. None on 404."""
+    key = output_key(anchor, tier, period, variant)
     if local_dir:
         p = Path(local_dir) / key
         if not p.exists():
@@ -428,10 +501,12 @@ def input_periods_for_output(
     output_start: datetime,
     input_tier: str,
     all_dates: tuple[Date, Date] | None,
+    variant: Variant = 'v1',
 ) -> list[str]:
     """Enumerate input-shard `period` strings overlapping one output shard window."""
-    out_spec = TIER_SPECS[output_tier]
-    in_spec = TIER_SPECS[input_tier]
+    specs = tier_specs(variant)
+    out_spec = specs[output_tier]
+    in_spec = specs[input_tier]
     if out_spec.shard == 'all':
         if all_dates is None:
             raise ValueError("output shard='all' requires all_dates=(from, to)")
@@ -450,26 +525,28 @@ def build_cascade_table(
     shard_start: datetime,
     local_dir: str | None,
     all_dates: tuple[Date, Date] | None = None,
+    variant: Variant = 'v1',
 ) -> pa.Table | None:
-    """Cascade one rides-v1/<anchor>/<tier>/<period>.parquet shard.
+    """Cascade one rides-<variant>/<anchor>/<tier>/<period>.parquet shard.
 
     Reads all input shards (at derive_from tier's shard granularity) that
     overlap the output window, re-buckets `dt` to the output tier's bin,
     sums the 6 monoid columns per (cell, dt_out, *dims). Returns None if
     no input shards present.
     """
-    spec = TIER_SPECS[tier]
+    specs = tier_specs(variant)
+    spec = specs[tier]
     if spec.derive_from is None:
         raise ValueError(f"tier {tier!r} has no derive_from")
     cfg = ANCHOR_CONFIG[anchor]
     cell_col = cfg['cell_col']
-    in_periods = input_periods_for_output(tier, shard_start, spec.derive_from, all_dates)
+    in_periods = input_periods_for_output(tier, shard_start, spec.derive_from, all_dates, variant)
 
     cli = None if local_dir else r2_client()
     frames: list[pd.DataFrame] = []
     n_present = 0
     for p in in_periods:
-        tab = read_shard(anchor, spec.derive_from, p, local_dir, cli)
+        tab = read_shard(anchor, spec.derive_from, p, local_dir, cli, variant)
         if tab is None:
             continue
         n_present += 1
@@ -517,26 +594,27 @@ def _build_shard_task(
     resolutions: tuple[int, ...],
     local_dir: str | None,
     all_dates_iso: tuple[str, str] | None,
+    variant: Variant = 'v1',
 ) -> tuple[str, Anchor, str, int]:
-    """Build + write one rides-v1/<anchor>/<tier>/<period>.parquet shard.
+    """Build + write one rides-<variant>/<anchor>/<tier>/<period>.parquet shard.
 
-    Dispatches on `TIER_SPECS[tier].derive_from`:
+    Dispatches on `tier_specs(variant)[tier].derive_from`:
       - None → build from normalized source (1h tier only)
       - else → cascade from derive_from tier
     Returns (period, anchor, status, bytes). status ∈ {wrote, skip, empty}."""
-    spec = TIER_SPECS[tier]
+    spec = tier_specs(variant)[tier]
     t = datetime.fromisoformat(shard_start_iso)
     period = shard_period(spec.shard, t)
     cfg = ANCHOR_CONFIG[anchor]
 
     if local_dir:
-        out_path = Path(local_dir) / output_key(anchor, tier, period)
+        out_path = Path(local_dir) / output_key(anchor, tier, period, variant)
         if not overwrite and out_path.exists():
             return (period, anchor, 'skip', 0)
         cli = None
     else:
         cli = r2_client()
-        key = output_key(anchor, tier, period)
+        key = output_key(anchor, tier, period, variant)
         if not overwrite and r2_head(cli, key) is not None:
             return (period, anchor, 'skip', 0)
 
@@ -550,15 +628,15 @@ def _build_shard_task(
             (Date.fromisoformat(all_dates_iso[0]), Date.fromisoformat(all_dates_iso[1]))
             if all_dates_iso else None
         )
-        table = build_cascade_table(anchor, tier, t, local_dir, ad)
+        table = build_cascade_table(anchor, tier, t, local_dir, ad, variant)
 
     if table is None:
         return (period, anchor, 'empty', 0)
 
     if local_dir:
-        n = write_table_to_local(table, out_path, cfg['cell_col'])
+        n = write_table_to_local(table, out_path, cfg['cell_col'], variant)
     else:
-        n = write_table_to_r2(cli, table, output_key(anchor, tier, period), cfg['cell_col'])
+        n = write_table_to_r2(cli, table, output_key(anchor, tier, period, variant), cfg['cell_col'], variant)
     return (period, anchor, 'wrote', n)
 
 
@@ -585,7 +663,7 @@ def _ym_range(date_from: str, date_to: str) -> list[YM]:
     return out
 
 
-@ctbk.command('rides-v1-build', help="Build rides-v1/<anchor>/<tier>/<period>.parquet shards.")
+@ctbk.command('rides-v1-build', help="Build rides-<variant>/<anchor>/<tier>/<period>.parquet shards.")
 @option('-a', '--anchor', type=str, default='both',
         help="'start' | 'end' | 'both' (default 'both').")
 @option('-c', '--concurrency', type=int, default=4, help="Worker process count.")
@@ -597,8 +675,10 @@ def _ym_range(date_from: str, date_to: str) -> list[YM]:
 @option('-r', '--resolution', 'resolutions', multiple=True, type=int, default=DEFAULT_RESOLUTIONS,
         help="h3 resolutions to materialize (1h only; default 9 7 5).")
 @option('-t', '--tier', type=str, default='1h',
-        help=f"Tier name; one of {list(TIER_SPECS)}.")
+        help="Tier name (depends on --variant; v1+v2 share the same tier names).")
 @option('-T', '--ym-to', 'ym_to', required=True, help="Inclusive end (YYYY-MM).")
+@option('-v', '--variant', type=str, default='v1',
+        help=f"Pyramid variant; one of {list(VARIANTS)} (default 'v1').")
 def rides_v1_build_cmd(
     anchor: str,
     concurrency: int,
@@ -609,14 +689,18 @@ def rides_v1_build_cmd(
     resolutions: tuple[int, ...],
     tier: str,
     ym_to: str,
+    variant: str,
 ):
-    if tier not in TIER_SPECS:
-        raise BadParameter(f"unknown --tier {tier!r}; known: {list(TIER_SPECS)}")
+    if variant not in VARIANTS:
+        raise BadParameter(f"unknown --variant {variant!r}; known: {list(VARIANTS)}")
+    specs = tier_specs(variant)  # type: ignore[arg-type]
+    if tier not in specs:
+        raise BadParameter(f"unknown --tier {tier!r}; known ({variant}): {list(specs)}")
     if anchor not in ('start', 'end', 'both'):
         raise BadParameter(f"--anchor must be one of start/end/both; got {anchor!r}")
     anchors: tuple[Anchor, ...] = ANCHORS if anchor == 'both' else (anchor,)  # type: ignore[assignment]
 
-    spec = TIER_SPECS[tier]
+    spec = specs[tier]
     ymf = _parse_ym(ym_from)
     ymt = _parse_ym(ym_to)
     yf, mf = int(str(ymf)[:4]), int(str(ymf)[4:6])
@@ -633,7 +717,7 @@ def rides_v1_build_cmd(
     if spec.shard == 'all':
         all_dates_iso = (lo.date().isoformat(), hi.date().isoformat())
 
-    err(f"rides-v1-build tier={tier} shard={spec.shard} anchors={anchors} "
+    err(f"rides-{variant}-build tier={tier} shard={spec.shard} anchors={anchors} "
         f"{len(starts)} shards in [{ym_from}, {ym_to}] (inclusive)")
 
     res_tup = tuple(resolutions)
@@ -643,14 +727,14 @@ def rides_v1_build_cmd(
         for s_iso, a in tasks:
             t = datetime.fromisoformat(s_iso)
             period = shard_period(spec.shard, t)
-            print(f"  BUILD {output_key(a, tier, period)}")
+            print(f"  BUILD {output_key(a, tier, period, variant)}")  # type: ignore[arg-type]
         return
 
     n_wrote = n_skip = n_empty = bytes_total = 0
     if concurrency <= 1:
         for s_iso, a in tasks:
             period, _a, status, n = _build_shard_task(
-                tier, s_iso, a, overwrite, res_tup, local_dir, all_dates_iso,
+                tier, s_iso, a, overwrite, res_tup, local_dir, all_dates_iso, variant,  # type: ignore[arg-type]
             )
             err(f"  {status:5s} {a:5s} {period} ({n:,} B)")
             n_wrote += (status == 'wrote'); n_skip += (status == 'skip'); n_empty += (status == 'empty')
@@ -659,7 +743,7 @@ def rides_v1_build_cmd(
         with ProcessPoolExecutor(max_workers=concurrency) as pool:
             futs = {
                 pool.submit(
-                    _build_shard_task, tier, s_iso, a, overwrite, res_tup, local_dir, all_dates_iso,
+                    _build_shard_task, tier, s_iso, a, overwrite, res_tup, local_dir, all_dates_iso, variant,  # type: ignore[arg-type]
                 ): (s_iso, a)
                 for s_iso, a in tasks
             }
