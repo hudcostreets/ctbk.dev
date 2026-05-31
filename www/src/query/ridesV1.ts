@@ -1,12 +1,19 @@
 /**
  * TSQ hook for `/api/rides-v1` — pyrmts-geo rides pyramid.
  *
- * Phase 1a: system-wide bbox, sum reducer, no region split. Returns rows
- * pre-shaped as `ProcessedRow[]` so `buildTraces` consumes them directly.
+ * Two modes:
+ * - `regions` omitted → one system-wide query (bbox = NYC+JC+HOB+buffer).
+ *   Every output row gets `Region: 'NYC'` as a stub (region-stack-by /
+ *   region-filter are no-ops). For "I just want totals" use cases.
+ * - `regions: ['NYC', 'JC', 'HOB']` (or any subset) → N parallel queries,
+ *   each with `cells=<region's h3 r9 covering>` so the pyramid sums only
+ *   that region's cells. Output rows carry the matching `Region`, so
+ *   downstream `buildTraces` can stack/filter by region naturally.
  */
 import { keepPreviousData, useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { stationsApi } from './stations'
 import type { ProcessedRow } from '../chart/ymrgtb-traces'
+import type { Region } from '../data'
 
 /** bbox covering NYC + JC + HOB + a generous buffer. */
 export const SYSTEM_BBOX = '40.5,-74.2,41.0,-73.7' as const
@@ -23,7 +30,6 @@ interface RidesV1Row {
   bike_type: string      // 'classic_bike' | 'electric_bike' | 'docked_bike'
   count: number
   duration: number       // seconds
-  // start_h3_cell / end_h3_cell may linger on rollup rows; ignored.
   [k: string]: number | string | undefined
 }
 
@@ -39,6 +45,8 @@ interface RidesV1Response {
   }
 }
 
+type RegionCells = Record<Region, string[]>
+
 /** Citi Bike's `user_type` → ctbk's `User Type`. */
 const USER_TYPE_MAP: Record<string, 'Annual' | 'Daily'> = {
   Subscriber: 'Annual',
@@ -52,6 +60,21 @@ const GENDER_MAP: Record<string, number> = {
   female: 2,
 }
 
+const REGION_CELLS_URL = '/assets/region-cells.json'
+
+/** TSQ-cached fetch of the static region → h3-r9-cells lookup. */
+function useRegionCells(): UseQueryResult<RegionCells> {
+  return useQuery<RegionCells>({
+    queryKey: ['region-cells'],
+    staleTime: Infinity,        // immutable static asset
+    queryFn: async () => {
+      const res = await fetch(REGION_CELLS_URL)
+      if (!res.ok) throw new Error(`region-cells: HTTP ${res.status}`)
+      return res.json()
+    },
+  })
+}
+
 interface UseRidesV1Args {
   /** Inclusive start; defaults to data start (2013-06). */
   from?: Date
@@ -59,39 +82,59 @@ interface UseRidesV1Args {
    *  is included. */
   to?: Date
   anchor?: Anchor
+  /** If provided, fan out one query per region (each filtered to that
+   *  region's h3 cells). Output rows tagged with `Region`. If omitted,
+   *  a single system-wide query runs and every row is tagged `'NYC'`. */
+  regions?: readonly Region[]
 }
 
 export function useRidesV1({
   from,
   to,
   anchor = 'start',
+  regions,
 }: UseRidesV1Args = {}): UseQueryResult<ProcessedRow[]> {
   const fromIso = (from ?? new Date(DATA_START_ISO)).toISOString()
-  // `to` exclusive — default to first-of-next-month from "now" so the
-  // partial current month lands in the response.
   const toIso = (to ?? defaultTo()).toISOString()
+  const regionCells = useRegionCells()
 
+  // Block until region-cells loads when regions are requested.
+  const cellsByRegion = regionCells.data
+  const enabled = !regions || !!cellsByRegion
+
+  // One TSQ query, sequenced across regions internally — issuing the 3
+  // region calls in parallel causes the CFW worker to 503 on cold
+  // (multiple POPs spinning up isolates + 14×3 R2 fans-out). Serial:
+  // first call cold-starts the worker, next two hit warm isolate or
+  // edge cache. Total wall time ~= sum of regions (≈3-5s cold; warm
+  // <100ms via edge cache).
   return useQuery<ProcessedRow[]>({
-    queryKey: ['rides-v1', anchor, fromIso, toIso],
+    queryKey: ['rides-v1', anchor, fromIso, toIso, regions?.join(',') ?? '__system__'],
+    enabled,
     placeholderData: keepPreviousData,
     queryFn: async () => {
-      const url = new URL(`${stationsApi.API_BASE}/api/rides-v1`)
-      const sp = url.searchParams
-      sp.set('anchor', anchor)
-      sp.set('from', fromIso)
-      sp.set('to', toIso)
-      sp.set('bbox', SYSTEM_BBOX)
-      sp.set('reducer', 'sum')
-      // Force coarsest cell res — system-wide rollup, cells get summed.
-      sp.set('cell_budget', '16')
-      // Tight bin_budget keeps the planner at the `1mo` tier across the full
-      // 12-year history. Default (1024) lets it pick `7d` which 503s on
-      // post-2020 dense shards (CFW CPU budget).
-      sp.set('bin_budget', '200')
-      const res = await fetch(url.toString())
-      if (!res.ok) throw new Error(`/api/rides-v1: HTTP ${res.status}`)
-      const body = (await res.json()) as RidesV1Response
-      return body.records.map(apiRowToProcessed)
+      const specs = !regions
+        ? [{ region: null as Region | null, cells: null as string[] | null }]
+        : regions.map((r) => ({ region: r, cells: cellsByRegion![r] }))
+      const out: ProcessedRow[] = []
+      for (const { region, cells } of specs) {
+        const url = new URL(`${stationsApi.API_BASE}/api/rides-v1`)
+        const sp = url.searchParams
+        sp.set('anchor', anchor)
+        sp.set('from', fromIso)
+        sp.set('to', toIso)
+        sp.set('bbox', SYSTEM_BBOX)
+        sp.set('reducer', 'sum')
+        sp.set('bin_budget', '200')
+        sp.set('cell_budget', '16')
+        if (cells) sp.set('cells', cells.join(','))
+        const res = await fetch(url.toString())
+        if (!res.ok) throw new Error(`/api/rides-v1: HTTP ${res.status}`)
+        const body = (await res.json()) as RidesV1Response
+        const regionTag: Region = region ?? 'NYC'
+        for (const row of body.records) out.push(apiRowToProcessed(row, regionTag))
+      }
+      return out
     },
   })
 }
@@ -101,11 +144,7 @@ function defaultTo(): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1))
 }
 
-/** API row → `ProcessedRow` (same shape `buildTraces` expects from the
- *  static `ymrgtb_cd.json` path). Region is stubbed to `'NYC'` for phase
- *  1a — the picker/stack-by is hidden on `/v2`; phase 1b wires per-region
- *  queries. */
-function apiRowToProcessed(row: RidesV1Row): ProcessedRow {
+function apiRowToProcessed(row: RidesV1Row, region: Region): ProcessedRow {
   const d = new Date(row.dt)
   const year = d.getUTCFullYear()
   const month = d.getUTCMonth() + 1
@@ -118,7 +157,7 @@ function apiRowToProcessed(row: RidesV1Row): ProcessedRow {
     Month: month,
     Count: row.count,
     Duration: row.duration,
-    Region: 'NYC',
+    Region: region,
     'User Type': userType,
     Gender: genderInt,
     'Rideable Type': rideableRaw,

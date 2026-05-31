@@ -1,15 +1,14 @@
 /**
- * Phase 1a parity preview: same chart as Home, but powered by
+ * Phase 1a + 1b parity preview: same chart as Home, but powered by
  * `/api/rides-v1` (pyrmts-geo) instead of the static `ymrgtb_cd.json`.
  *
- * Region picker + Region stack-by are hidden — phase 1b adds the
- * h3-covering filter per region. Until then `/v2` queries the
- * system-wide bbox and reports totals across all 3 regions.
+ * Phase 1b adds Region picker + Region stacking, implemented as N
+ * parallel `/api/rides-v1` calls — one per selected region — each
+ * passing that region's r9 h3-cell covering as `cells=`. Output rows
+ * carry their region tag so `buildTraces` filters/stacks naturally.
  *
- * Validates: temporal binning, dim aggregation (User Type / Gender /
- * Bike Type), and that pyrmts numerics match the static-JSON ground
- * truth. Once parity is comfortable, phase 1c cuts `/` over and
- * deletes this file.
+ * Once parity is comfortable, phase 1c cuts `/` over to this page
+ * (rename + delete static `ymrgtb_cd.json` build step).
  */
 import { Alert } from "@mui/material"
 import { useUrlState, boolParam, numberArrayParam } from 'use-prms'
@@ -31,6 +30,7 @@ import {
   Genders,
   codesParam,
   Regions,
+  RegionQueryStrings,
   RideableType,
   RideableTypeChars,
   RideableTypes,
@@ -52,10 +52,11 @@ function dateToMonth(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 
-// `Region` and `Docking` stack options are intentionally absent — phase 1b.
-type StackByV2 = Exclude<StackBy, 'Region' | 'Docking'>
+// `Docking` is per-station-only, irrelevant on the system page.
+type StackByV2 = Exclude<StackBy, 'Docking'>
 const StackByV2QueryStrings: [StackByV2, string][] = [
   ['None', 'n'],
+  ['Region', 'r'],
   ['Gender', 'g'],
   ['User Type', 'u'],
   ['Rideable Type', 'b'],
@@ -68,6 +69,7 @@ export default function HomeV2() {
   const [yAxis, setYAxis] = useUrlState('y', codeParam<YAxis>('Rides', YAxisQueryStrings))
   const [stackBy, setStackBy] = useUrlState('s', codeParam<StackByV2>('None', StackByV2QueryStrings))
   const [stackRelative, setStackRelative] = useUrlState('pct', boolParam)
+  const [regions, setRegions] = useUrlState('r', codesParam(Regions, RegionQueryStrings))
   const [userTypes, setUserTypes] = useUrlState('u', codesParam(UserTypes, UserTypeQueryStrings))
   const [genders, setGenders] = useUrlState('g', codesParam(Genders, GenderQueryStrings))
   const [rideableTypes, setRideableTypes] = useUrlState('rt', codesParam(RideableTypes, RideableTypeChars))
@@ -87,7 +89,12 @@ export default function HomeV2() {
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
-  const { data, isLoading, error } = useRidesV1()
+  // Always fetch per-region — region picker / region stack-by need the
+  // tagged rows. When the user has all 3 regions checked + isn't stacking
+  // by region, the chart still looks identical to a single system-wide
+  // query (rows get summed). 3 parallel queries → TSQ caches them
+  // independently, so toggling regions off doesn't re-fetch.
+  const { data, isLoading, error } = useRidesV1({ regions: Regions })
 
   const { start, end } = useMemo(() => {
     if (!data || data.length === 0) return { start: '', end: '' }
@@ -110,13 +117,11 @@ export default function HomeV2() {
   const lineDarkenFactor = isDark ? 0.6 : 0.75
 
   const { traces, months, allMonths } = useMemo(() => buildTraces(data ?? null, {
-    yAxis, stackBy, stackPercents,
-    // Phase 1a: region filter is a no-op (every synthetic row has Region='NYC').
-    regions: Regions,
-    userTypes, genders, rideableTypes,
+    yAxis, stackBy: stackBy as StackBy, stackPercents,
+    regions, userTypes, genders, rideableTypes,
     start, end, rollingAvgs,
     isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor,
-  }), [data, yAxis, stackBy, stackPercents, userTypes, genders, rideableTypes, start, end, rollingAvgs, isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor])
+  }), [data, yAxis, stackBy, stackPercents, regions, userTypes, genders, rideableTypes, start, end, rollingAvgs, isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor])
 
   const dataBounds = useMemo(() => {
     if (allMonths.length === 0) return null
@@ -184,6 +189,7 @@ export default function HomeV2() {
     return `exp-${dateRange.start.getTime()}-${dateRange.end?.getTime() ?? "present"}-${suffix}`
   })()
   const yAxisRevision = [
+    [...regions].sort().join(','),
     stackBy,
     [...userTypes].sort().join(','),
     [...genders].sort().join(','),
@@ -206,8 +212,7 @@ export default function HomeV2() {
       <main className={css.main}>
         <Alert severity="info" sx={{ mb: 2 }}>
           <strong>v2 parity preview</strong> — data served live from{' '}
-          <code>/api/rides-v1</code> (pyrmts-geo). Region picker + region
-          stacking arrive next; for now this is system-wide totals.
+          <code>/api/rides-v1</code> (pyrmts-geo, one query per region).
         </Alert>
         <div className={css.titleContainer}>
           <h1 className={css.title}>{title}</h1>
@@ -261,10 +266,20 @@ export default function HomeV2() {
               />
             </div>
 
+            <Checklist
+              label="Region"
+              data={Regions.map(region => ({
+                name: region, label: region, data: region,
+                checked: regions.includes(region),
+              }))}
+              cb={setRegions}
+            />
+
             <Radios
               label="Stack by"
               options={[
                 { label: "None", data: "None" },
+                { label: "Region", data: "Region" },
                 { label: "User Type", data: "User Type" },
                 { label: "Gender", data: "Gender" },
                 { label: "Bike Type", data: "Rideable Type" },
