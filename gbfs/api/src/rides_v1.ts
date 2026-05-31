@@ -43,6 +43,7 @@
 import {
 	fetchSegmentRows,
 	stitch,
+	type FetchTrace,
 	type Pyramid,
 	type Row,
 	type Tier,
@@ -239,13 +240,20 @@ function parseDimFilters(url: URL): { col: string; values: string[] }[] | undefi
 	return out.length ? out : undefined;
 }
 
-/** Core handler — runs plan/fetch/filter/stitch and applies reducer. */
+/** Core handler — runs plan/fetch/filter/stitch and applies reducer.
+ *
+ *  Pass `?debug=1` to swap the row payload for a phase-timing diagnostic:
+ *  `{ debug: { plan, phaseMs: { plan, fetch, filter, stitch, reduce, total },
+ *  rowCounts: { perShard, filtered, stitched, reduced } } }`. Used to
+ *  benchmark hot-path optimizations (RG size, multi-range, pre-aggregation).
+ */
 async function serveRidesReduced(
 	pyramid: Pyramid,
 	request: Request,
 	cors: string | null,
 	dropCellCol: boolean,
 ): Promise<Response> {
+	const tStart = performance.now();
 	const url = new URL(request.url);
 	const from = parseInstant(url.searchParams.get('from'));
 	const to = parseInstant(url.searchParams.get('to'));
@@ -264,6 +272,7 @@ async function serveRidesReduced(
 		return errorResponse(400, `bad reducer '${reducerRaw}'; one of ${REDUCERS.join('|')}`, cors);
 	}
 	const reducer = reducerRaw as Reducer;
+	const debug = url.searchParams.get('debug') === '1';
 
 	const rgFilters = parseDimFilters(url);
 
@@ -281,6 +290,7 @@ async function serveRidesReduced(
 		return errorResponse(400, '`cells` param given but empty', cors);
 	}
 
+	const tPlan = performance.now();
 	const plan = planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox, cellBudget });
 	const outputCells = userCells ?? plan.outputCells;
 	// h3 cell-id hex string: char at index 1 encodes resolution (single hex
@@ -288,41 +298,138 @@ async function serveRidesReduced(
 	const outputRes = userCells !== null
 		? parseInt(userCells[0]![1]!, 16)
 		: plan.outputRes;
+
+	const tFetch = performance.now();
+	// Per-segment trace buffer (debug only). When `debug=1`, each segment's
+	// shard fetches append `FetchTrace` entries here, then we expose them
+	// in the debug response so callers can see the actual byte-range
+	// request distribution per parquet.
+	const trace: FetchTrace[] = debug ? [] : undefined as unknown as FetchTrace[];
+	// Push the cell list down as an RG-prune filter on the cellCol. For
+	// `(cell, dt)`-sorted shards (rides-v2), each RG covers a narrow cell
+	// range and ~70% of RGs can be skipped for a region-sized cell set.
+	// For `(dt, cell)`-sorted shards (rides-v1), RGs cover the full cell
+	// range per dt-bucket → the filter never prunes (but doesn't hurt
+	// either; the canSkipRowGroup check is cheap stats arithmetic).
+	const allFilters = [
+		...(rgFilters ?? []),
+		...(userCells !== null ? [{ col: pyramid.geo!.cellCol, values: userCells }] : []),
+	];
 	const shardRows = await Promise.all(
 		plan.segments.map((seg) => fetchSegmentRows(pyramid.storage, seg.keys, {
 			binCol: pyramid.binCol,
 			range: { from: seg.from, to: seg.to },
-			filters: rgFilters,
+			filters: allFilters.length ? allFilters : undefined,
+			...(debug ? { trace } : {}),
 		})),
 	);
+
+	const tFilter = performance.now();
 	const filtered = shardRows.map((rows) =>
 		filterCellsAndRes(rows, pyramid.geo!.cellCol, outputRes, outputCells),
 	);
+
+	const tStitch = performance.now();
 	const stitched = stitch({ pyramid, plan, shardRows: filtered });
+
+	const tReduce = performance.now();
 	const dropCols = dropCellCol ? [pyramid.geo!.cellCol] : [];
 	const reduced = reduceRows(stitched, reducer, dropCols);
+	const tEnd = performance.now();
 
 	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 	if (cors) headers['Access-Control-Allow-Origin'] = cors;
+	const planSummary = {
+		outputTier: plan.outputTier.name,
+		outputBin: plan.outputBin,
+		outputRes,
+		outputCells,
+		authoritativeEnd: plan.authoritativeEnd?.toISOString() ?? null,
+		segments: plan.segments.map((s) => ({
+			tier: s.shardTier.name,
+			from: s.from.toISOString(),
+			to: s.to.toISOString(),
+			reaggregate: s.reaggregate,
+			keys: s.keys,
+		})),
+	};
+	if (debug) {
+		return new Response(JSON.stringify({
+			debug: {
+				plan: planSummary,
+				phaseMs: {
+					parse: Math.round((tPlan - tStart) * 100) / 100,
+					plan: Math.round((tFetch - tPlan) * 100) / 100,
+					fetch: Math.round((tFilter - tFetch) * 100) / 100,
+					filter: Math.round((tStitch - tFilter) * 100) / 100,
+					stitch: Math.round((tReduce - tStitch) * 100) / 100,
+					reduce: Math.round((tEnd - tReduce) * 100) / 100,
+					total: Math.round((tEnd - tStart) * 100) / 100,
+				},
+				rowCounts: {
+					perShard: shardRows.map((rs) => rs.length),
+					filteredPerShard: filtered.map((rs) => rs.length),
+					stitched: stitched.length,
+					reduced: reduced.length,
+				},
+				cellsFilter: userCells !== null ? userCells.length : null,
+				dimFilters: rgFilters ?? null,
+				reducer,
+				anchor: (pyramid.keyTemplate.includes('/start/') ? 'start' : 'end') as Anchor,
+				fetchTrace: summarizeTrace(trace),
+			},
+		}), { headers });
+	}
 	return new Response(JSON.stringify({
 		records: reduced,
 		reducer,
 		anchor: (pyramid.keyTemplate.includes('/start/') ? 'start' : 'end') as Anchor,
-		plan: {
-			outputTier: plan.outputTier.name,
-			outputBin: plan.outputBin,
-			outputRes,
-			outputCells,
-			authoritativeEnd: plan.authoritativeEnd?.toISOString() ?? null,
-			segments: plan.segments.map((s) => ({
-				tier: s.shardTier.name,
-				from: s.from.toISOString(),
-				to: s.to.toISOString(),
-				reaggregate: s.reaggregate,
-				keys: s.keys,
-			})),
-		},
+		plan: planSummary,
 	}), { headers });
+}
+
+/** Group `FetchTrace[]` by parquet key, summarize counts + sizes + phase
+ *  breakdown. Designed for the `?debug=1` debug response — keeps the
+ *  per-slice detail available but also surfaces useful aggregates
+ *  (request count, total bytes fetched, footer vs data split) without
+ *  forcing the caller to walk every entry. */
+function summarizeTrace(trace: FetchTrace[] | undefined) {
+	if (!trace || trace.length === 0) return null;
+	const perKey: Record<string, {
+		count: number;
+		bytesTotal: number;
+		msTotal: number;
+		metadataSlices: number;
+		dataSlices: number;
+		minLen: number;
+		maxLen: number;
+		ranges: { start: number; end: number; length: number; ms: number; phase: string }[];
+	}> = {};
+	for (const t of trace) {
+		const e = perKey[t.key] ??= {
+			count: 0, bytesTotal: 0, msTotal: 0,
+			metadataSlices: 0, dataSlices: 0,
+			minLen: Infinity, maxLen: 0, ranges: [],
+		};
+		e.count++;
+		e.bytesTotal += t.length;
+		e.msTotal += t.ms;
+		e.minLen = Math.min(e.minLen, t.length);
+		e.maxLen = Math.max(e.maxLen, t.length);
+		if (t.phase === 'metadata') e.metadataSlices++; else e.dataSlices++;
+		e.ranges.push({ start: t.start, end: t.end, length: t.length, ms: t.ms, phase: t.phase });
+	}
+	return Object.entries(perKey).map(([key, e]) => ({
+		key,
+		count: e.count,
+		bytesTotal: e.bytesTotal,
+		msTotal: Math.round(e.msTotal * 100) / 100,
+		metadataSlices: e.metadataSlices,
+		dataSlices: e.dataSlices,
+		minLen: e.minLen,
+		maxLen: e.maxLen,
+		ranges: e.ranges,
+	}));
 }
 
 function parseAnchor(url: URL, cors: string | null): Anchor | Response {
