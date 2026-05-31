@@ -16,16 +16,17 @@ precise at borders but the cell lists balloon to ~5K (URL won't fit).
 import json
 import sys
 from collections import Counter, defaultdict
+from glob import glob
 from pathlib import Path
 
 import h3
 import pyarrow.parquet as pq
-from click import option
+from click import argument, option
 
 from ctbk.cli.base import ctbk
 from utz import err
 
-DEFAULT_INPUT = 's3/ctbk/normalized/202604.parquet'
+DEFAULT_INPUT_GLOB = 's3/ctbk/normalized/20*.parquet'
 DEFAULT_OUTPUT = 'www/public/assets/region-cells.json'
 DEFAULT_RES = 9
 
@@ -35,33 +36,44 @@ REGION_RENAME = {'HB': 'HOB'}
 
 
 @ctbk.command('region-cells', help="Precompute h3 cells per region (NYC/JC/HOB) for FE region stacking.")
-@option('-i', '--input', 'input_path', default=DEFAULT_INPUT, help=f'Normalized parquet to read (default: {DEFAULT_INPUT}).')
 @option('-o', '--output', 'output_path', default=DEFAULT_OUTPUT, help=f'Output JSON path (default: {DEFAULT_OUTPUT}).')
 @option('-r', '--resolution', type=int, default=DEFAULT_RES, help=f'h3 resolution (default: {DEFAULT_RES}).')
-def region_cells_cmd(input_path: str, output_path: str, resolution: int):
-    src = Path(input_path)
-    if not src.exists():
-        err(f"input not found: {src}")
-        sys.exit(1)
+@argument('inputs', nargs=-1)
+def region_cells_cmd(output_path: str, resolution: int, inputs: tuple[str, ...]):
+    """Read one or more normalized parquets, bucket stations into h3 cells by region,
+    union across all inputs (so stations active in any input month are covered). With
+    no INPUTS positional, defaults to `s3/ctbk/normalized/20*.parquet` (all on disk)."""
+    if not inputs:
+        inputs = tuple(sorted(glob(DEFAULT_INPUT_GLOB)))
+        if not inputs:
+            err(f"no parquets matching {DEFAULT_INPUT_GLOB}")
+            sys.exit(1)
+    err(f"reading {len(inputs)} parquet(s): {inputs[0]} .. {inputs[-1]}")
 
-    err(f"reading {src} (cols: Start Station Latitude/Longitude/Region)…")
-    t = pq.read_table(src, columns=['Start Station Latitude', 'Start Station Longitude', 'Start Region'])
-    df = t.to_pandas().rename(columns={
-        'Start Station Latitude': 'lat',
-        'Start Station Longitude': 'lng',
-        'Start Region': 'region',
-    }).dropna(subset=['lat', 'lng', 'region'])
-
-    # Each ride is one signal. Count how many rides land each (cell, region)
-    # tuple; assign each cell to the region holding the most rides in it.
-    # Prevents a border cell from being claimed by 2+ regions (which would
-    # double-count rides at region-stacked queries downstream).
+    # `(cell, region) -> ride count` across all inputs. Each ride is one
+    # signal; sum signals so a cell sees the same denominator regardless of
+    # how many months it appears in.
     cell_region_counts: dict[str, Counter] = defaultdict(Counter)
-    for row in df.itertuples(index=False):
-        cell = h3.latlng_to_cell(row.lat, row.lng, resolution)
-        region = REGION_RENAME.get(row.region, row.region)
-        cell_region_counts[cell][region] += 1
+    for ipath in inputs:
+        src = Path(ipath)
+        if not src.exists():
+            err(f"  skip (not found): {src}")
+            continue
+        t = pq.read_table(src, columns=['Start Station Latitude', 'Start Station Longitude', 'Start Region'])
+        df = t.to_pandas().rename(columns={
+            'Start Station Latitude': 'lat',
+            'Start Station Longitude': 'lng',
+            'Start Region': 'region',
+        }).dropna(subset=['lat', 'lng', 'region'])
+        for row in df.itertuples(index=False):
+            cell = h3.latlng_to_cell(row.lat, row.lng, resolution)
+            region = REGION_RENAME.get(row.region, row.region)
+            cell_region_counts[cell][region] += 1
+        err(f"  {src.name}: {len(df):,} rides → {len(cell_region_counts):,} unique cells cumulative")
 
+    # Border cells (claimed by ≥2 regions because hexes can straddle the
+    # NYC/JC border etc.): assign to the region with the most rides in
+    # the cell. Avoids double-counting in region-stacked downstream queries.
     by_region: dict[str, set[str]] = defaultdict(set)
     contested = 0
     for cell, counts in cell_region_counts.items():
