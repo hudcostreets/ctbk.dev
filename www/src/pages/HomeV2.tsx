@@ -46,9 +46,10 @@ import {
 } from '../data'
 import { buildTraces, monthToDate } from '../chart/ymrgtb-traces'
 import { buildLayout } from '../chart/ymrgtb-layout'
-import { useRidesV1, type Pyramid } from '../query/ridesV1'
+import { useRidesV1, type Pyramid, type ApiTarget } from '../query/ridesV1'
 
 const Pyramids: Pyramid[] = ['v1', 'v2']
+const ApiTargets: ApiTarget[] = ['prod', 'dev']
 
 function dateToMonth(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
@@ -73,6 +74,7 @@ export default function HomeV2() {
   const [stackRelative, setStackRelative] = useUrlState('pct', boolParam)
   const [regions, setRegions] = useUrlState('r', codesParam(Regions, RegionQueryStrings))
   const [pyramid, setPyramid] = useUrlState<Pyramid>('pyramid', codeParam<Pyramid>('v1', [['v1', 'v1'], ['v2', 'v2']]))
+  const [api, setApi] = useUrlState<ApiTarget>('api', codeParam<ApiTarget>('prod', [['prod', 'prod'], ['dev', 'dev']]))
   const [userTypes, setUserTypes] = useUrlState('u', codesParam(UserTypes, UserTypeQueryStrings))
   const [genders, setGenders] = useUrlState('g', codesParam(Genders, GenderQueryStrings))
   const [rideableTypes, setRideableTypes] = useUrlState('rt', codesParam(RideableTypes, RideableTypeChars))
@@ -97,7 +99,7 @@ export default function HomeV2() {
   // by region, the chart still looks identical to a single system-wide
   // query (rows get summed). 3 parallel queries → TSQ caches them
   // independently, so toggling regions off doesn't re-fetch.
-  const { data, isLoading, error } = useRidesV1({ regions: Regions, pyramid })
+  const { data, isLoading, error } = useRidesV1({ regions: Regions, pyramid, api })
 
   const { start, end } = useMemo(() => {
     if (!data || data.length === 0) return { start: '', end: '' }
@@ -285,6 +287,13 @@ export default function HomeV2() {
               options={Pyramids.map(p => ({ label: p, data: p }))}
               cb={setPyramid}
               choice={pyramid}
+            />
+
+            <Radios
+              label="API"
+              options={ApiTargets.map(a => ({ label: a, data: a }))}
+              cb={setApi}
+              choice={api}
             />
 
             <Radios

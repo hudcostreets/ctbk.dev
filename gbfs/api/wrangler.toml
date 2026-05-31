@@ -29,3 +29,37 @@ bucket_name = "ctbk"
 # Requires `SLACK_BOT_TOKEN` wrangler secret; alerts are disabled if absent.
 [triggers]
 crons = ["*/5 * * * *"]
+
+# ─── Dev environment ───────────────────────────────────────────────────
+# Sibling worker at `ctbk-gbfs-api-dev.ryan-0dc.workers.dev` for iterating
+# on backend changes without touching production. Same R2/D1 bindings (so
+# behavior is identical against real data); cron disabled (don't want both
+# prod and dev firing Slack alerts every 5 minutes).
+#
+# Deploy: `wrangler deploy --env dev` from /gbfs/api. ~15s, no GHA.
+# Secrets: set separately via `wrangler secret put --env dev <NAME>`
+# (Slack token, etc.; reuse prod values).
+# FE: pass `?api=dev` (or `VITE_API_BASE_DEV=…` at build time) to route
+# queries at the dev worker — see `www/src/query/stations.ts`.
+[env.dev]
+name = "ctbk-gbfs-api-dev"
+
+[env.dev.vars]
+CORS_ORIGIN = "*"
+R2_BUCKET_NAME = "ctbk"
+R2_PUBLIC_BASE_URL = "https://pub-4856603e85b34753b7e6bffb89411803.r2.dev"
+AVAIL_PYRMTS_SHADOW = "1"
+
+[[env.dev.d1_databases]]
+binding = "DB"
+database_name = "ctbk-gbfs"
+database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
+
+[[env.dev.r2_buckets]]
+binding = "R2"
+bucket_name = "ctbk"
+
+# Disable cron on dev — prod already fires `*/5 * * * *` for Slack alerts;
+# we don't want dev double-firing.
+[env.dev.triggers]
+crons = []

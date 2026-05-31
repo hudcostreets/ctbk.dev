@@ -11,7 +11,6 @@
  *   downstream `buildTraces` can stack/filter by region naturally.
  */
 import { keepPreviousData, useQuery, type UseQueryResult } from '@tanstack/react-query'
-import { stationsApi } from './stations'
 import type { ProcessedRow } from '../chart/ymrgtb-traces'
 import type { Region } from '../data'
 
@@ -23,6 +22,16 @@ const DATA_START_ISO = '2013-06-01T00:00:00Z'
 
 export type Anchor = 'start' | 'end'
 export type Pyramid = 'v1' | 'v2'
+
+/** Which CFW worker to hit. `prod` = `ctbk-gbfs-api`, `dev` =
+ *  `ctbk-gbfs-api-dev`. Use `dev` for iterating on backend changes
+ *  (set up via `[env.dev]` in `gbfs/api/wrangler.toml`). Routed only for
+ *  rides-v1/v2 hits — avail, station, totals stay on prod. */
+export type ApiTarget = 'prod' | 'dev'
+const API_BASE_BY_TARGET: Record<ApiTarget, string> = {
+  prod: 'https://ctbk-gbfs-api.ryan-0dc.workers.dev',
+  dev: 'https://ctbk-gbfs-api-dev.ryan-0dc.workers.dev',
+}
 
 interface RidesV1Row {
   dt: number             // unix ms (bucket start)
@@ -90,6 +99,10 @@ interface UseRidesV1Args {
   /** Pyramid variant to query — selects between `/api/rides-v1` and
    *  `/api/rides-v2`. Default `'v1'`. See `specs/done/rides-pyramid-v2.md`. */
   pyramid?: Pyramid
+  /** Which worker URL to hit. Default `'prod'`. `'dev'` points at the
+   *  `ctbk-gbfs-api-dev` sibling worker for backend iteration without
+   *  touching prod. Use via `?api=dev` URL param on `/v2`. */
+  api?: ApiTarget
 }
 
 export function useRidesV1({
@@ -98,7 +111,9 @@ export function useRidesV1({
   anchor = 'start',
   regions,
   pyramid = 'v1',
+  api = 'prod',
 }: UseRidesV1Args = {}): UseQueryResult<ProcessedRow[]> {
+  const apiBase = API_BASE_BY_TARGET[api]
   const fromIso = (from ?? new Date(DATA_START_ISO)).toISOString()
   const toIso = (to ?? defaultTo()).toISOString()
   const regionCells = useRegionCells()
@@ -113,7 +128,7 @@ export function useRidesV1({
   // Sharding consolidation upstream (1mo tier → single `all` shard) is the
   // real perf lever; tracked separately.
   return useQuery<ProcessedRow[]>({
-    queryKey: ['rides', pyramid, anchor, fromIso, toIso, regions?.join(',') ?? '__system__'],
+    queryKey: ['rides', api, pyramid, anchor, fromIso, toIso, regions?.join(',') ?? '__system__'],
     enabled,
     placeholderData: keepPreviousData,
     queryFn: async () => {
@@ -121,7 +136,7 @@ export function useRidesV1({
         ? [{ region: null as Region | null, cells: null as string[] | null }]
         : regions.map((r) => ({ region: r, cells: cellsByRegion![r] }))
       const perRegion = await Promise.all(specs.map(async ({ region, cells }) => {
-        const url = new URL(`${stationsApi.API_BASE}/api/rides-${pyramid}`)
+        const url = new URL(`${apiBase}/api/rides-${pyramid}`)
         const sp = url.searchParams
         sp.set('anchor', anchor)
         sp.set('from', fromIso)
