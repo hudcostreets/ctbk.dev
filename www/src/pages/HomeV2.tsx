@@ -189,6 +189,7 @@ export default function HomeV2() {
     return `exp-${dateRange.start.getTime()}-${dateRange.end?.getTime() ?? "present"}-${suffix}`
   })()
   const yAxisRevision = [
+    yAxis,  // Rides ↔ Minutes changes y-value OoM; mirror Home.tsx fix.
     [...regions].sort().join(','),
     stackBy,
     [...userTypes].sort().join(','),
@@ -212,7 +213,7 @@ export default function HomeV2() {
       <main className={css.main}>
         <Alert severity="info" sx={{ mb: 2 }}>
           <strong>v2 parity preview</strong> — data served live from{' '}
-          <code>/api/rides-v1</code> (pyrmts-geo, one query per region).
+          <code>/api/rides-v1</code> (pyrmts-geo, parallel per-region queries).
         </Alert>
         <div className={css.titleContainer}>
           <h1 className={css.title}>{title}</h1>

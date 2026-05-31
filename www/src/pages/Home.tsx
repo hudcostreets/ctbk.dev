@@ -342,6 +342,9 @@ export default function Home() {
   // the autoranged y-axis on filter toggles. Per-attribute uirevision means
   // legend toggles (above) persist across these changes.
   const yAxisRevision = [
+    yAxis,  // Rides ↔ Minutes changes the y-value OoM; without this in the
+            // y-axis uirevision plotly preserves the stale autoranged range
+            // and all bars clip at the top (or float at the bottom).
     [...regions].sort().join(','),
     stackBy,
     [...userTypes].sort().join(','),

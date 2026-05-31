@@ -102,12 +102,11 @@ export function useRidesV1({
   const cellsByRegion = regionCells.data
   const enabled = !regions || !!cellsByRegion
 
-  // One TSQ query, sequenced across regions internally — issuing the 3
-  // region calls in parallel causes the CFW worker to 503 on cold
-  // (multiple POPs spinning up isolates + 14×3 R2 fans-out). Serial:
-  // first call cold-starts the worker, next two hit warm isolate or
-  // edge cache. Total wall time ~= sum of regions (≈3-5s cold; warm
-  // <100ms via edge cache).
+  // Single TSQ query, region calls fanned out via Promise.all (parallel)
+  // — total wall time = slowest region. Cold ~5-9s (worker still has to
+  // fetch 14 shards × 3 regions = 42 R2 GETs), warm via edge cache <100ms.
+  // Sharding consolidation upstream (1mo tier → single `all` shard) is the
+  // real perf lever; tracked separately.
   return useQuery<ProcessedRow[]>({
     queryKey: ['rides-v1', anchor, fromIso, toIso, regions?.join(',') ?? '__system__'],
     enabled,
@@ -116,8 +115,7 @@ export function useRidesV1({
       const specs = !regions
         ? [{ region: null as Region | null, cells: null as string[] | null }]
         : regions.map((r) => ({ region: r, cells: cellsByRegion![r] }))
-      const out: ProcessedRow[] = []
-      for (const { region, cells } of specs) {
+      const perRegion = await Promise.all(specs.map(async ({ region, cells }) => {
         const url = new URL(`${stationsApi.API_BASE}/api/rides-v1`)
         const sp = url.searchParams
         sp.set('anchor', anchor)
@@ -132,9 +130,9 @@ export function useRidesV1({
         if (!res.ok) throw new Error(`/api/rides-v1: HTTP ${res.status}`)
         const body = (await res.json()) as RidesV1Response
         const regionTag: Region = region ?? 'NYC'
-        for (const row of body.records) out.push(apiRowToProcessed(row, regionTag))
-      }
-      return out
+        return body.records.map((row) => apiRowToProcessed(row, regionTag))
+      }))
+      return perRegion.flat()
     },
   })
 }
