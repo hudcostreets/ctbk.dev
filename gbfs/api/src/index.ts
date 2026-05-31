@@ -1166,19 +1166,43 @@ export default {
 		// selected via `?anchor=start|end` (default `start`); FE composes
 		// stacked start+end charts via two parallel requests. See
 		// `specs/rides-pyramid-v1.md` + `rides_v1.ts`.
-		if (url.pathname === '/api/rides-v1') {
+		if (url.pathname === '/api/rides-v1' || url.pathname === '/api/rides-v1/cells') {
+			// Edge cache: rides-v1 cold queries are O(seconds) since they
+			// fan out to ~14 year-shards on R2 + decode + filter + stitch.
+			// Mirroring the /api/totals pattern (`index.ts:1232-1280`):
+			// past-only windows are immutable → 24h cache; queries that
+			// touch the current month get 60s (cron lag + cascade write
+			// latency slack).
+			const cache = caches.default;
+			const cacheKey = new Request(url.toString(), { method: 'GET' });
+			const hit = await cache.match(cacheKey);
+			if (hit) {
+				const headers = new Headers(hit.headers);
+				headers.set('X-Cache', 'HIT');
+				return new Response(hit.body, { status: hit.status, headers });
+			}
+			let resp: Response;
 			try {
-				return await serveRidesV1(env.R2, request, env.CORS_ORIGIN ?? '*');
+				resp = url.pathname === '/api/rides-v1'
+					? await serveRidesV1(env.R2, request, env.CORS_ORIGIN ?? '*')
+					: await serveRidesV1Cells(env.R2, request, env.CORS_ORIGIN ?? '*');
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'rides-v1 error', 500, env);
 			}
-		}
-		if (url.pathname === '/api/rides-v1/cells') {
-			try {
-				return await serveRidesV1Cells(env.R2, request, env.CORS_ORIGIN ?? '*');
-			} catch (err: any) {
-				return errorResponse(err.message ?? 'rides-v1/cells error', 500, env);
+			if (resp.ok) {
+				// `to` exclusive — past-only iff `to` ≤ now − 5min (cron slack).
+				const toRaw = url.searchParams.get('to');
+				const toMs = toRaw ? Date.parse(toRaw) : NaN;
+				const isPast = Number.isFinite(toMs) && toMs <= Date.now() - 300_000;
+				const cacheControl = isPast
+					? 'public, max-age=86400, immutable'
+					: 'public, max-age=60';
+				const headers = new Headers(resp.headers);
+				headers.set('Cache-Control', cacheControl);
+				resp = new Response(resp.body, { status: resp.status, headers });
+				ctx.waitUntil(cache.put(cacheKey, resp.clone()));
 			}
+			return resp;
 		}
 
 		// /api/query — unified multi-scale time-series (trips + availability).
