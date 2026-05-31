@@ -1,10 +1,14 @@
 /**
- * pyrmts-geo CFW glue for ctbk's rides pyramids (`rides-v1`).
+ * pyrmts-geo CFW glue for ctbk's rides pyramids (`rides-v1`, `rides-v2`).
  *
- * Two sibling pyramids built by `ctbk/rides_v1.py`, identical except for the
- * h3 anchor:
- *   rides-v1/start/<tier>/<period>.parquet — `start_h3_cell`-anchored
- *   rides-v1/end/<tier>/<period>.parquet   — `end_h3_cell`-anchored
+ * Two variants × two anchors = four sibling pyramids, all built by
+ * `ctbk/rides_v1.py`:
+ *   rides-{v1,v2}/start/<tier>/<period>.parquet — `start_h3_cell`-anchored
+ *   rides-{v1,v2}/end/<tier>/<period>.parquet   — `end_h3_cell`-anchored
+ *
+ * v1 vs v2: same schema; v2 has coarser shard sizes (~1000 bins each) and
+ * `(cell, dt)` sort — see `specs/done/rides-pyramid-v2.md`. FE selects via
+ * `?pyramid=v1|v2` (mapped to endpoint `/api/rides-v{1,2}[/cells]`).
  *
  * 11-tier ladder: 1h / 3h / 6h / 12h / 1d / 3d / 7d / 14d / 1mo / 3mo / 1y.
  * h3 resolutions: 9 / 7 / 5 (same as avail-v2).
@@ -60,39 +64,60 @@ export const ANCHORS = ['start', 'end'] as const;
 export type Anchor = typeof ANCHORS[number];
 const DEFAULT_ANCHOR: Anchor = 'start';
 
-const TIERS: Tier[] = [
-	{ name: '1h',  bin: '1h',  shard: '1mo' },
-	{ name: '3h',  bin: '3h',  shard: '1mo' },
-	{ name: '6h',  bin: '6h',  shard: '1mo' },
-	{ name: '12h', bin: '12h', shard: '1mo' },
-	{ name: '1d',  bin: '1d',  shard: '1y'  },
-	{ name: '3d',  bin: '3d',  shard: '1y'  },
-	{ name: '7d',  bin: '7d',  shard: '1y'  },
-	{ name: '14d', bin: '14d', shard: '1y'  },
-	{ name: '1mo', bin: '1mo', shard: '1y'  },
-	{ name: '3mo', bin: '3mo', shard: '1y'  },
-	{ name: '1y',  bin: '1y',  shard: 'all' },
-];
+export const VARIANTS = ['v1', 'v2'] as const;
+export type Variant = typeof VARIANTS[number];
+
+/** v1: every tier 1h-12h on 1mo shards, every 1d-3mo tier on 1y, 1y on `all`.
+ *  v2: consolidated cascade per `specs/done/rides-pyramid-v2.md` — ~1000
+ *  bins per shard so a typical viewport reads one shard. */
+const TIERS_BY_VARIANT: Record<Variant, Tier[]> = {
+	v1: [
+		{ name: '1h',  bin: '1h',  shard: '1mo' },
+		{ name: '3h',  bin: '3h',  shard: '1mo' },
+		{ name: '6h',  bin: '6h',  shard: '1mo' },
+		{ name: '12h', bin: '12h', shard: '1mo' },
+		{ name: '1d',  bin: '1d',  shard: '1y'  },
+		{ name: '3d',  bin: '3d',  shard: '1y'  },
+		{ name: '7d',  bin: '7d',  shard: '1y'  },
+		{ name: '14d', bin: '14d', shard: '1y'  },
+		{ name: '1mo', bin: '1mo', shard: '1y'  },
+		{ name: '3mo', bin: '3mo', shard: '1y'  },
+		{ name: '1y',  bin: '1y',  shard: 'all' },
+	],
+	v2: [
+		{ name: '1h',  bin: '1h',  shard: '1mo' },
+		{ name: '3h',  bin: '3h',  shard: '3mo' },
+		{ name: '6h',  bin: '6h',  shard: '6mo' },
+		{ name: '12h', bin: '12h', shard: '1y'  },
+		{ name: '1d',  bin: '1d',  shard: 'all' },
+		{ name: '3d',  bin: '3d',  shard: 'all' },
+		{ name: '7d',  bin: '7d',  shard: 'all' },
+		{ name: '14d', bin: '14d', shard: 'all' },
+		{ name: '1mo', bin: '1mo', shard: 'all' },
+		{ name: '3mo', bin: '3mo', shard: 'all' },
+		{ name: '1y',  bin: '1y',  shard: 'all' },
+	],
+};
 
 function cellCol(anchor: Anchor): string {
 	return `${anchor}_h3_cell`;
 }
 
-function keyTemplate(anchor: Anchor): string {
-	return `rides-v1/${anchor}/{tier}/{period}.parquet`;
+function keyTemplate(anchor: Anchor, variant: Variant): string {
+	return `rides-${variant}/${anchor}/{tier}/{period}.parquet`;
 }
 
 /** Shared pyramid skeleton; only key-template + cellCol + `dims` vary. */
-function makeBaseProps(bucket: R2Bucket, anchor: Anchor): Omit<Pyramid, 'dims'> {
+function makeBaseProps(bucket: R2Bucket, anchor: Anchor, variant: Variant): Omit<Pyramid, 'dims'> {
 	return {
 		storage: r2Storage(bucket),
-		keyTemplate: keyTemplate(anchor),
+		keyTemplate: keyTemplate(anchor, variant),
 		axis: 'time',
 		binCol: 'dt',
 		// pyrmts's `sum` monoid stores state as `<name>{_n,_sum,_sumsq}` —
 		// one metric per logical quantity, monoid handles the triplet.
 		metrics: METRICS.map((name) => ({ name, monoid: 'sum' as const })),
-		tiers: TIERS,
+		tiers: TIERS_BY_VARIANT[variant],
 		geo: {
 			cellCol: cellCol(anchor),
 			resolutions: [9, 7, 5],
@@ -102,15 +127,15 @@ function makeBaseProps(bucket: R2Bucket, anchor: Anchor): Omit<Pyramid, 'dims'> 
 
 /** Rollup pyramid — `dims: []` so `stitch` collapses cells, leaving
  *  one row per (dt, dim-tuple) summed across the bbox-covering cell set. */
-export function ridesPyramid(bucket: R2Bucket, anchor: Anchor): Pyramid {
-	return { ...makeBaseProps(bucket, anchor), dims: DIMS.map((d) => ({ name: d, type: 'string' as const })) };
+export function ridesPyramid(bucket: R2Bucket, anchor: Anchor, variant: Variant): Pyramid {
+	return { ...makeBaseProps(bucket, anchor, variant), dims: DIMS.map((d) => ({ name: d, type: 'string' as const })) };
 }
 
 /** Per-cell pyramid — adds `{anchor}_h3_cell` to dims so stitch preserves
  *  cell-level breakdown. */
-export function ridesCellsPyramid(bucket: R2Bucket, anchor: Anchor): Pyramid {
+export function ridesCellsPyramid(bucket: R2Bucket, anchor: Anchor, variant: Variant): Pyramid {
 	return {
-		...makeBaseProps(bucket, anchor),
+		...makeBaseProps(bucket, anchor, variant),
 		dims: [
 			{ name: cellCol(anchor), type: 'string' as const },
 			...DIMS.map((d) => ({ name: d, type: 'string' as const })),
@@ -308,20 +333,26 @@ function parseAnchor(url: URL, cors: string | null): Anchor | Response {
 	return raw as Anchor;
 }
 
-/** HTTP handler for `/api/rides-v1` — bbox rollup, one row per (dt, dims).
- *  Strips the `{anchor}_h3_cell` column from response rows (rollup has no
- *  meaningful cell value). */
-export async function serveRidesV1(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
+/** HTTP handler for `/api/rides-{v1,v2}` — bbox rollup, one row per
+ *  (dt, dims). Strips the `{anchor}_h3_cell` column from response rows
+ *  (rollup has no meaningful cell value). */
+export async function serveRides(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant): Promise<Response> {
 	const cors = corsOrigin || null;
 	const anchor = parseAnchor(new URL(request.url), cors);
 	if (anchor instanceof Response) return anchor;
-	return serveRidesReduced(ridesPyramid(bucket, anchor), request, cors, true);
+	return serveRidesReduced(ridesPyramid(bucket, anchor, variant), request, cors, true);
 }
 
-/** HTTP handler for `/api/rides-v1/cells` — per-cell breakdown preserved. */
-export async function serveRidesV1Cells(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
+/** HTTP handler for `/api/rides-{v1,v2}/cells` — per-cell breakdown preserved. */
+export async function serveRidesCells(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant): Promise<Response> {
 	const cors = corsOrigin || null;
 	const anchor = parseAnchor(new URL(request.url), cors);
 	if (anchor instanceof Response) return anchor;
-	return serveRidesReduced(ridesCellsPyramid(bucket, anchor), request, cors, false);
+	return serveRidesReduced(ridesCellsPyramid(bucket, anchor, variant), request, cors, false);
 }
+
+// Back-compat aliases used by `index.ts` route handlers.
+export const serveRidesV1 = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRides(bucket, request, corsOrigin, 'v1');
+export const serveRidesV1Cells = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRidesCells(bucket, request, corsOrigin, 'v1');
+export const serveRidesV2 = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRides(bucket, request, corsOrigin, 'v2');
+export const serveRidesV2Cells = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRidesCells(bucket, request, corsOrigin, 'v2');

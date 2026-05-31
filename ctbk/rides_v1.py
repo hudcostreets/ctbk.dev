@@ -160,12 +160,15 @@ def _add_months(t: datetime, n: int) -> datetime:
 def shard_period(shard: str, t: datetime) -> str:
     """Encode a shard-start `t` as a filename-safe period string.
 
-    v2 adds quarter (3mo) and half-year (6mo) shards. Quarters are
-    encoded as `YYYY-QN` (N ∈ 1..4); half-years as `YYYY-HN` (N ∈ 1..2).
+    All `mo`-unit shards use `YYYY-MM` (start-of-period month) to
+    match pyrmts JS's `formatPeriod` default — the JS planner builds
+    keys from `{count, unit}` only, so multi-month spans (3mo / 6mo)
+    share the 1mo formatter. A 3mo shard starting Apr 2013 is
+    `2013-04.parquet`; a 6mo shard starting Jul 2013 is
+    `2013-07.parquet`.
     """
-    if shard == '1mo': return t.strftime('%Y-%m')
-    if shard == '3mo': return f'{t.year}-Q{(t.month - 1) // 3 + 1}'
-    if shard == '6mo': return f'{t.year}-H{(t.month - 1) // 6 + 1}'
+    if shard in ('1mo', '3mo', '6mo'):
+        return t.strftime('%Y-%m')
     if shard == '1y':  return t.strftime('%Y')
     if shard == 'all': return 'all'
     raise ValueError(f"unknown shard granularity: {shard!r}")

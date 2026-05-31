@@ -46,7 +46,9 @@ import {
 } from '../data'
 import { buildTraces, monthToDate } from '../chart/ymrgtb-traces'
 import { buildLayout } from '../chart/ymrgtb-layout'
-import { useRidesV1 } from '../query/ridesV1'
+import { useRidesV1, type Pyramid } from '../query/ridesV1'
+
+const Pyramids: Pyramid[] = ['v1', 'v2']
 
 function dateToMonth(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
@@ -70,6 +72,7 @@ export default function HomeV2() {
   const [stackBy, setStackBy] = useUrlState('s', codeParam<StackByV2>('None', StackByV2QueryStrings))
   const [stackRelative, setStackRelative] = useUrlState('pct', boolParam)
   const [regions, setRegions] = useUrlState('r', codesParam(Regions, RegionQueryStrings))
+  const [pyramid, setPyramid] = useUrlState<Pyramid>('pyramid', codeParam<Pyramid>('v1', [['v1', 'v1'], ['v2', 'v2']]))
   const [userTypes, setUserTypes] = useUrlState('u', codesParam(UserTypes, UserTypeQueryStrings))
   const [genders, setGenders] = useUrlState('g', codesParam(Genders, GenderQueryStrings))
   const [rideableTypes, setRideableTypes] = useUrlState('rt', codesParam(RideableTypes, RideableTypeChars))
@@ -94,7 +97,7 @@ export default function HomeV2() {
   // by region, the chart still looks identical to a single system-wide
   // query (rows get summed). 3 parallel queries → TSQ caches them
   // independently, so toggling regions off doesn't re-fetch.
-  const { data, isLoading, error } = useRidesV1({ regions: Regions })
+  const { data, isLoading, error } = useRidesV1({ regions: Regions, pyramid })
 
   const { start, end } = useMemo(() => {
     if (!data || data.length === 0) return { start: '', end: '' }
@@ -213,7 +216,8 @@ export default function HomeV2() {
       <main className={css.main}>
         <Alert severity="info" sx={{ mb: 2 }}>
           <strong>v2 parity preview</strong> — data served live from{' '}
-          <code>/api/rides-v1</code> (pyrmts-geo, parallel per-region queries).
+          <code>/api/rides-{pyramid}</code> (pyrmts-geo, parallel per-region queries).
+          Toggle the <strong>Pyramid</strong> radio below to A/B v1 vs v2.
         </Alert>
         <div className={css.titleContainer}>
           <h1 className={css.title}>{title}</h1>
@@ -274,6 +278,13 @@ export default function HomeV2() {
                 checked: regions.includes(region),
               }))}
               cb={setRegions}
+            />
+
+            <Radios
+              label="Pyramid"
+              options={Pyramids.map(p => ({ label: p, data: p }))}
+              cb={setPyramid}
+              choice={pyramid}
             />
 
             <Radios

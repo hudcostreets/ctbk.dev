@@ -22,6 +22,7 @@ export const SYSTEM_BBOX = '40.5,-74.2,41.0,-73.7' as const
 const DATA_START_ISO = '2013-06-01T00:00:00Z'
 
 export type Anchor = 'start' | 'end'
+export type Pyramid = 'v1' | 'v2'
 
 interface RidesV1Row {
   dt: number             // unix ms (bucket start)
@@ -86,6 +87,9 @@ interface UseRidesV1Args {
    *  region's h3 cells). Output rows tagged with `Region`. If omitted,
    *  a single system-wide query runs and every row is tagged `'NYC'`. */
   regions?: readonly Region[]
+  /** Pyramid variant to query — selects between `/api/rides-v1` and
+   *  `/api/rides-v2`. Default `'v1'`. See `specs/done/rides-pyramid-v2.md`. */
+  pyramid?: Pyramid
 }
 
 export function useRidesV1({
@@ -93,6 +97,7 @@ export function useRidesV1({
   to,
   anchor = 'start',
   regions,
+  pyramid = 'v1',
 }: UseRidesV1Args = {}): UseQueryResult<ProcessedRow[]> {
   const fromIso = (from ?? new Date(DATA_START_ISO)).toISOString()
   const toIso = (to ?? defaultTo()).toISOString()
@@ -108,7 +113,7 @@ export function useRidesV1({
   // Sharding consolidation upstream (1mo tier → single `all` shard) is the
   // real perf lever; tracked separately.
   return useQuery<ProcessedRow[]>({
-    queryKey: ['rides-v1', anchor, fromIso, toIso, regions?.join(',') ?? '__system__'],
+    queryKey: ['rides', pyramid, anchor, fromIso, toIso, regions?.join(',') ?? '__system__'],
     enabled,
     placeholderData: keepPreviousData,
     queryFn: async () => {
@@ -116,7 +121,7 @@ export function useRidesV1({
         ? [{ region: null as Region | null, cells: null as string[] | null }]
         : regions.map((r) => ({ region: r, cells: cellsByRegion![r] }))
       const perRegion = await Promise.all(specs.map(async ({ region, cells }) => {
-        const url = new URL(`${stationsApi.API_BASE}/api/rides-v1`)
+        const url = new URL(`${stationsApi.API_BASE}/api/rides-${pyramid}`)
         const sp = url.searchParams
         sp.set('anchor', anchor)
         sp.set('from', fromIso)
@@ -127,7 +132,7 @@ export function useRidesV1({
         sp.set('cell_budget', '16')
         if (cells) sp.set('cells', cells.join(','))
         const res = await fetch(url.toString())
-        if (!res.ok) throw new Error(`/api/rides-v1: HTTP ${res.status}`)
+        if (!res.ok) throw new Error(`/api/rides-${pyramid}: HTTP ${res.status}`)
         const body = (await res.json()) as RidesV1Response
         const regionTag: Region = region ?? 'NYC'
         return body.records.map((row) => apiRowToProcessed(row, regionTag))

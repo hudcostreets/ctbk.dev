@@ -483,7 +483,7 @@ import { getHealthSnapshot } from './health';
 import { runAlerts } from './alerts';
 import { executeAvailViaPyrmts, shadowDelta } from './avail_pyrmts';
 import { serveAvailGeo, serveAvailGeoCells, serveAvailV2, serveAvailV2Cells } from './avail_geo';
-import { serveRidesV1, serveRidesV1Cells } from './rides_v1';
+import { serveRidesV1, serveRidesV1Cells, serveRidesV2, serveRidesV2Cells } from './rides_v1';
 
 /**
  * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
@@ -1161,18 +1161,20 @@ export default {
 			}
 		}
 
-		// /api/rides-v1[/cells] — pyrmts-geo serving of rides pyramids
-		// (`rides-v1/{start,end}/<tier>/<period>.parquet`). Two sibling pyramids
-		// selected via `?anchor=start|end` (default `start`); FE composes
-		// stacked start+end charts via two parallel requests. See
-		// `specs/rides-pyramid-v1.md` + `rides_v1.ts`.
-		if (url.pathname === '/api/rides-v1' || url.pathname === '/api/rides-v1/cells') {
-			// Edge cache: rides-v1 cold queries are O(seconds) since they
-			// fan out to ~14 year-shards on R2 + decode + filter + stitch.
-			// Mirroring the /api/totals pattern (`index.ts:1232-1280`):
-			// past-only windows are immutable → 24h cache; queries that
-			// touch the current month get 60s (cron lag + cascade write
-			// latency slack).
+		// /api/rides-{v1,v2}[/cells] — pyrmts-geo serving of rides pyramids
+		// (`rides-{v1,v2}/{start,end}/<tier>/<period>.parquet`). Variants
+		// share schema; v1 = original cascade, v2 = consolidated cascade +
+		// `(cell, dt)` sort. See `specs/done/rides-pyramid-{v1,v2}.md` +
+		// `rides_v1.ts`.
+		const ridesMatch = url.pathname.match(/^\/api\/rides-(v[12])(\/cells)?$/);
+		if (ridesMatch) {
+			const variant = ridesMatch[1] as 'v1' | 'v2';
+			const cellsRoute = !!ridesMatch[2];
+			// Edge cache: rides-* cold queries are O(seconds) since they
+			// fan out to many R2 GETs + decode + filter + stitch. Mirroring
+			// the /api/totals pattern (`index.ts:1232-1280`): past-only
+			// windows are immutable → 24h cache; queries that touch the
+			// current month get 60s (cron lag + cascade write slack).
 			const cache = caches.default;
 			const cacheKey = new Request(url.toString(), { method: 'GET' });
 			const hit = await cache.match(cacheKey);
@@ -1181,13 +1183,14 @@ export default {
 				headers.set('X-Cache', 'HIT');
 				return new Response(hit.body, { status: hit.status, headers });
 			}
+			const serve = variant === 'v1'
+				? (cellsRoute ? serveRidesV1Cells : serveRidesV1)
+				: (cellsRoute ? serveRidesV2Cells : serveRidesV2);
 			let resp: Response;
 			try {
-				resp = url.pathname === '/api/rides-v1'
-					? await serveRidesV1(env.R2, request, env.CORS_ORIGIN ?? '*')
-					: await serveRidesV1Cells(env.R2, request, env.CORS_ORIGIN ?? '*');
+				resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*');
 			} catch (err: any) {
-				return errorResponse(err.message ?? 'rides-v1 error', 500, env);
+				return errorResponse(err.message ?? `rides-${variant} error`, 500, env);
 			}
 			if (resp.ok) {
 				// `to` exclusive — past-only iff `to` ≤ now − 5min (cron slack).
