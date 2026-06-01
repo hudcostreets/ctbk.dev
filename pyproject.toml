@@ -28,6 +28,7 @@ dependencies = [
     "pyrmts @ git+https://github.com/runsascoded/pyrmts.git@c8de71f#subdirectory=python/pyrmts",
     "pyrmts_geo @ git+https://github.com/runsascoded/pyrmts.git@c8de71f#subdirectory=python/pyrmts_geo",
     "python-dateutil>=2.9.0.post0",
+    "s2cell>=1.8.0",
     "s3fs>=2025.5.1",
     "SQLAlchemy>=2.0.41",
     "utz>=0.20.0",

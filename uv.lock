@@ -696,6 +696,7 @@ dependencies = [
     { name = "pyrmts" },
     { name = "pyrmts-geo" },
     { name = "python-dateutil" },
+    { name = "s2cell" },
     { name = "s3fs" },
     { name = "sqlalchemy" },
     { name = "utz" },
@@ -730,6 +731,7 @@ requires-dist = [
     { name = "pyrmts", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=c8de71f" },
     { name = "pyrmts-geo", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_geo&rev=c8de71f" },
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
+    { name = "s2cell", specifier = ">=1.8.0" },
     { name = "s3fs", specifier = ">=2025.5.1" },
     { name = "sqlalchemy", specifier = ">=2.0.41" },
     { name = "utz", specifier = ">=0.20.0" },
@@ -2962,6 +2964,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b9/17/4e01a602693b572149f92c983c1f25bd608df02c3f5cf50fd1f94e124a59/ruamel_yaml_clib-0.2.15-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:542d77b72786a35563f97069b9379ce762944e67055bea293480f7734b2c7e5e", size = 765882, upload-time = "2025-11-16T16:13:49.526Z" },
     { url = "https://files.pythonhosted.org/packages/9f/17/7999399081d39ebb79e807314de6b611e1d1374458924eb2a489c01fc5ad/ruamel_yaml_clib-0.2.15-cp314-cp314-win32.whl", hash = "sha256:424ead8cef3939d690c4b5c85ef5b52155a231ff8b252961b6516ed7cf05f6aa", size = 102567, upload-time = "2025-11-16T16:13:50.78Z" },
     { url = "https://files.pythonhosted.org/packages/d2/67/be582a7370fdc9e6846c5be4888a530dcadd055eef5b932e0e85c33c7d73/ruamel_yaml_clib-0.2.15-cp314-cp314-win_amd64.whl", hash = "sha256:ac9b8d5fa4bb7fd2917ab5027f60d4234345fd366fe39aa711d5dca090aa1467", size = 122847, upload-time = "2025-11-16T16:13:51.807Z" },
+]
+
+[[package]]
+name = "s2cell"
+version = "1.8.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e6/20/af36f1ea970ac6b1a9acb481d039d433a6f3add736b6a7630e840ac25652/s2cell-1.8.0.tar.gz", hash = "sha256:6ba0f06b2c9fe415259194295ef1e0794e18dafcb84880de5b6fa627c4a8eea8", size = 23404, upload-time = "2024-03-01T23:47:03.043Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8c/9c/af2c4e20b132c3351a2b026488c4ee2d515732315bc34d9a46f4b6db617b/s2cell-1.8.0-py3-none-any.whl", hash = "sha256:25b488fc8955b7919bc6477c9be38abce7793b70400dd3a1463e858dffb59568", size = 19240, upload-time = "2024-03-01T23:47:01.329Z" },
 ]
 
 [[package]]

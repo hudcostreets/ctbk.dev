@@ -35,6 +35,7 @@ import h3
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import s2cell
 from botocore.exceptions import ClientError
 from click import BadParameter, option
 from pyrmts import write_tier_parquet
@@ -48,14 +49,20 @@ R2_BUCKET = 'ctbk'
 SRC_DIR = Path(f's3/{R2_BUCKET}/normalized')
 STATION_OBS_PATH = Path(f's3/{R2_BUCKET}/stations/station-observations.parquet')
 
-Variant = Literal['v1', 'v2']
-VARIANTS: tuple[Variant, ...] = ('v1', 'v2')
+Variant = Literal['v1', 'v2', 'v3']
+VARIANTS: tuple[Variant, ...] = ('v1', 'v2', 'v3')
 
 
 def dst_prefix(variant: Variant) -> str:
     return f'rides-{variant}'
 
+# v1/v2 use h3 resolutions {9, 7, 5}; v3 uses S2 levels (10..15).
 DEFAULT_RESOLUTIONS: tuple[int, ...] = (9, 7, 5)
+DEFAULT_RESOLUTIONS_BY_VARIANT: dict[Variant, tuple[int, ...]] = {
+    'v1': (9, 7, 5),
+    'v2': (9, 7, 5),
+    'v3': (10, 11, 12, 13, 14, 15),
+}
 
 # Citibike's `Gender` column: 0 unknown, 1 male, 2 female. (Removed 2021-02
 # alongside `Bike ID`; pre-2021 months have values.)
@@ -73,18 +80,22 @@ ANCHORS: tuple[Anchor, ...] = ('start', 'end')
 
 ANCHOR_CONFIG: dict[Anchor, dict[str, str]] = {
     'start': {
-        'cell_col': 'start_h3_cell',
         'time_col': 'Start Time',
         'lat_col': 'Start Station Latitude',
         'lng_col': 'Start Station Longitude',
     },
     'end': {
-        'cell_col': 'end_h3_cell',
         'time_col': 'Stop Time',
         'lat_col': 'End Station Latitude',
         'lng_col': 'End Station Longitude',
     },
 }
+
+
+def cell_col(anchor: Anchor, variant: Variant) -> str:
+    """Cell column name varies by variant: v1/v2 use h3, v3 uses s2."""
+    idx = 's2' if variant == 'v3' else 'h3'
+    return f'{anchor}_{idx}_cell'
 
 DIM_COLS = ['gender', 'user_type', 'bike_type']
 METRIC_NAMES = ['count', 'duration']
@@ -129,9 +140,13 @@ V2_TIER_SPECS: dict[str, TierSpec] = {
     '1y':  TierSpec('1y',  None,    'all', '1mo'),
 }
 
+# v3 reuses v2's cascade verbatim — only cell-key column + level set differ.
+V3_TIER_SPECS: dict[str, TierSpec] = V2_TIER_SPECS
+
 TIER_SPECS_BY_VARIANT: dict[Variant, dict[str, TierSpec]] = {
     'v1': V1_TIER_SPECS,
     'v2': V2_TIER_SPECS,
+    'v3': V3_TIER_SPECS,
 }
 
 
@@ -141,11 +156,11 @@ def tier_specs(variant: Variant) -> dict[str, TierSpec]:
 
 def sort_cols(variant: Variant, cell_col: str) -> list[str]:
     """v1: (dt, cell) — time-window queries prune via `dt` RG stats.
-    v2: (cell, dt) — cell-filter queries prune via cell RG stats.
+    v2/v3: (cell, dt) — cell-filter queries prune via cell RG stats.
     """
     if variant == 'v1':
         return ['dt', cell_col]
-    if variant == 'v2':
+    if variant in ('v2', 'v3'):
         return [cell_col, 'dt']
     raise ValueError(f"unknown variant: {variant!r}")
 
@@ -340,17 +355,22 @@ def _load_rides_for_anchor(ym: YM, anchor: Anchor) -> pd.DataFrame:
 def build_1h_month_table(
     ym: YM,
     anchor: Anchor,
-    resolutions: tuple[int, ...] = DEFAULT_RESOLUTIONS,
+    resolutions: tuple[int, ...] | None = None,
+    variant: Variant = 'v1',
 ) -> pa.Table | None:
-    """Build one `rides-v1/<anchor>/1h/<YYYY-MM>.parquet` table.
+    """Build one `rides-<variant>/<anchor>/1h/<YYYY-MM>.parquet` table.
 
-    Reads normalized rides for `ym`, h3-materializes each ride at every
-    requested resolution, groups by `(<anchor>_h3_cell, dt_hour, *dims)`,
-    aggregates `count` + `duration` with the sum monoid.
+    Reads normalized rides for `ym`, cellizes each ride at every
+    requested resolution (h3 for v1/v2, S2 for v3), groups by
+    `(<anchor>_<idx>_cell, dt_hour, *dims)`, aggregates `count` +
+    `duration` with the sum monoid.
 
     Returns None if the source has no rides for this (ym, anchor).
     """
+    if resolutions is None:
+        resolutions = DEFAULT_RESOLUTIONS_BY_VARIANT[variant]
     cfg = ANCHOR_CONFIG[anchor]
+    cc = cell_col(anchor, variant)
     df = _load_rides_for_anchor(ym, anchor)
     if df.empty:
         return None
@@ -395,12 +415,15 @@ def build_1h_month_table(
     lat = df[cfg['lat_col']].values
     lng = df[cfg['lng_col']].values
 
-    # Inflate by 3× (one row per resolution), then groupby+sum.
+    # Inflate by len(resolutions) (one row per resolution), then groupby+sum.
     chunks = []
     for res in resolutions:
-        cells = [h3.latlng_to_cell(la, ln, res) for la, ln in zip(lat, lng)]
+        if variant == 'v3':
+            cells = [s2cell.lat_lon_to_token(la, ln, res) for la, ln in zip(lat, lng)]
+        else:
+            cells = [h3.latlng_to_cell(la, ln, res) for la, ln in zip(lat, lng)]
         chunks.append(pd.DataFrame({
-            cfg['cell_col']: cells,
+            cc: cells,
             'dt': dt_hour_ms,
             'gender': gender,
             'user_type': user_type,
@@ -410,7 +433,7 @@ def build_1h_month_table(
         }))
     long_df = pd.concat(chunks, ignore_index=True)
 
-    group_keys = [cfg['cell_col'], 'dt', 'gender', 'user_type', 'bike_type']
+    group_keys = [cc, 'dt', 'gender', 'user_type', 'bike_type']
     agg = (
         long_df
         .groupby(group_keys, observed=True, sort=False)
@@ -427,12 +450,12 @@ def build_1h_month_table(
     agg['duration_n'] = agg['count_n']
 
     out_cols = [
-        cfg['cell_col'], 'dt', 'gender', 'user_type', 'bike_type',
+        cc, 'dt', 'gender', 'user_type', 'bike_type',
         'count_n', 'count_sum', 'count_sumsq',
         'duration_n', 'duration_sum', 'duration_sumsq',
     ]
     schema = pa.schema([
-        (cfg['cell_col'], pa.string()),
+        (cc, pa.string()),
         ('dt', pa.int64()),
         ('gender', pa.string()),
         ('user_type', pa.string()),
@@ -541,37 +564,45 @@ def build_cascade_table(
     spec = specs[tier]
     if spec.derive_from is None:
         raise ValueError(f"tier {tier!r} has no derive_from")
-    cfg = ANCHOR_CONFIG[anchor]
-    cell_col = cfg['cell_col']
+    cc = cell_col(anchor, variant)
     in_periods = input_periods_for_output(tier, shard_start, spec.derive_from, all_dates, variant)
 
     cli = None if local_dir else r2_client()
-    frames: list[pd.DataFrame] = []
+    group_keys = [cc, 'dt', *DIM_COLS]
+
+    # Stream-aggregate: read each input shard, re-floor dt, groupby+sum,
+    # then merge into running accumulator. Avoids holding all shards in
+    # memory simultaneously — critical for 'all'-shard cascades over 13yr.
+    acc: pd.DataFrame | None = None
     n_present = 0
     for p in in_periods:
         tab = read_shard(anchor, spec.derive_from, p, local_dir, cli, variant)
         if tab is None:
             continue
         n_present += 1
-        frames.append(tab.to_pandas())
+        df = tab.to_pandas()
+        del tab
+        if spec.bin_sec is not None:
+            df['dt'] = (df['dt'].astype('int64') // (spec.bin_sec * 1000)) * (spec.bin_sec * 1000)
+        else:
+            df['dt'] = df['dt'].astype('int64').map(lambda v: dt_floor_ms_calendar(int(v), tier))
+        chunk = df.groupby(group_keys, sort=False, observed=True, dropna=False)[MONOID_COLS].sum().reset_index()
+        del df
+        if acc is None:
+            acc = chunk
+        else:
+            acc = pd.concat([acc, chunk], ignore_index=True)
+            del chunk
+            acc = acc.groupby(group_keys, sort=False, observed=True, dropna=False)[MONOID_COLS].sum().reset_index()
     if n_present == 0:
         return None
 
-    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-
-    # Re-floor dt to output bin.
-    if spec.bin_sec is not None:
-        df['dt'] = (df['dt'].astype('int64') // (spec.bin_sec * 1000)) * (spec.bin_sec * 1000)
-    else:
-        df['dt'] = df['dt'].astype('int64').map(lambda v: dt_floor_ms_calendar(int(v), tier))
-
-    group_keys = [cell_col, 'dt', *DIM_COLS]
-    agg = df.groupby(group_keys, sort=False, observed=True, dropna=False)[MONOID_COLS].sum().reset_index()
+    agg = acc
     for c in MONOID_COLS:
         agg[c] = agg[c].astype('int64')
 
     schema = pa.schema([
-        (cell_col, pa.string()),
+        (cc, pa.string()),
         ('dt', pa.int64()),
         ('gender', pa.string()),
         ('user_type', pa.string()),
@@ -583,7 +614,7 @@ def build_cascade_table(
         ('duration_sum', pa.int64()),
         ('duration_sumsq', pa.int64()),
     ])
-    out_cols = [cell_col, 'dt', *DIM_COLS, *MONOID_COLS]
+    out_cols = [cc, 'dt', *DIM_COLS, *MONOID_COLS]
     return pa.Table.from_pandas(agg[out_cols], schema=schema, preserve_index=False)
 
 
@@ -608,7 +639,7 @@ def _build_shard_task(
     spec = tier_specs(variant)[tier]
     t = datetime.fromisoformat(shard_start_iso)
     period = shard_period(spec.shard, t)
-    cfg = ANCHOR_CONFIG[anchor]
+    cc = cell_col(anchor, variant)
 
     if local_dir:
         out_path = Path(local_dir) / output_key(anchor, tier, period, variant)
@@ -625,7 +656,7 @@ def _build_shard_task(
         if tier != '1h':
             raise RuntimeError(f"tier {tier!r} has no derive_from but isn't '1h'")
         ym = YM(t.strftime('%Y%m'))
-        table = build_1h_month_table(ym, anchor, resolutions)
+        table = build_1h_month_table(ym, anchor, resolutions, variant)
     else:
         ad = (
             (Date.fromisoformat(all_dates_iso[0]), Date.fromisoformat(all_dates_iso[1]))
@@ -637,9 +668,9 @@ def _build_shard_task(
         return (period, anchor, 'empty', 0)
 
     if local_dir:
-        n = write_table_to_local(table, out_path, cfg['cell_col'], variant)
+        n = write_table_to_local(table, out_path, cc, variant)
     else:
-        n = write_table_to_r2(cli, table, output_key(anchor, tier, period, variant), cfg['cell_col'], variant)
+        n = write_table_to_r2(cli, table, output_key(anchor, tier, period, variant), cc, variant)
     return (period, anchor, 'wrote', n)
 
 
@@ -675,8 +706,8 @@ def _ym_range(date_from: str, date_to: str) -> list[YM]:
         help="Read/write local dir instead of R2 (prototype/smoke).")
 @option('-n', '--dry-run', is_flag=True)
 @option('-O', '--overwrite', '--force', is_flag=True, help="Rebuild even if output exists.")
-@option('-r', '--resolution', 'resolutions', multiple=True, type=int, default=DEFAULT_RESOLUTIONS,
-        help="h3 resolutions to materialize (1h only; default 9 7 5).")
+@option('-r', '--resolution', 'resolutions', multiple=True, type=int, default=(),
+        help="cell resolutions/levels (1h only; default per variant: v1/v2=9,7,5; v3=10..15).")
 @option('-t', '--tier', type=str, default='1h',
         help="Tier name (depends on --variant; v1+v2 share the same tier names).")
 @option('-T', '--ym-to', 'ym_to', required=True, help="Inclusive end (YYYY-MM).")
@@ -723,7 +754,7 @@ def rides_v1_build_cmd(
     err(f"rides-{variant}-build tier={tier} shard={spec.shard} anchors={anchors} "
         f"{len(starts)} shards in [{ym_from}, {ym_to}] (inclusive)")
 
-    res_tup = tuple(resolutions)
+    res_tup = tuple(resolutions) if resolutions else DEFAULT_RESOLUTIONS_BY_VARIANT[variant]  # type: ignore[index]
     tasks = [(s.isoformat(), a) for s in starts for a in anchors]
 
     if dry_run:
