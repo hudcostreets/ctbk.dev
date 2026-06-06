@@ -125,7 +125,7 @@ jobs:
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           REPO_SLUG: ${{ github.repository }}
         run: |
-          uv run --no-project --with 'thrds==0.3.0' --python 3.12 python - <<'PY'
+          uv run --no-project --with 'thrds==0.4.0' --python 3.12 python - <<'PY'
           import json, os, urllib.request
           from thrds import SlackClient, Thread
           gh_token = os.environ['GITHUB_TOKEN']

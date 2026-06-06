@@ -79,7 +79,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CI_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/ci.yml
         run: |
-          uv pip install --quiet 'thrds==0.3.0'
+          uv pip install --quiet 'thrds==0.4.0'
           python - <<'PY'
           import os
           from thrds import SlackClient, Thread
