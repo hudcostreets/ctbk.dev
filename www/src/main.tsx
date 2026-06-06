@@ -27,6 +27,7 @@ const StationDetail = lazy(() => import("./pages/StationDetail"))
 const PipelineMdx = lazy(() => import("./pages/Pipeline.mdx"))
 const Files = lazy(() => import("./pages/Files"))
 const Health = lazy(() => import("./pages/Health"))
+const CellsDebug = lazy(() => import("./pages/CellsDebug"))
 
 function Pipeline() {
   return (
@@ -58,6 +59,7 @@ function AppContent() {
           <Route path="/files" element={<Files />} />
           <Route path="/files/*" element={<Files />} />
           <Route path="/health" element={<Health />} />
+          <Route path="/cells-debug" element={<CellsDebug />} />
         </Routes>
       </Suspense>
       <ThemeToggle onOpenShortcuts={openModal} hideThemeButton={isStationsPage}>

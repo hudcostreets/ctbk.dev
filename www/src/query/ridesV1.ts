@@ -11,6 +11,7 @@
  *   downstream `buildTraces` can stack/filter by region naturally.
  */
 import { keepPreviousData, useQuery, type UseQueryResult } from '@tanstack/react-query'
+import { minimalCover, s2Index, type SpatialSet } from 'pyrmts-geo'
 import type { ProcessedRow } from '../chart/ymrgtb-traces'
 import type { Region } from '../data'
 
@@ -21,7 +22,12 @@ export const SYSTEM_BBOX = '40.5,-74.2,41.0,-73.7' as const
 const DATA_START_ISO = '2013-06-01T00:00:00Z'
 
 export type Anchor = 'start' | 'end'
-export type Pyramid = 'v1' | 'v2'
+export type Pyramid = 'v1' | 'v2' | 'v3'
+
+/** Static h3 region-cells for v1/v2. v3 doesn't use a static asset —
+ *  it computes a mixed-resolution `minimalCover` live from
+ *  `stations-regional.json` (see `useRegionCoversV3`). */
+const REGION_CELLS_URL_H3 = '/assets/region-cells.json' as const
 
 /** Which CFW worker to hit. `prod` = `ctbk-gbfs-api`, `dev` =
  *  `ctbk-gbfs-api-dev`. Use `dev` for iterating on backend changes
@@ -56,6 +62,18 @@ interface RidesV1Response {
 }
 
 type RegionCells = Record<Region, string[]>
+type RegionCovers = Record<Region, SpatialSet<string>>
+
+/** Stations static asset shape (written by `ctbk stations-regional`). */
+type Station = { lat: number; lng: number; region: Region; name?: string }
+type StationsRegional = Record<string, Station>
+
+/** S2 levels materialized in the v3 pyramid (see `specs/done/rides-pyramid-v3.md`).
+ *  `finestLevel` = where stations get cell-ified before minimalCover compacts.
+ *  `coarsestLevel` = highest the cover is allowed to roll up to (= shallowest
+ *  materialized level — going coarser would have no shard to query). */
+const V3_FINEST_LEVEL = 15
+const V3_COARSEST_LEVEL = 10
 
 /** Citi Bike's `user_type` → ctbk's `User Type`. */
 const USER_TYPE_MAP: Record<string, 'Annual' | 'Daily'> = {
@@ -70,17 +88,59 @@ const GENDER_MAP: Record<string, number> = {
   female: 2,
 }
 
-const REGION_CELLS_URL = '/assets/region-cells.json'
-
-/** TSQ-cached fetch of the static region → h3-r9-cells lookup. */
-function useRegionCells(): UseQueryResult<RegionCells> {
+/** TSQ-cached fetch of the static h3 region → cells lookup (v1/v2).
+ *  v3 takes the live `useRegionCoversV3` path instead. `enabled = false`
+ *  short-circuits the fetch entirely for v3 — see `useRidesV1` call site. */
+function useRegionCellsH3(enabled: boolean): UseQueryResult<RegionCells> {
   return useQuery<RegionCells>({
-    queryKey: ['region-cells'],
+    queryKey: ['region-cells', 'h3'],
+    enabled,
     staleTime: Infinity,        // immutable static asset
     queryFn: async () => {
-      const res = await fetch(REGION_CELLS_URL)
+      const res = await fetch(REGION_CELLS_URL_H3)
       if (!res.ok) throw new Error(`region-cells: HTTP ${res.status}`)
       return res.json()
+    },
+  })
+}
+
+/** Compute v3 region covers via `s2Index.minimalCover`. For each region R:
+ *  - include = stations in R (mapped to leaf cells at `V3_FINEST_LEVEL`)
+ *  - system  = ALL stations (across all regions) at the same level
+ *  - cover   = minimalCover(...) — mixed-resolution + lineage-disjoint, with
+ *              `coarsestLevel = V3_COARSEST_LEVEL` (= shallowest materialized
+ *              level in the pyramid). Returned as `{ include, exclude }` per
+ *              region; the v3 endpoint accepts both via `cells=` + `cells.exclude=`. */
+export function useRegionCoversV3(enabled: boolean = true): UseQueryResult<RegionCovers> {
+  return useQuery<RegionCovers>({
+    queryKey: ['region-covers', 's2', V3_FINEST_LEVEL, V3_COARSEST_LEVEL],
+    enabled,
+    staleTime: Infinity,
+    queryFn: async () => {
+      const res = await fetch('/assets/stations-regional.json')
+      if (!res.ok) throw new Error(`stations-regional: HTTP ${res.status}`)
+      const stations = (await res.json()) as StationsRegional
+      const leafByStation = Object.values(stations).map((s) => ({
+        region: s.region,
+        cell: s2Index.latLngToCell(s.lat, s.lng, V3_FINEST_LEVEL),
+      }))
+      const system = Array.from(new Set(leafByStation.map((x) => x.cell)))
+      const out: RegionCovers = {
+        NYC: { include: [], exclude: [] },
+        JC:  { include: [], exclude: [] },
+        HOB: { include: [], exclude: [] },
+      } as RegionCovers
+      for (const r of Object.keys(out) as Region[]) {
+        const include = Array.from(new Set(
+          leafByStation.filter((x) => x.region === r).map((x) => x.cell),
+        ))
+        if (include.length === 0) continue
+        out[r] = minimalCover(s2Index, include, system, {
+          allowSubtraction: true,
+          coarsestLevel: V3_COARSEST_LEVEL,
+        })
+      }
+      return out
     },
   })
 }
@@ -116,11 +176,17 @@ export function useRidesV1({
   const apiBase = API_BASE_BY_TARGET[api]
   const fromIso = (from ?? new Date(DATA_START_ISO)).toISOString()
   const toIso = (to ?? defaultTo()).toISOString()
-  const regionCells = useRegionCells()
+  // v1/v2: static single-level h3 cells from a JSON asset.
+  // v3: live minimalCover (mixed res + exclude) computed from
+  // stations-regional.json at FE startup, cached by TSQ. Each hook gates
+  // its own fetch on `enabled` — only the variant in use does I/O.
+  const isV3 = pyramid === 'v3'
+  const staticCells = useRegionCellsH3(!isV3)
+  const minCovers = useRegionCoversV3(isV3)
 
-  // Block until region-cells loads when regions are requested.
-  const cellsByRegion = regionCells.data
-  const enabled = !regions || !!cellsByRegion
+  const cellsByRegion = staticCells.data
+  const coversByRegion = minCovers.data
+  const enabled = !regions || (isV3 ? !!coversByRegion : !!cellsByRegion)
 
   // Single TSQ query, region calls fanned out via Promise.all (parallel)
   // — total wall time = slowest region. Cold ~5-9s (worker still has to
@@ -132,10 +198,17 @@ export function useRidesV1({
     enabled,
     placeholderData: keepPreviousData,
     queryFn: async () => {
-      const specs = !regions
-        ? [{ region: null as Region | null, cells: null as string[] | null }]
-        : regions.map((r) => ({ region: r, cells: cellsByRegion![r] }))
-      const perRegion = await Promise.all(specs.map(async ({ region, cells }) => {
+      type Spec = { region: Region | null; include: string[] | null; exclude: string[] }
+      const specs: Spec[] = !regions
+        ? [{ region: null, include: null, exclude: [] }]
+        : regions.map((r) => {
+          if (isV3 && coversByRegion) {
+            const cov = coversByRegion[r]
+            return { region: r, include: cov.include, exclude: cov.exclude }
+          }
+          return { region: r, include: cellsByRegion![r], exclude: [] }
+        })
+      const perRegion = await Promise.all(specs.map(async ({ region, include, exclude }) => {
         const url = new URL(`${apiBase}/api/rides-${pyramid}`)
         const sp = url.searchParams
         sp.set('anchor', anchor)
@@ -145,7 +218,8 @@ export function useRidesV1({
         sp.set('reducer', 'sum')
         sp.set('bin_budget', '200')
         sp.set('cell_budget', '16')
-        if (cells) sp.set('cells', cells.join(','))
+        if (include) sp.set('cells', include.join(','))
+        if (exclude.length) sp.set('cells.exclude', exclude.join(','))
         const res = await fetch(url.toString())
         if (!res.ok) throw new Error(`/api/rides-${pyramid}: HTTP ${res.status}`)
         const body = (await res.json()) as RidesV1Response

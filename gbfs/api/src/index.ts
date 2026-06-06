@@ -483,7 +483,7 @@ import { getHealthSnapshot } from './health';
 import { runAlerts } from './alerts';
 import { executeAvailViaPyrmts, shadowDelta } from './avail_pyrmts';
 import { serveAvailGeo, serveAvailGeoCells, serveAvailV2, serveAvailV2Cells } from './avail_geo';
-import { serveRidesV1, serveRidesV1Cells, serveRidesV2, serveRidesV2Cells } from './rides_v1';
+import { serveRidesV1, serveRidesV1Cells, serveRidesV2, serveRidesV2Cells, serveRidesV3, serveRidesV3Cells } from './rides_v1';
 
 /**
  * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
@@ -1161,14 +1161,14 @@ export default {
 			}
 		}
 
-		// /api/rides-{v1,v2}[/cells] — pyrmts-geo serving of rides pyramids
-		// (`rides-{v1,v2}/{start,end}/<tier>/<period>.parquet`). Variants
-		// share schema; v1 = original cascade, v2 = consolidated cascade +
-		// `(cell, dt)` sort. See `specs/done/rides-pyramid-{v1,v2}.md` +
-		// `rides_v1.ts`.
-		const ridesMatch = url.pathname.match(/^\/api\/rides-(v[12])(\/cells)?$/);
+		// /api/rides-{v1,v2,v3}[/cells] — pyrmts-geo serving of rides
+		// pyramids (`rides-{v1,v2,v3}/{start,end}/<tier>/<period>.parquet`).
+		// Variants share schema; v1 = original cascade, v2 = consolidated
+		// cascade + `(cell, dt)` sort, v3 = S2-keyed (exact lineage). See
+		// `specs/done/rides-pyramid-{v1,v2,v3}.md` + `rides_v1.ts`.
+		const ridesMatch = url.pathname.match(/^\/api\/rides-(v[123])(\/cells)?$/);
 		if (ridesMatch) {
-			const variant = ridesMatch[1] as 'v1' | 'v2';
+			const variant = ridesMatch[1] as 'v1' | 'v2' | 'v3';
 			const cellsRoute = !!ridesMatch[2];
 			// Edge cache: rides-* cold queries are O(seconds) since they
 			// fan out to many R2 GETs + decode + filter + stitch. Mirroring
@@ -1183,9 +1183,12 @@ export default {
 				headers.set('X-Cache', 'HIT');
 				return new Response(hit.body, { status: hit.status, headers });
 			}
-			const serve = variant === 'v1'
-				? (cellsRoute ? serveRidesV1Cells : serveRidesV1)
-				: (cellsRoute ? serveRidesV2Cells : serveRidesV2);
+			const serveByVariant = {
+				v1: { rollup: serveRidesV1, cells: serveRidesV1Cells },
+				v2: { rollup: serveRidesV2, cells: serveRidesV2Cells },
+				v3: { rollup: serveRidesV3, cells: serveRidesV3Cells },
+			} as const;
+			const serve = cellsRoute ? serveByVariant[variant].cells : serveByVariant[variant].rollup;
 			let resp: Response;
 			try {
 				resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*');
