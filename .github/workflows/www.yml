@@ -93,25 +93,38 @@ jobs:
         if: steps.deploy.outcome == 'success'
         working-directory: www
         run: |
-          # Wait briefly for GH Pages to flip the live tree (it polls ghp
-          # branch every ~10s). If chunks referenced by the just-deployed
-          # `index.html` 404 against ctbk.dev, fail loudly so the deploy
-          # is visibly broken — we hit exactly this when `clean-exclude`
-          # silently dropped chunks (commit ea82f3c0).
-          for i in 1 2 3 4 5 6; do
+          # Poll until the live `index.html` AND every chunk it
+          # references all return 200, up to 5 min. GH Pages can flip the
+          # root and the chunk tree out of sync — old `index.html` may
+          # linger briefly with stale chunk refs, or new `index.html` may
+          # serve before its new chunks propagate. Both look like a
+          # 404'd chunk to a one-shot check. Fail loudly only if the
+          # mismatch is still present after the deadline (this catches
+          # the `clean-exclude`-dropped-chunks bug from `ea82f3c0`).
+          deadline=$((SECONDS + 300))
+          chunks=
+          while [ $SECONDS -lt $deadline ]; do
             sleep 15
             html=$(curl -sf https://ctbk.dev/ || true)
-            [ -n "$html" ] && break
+            [ -z "$html" ] && continue
+            chunks=$(echo "$html" | grep -oE 'assets/[A-Za-z0-9._/-]+\.(js|css)' | sort -u)
+            [ -z "$chunks" ] && continue
+            fail=0
+            for c in $chunks; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' "https://ctbk.dev/$c")
+              [ "$code" = "200" ] || { fail=1; break; }
+            done
+            if [ "$fail" = "0" ]; then
+              echo "smoke OK: $(echo $chunks | wc -w) chunk(s) all 200"
+              exit 0
+            fi
           done
-          chunks=$(echo "$html" | grep -oE 'assets/[A-Za-z0-9._/-]+\.(js|css)' | sort -u)
-          [ -z "$chunks" ] && { echo 'no chunks parsed from live index.html — aborting'; exit 1; }
-          fail=0
+          echo 'smoke check timed out (5min); last observed chunk status:'
           for c in $chunks; do
             code=$(curl -s -o /dev/null -w '%{http_code}' "https://ctbk.dev/$c")
-            echo "$code  https://ctbk.dev/$c"
-            [ "$code" = "200" ] || fail=1
+            echo "  $code  https://ctbk.dev/$c"
           done
-          [ "$fail" = "0" ] || { echo 'one or more chunks 404 — deploy is broken'; exit 1; }
+          exit 1
 
       - name: Notify Slack — site deployed
         if: github.ref == 'refs/heads/www' && steps.deploy.outcome == 'success' && steps.smoke.outcome == 'success'
