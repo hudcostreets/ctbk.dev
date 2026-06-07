@@ -1315,6 +1315,93 @@ export default {
 			return resp;
 		}
 
+		// `/api/d1-probe` — diagnostic for D1 latency profiling. Times bare
+		// `.all()`, `d1Backend.fetchSegment()`, and `pyramid.storage.fetchSegment()`
+		// against `RIDES_V3_COARSE` so we can isolate the per-invocation
+		// cold-start (~5s first query, ~40ms subsequent — observed for D1
+		// from CFW workers, see `scripts/d1-probe.py`).
+		// `?sql=…` accepts arbitrary SQL (read-only D1 binding, but still
+		// gated on the dev environment to avoid prod surface). Dev-only.
+		if (url.pathname === '/api/d1-probe') {
+			if (env.AVAIL_PYRMTS_SHADOW !== '1') return new Response('not found', { status: 404 });
+			if (!env.RIDES_V3_COARSE) return new Response(JSON.stringify({error: 'no RIDES_V3_COARSE binding'}), {status: 503, headers: {'Content-Type': 'application/json'}});
+			const { d1Backend } = await import('pyrmts-cfw');
+			const { ridesPyramidV3D1 } = await import('./rides_v1');
+			const limit = url.searchParams.get('limit') ?? '1080';
+			const customSql = url.searchParams.get('sql');
+			const repeats = parseInt(url.searchParams.get('n') ?? '1', 10);
+			const useBackend = url.searchParams.get('backend') === '1';
+			const usePyramid = url.searchParams.get('pyramid') === '1';
+			const useCellAsName = url.searchParams.get('cellcol') === 'start_s2_cell';
+			const tableName = url.searchParams.get('table') ?? 'rides_start_1d';
+			const cells = (url.searchParams.get('cells') ?? '89c2f5,89c259,89c25d,89c2f7,89c25b,89c25f,89c2f3,89c245,89c24f').split(',');
+			const dtFrom = parseInt(url.searchParams.get('dt_from') ?? '1761955200000');
+			const dtTo = parseInt(url.searchParams.get('dt_to') ?? '1764547200000');
+			const sqlBase = customSql ?? `SELECT * FROM "${tableName}" WHERE dt >= ? AND dt < ? AND cell IN (${cells.map(() => '?').join(',')}) LIMIT ${limit}`;
+			const backend = useBackend ? d1Backend(env.RIDES_V3_COARSE, { tableTemplate: tableName }) : null;
+			const pyr = usePyramid ? ridesPyramidV3D1(env.RIDES_V3_COARSE, 'start') : null;
+			const runs: any[] = [];
+			for (let i = 0; i < repeats; i++) {
+				const t0 = performance.now();
+				let rowsLen = 0;
+				let meta: any = null;
+				let mode = 'raw';
+				if (pyr) {
+					mode = 'pyramid.storage';
+					const filterCol = useCellAsName ? 'start_s2_cell' : 'cell';
+					// Match the EXACT shape the real planner emits — includes
+					// `reaggregate` + `cells` (48-cell bbox-derived) properties
+					// the worker passes to fetchSegment in the rides-v3 path.
+					const segment = {
+						from: new Date(dtFrom),
+						to: new Date(dtTo),
+						shardTier: { name: '1d', bin: '1d' as const, shard: 'all' as const },
+						keys: [tableName],
+						reaggregate: false,
+						cells: Array.from({ length: 48 }, (_, i) => `89c2${i.toString(16).padStart(2, '0')}`),
+					};
+					const rows = await pyr.storage.fetchSegment(segment as any, {
+						binCol: 'dt',
+						range: { from: new Date(dtFrom), to: new Date(dtTo) },
+						filters: [{ col: filterCol, values: cells }],
+						trace: [] as any,
+					} as any);
+					rowsLen = rows.length;
+				} else if (backend) {
+					mode = 'd1Backend';
+					const segment = {
+						from: new Date(dtFrom),
+						to: new Date(dtTo),
+						shardTier: { name: tableName, bin: '1d' as const, shard: 'all' as const },
+						keys: [tableName],
+					};
+					const rows = await backend.fetchSegment(segment as any, {
+						binCol: 'dt',
+						range: { from: new Date(dtFrom), to: new Date(dtTo) },
+						filters: [{ col: 'cell', values: cells }],
+					});
+					rowsLen = rows.length;
+				} else {
+					const stmt = customSql ? env.RIDES_V3_COARSE.prepare(sqlBase) : env.RIDES_V3_COARSE.prepare(sqlBase).bind(dtFrom, dtTo, ...cells);
+					const res = await stmt.all();
+					rowsLen = res.results.length;
+					meta = res.meta;
+				}
+				const t1 = performance.now();
+				runs.push({
+					run: i,
+					mode,
+					wallMs: Math.round((t1 - t0) * 100) / 100,
+					rows: rowsLen,
+					sqlDurationMs: meta?.duration ?? null,
+					colo: meta?.served_by_colo,
+				});
+			}
+			return new Response(JSON.stringify({ sql: sqlBase, table: tableName, runs }, null, 2), {
+				headers: { 'Content-Type': 'application/json' },
+			});
+		}
+
 		// /api/rides — paginated raw-rides table per station (see specs/multiscale-timeseries-backend.md
 		// § "Paginated raw-rides table per station"). Reads `trips/stations/<short_name>.parquet`.
 		if (url.pathname === '/api/rides') {

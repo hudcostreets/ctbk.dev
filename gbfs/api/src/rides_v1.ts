@@ -208,6 +208,25 @@ const DIM_ENCODE: { [dim: string]: { [k: string]: number } } = {
  *     the parquet name on the way up — see `ctbk/rides_d1.py` which
  *     renames `start_s2_cell` → `cell` at load. This keeps callers (and
  *     downstream stitch/reduce code) agnostic to the storage backend. */
+// Per-request scratch for backend timing diagnostics. Populated by
+// `withDimCodec` (`fetchMs` = inner backend wall-time;
+// `decodeMs` = post-fetch row-iteration). Drained + cleared per request
+// in `serveRidesReduced`.
+const __d1Diag: { fetchMs: number; decodeMs: number; rowsIn: number; calls: number; perCallMs: number[] } = {
+	fetchMs: 0,
+	decodeMs: 0,
+	rowsIn: 0,
+	calls: 0,
+	perCallMs: [],
+};
+function resetD1Diag() {
+	__d1Diag.fetchMs = 0;
+	__d1Diag.decodeMs = 0;
+	__d1Diag.rowsIn = 0;
+	__d1Diag.calls = 0;
+	__d1Diag.perCallMs = [];
+}
+
 function withDimCodec<T extends import('pyrmts').FetchOptionsBase>(
 	backend: import('pyrmts').StorageBackend<T>,
 	parquetCellCol: string,
@@ -233,7 +252,13 @@ function withDimCodec<T extends import('pyrmts').FetchOptionsBase>(
 				});
 				encOpts = { ...opts, filters: encodedFilters } as T;
 			}
+			const t0 = performance.now();
 			const rows = await backend.fetchSegment(segment, encOpts);
+			const t1 = performance.now();
+			__d1Diag.fetchMs += t1 - t0;
+			__d1Diag.rowsIn += rows.length;
+			__d1Diag.calls += 1;
+			__d1Diag.perCallMs.push(Math.round((t1 - t0) * 10) / 10);
 			for (const r of rows) {
 				// Rename D1 `cell` back to parquet `{anchor}_s2_cell` so
 				// downstream code keys off pyramid.geo.cellCol uniformly.
@@ -249,6 +274,8 @@ function withDimCodec<T extends import('pyrmts').FetchOptionsBase>(
 					}
 				}
 			}
+			const t2 = performance.now();
+			__d1Diag.decodeMs += t2 - t1;
 			return rows;
 		},
 	};
@@ -409,6 +436,7 @@ async function serveRidesReduced(
 	dropCellCol: boolean,
 ): Promise<Response> {
 	const tStart = performance.now();
+	resetD1Diag();
 	const url = new URL(request.url);
 	const from = parseInstant(url.searchParams.get('from'));
 	const to = parseInstant(url.searchParams.get('to'));
@@ -580,6 +608,7 @@ async function serveRidesReduced(
 					stitched: stitched.length,
 					reduced: reduced.length,
 				},
+				d1Diag: { ...__d1Diag, fetchMs: Math.round(__d1Diag.fetchMs * 100) / 100, decodeMs: Math.round(__d1Diag.decodeMs * 100) / 100 },
 				cellsFilter: userCells !== null ? userCells.length : null,
 				dimFilters: rgFilters ?? null,
 				reducer,
