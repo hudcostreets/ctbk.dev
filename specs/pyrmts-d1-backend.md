@@ -188,40 +188,149 @@ ctbk d1-size-probe --variant v3 --tiers 1mo,3mo,1y --output tmp/v3-d1-sizes.json
 
 ### Deliverable from `e`
 
-A new spec section (or PR-comment) here that fills in this table for the
-v3 ladder (and v1/v2 for comparison):
+#### Phase 0 results (filled in 2026-06-07)
 
-| Tier | Anchor | Levels | Total parquet (MB) | Total rows (M) | Est. SQLite (MB) | Fits 10 GB D1? |
+**Method**: `ctbk pyramid-stats -v v1,v2,v3 -a both` enumerated all 2,434 shards on R2
+under `rides-v{1,2,3}/{anchor}/{tier}/<period>.parquet`, emitting per-`(variant,
+anchor, tier, level, shard)` row counts + parquet bytes to `tmp/pyramid-stats.jsonl`
+(8,836 records). `ctbk d1-size-probe -v v1,v2,v3 -a both -p` built the spec
+`WITHOUT ROWID` + INT-encoded-dim SQLite schema for one representative (largest)
+shard per `(variant, anchor, tier)` — 66 SQLite builds — and recorded the
+parquet→SQLite ratio per `(v, a, t)`. Per-tier total SQLite bytes are estimated
+as `(total parquet bytes summed across all shards) × (probe shard's ratio)`.
+
+##### v3 — per-(anchor, tier) sizing (the spec target)
+
+Each row is one D1 table per anchor (the spec's schema).
+
+| Tier | Anchor | Levels | Shards | Total parquet (MB) | Total rows (M) | Probe ratio | Est. SQLite (MB) | Fits 10 GB? |
+|---|---|---|---|---|---|---|---|---|
+| 1h  | start | 10-15 | 155 | 3,242.8 | 246.01 | 4.55× | 14,743.2 | ✗ |
+| 1h  | end   | 10-15 | 155 | 3,250.4 | 247.14 | 4.55× | 14,799.6 | ✗ |
+| 3h  | start | 10-15 |  53 | 1,868.8 | 127.93 | 4.10× |  7,659.3 | ✓ |
+| 3h  | end   | 10-15 |  53 | 1,873.6 | 126.35 | 4.10× |  7,688.4 | ✓ |
+| 6h  | start | 10-15 |  27 | 1,262.6 |  81.06 | 3.93× |  4,965.3 | ✓ |
+| 6h  | end   | 10-15 |  27 | 1,269.6 |  81.56 | 3.92× |  4,979.3 | ✓ |
+| 12h | start | 10-15 |  14 |   849.8 |  51.46 | 3.76× |  3,192.4 | ✓ |
+| 12h | end   | 10-15 |  14 |   843.5 |  51.04 | 3.75× |  3,166.0 | ✓ |
+| 1d  | start | 10-15 |   1 |   570.6 |  29.95 | 3.35× |  1,910.9 | ✓ |
+| 1d  | end   | 10-15 |   1 |   569.4 |  29.93 | 3.35× |  1,909.8 | ✓ |
+| 3d  | start | 10-15 |   1 |   228.4 |  11.42 | 3.25× |    741.6 | ✓ |
+| 3d  | end   | 10-15 |   1 |   228.1 |  11.40 | 3.25× |    740.1 | ✓ |
+| 7d  | start | 10-15 |   1 |   109.4 |   5.22 | 3.15× |    344.1 | ✓ |
+| 7d  | end   | 10-15 |   1 |   109.3 |   5.21 | 3.14× |    343.2 | ✓ |
+| 14d | start | 10-15 |   1 |    59.3 |   2.71 | 3.05× |    180.7 | ✓ |
+| 14d | end   | 10-15 |   1 |    59.1 |   2.70 | 3.05× |    180.1 | ✓ |
+| 1mo | start | 10-15 |   1 |    30.3 |   1.27 | 2.85× |     86.3 | ✓ |
+| 1mo | end   | 10-15 |   1 |    30.2 |   1.27 | 2.85× |     86.0 | ✓ |
+| 3mo | start | 10-15 |   1 |    13.0 |   0.46 | 2.45× |     31.9 | ✓ |
+| 3mo | end   | 10-15 |   1 |    13.0 |   0.46 | 2.45× |     31.8 | ✓ |
+| 1y  | start | 10-15 |   1 |     4.6 |   0.15 | 2.25× |     10.4 | ✓ |
+| 1y  | end   | 10-15 |   1 |     4.6 |   0.15 | 2.25× |     10.3 | ✓ |
+
+##### v3 — combined per-tier (both anchors, the D1-packing view)
+
+| Tier | Levels | Parquet (MB) | Rows (M) | Avg ratio | Est. SQLite (MB) | Fits 10 GB? |
 |---|---|---|---|---|---|---|
-| 1mo | start | 10-15 | ? | ? | ? | ? |
-| 1mo | end | 10-15 | ? | ? | ? | ? |
-| 3mo | both | 10-15 | ? | ? | ? | ? |
-| 1y | both | 10-15 | ? | ? | ? | ? |
-| 1d | both | 10-15 | ? | ? | ? | ? |
-| 7d | both | 10-15 | ? | ? | ? | ? |
-| 14d | both | 10-15 | ? | ? | ? | ? |
-| 12h | both | 10-15 | ? | ? | ? | ? |
-| 6h | both | 10-15 | ? | ? | ? | ? |
-| 3h | both | 10-15 | ? | ? | ? | ? |
-| 1h | both | 10-15 | ? | ? | ? | ? |
+| 1h  | 10-15 | 6,493.1 | 493.15 | 4.55× | 29,542.7 | ✗ |
+| 3h  | 10-15 | 3,742.4 | 254.28 | 4.10× | 15,347.7 | ✗ |
+| 6h  | 10-15 | 2,532.2 | 162.62 | 3.93× |  9,944.6 | ✓ (tight) |
+| 12h | 10-15 | 1,693.2 | 102.50 | 3.76× |  6,358.3 | ✓ |
+| 1d  | 10-15 | 1,140.0 |  59.88 | 3.35× |  3,820.8 | ✓ |
+| 3d  | 10-15 |   456.5 |  22.83 | 3.25× |  1,481.7 | ✓ |
+| 7d  | 10-15 |   218.7 |  10.43 | 3.14× |    687.3 | ✓ |
+| 14d | 10-15 |   118.4 |   5.40 | 3.05× |    360.8 | ✓ |
+| 1mo | 10-15 |    60.4 |   2.54 | 2.85× |    172.3 | ✓ |
+| 3mo | 10-15 |    26.0 |   0.92 | 2.45× |     63.7 | ✓ |
+| 1y  | 10-15 |     9.2 |   0.29 | 2.25× |     20.7 | ✓ |
 
-Plus a written conclusion: **which tiers are D1-feasible** under the
-single-DB limit, and where the splits should go.
+**v3 grand total: 16.49 GB parquet → 67.80 GB SQLite (1.11 G rows across 11 tiers
+× 2 anchors). Will not fit a single D1.**
 
-### Open questions for `e` to settle empirically
+##### v1 / v2 for comparison (3 levels each — 5,7,9 H3 res)
 
-1. **WITHOUT ROWID vs. ROWID**: SQLite docs claim WITHOUT ROWID is 5-15%
-   smaller for narrow tables and faster for PK-range queries. Verify on
-   the 1mo tier.
-2. **Dim encoding**: INT-encoded dims (0/1/2) vs. TEXT (`"classic_bike"`).
-   Expected ~3-4× compression on dim cols. Measure.
-3. **Compression**: SQLite has no native compression. If sparsity is worse
-   than expected, consider `sqlite-zstd` extension (or just stay on
-   parquet for that tier).
-4. **Sparsity vs. cardinality**: We assume ~5K cells × 18 dim combos at
-   1mo gives ~14M rows over 155 months. True sparsity = rows / (theoretical
-   max). If true sparsity is ≥50%, sizing is well-modeled; if <10%, the
-   actual row count is much smaller than predicted and D1 fits more tiers.
+The parquet→SQLite ratio ranges 2.48–5.55× across all variants. v1 and v2 have
+roughly half v3's row count (3 levels vs 6) and correspondingly smaller SQLite
+footprints:
+
+| Variant | Tier | Both anchors parquet (MB) | Both anchors SQLite (MB) |
+|---|---|---|---|
+| v1 | 1h  | 3,485.3 | 17,834.8 |
+| v1 | 3h  | 2,200.2 |  9,456.5 |
+| v1 | 6h  | 1,551.9 |  5,931.1 |
+| v1 | 12h |   1,051.0 |  4,287.1 |
+| v1 | 1d-1y total | 905.0 | 3,310.3 |
+| v2 | 1h  | 3,329.4 | 18,474.5 |
+| v2 | 3h  | 1,900.4 |  9,544.5 |
+| v2 | 6h  | 1,290.5 |  6,237.5 |
+| v2 | 12h |   870.7 |  4,017.9 |
+| v2 | 1d-1y total | 762.0 | 2,820.5 |
+
+v2 1h is slightly larger than v1 1h despite identical row counts because v2's
+`(cell, dt)` sort compresses less well in parquet (less locality on `dt`). For
+SQLite the ratio is reversed — `(cell, dt, ...)` PK aligns with the cell-first
+filter pattern and `WITHOUT ROWID` benefits.
+
+#### Verdict
+
+**Which tiers fit a single 10 GB D1**:
+
+- **Per-anchor D1 (single table per `(anchor, tier)`)**: All v3 tiers EXCEPT 1h
+  fit cleanly. 1h is 14.8 GB per anchor — needs further sub-sharding (by
+  year-range) OR stay on parquet.
+- **Combined-anchor D1 (both `rides_start_<tier>` + `rides_end_<tier>` in one
+  DB)**: 12h and coarser fit comfortably; 6h squeaks in (9.94 GB → no headroom);
+  3h and 1h do not.
+
+**Recommended layout for v3** (target: <8 GB per D1 for headroom; minimize DB
+count):
+
+1. **`RIDES_V3_COARSE_START`** (12h, 1d, 3d, 7d, 14d, 1mo, 3mo, 1y; start anchor) — **6.49 GB** ✓
+2. **`RIDES_V3_COARSE_END`** (same tiers; end anchor) — **6.47 GB** ✓
+3. **`RIDES_V3_6H_START`** — 4.97 GB ✓
+4. **`RIDES_V3_6H_END`** — 4.98 GB ✓
+5. **`RIDES_V3_3H_START`** — 7.66 GB ✓ (tight)
+6. **`RIDES_V3_3H_END`** — 7.69 GB ✓ (tight)
+
+→ **1h tier stays on parquet** (14.8 GB per anchor would need ≥2 sub-shards
+each, and the cold-load latency benefit is more marginal at 1h granularity for
+the load-bearing multi-year-monthly query path).
+
+Total: **6 D1 databases** covering 3h..1y for both anchors. The Home /
+StationDetail monthly chart (load-bearing 13-year case) hits `RIDES_V3_COARSE_*`
+exclusively (1mo bin → 1mo tier or 1y tier). Time-of-day fold hits 1h on
+parquet (existing path) or 3h on D1 if needed (3h is the finest hourly fold
+ctbk currently supports).
+
+**Conservative starter** (1 D1 if we want to land fast and grow):
+
+- **`RIDES_V3_COARSE`** (1d, 3d, 7d, 14d, 1mo, 3mo, 1y; both anchors) — 6.60 GB ✓.
+  Covers the load-bearing monthly chart with one DB. 12h+finer stays on parquet
+  for Phase 1. Add `RIDES_V3_12H` (6.36 GB combined) in a follow-up to unblock
+  TOD fold.
+
+#### Open questions — answered
+
+1. **WITHOUT ROWID vs ROWID**: not separately benchmarked (ran out of time
+   budget; the spec schema uses WITHOUT ROWID throughout). All measurements
+   reported above are WITHOUT ROWID; if we want a delta, repeat with a
+   `--no-rowid=false` flag (TODO if it matters for cutover).
+2. **Dim encoding**: measurements use the proposed INT encoding for gender (0/1/2)
+   + dense-INT for user_type and bike_type. The 2.25–5.55× ratios are with this
+   encoding. TEXT-encoded dims would add ~10–20% per row (3 dim cols × ~8 bytes
+   extra each) → estimate 2.7–6.5× ratios. Not separately measured.
+3. **Compression**: not needed for v3 12h+ tiers. For 1h, sizing exceeds 10 GB
+   even with the current dense encoding — `sqlite-zstd` could help here but the
+   row-IO cost on every query is probably worse than parquet RG pruning. Recommend
+   parquet for 1h.
+4. **Sparsity vs. cardinality**: actual v3 row counts come in *much* lower than
+   the spec's worst-case `5K cells × 14 buckets × 18 combos × 155 months ≈ 194M`
+   for 1mo — measured **2.54M rows** (1.27 M start + 1.27 M end) for the entire
+   1mo tier 'all' shard. **True sparsity is ≈1.3%** vs the theoretical max — so
+   the actual SQLite footprint is 77× *smaller* than the worst-case sizing
+   model. Same pattern holds at all tiers. This validates the cell-set query
+   pattern being a thin slice of the table (load-bearing case of ~200 cells over
+   13 years × 12 months ≈ 2,400 buckets × ~18 dim combos ≈ 43 K rows per anchor).
 
 ## Phase 1 — pyrmts `D1Storage`
 
