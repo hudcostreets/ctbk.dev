@@ -76,16 +76,27 @@ def duration_range(dur: str, anchor: datetime) -> tuple[datetime, datetime]:
     return from_, anchor
 
 
+_REGION_CELLS_CACHE: dict | None = None
+
+
 def fetch_region_cells(region: str, r2_base: str) -> list[str]:
-    """Pull a v3 region's minimal cover from R2."""
-    url = f'{r2_base.rstrip("/")}/region-cells/v3/{region}.json'
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    # Schema TBD; common shape is { cells: [...] } or just an array.
-    if isinstance(data, dict):
-        return data.get('cells') or data.get('cover') or []
-    return list(data)
+    """Pull a v3 region's minimal cover.
+
+    The cover lives in the FE bundle at `/assets/region-cells-s2.json` (a
+    `{REGION: [cells...]}` dict). `r2_base` is repurposed as the base host
+    for that asset — pass the FE origin (https://ctbk.dev) or any
+    deployment that serves the same asset."""
+    global _REGION_CELLS_CACHE
+    if _REGION_CELLS_CACHE is None:
+        url = f'{r2_base.rstrip("/")}/assets/region-cells-s2.json'
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        _REGION_CELLS_CACHE = resp.json()
+    upper = region.upper()
+    for k in (region, upper, region.lower()):
+        if k in _REGION_CELLS_CACHE:
+            return list(_REGION_CELLS_CACHE[k])
+    return []
 
 
 def synthetic_neighborhood(n_cells: int = 200) -> list[str]:
@@ -106,8 +117,10 @@ def one_request(
     to: datetime,
     backend: Backend,
     cache_mode: CacheMode,
-    bin_budget: int = 1024,
-    cell_budget: int = 1024,
+    bin_budget: int = 200,
+    cell_budget: int = 16,
+    cells_exclude: list[str] | None = None,
+    run_tag: str | None = None,
 ) -> dict:
     params = {
         'from': from_.isoformat(),
@@ -120,6 +133,14 @@ def one_request(
         # explicit cells (planner uses it for outputRes fallback).
         'bbox': '40.5,-74.3,40.95,-73.7',
     }
+    if cells_exclude:
+        params['cells.exclude'] = ','.join(cells_exclude)
+    # Per-run tag busts CFW edge cache across bench runs — without it, a
+    # stable URL across runs picks up the prior run's cached body (so
+    # warm latency reflects a stale payload, e.g. an old buggy worker
+    # version). Keeps cold/warm semantics within the run.
+    if run_tag:
+        params['_run'] = run_tag
     if backend == 'd1':
         params['backend'] = 'd1'
     if cache_mode == 'cold':
@@ -151,8 +172,8 @@ def one_request(
 
 @click.command()
 @click.option('--api-base', '-A', required=True, help='Worker base URL.')
-@click.option('--r2-base', '-R', default='https://ctbk.s3.amazonaws.com',
-              help='R2 base URL for region-cells fetch.')
+@click.option('--r2-base', '-R', default='https://ctbk.dev',
+              help='Base URL serving `/assets/region-cells-s2.json`.')
 @click.option('--regions', '-r', default='nyc,jc,hob,neighborhood',
               help='Comma-separated region names (default nyc,jc,hob,neighborhood).')
 @click.option('--durations', '-d', default=','.join(DEFAULT_DURATIONS),
@@ -164,6 +185,9 @@ def one_request(
 @click.option('--backends', '-b', default='parquet,d1',
               help='Backends to test.')
 @click.option('--out', '-o', required=True, help='Output JSONL path.')
+@click.option('--covers-file', '-c', default=None,
+              help='Path to a JSON `{REGION: {include, exclude}}` file (FE-style '
+                   'mixed-level cover). Overrides flat region-cells.')
 def main(
     api_base: str,
     r2_base: str,
@@ -173,6 +197,7 @@ def main(
     repeats: int,
     backends: str,
     out: str,
+    covers_file: str | None,
 ):
     region_list = [r.strip() for r in regions.split(',')]
     dur_list = [d.strip() for d in durations.split(',')]
@@ -183,19 +208,38 @@ def main(
 
     # Resolve cells per region (sync now; cache).
     cells_by_region: dict[str, list[str]] = {}
+    excludes_by_region: dict[str, list[str]] = {}
+    covers_data: dict[str, dict] | None = None
+    if covers_file:
+        with open(covers_file) as f:
+            covers_data = json.load(f)
+        err(f"  loaded mixed-level covers from {covers_file}")
     for r in region_list:
         if r == 'neighborhood':
             cells_by_region[r] = synthetic_neighborhood()
             continue
+        if covers_data:
+            upper = r.upper()
+            cov = covers_data.get(upper) or covers_data.get(r) or covers_data.get(r.lower())
+            if cov is None:
+                err(f"  WARN {r}: not in covers file; skipping")
+                cells_by_region[r] = []
+                continue
+            cells_by_region[r] = list(cov.get('include', []))
+            excludes_by_region[r] = list(cov.get('exclude', []))
+            err(f"  {r}: {len(cells_by_region[r])} include + {len(excludes_by_region[r])} exclude (mixed)")
+            continue
         try:
             cells_by_region[r] = fetch_region_cells(r, r2_base)
-            err(f"  {r}: {len(cells_by_region[r])} cells")
+            err(f"  {r}: {len(cells_by_region[r])} cells (flat)")
         except Exception as e:
             err(f"  WARN {r}: failed to fetch cells ({e}); skipping")
             cells_by_region[r] = []
 
     out_path = Path(out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    run_tag = uuid.uuid4().hex[:8]
+    err(f"run_tag={run_tag}")
 
     measurements: list[dict] = []
     with out_path.open('w') as f:
@@ -213,6 +257,8 @@ def main(
                                 api_base, region, cells, from_, to,
                                 backend=backend,  # type: ignore[arg-type]
                                 cache_mode=cache_mode,  # type: ignore[arg-type]
+                                cells_exclude=excludes_by_region.get(region),
+                                run_tag=run_tag,
                             )
                             m['rep'] = rep
                             m['from'] = from_.isoformat()
