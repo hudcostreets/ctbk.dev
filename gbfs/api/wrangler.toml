@@ -20,6 +20,17 @@ binding = "DB"
 database_name = "ctbk-gbfs"
 database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
 
+# RIDES_V3_COARSE — `/api/rides-v3?backend=d1` queries this. Holds
+# the v3 COARSE bundle (1d-1y tiers, both anchors, ~6.6 GB; INT-encoded
+# dim columns per `ctbk/rides_d1.py` so `tmp/d1/v3-coarse.sqlite` fits
+# under 10 GB). Worker decodes INT→string via `DIM_DECODE` in
+# `src/rides_v1.ts`. Provisioned 2026-06-07.
+# Bulk-load: `wrangler d1 import RIDES_V3_COARSE --file=tmp/d1/v3-coarse.sqlite --remote`.
+[[d1_databases]]
+binding = "RIDES_V3_COARSE"
+database_name = "ctbk-rides-v3-coarse"
+database_id = "493af275-0ffd-4abf-9676-f0bf0869bc9f"
+
 [[r2_buckets]]
 binding = "R2"
 bucket_name = "ctbk"
@@ -54,6 +65,11 @@ AVAIL_PYRMTS_SHADOW = "1"
 binding = "DB"
 database_name = "ctbk-gbfs"
 database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
+
+[[env.dev.d1_databases]]
+binding = "RIDES_V3_COARSE"
+database_name = "ctbk-rides-v3-coarse"
+database_id = "493af275-0ffd-4abf-9676-f0bf0869bc9f"
 
 [[env.dev.r2_buckets]]
 binding = "R2"

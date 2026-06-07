@@ -19,6 +19,7 @@
  */
 import {
 	fetchShardData,
+	parquetBackend,
 	pivotTallToHistogram,
 	planQuery,
 	stitch,
@@ -37,7 +38,7 @@ const METRICS: readonly AvailMetric[] = ['bikes', 'ebikes', 'docks', 'disabled',
 
 export function availPyramid(bucket: R2Bucket): Pyramid {
 	return {
-		storage: r2Storage(bucket),
+		storage: parquetBackend(r2Storage(bucket)),
 		keyTemplate: 'avail/agg/{tier}/{period}.parquet',
 		axis: 'time',
 		// Pivot adapter converts ctbk's unix-seconds `dt` to a ms-valued `dt_ms`

@@ -48,6 +48,11 @@ interface Env {
 	 *  pyrmts-based reader in parallel with the legacy path and logs a
 	 *  delta. Pure observation; client gets the legacy response unchanged. */
 	AVAIL_PYRMTS_SHADOW?: string;
+	/** Optional — when bound, `/api/rides-v3?backend=d1` queries this D1
+	 *  database instead of fanning out parquet reads. Holds the COARSE
+	 *  bundle (1d-1y tiers, both anchors; ~6.6 GB). See
+	 *  `specs/pyrmts-d1-backend.md`. */
+	RIDES_V3_COARSE?: D1Database;
 }
 
 function todayUtc(): string {
@@ -1191,7 +1196,7 @@ export default {
 			const serve = cellsRoute ? serveByVariant[variant].cells : serveByVariant[variant].rollup;
 			let resp: Response;
 			try {
-				resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*');
+				resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*', env.RIDES_V3_COARSE);
 			} catch (err: any) {
 				return errorResponse(err.message ?? `rides-${variant} error`, 500, env);
 			}

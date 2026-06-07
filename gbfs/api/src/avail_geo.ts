@@ -40,12 +40,12 @@
  * response is serialized. ~10–20× smaller payloads than `?reducer=hist`.
  */
 import {
-	fetchSegmentRows,
 	stitch,
 	type Pyramid,
 	type Row,
 	type Tier,
 } from 'pyrmts';
+import { parquetBackend } from 'pyrmts';
 import { r2Storage } from 'pyrmts-cfw';
 import { filterCellsAndRes, planGeoQuery, type BBox } from 'pyrmts-geo';
 
@@ -78,7 +78,7 @@ const V2_TIERS: Tier[] = [
 /** Shared pyramid skeleton; only key-template + tier ladder + `dims` vary. */
 function makeBaseProps(bucket: R2Bucket, keyTemplate: string, tiers: Tier[]): Omit<Pyramid, 'dims'> {
 	return {
-		storage: r2Storage(bucket),
+		storage: parquetBackend(r2Storage(bucket)),
 		keyTemplate,
 		axis: 'time',
 		binCol: 'dt',
@@ -264,7 +264,7 @@ async function serveGeoReduced(
 	// smaller, `dt`-first-sorted RGs; until then v2 endpoints OOM on sub-day
 	// queries and only PoC `/api/avail-geo` reliably serves.
 	const shardRows = await Promise.all(
-		plan.segments.map((seg) => fetchSegmentRows(pyramid.storage, seg.keys, {
+		plan.segments.map((seg) => pyramid.storage.fetchSegment(seg, {
 			binCol: pyramid.binCol,
 			range: { from: seg.from, to: seg.to },
 		})),

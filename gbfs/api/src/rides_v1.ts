@@ -41,14 +41,14 @@
  * as hyparquet RG-prune filters via pyrmts §2 `FetchOptions.filters`.
  */
 import {
-	fetchSegmentRows,
 	stitch,
 	type FetchTrace,
 	type Pyramid,
 	type Row,
 	type Tier,
 } from 'pyrmts';
-import { r2Storage } from 'pyrmts-cfw';
+import { parquetBackend } from 'pyrmts';
+import { d1Backend, r2Storage } from 'pyrmts-cfw';
 import {
 	filterCellsAndRes,
 	filterCellsByCover,
@@ -134,7 +134,7 @@ function keyTemplate(anchor: Anchor, variant: Variant): string {
 /** Shared pyramid skeleton; only key-template + cellCol + `dims` + `index` vary. */
 function makeBaseProps(bucket: R2Bucket, anchor: Anchor, variant: Variant): Omit<GeoPyramid, 'dims'> {
 	return {
-		storage: r2Storage(bucket),
+		storage: parquetBackend(r2Storage(bucket)),
 		keyTemplate: keyTemplate(anchor, variant),
 		axis: 'time',
 		binCol: 'dt',
@@ -165,6 +165,116 @@ export function ridesCellsPyramid(bucket: R2Bucket, anchor: Anchor, variant: Var
 		...makeBaseProps(bucket, anchor, variant),
 		dims: [
 			{ name: cellCol(anchor, variant), type: 'string' as const },
+			...DIMS.map((d) => ({ name: d, type: 'string' as const })),
+		],
+	};
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// D1 backend (rides-v3 only — COARSE tiers in the RIDES_V3_COARSE DB).
+//
+// Tables: `rides_{start,end}_{1d,3d,7d,14d,1mo,3mo,1y}` — one row per
+// (cell, dt, gender, user_type, bike_type) with sum-monoid state.
+//
+// Dim columns are INT-encoded in D1 (gender/user_type/bike_type are
+// int 0-2, see `ctbk/rides_d1.py:GENDER_INT` etc.). On fetch, the
+// backend wrapper decodes back to strings so downstream stitch/reduce
+// code sees the same row shape as the parquet path. See
+// `specs/pyrmts-d1-backend.md` §"Verdict" — INT-encoded coarse fits
+// one D1 (~6.6 GB across 14 tables); TEXT-encoded the same data is
+// 12 GB (the dt secondary index also embeds the PK).
+
+/** Dim INT→string decode maps. Must match `ctbk/rides_d1.py:DIM_MAPS`
+ *  — when that builder writes a new dim value, bump these too. */
+const DIM_DECODE: { [dim: string]: { [k: number]: string } } = {
+	gender:    { 0: 'unknown', 1: 'male', 2: 'female' },
+	user_type: { 0: 'Customer', 1: 'Subscriber', 2: 'nan' },
+	bike_type: { 0: 'unknown', 1: 'classic_bike', 2: 'electric_bike' },
+};
+const DIM_ENCODE: { [dim: string]: { [k: string]: number } } = {
+	gender:    { unknown: 0, male: 1, female: 2 },
+	user_type: { Customer: 0, Subscriber: 1, nan: 2 },
+	bike_type: { unknown: 0, classic_bike: 1, electric_bike: 2 },
+};
+
+/** Wrap a StorageBackend so:
+ *   - incoming `filters` on dim columns get their string values encoded
+ *     to INT before hitting D1's WHERE clause
+ *   - returned rows have dim INT values swapped back to strings (matches
+ *     the parquet row shape so stitch/reduce work without dispatching
+ *     on backend). */
+function withDimCodec<T extends import('pyrmts').FetchOptionsBase>(
+	backend: import('pyrmts').StorageBackend<T>,
+): import('pyrmts').StorageBackend<T> {
+	return {
+		name: `${backend.name}+dim-codec`,
+		async fetchSegment(segment, opts) {
+			let encOpts = opts;
+			if (opts?.filters) {
+				const encodedFilters = opts.filters.map((f) => {
+					if (!('values' in f) || !(f.col in DIM_ENCODE)) return f;
+					const map = DIM_ENCODE[f.col]!;
+					const encVals = (f.values as readonly string[])
+						.map((v) => map[v])
+						.filter((v): v is number => v !== undefined);
+					return { col: f.col, values: encVals };
+				});
+				encOpts = { ...opts, filters: encodedFilters } as T;
+			}
+			const rows = await backend.fetchSegment(segment, encOpts);
+			for (const r of rows) {
+				for (const dim of DIMS) {
+					const v = r[dim];
+					if (typeof v === 'number' && DIM_DECODE[dim]) {
+						const s = DIM_DECODE[dim]![v];
+						if (s !== undefined) r[dim] = s;
+					}
+				}
+			}
+			return rows;
+		},
+	};
+}
+
+/** v3 COARSE tiers (matches `RIDES_V3_COARSE` D1 table set; see
+ *  ctbk/rides_d1.py:TIER_GROUPS). */
+const V3_COARSE_TIERS: Tier[] = [
+	{ name: '1d',  bin: '1d',  shard: 'all' },
+	{ name: '3d',  bin: '3d',  shard: 'all' },
+	{ name: '7d',  bin: '7d',  shard: 'all' },
+	{ name: '14d', bin: '14d', shard: 'all' },
+	{ name: '1mo', bin: '1mo', shard: 'all' },
+	{ name: '3mo', bin: '3mo', shard: 'all' },
+	{ name: '1y',  bin: '1y',  shard: 'all' },
+];
+
+function makeBaseDbProps(db: D1Database, anchor: Anchor): Omit<GeoPyramid, 'dims'> {
+	return {
+		storage: withDimCodec(d1Backend(db, { tableTemplate: `rides_${anchor}_{tier}` })),
+		// keyTemplate is parquet-flavored; unused by D1 backend, but kept
+		// non-empty so the planner can still substitute templates.
+		keyTemplate: `rides_${anchor}_{tier}`,
+		axis: 'time',
+		binCol: 'dt',
+		metrics: METRICS.map((name) => ({ name, monoid: 'sum' as const })),
+		tiers: V3_COARSE_TIERS,
+		geo: {
+			cellCol: cellCol(anchor, 'v3'),
+			resolutions: resolutions('v3'),
+			index: s2Index,
+		},
+	};
+}
+
+export function ridesPyramidV3D1(db: D1Database, anchor: Anchor): GeoPyramid {
+	return { ...makeBaseDbProps(db, anchor), dims: DIMS.map((d) => ({ name: d, type: 'string' as const })) };
+}
+
+export function ridesCellsPyramidV3D1(db: D1Database, anchor: Anchor): GeoPyramid {
+	return {
+		...makeBaseDbProps(db, anchor),
+		dims: [
+			{ name: cellCol(anchor, 'v3'), type: 'string' as const },
 			...DIMS.map((d) => ({ name: d, type: 'string' as const })),
 		],
 	};
@@ -368,7 +478,7 @@ async function serveRidesReduced(
 		...(allCoverCells ? [{ col: pyramid.geo!.cellCol, values: allCoverCells }] : []),
 	];
 	const shardRows = await Promise.all(
-		plan.segments.map((seg) => fetchSegmentRows(pyramid.storage, seg.keys, {
+		plan.segments.map((seg) => pyramid.storage.fetchSegment(seg, {
 			binCol: pyramid.binCol,
 			range: { from: seg.from, to: seg.to },
 			filters: allFilters.length ? allFilters : undefined,
@@ -519,28 +629,44 @@ function parseAnchor(url: URL, cors: string | null): Anchor | Response {
 	return raw as Anchor;
 }
 
-/** HTTP handler for `/api/rides-{v1,v2}` — bbox rollup, one row per
+/** HTTP handler for `/api/rides-{v1,v2,v3}` — bbox rollup, one row per
  *  (dt, dims). Strips the `{anchor}_h3_cell` column from response rows
- *  (rollup has no meaningful cell value). */
-export async function serveRides(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant): Promise<Response> {
+ *  (rollup has no meaningful cell value).
+ *
+ *  For v3, when `?backend=d1` and a D1 binding is provided, the rollup
+ *  queries `RIDES_V3_COARSE` directly (single SELECT per segment) — see
+ *  `specs/pyrmts-d1-backend.md`. Other variants ignore `?backend`. */
+export async function serveRides(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant, db?: D1Database): Promise<Response> {
 	const cors = corsOrigin || null;
-	const anchor = parseAnchor(new URL(request.url), cors);
+	const url = new URL(request.url);
+	const anchor = parseAnchor(url, cors);
 	if (anchor instanceof Response) return anchor;
+	if (variant === 'v3' && url.searchParams.get('backend') === 'd1') {
+		if (db === undefined) return errorResponse(503, 'backend=d1 requested but no D1 binding configured', cors);
+		return serveRidesReduced(ridesPyramidV3D1(db, anchor), request, cors, true);
+	}
 	return serveRidesReduced(ridesPyramid(bucket, anchor, variant), request, cors, true);
 }
 
-/** HTTP handler for `/api/rides-{v1,v2}/cells` — per-cell breakdown preserved. */
-export async function serveRidesCells(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant): Promise<Response> {
+/** HTTP handler for `/api/rides-{v1,v2,v3}/cells` — per-cell breakdown preserved. */
+export async function serveRidesCells(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant, db?: D1Database): Promise<Response> {
 	const cors = corsOrigin || null;
-	const anchor = parseAnchor(new URL(request.url), cors);
+	const url = new URL(request.url);
+	const anchor = parseAnchor(url, cors);
 	if (anchor instanceof Response) return anchor;
+	if (variant === 'v3' && url.searchParams.get('backend') === 'd1') {
+		if (db === undefined) return errorResponse(503, 'backend=d1 requested but no D1 binding configured', cors);
+		return serveRidesReduced(ridesCellsPyramidV3D1(db, anchor), request, cors, false);
+	}
 	return serveRidesReduced(ridesCellsPyramid(bucket, anchor, variant), request, cors, false);
 }
 
-// Back-compat aliases used by `index.ts` route handlers.
-export const serveRidesV1 = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRides(bucket, request, corsOrigin, 'v1');
-export const serveRidesV1Cells = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRidesCells(bucket, request, corsOrigin, 'v1');
-export const serveRidesV2 = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRides(bucket, request, corsOrigin, 'v2');
-export const serveRidesV2Cells = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRidesCells(bucket, request, corsOrigin, 'v2');
-export const serveRidesV3 = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRides(bucket, request, corsOrigin, 'v3');
-export const serveRidesV3Cells = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRidesCells(bucket, request, corsOrigin, 'v3');
+// Back-compat aliases used by `index.ts` route handlers. v1/v2 accept (and
+// ignore) the trailing `db` arg so all six handlers share one signature
+// — index.ts can call them uniformly without per-variant dispatch.
+export const serveRidesV1 = (bucket: R2Bucket, request: Request, corsOrigin: string, _db?: D1Database) => serveRides(bucket, request, corsOrigin, 'v1');
+export const serveRidesV1Cells = (bucket: R2Bucket, request: Request, corsOrigin: string, _db?: D1Database) => serveRidesCells(bucket, request, corsOrigin, 'v1');
+export const serveRidesV2 = (bucket: R2Bucket, request: Request, corsOrigin: string, _db?: D1Database) => serveRides(bucket, request, corsOrigin, 'v2');
+export const serveRidesV2Cells = (bucket: R2Bucket, request: Request, corsOrigin: string, _db?: D1Database) => serveRidesCells(bucket, request, corsOrigin, 'v2');
+export const serveRidesV3 = (bucket: R2Bucket, request: Request, corsOrigin: string, db?: D1Database) => serveRides(bucket, request, corsOrigin, 'v3', db);
+export const serveRidesV3Cells = (bucket: R2Bucket, request: Request, corsOrigin: string, db?: D1Database) => serveRidesCells(bucket, request, corsOrigin, 'v3', db);
