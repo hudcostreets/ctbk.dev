@@ -202,9 +202,15 @@ const DIM_ENCODE: { [dim: string]: { [k: string]: number } } = {
  *     to INT before hitting D1's WHERE clause
  *   - returned rows have dim INT values swapped back to strings (matches
  *     the parquet row shape so stitch/reduce work without dispatching
- *     on backend). */
+ *     on backend)
+ *   - the parquet-style cell column name (`{anchor}_s2_cell`) is
+ *     translated to D1's canonical `cell` on the way down, and back to
+ *     the parquet name on the way up — see `ctbk/rides_d1.py` which
+ *     renames `start_s2_cell` → `cell` at load. This keeps callers (and
+ *     downstream stitch/reduce code) agnostic to the storage backend. */
 function withDimCodec<T extends import('pyrmts').FetchOptionsBase>(
 	backend: import('pyrmts').StorageBackend<T>,
+	parquetCellCol: string,
 ): import('pyrmts').StorageBackend<T> {
 	return {
 		name: `${backend.name}+dim-codec`,
@@ -212,6 +218,12 @@ function withDimCodec<T extends import('pyrmts').FetchOptionsBase>(
 			let encOpts = opts;
 			if (opts?.filters) {
 				const encodedFilters = opts.filters.map((f) => {
+					// Rename parquet-style cellCol to D1's `cell`.
+					if (f.col === parquetCellCol) {
+						return 'values' in f
+							? { col: 'cell', values: f.values }
+							: { col: 'cell', range: f.range };
+					}
 					if (!('values' in f) || !(f.col in DIM_ENCODE)) return f;
 					const map = DIM_ENCODE[f.col]!;
 					const encVals = (f.values as readonly string[])
@@ -223,6 +235,12 @@ function withDimCodec<T extends import('pyrmts').FetchOptionsBase>(
 			}
 			const rows = await backend.fetchSegment(segment, encOpts);
 			for (const r of rows) {
+				// Rename D1 `cell` back to parquet `{anchor}_s2_cell` so
+				// downstream code keys off pyramid.geo.cellCol uniformly.
+				if (r.cell !== undefined && r[parquetCellCol] === undefined) {
+					r[parquetCellCol] = r.cell;
+					delete r.cell;
+				}
 				for (const dim of DIMS) {
 					const v = r[dim];
 					if (typeof v === 'number' && DIM_DECODE[dim]) {
@@ -249,8 +267,9 @@ const V3_COARSE_TIERS: Tier[] = [
 ];
 
 function makeBaseDbProps(db: D1Database, anchor: Anchor): Omit<GeoPyramid, 'dims'> {
+	const parquetCellCol = cellCol(anchor, 'v3');
 	return {
-		storage: withDimCodec(d1Backend(db, { tableTemplate: `rides_${anchor}_{tier}` })),
+		storage: withDimCodec(d1Backend(db, { tableTemplate: `rides_${anchor}_{tier}` }), parquetCellCol),
 		// keyTemplate is parquet-flavored; unused by D1 backend, but kept
 		// non-empty so the planner can still substitute templates.
 		keyTemplate: `rides_${anchor}_{tier}`,

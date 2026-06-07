@@ -18,7 +18,6 @@
  * ms. Pivot multiplies by 1000.
  */
 import {
-	fetchShardData,
 	parquetBackend,
 	pivotTallToHistogram,
 	planQuery,
@@ -255,15 +254,12 @@ export async function executeAvailViaPyrmts(
 		: undefined;
 
 	const shardRows = await Promise.all(
-		plan.segments.map((seg) =>
-			Promise.all(seg.keys.map((k) => fetchShardData(pyramid.storage, k, {
-				binCol: pyramid.binCol,
-				range: { from: seg.from, to: seg.to },
-				filters: rgFilters,
-			}).catch(() => [] as Row[]))).then((arrs) =>
-				arrs.flat(),
-			),
-		),
+		plan.segments.map((seg) => pyramid.storage.fetchSegment(seg, {
+			binCol: pyramid.binCol,
+			range: { from: seg.from, to: seg.to },
+			filters: rgFilters,
+			tolerate404: true,
+		})),
 	);
 	const widened = shardRows.map(pivotPerMetric);
 
