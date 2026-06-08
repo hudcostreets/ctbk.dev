@@ -1,0 +1,1 @@
+import{j as e,aH as r,aI as o,aJ as s,aK as l}from"./index-ClfEJ2ob.js";function u(t){return e.jsx(r,{...t,defaultTheme:s,themeId:o})}function f(t){return function(a){return e.jsx(u,{styles:typeof t=="function"?n=>t({theme:n,...a}):t})}}function p(){return l}export{f as g,p as i};
