@@ -281,29 +281,45 @@ function withDimCodec<T extends import('pyrmts').FetchOptionsBase>(
 	};
 }
 
-/** v3 COARSE tiers (matches `RIDES_V3_COARSE` D1 table set; see
- *  ctbk/rides_d1.py:TIER_GROUPS). */
-const V3_COARSE_TIERS: Tier[] = [
-	{ name: '1d',  bin: '1d',  shard: 'all' },
-	{ name: '3d',  bin: '3d',  shard: 'all' },
-	{ name: '7d',  bin: '7d',  shard: 'all' },
-	{ name: '14d', bin: '14d', shard: 'all' },
-	{ name: '1mo', bin: '1mo', shard: 'all' },
-	{ name: '3mo', bin: '3mo', shard: 'all' },
-	{ name: '1y',  bin: '1y',  shard: 'all' },
-];
+/** Tier names served by the `RIDES_V3_COARSE` D1 (matches
+ *  `ctbk/rides_d1.py:TIER_GROUPS['COARSE']`). All other v3 tiers
+ *  (`1h`/`3h`/`6h`/`12h`) fall through to the parquet backend in the
+ *  hybrid v3 pyramid. */
+const V3_D1_TIER_NAMES = new Set(['1d', '3d', '7d', '14d', '1mo', '3mo', '1y']);
 
-function makeBaseDbProps(db: D1Database, anchor: Anchor): Omit<GeoPyramid, 'dims'> {
-	const parquetCellCol = cellCol(anchor, 'v3');
+/** Tier-routing storage backend: dispatch each `fetchSegment` to one of
+ *  two underlying backends based on the segment's tier name. Used to
+ *  build the hybrid v3 pyramid where D1 owns coarse tiers and parquet
+ *  owns the fine ones — planner sees a single full tier ladder and
+ *  picks freely, multiplex routes per call. */
+function multiplexStorage<T extends import('pyrmts').FetchOptionsBase>(
+	pickD1: (tierName: string) => boolean,
+	d1Backend_: import('pyrmts').StorageBackend<T>,
+	parquetBackend_: import('pyrmts').StorageBackend<T>,
+): import('pyrmts').StorageBackend<T> {
 	return {
-		storage: withDimCodec(d1Backend(db, { tableTemplate: `rides_${anchor}_{tier}` }), parquetCellCol),
-		// keyTemplate is parquet-flavored; unused by D1 backend, but kept
-		// non-empty so the planner can still substitute templates.
-		keyTemplate: `rides_${anchor}_{tier}`,
+		name: `multiplex(${d1Backend_.name}|${parquetBackend_.name})`,
+		fetchSegment(segment, opts) {
+			const backend = pickD1(segment.shardTier.name) ? d1Backend_ : parquetBackend_;
+			return backend.fetchSegment(segment, opts);
+		},
+	};
+}
+
+function makeBaseHybridProps(bucket: R2Bucket, db: D1Database, anchor: Anchor): Omit<GeoPyramid, 'dims'> {
+	const parquetCellCol = cellCol(anchor, 'v3');
+	const d1B = withDimCodec(d1Backend(db, { tableTemplate: `rides_${anchor}_{tier}` }), parquetCellCol);
+	const parquetB = parquetBackend(r2Storage(bucket));
+	return {
+		storage: multiplexStorage((t) => V3_D1_TIER_NAMES.has(t), d1B, parquetB),
+		// keyTemplate is parquet-flavored — used by the parquet leg.
+		// The D1 leg derives its table from `segment.shardTier.name` via
+		// its own `tableTemplate`, so this template only affects parquet.
+		keyTemplate: keyTemplate(anchor, 'v3'),
 		axis: 'time',
 		binCol: 'dt',
 		metrics: METRICS.map((name) => ({ name, monoid: 'sum' as const })),
-		tiers: V3_COARSE_TIERS,
+		tiers: TIERS_BY_VARIANT['v3'],
 		geo: {
 			cellCol: cellCol(anchor, 'v3'),
 			resolutions: resolutions('v3'),
@@ -312,13 +328,39 @@ function makeBaseDbProps(db: D1Database, anchor: Anchor): Omit<GeoPyramid, 'dims
 	};
 }
 
-export function ridesPyramidV3D1(db: D1Database, anchor: Anchor): GeoPyramid {
-	return { ...makeBaseDbProps(db, anchor), dims: DIMS.map((d) => ({ name: d, type: 'string' as const })) };
+/** Hybrid v3 pyramid: D1 for coarse tiers (≥1d), parquet for fine.
+ *  Planner picks the finest tier within the requested bin_budget;
+ *  storage layer routes per-segment. */
+export function ridesPyramidV3Hybrid(bucket: R2Bucket, db: D1Database, anchor: Anchor): GeoPyramid {
+	return { ...makeBaseHybridProps(bucket, db, anchor), dims: DIMS.map((d) => ({ name: d, type: 'string' as const })) };
 }
 
-export function ridesCellsPyramidV3D1(db: D1Database, anchor: Anchor): GeoPyramid {
+/** D1-only v3 pyramid — diagnostic helper for `/api/d1-probe`. Production
+ *  v3 always uses `ridesPyramidV3Hybrid`. Restricted to D1 COARSE tiers
+ *  so the planner can't pick a tier that isn't in D1. */
+export function ridesPyramidV3D1(db: D1Database, anchor: Anchor): GeoPyramid {
+	const parquetCellCol = cellCol(anchor, 'v3');
+	const d1Only = withDimCodec(d1Backend(db, { tableTemplate: `rides_${anchor}_{tier}` }), parquetCellCol);
+	const coarseTiers: Tier[] = TIERS_BY_VARIANT['v3'].filter((t) => V3_D1_TIER_NAMES.has(t.name));
 	return {
-		...makeBaseDbProps(db, anchor),
+		storage: d1Only,
+		keyTemplate: `rides_${anchor}_{tier}`,
+		axis: 'time',
+		binCol: 'dt',
+		metrics: METRICS.map((name) => ({ name, monoid: 'sum' as const })),
+		tiers: coarseTiers,
+		geo: {
+			cellCol: cellCol(anchor, 'v3'),
+			resolutions: resolutions('v3'),
+			index: s2Index,
+		},
+		dims: DIMS.map((d) => ({ name: d, type: 'string' as const })),
+	};
+}
+
+export function ridesCellsPyramidV3Hybrid(bucket: R2Bucket, db: D1Database, anchor: Anchor): GeoPyramid {
+	return {
+		...makeBaseHybridProps(bucket, db, anchor),
 		dims: [
 			{ name: cellCol(anchor, 'v3'), type: 'string' as const },
 			...DIMS.map((d) => ({ name: d, type: 'string' as const })),
@@ -689,9 +731,13 @@ export async function serveRides(bucket: R2Bucket, request: Request, corsOrigin:
 	const url = new URL(request.url);
 	const anchor = parseAnchor(url, cors);
 	if (anchor instanceof Response) return anchor;
-	if (variant === 'v3' && url.searchParams.get('backend') === 'd1') {
-		if (db === undefined) return errorResponse(503, 'backend=d1 requested but no D1 binding configured', cors);
-		return serveRidesReduced(ridesPyramidV3D1(db, anchor), request, cors, true);
+	// v3 default: hybrid (D1 for coarse tiers, parquet for fine — D1 wins on
+	// CPU at large covers since SQL aggregates server-side). `?backend=parquet`
+	// forces pure parquet (diagnostic); `?backend=d1` is an alias retained for
+	// back-compat with the bench tooling. v1/v2 ignore `?backend`.
+	const backendOverride = url.searchParams.get('backend');
+	if (variant === 'v3' && db !== undefined && backendOverride !== 'parquet') {
+		return serveRidesReduced(ridesPyramidV3Hybrid(bucket, db, anchor), request, cors, true);
 	}
 	return serveRidesReduced(ridesPyramid(bucket, anchor, variant), request, cors, true);
 }
@@ -702,9 +748,9 @@ export async function serveRidesCells(bucket: R2Bucket, request: Request, corsOr
 	const url = new URL(request.url);
 	const anchor = parseAnchor(url, cors);
 	if (anchor instanceof Response) return anchor;
-	if (variant === 'v3' && url.searchParams.get('backend') === 'd1') {
-		if (db === undefined) return errorResponse(503, 'backend=d1 requested but no D1 binding configured', cors);
-		return serveRidesReduced(ridesCellsPyramidV3D1(db, anchor), request, cors, false);
+	const backendOverride = url.searchParams.get('backend');
+	if (variant === 'v3' && db !== undefined && backendOverride !== 'parquet') {
+		return serveRidesReduced(ridesCellsPyramidV3Hybrid(bucket, db, anchor), request, cors, false);
 	}
 	return serveRidesReduced(ridesCellsPyramid(bucket, anchor, variant), request, cors, false);
 }
