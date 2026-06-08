@@ -73,7 +73,7 @@ export default function HomeV2() {
   const [stackBy, setStackBy] = useUrlState('s', codeParam<StackByV2>('None', StackByV2QueryStrings))
   const [stackRelative, setStackRelative] = useUrlState('pct', boolParam)
   const [regions, setRegions] = useUrlState('r', codesParam(Regions, RegionQueryStrings))
-  const [pyramid, setPyramid] = useUrlState<Pyramid>('pyramid', codeParam<Pyramid>('v1', [['v1', 'v1'], ['v2', 'v2'], ['v3', 'v3']]))
+  const [pyramid, setPyramid] = useUrlState<Pyramid>('pyramid', codeParam<Pyramid>('v3', [['v1', 'v1'], ['v2', 'v2'], ['v3', 'v3']]))
   const [api, setApi] = useUrlState<ApiTarget>('api', codeParam<ApiTarget>('prod', [['prod', 'prod'], ['dev', 'dev']]))
   const [userTypes, setUserTypes] = useUrlState('u', codesParam(UserTypes, UserTypeQueryStrings))
   const [genders, setGenders] = useUrlState('g', codesParam(Genders, GenderQueryStrings))
@@ -219,7 +219,8 @@ export default function HomeV2() {
         <Alert severity="info" sx={{ mb: 2 }}>
           <strong>v2 parity preview</strong> — data served live from{' '}
           <code>/api/rides-{pyramid}</code> (pyrmts-geo, parallel per-region queries).
-          Toggle the <strong>Pyramid</strong> radio below to A/B v1 vs v2.
+          Default is <code>v3</code> (s2-keyed, hybrid D1+parquet); toggle the{' '}
+          <strong>Pyramid</strong> radio below to A/B v1/v2/v3.
         </Alert>
         <div className={css.titleContainer}>
           <h1 className={css.title}>{title}</h1>
