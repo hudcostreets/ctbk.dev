@@ -53,6 +53,13 @@ interface Env {
 	 *  bundle (1d-1y tiers, both anchors; ~6.6 GB). See
 	 *  `specs/pyrmts-d1-backend.md`. */
 	RIDES_V3_COARSE?: D1Database;
+	/** Workers Analytics Engine dataset for per-request perf telemetry.
+	 *  Configured in `wrangler.toml` `[[analytics_engine_datasets]]`.
+	 *  `writeDataPoint({ blobs, doubles, indexes })`:
+	 *    blobs[0] = route, blobs[1] = workerColo, blobs[2] = d1Colo,
+	 *    blobs[3] = status, doubles[0] = perCallMs, doubles[1] = wallMs.
+	 *  Queryable via CF GraphQL `viewer.accounts.workersAnalyticsEngine`. */
+	PERF?: AnalyticsEngineDataset;
 }
 
 function todayUtc(): string {
@@ -1204,11 +1211,27 @@ export default {
 			const ridesV3DB = env.RIDES_V3_COARSE
 				? (env.RIDES_V3_COARSE.withSession('first-unconstrained') as unknown as D1Database)
 				: undefined;
+			const tRidesStart = performance.now();
 			let resp: Response;
 			try {
 				resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*', ridesV3DB);
 			} catch (err: any) {
 				return errorResponse(err.message ?? `rides-${variant} error`, 500, env);
+			}
+			// Workers Analytics Engine: per-request perf telemetry. Lets us
+			// (a) detect when an EWR D1 replica spawns, (b) track per-route
+			// p50/p99 over time, (c) verify the keep-warm / replication fix
+			// once it lands. blobs are string-typed; doubles numeric; indexes
+			// is the sampling key (route — buckets writes by route for
+			// efficient quantile estimation).
+			if (env.PERF) {
+				const workerColo = resp.headers.get('X-Worker-Colo') ?? '';
+				const wallMs = performance.now() - tRidesStart;
+				env.PERF.writeDataPoint({
+					blobs: [`/api/rides-${variant}${cellsRoute ? '/cells' : ''}`, workerColo, String(resp.status)],
+					doubles: [wallMs],
+					indexes: [`/api/rides-${variant}`],
+				});
 			}
 			if (resp.ok) {
 				// `to` exclusive — past-only iff `to` ≤ now − 5min (cron slack).
@@ -1622,9 +1645,46 @@ export default {
 		return errorResponse('Not found', 404, env);
 	},
 
-	/** Scheduled handler — every-5-minutes cron triggers Slack alerting on
-	 *  threshold breaches. See `alerts.ts` for rules + state mgmt. */
+	/** Scheduled handler — every-minute cron. Two concerns:
+	 *   1. D1 keep-warm: fire a trivial `SELECT 1` against `RIDES_V3_COARSE`
+	 *      so the D1 DO doesn't hibernate between low-traffic real requests.
+	 *      D1 hibernates after "dozens of seconds" idle (chimame benchmark)
+	 *      with a 300-600ms cold-path penalty; ours is observed at ~5s,
+	 *      worse than baseline (likely DO wake + cross-DC RPC compounded).
+	 *      $0 — 1 row read × 1440/day = 43k/mo vs 25B free tier.
+	 *   2. Slack alerts (existing): evaluate threshold rules and post
+	 *      firing/resolved transitions. Already idempotent — every-minute
+	 *      eval is fine; only posts on state change.
+	 *  Both phases emit AE data points so we can verify keep-warm latency
+	 *  + correlate with /api/rides-v3 cold-path improvement. */
 	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+		// D1 keep-warm — route through Sessions API so it exercises the
+		// same code path as /api/rides-v3, not just primary.
+		if (env.RIDES_V3_COARSE) {
+			const t0 = performance.now();
+			const session = env.RIDES_V3_COARSE.withSession('first-unconstrained') as unknown as D1Database;
+			ctx.waitUntil(session.prepare('SELECT 1 AS x').first()
+				.then((_row) => {
+					const wallMs = performance.now() - t0;
+					if (env.PERF) {
+						env.PERF.writeDataPoint({
+							blobs: ['cron:d1-keepwarm', 'cron', '200'],
+							doubles: [wallMs],
+							indexes: ['cron:d1-keepwarm'],
+						});
+					}
+				})
+				.catch((err) => {
+					console.error('d1-keepwarm error:', err?.message ?? err);
+					if (env.PERF) {
+						env.PERF.writeDataPoint({
+							blobs: ['cron:d1-keepwarm', 'cron', '500'],
+							doubles: [performance.now() - t0],
+							indexes: ['cron:d1-keepwarm'],
+						});
+					}
+				}));
+		}
 		if (!env.SLACK_BOT_TOKEN) {
 			console.log('alerts: SLACK_BOT_TOKEN not set; skipping');
 			return;

@@ -42,11 +42,26 @@ database_id = "493af275-0ffd-4abf-9676-f0bf0869bc9f"
 binding = "R2"
 bucket_name = "ctbk"
 
-# Slack alerting cron — `alerts.ts` evaluates threshold rules against the
-# health snapshot and posts to #ctbk-bot on firing/resolved transitions.
-# Requires `SLACK_BOT_TOKEN` wrangler secret; alerts are disabled if absent.
+# Workers Analytics Engine: per-request data points (route, workerColo,
+# d1Colo, perCallMs, status). Free up to 25M writes/day per account;
+# queryable via the CF GraphQL API. Used to detect when a D1 read-replica
+# eventually spawns in EWR and to track per-route p50/p99 over time.
+[[analytics_engine_datasets]]
+binding = "PERF"
+dataset = "ctbk_perf"
+
+# Cron triggers, both run via the scheduled() handler in `index.ts`:
+#  (a) D1 keep-warm — fires `SELECT 1` against `RIDES_V3_COARSE` to keep
+#      the D1 Durable Object resident. D1 hibernates after ~"dozens of
+#      seconds" idle (chimame benchmark) with ~300-600ms cold-path; our
+#      observed ~5s cold-path is worse, so we need fine-grained pings.
+#      $0 cost (43k row-reads/mo vs 25B free-tier).
+#  (b) Slack alerts — evaluates threshold rules and posts firing/resolved
+#      transitions to `#ctbk-bot`. Already idempotent; every-minute eval
+#      just runs the check more often.
+# Both run together every minute; that's the keep-warm cadence we need.
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["* * * * *"]
 
 # ─── Dev environment ───────────────────────────────────────────────────
 # Sibling worker at `ctbk-gbfs-api-dev.ryan-0dc.workers.dev` for iterating
@@ -87,6 +102,13 @@ database_id = "493af275-0ffd-4abf-9676-f0bf0869bc9f"
 [[env.dev.r2_buckets]]
 binding = "R2"
 bucket_name = "ctbk"
+
+# Same AE binding on dev — diagnostic runs against dev should also write
+# data points (dataset is shared with prod; filter by `script_name` in
+# queries to disambiguate).
+[[env.dev.analytics_engine_datasets]]
+binding = "PERF"
+dataset = "ctbk_perf"
 
 # Disable cron on dev — prod already fires `*/5 * * * *` for Slack alerts;
 # we don't want dev double-firing.
