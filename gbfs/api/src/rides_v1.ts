@@ -617,6 +617,11 @@ async function serveRidesReduced(
 
 	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 	if (cors) headers['Access-Control-Allow-Origin'] = cors;
+	// Surface the worker's colo on every response so bench scripts can
+	// correlate latency with geographic placement without flipping
+	// `?debug=1`. Empty value if CF didn't populate `cf` (local-dev case).
+	const workerColo = (request as any).cf?.colo;
+	if (workerColo) headers['X-Worker-Colo'] = workerColo;
 	const planSummary = {
 		outputTier: plan.outputTier.name,
 		outputBin: plan.outputBin,
@@ -650,7 +655,12 @@ async function serveRidesReduced(
 					stitched: stitched.length,
 					reduced: reduced.length,
 				},
-				d1Diag: { ...__d1Diag, fetchMs: Math.round(__d1Diag.fetchMs * 100) / 100, decodeMs: Math.round(__d1Diag.decodeMs * 100) / 100 },
+				d1Diag: {
+					...__d1Diag,
+					fetchMs: Math.round(__d1Diag.fetchMs * 100) / 100,
+					decodeMs: Math.round(__d1Diag.decodeMs * 100) / 100,
+					workerColo: (request as any).cf?.colo ?? null,
+				},
 				cellsFilter: userCells !== null ? userCells.length : null,
 				dimFilters: rgFilters ?? null,
 				reducer,

@@ -165,6 +165,7 @@ def one_request(
         'bytes': bytes_in,
         'x_cache': resp.headers.get('X-Cache') or '',
         'cf_cache_status': resp.headers.get('cf-cache-status') or '',
+        'worker_colo': resp.headers.get('X-Worker-Colo') or '',
         'server_timing': resp.headers.get('server-timing') or '',
         'url': resp.url,
     }
@@ -269,7 +270,8 @@ def main(
                             f.flush()
                             err(f"  {region:12s} {dur:5s} {backend:7s} {cache_mode:4s} "
                                 f"#{rep}: {m['latency_ms']:>6.1f} ms "
-                                f"({m['bytes']:>6,} B, {m['x_cache'] or m['cf_cache_status']})")
+                                f"({m['bytes']:>6,} B, {m['x_cache'] or m['cf_cache_status']}, "
+                                f"worker={m['worker_colo'] or '?'})")
 
     # Summary table.
     err()

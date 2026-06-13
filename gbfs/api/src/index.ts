@@ -1397,7 +1397,25 @@ export default {
 					colo: meta?.served_by_colo,
 				});
 			}
-			return new Response(JSON.stringify({ sql: sqlBase, table: tableName, runs }, null, 2), {
+			// Unconditional D1 colo probe — guarantees served_by_colo even
+			// when runs[] used the pyramid/backend path (which doesn't
+			// surface meta). One extra round-trip; negligible vs the
+			// ~5s diagnostic itself.
+			let d1Colo: string | null = null;
+			try {
+				const probe = await env.RIDES_V3_COARSE.prepare(`SELECT 1 AS x`).all();
+				d1Colo = (probe.meta as any)?.served_by_colo ?? null;
+			} catch (e: any) {
+				d1Colo = `error:${e?.message ?? 'unknown'}`;
+			}
+			const workerColo = (request as any).cf?.colo ?? null;
+			return new Response(JSON.stringify({
+				sql: sqlBase,
+				table: tableName,
+				workerColo,
+				d1Colo,
+				runs,
+			}, null, 2), {
 				headers: { 'Content-Type': 'application/json' },
 			});
 		}

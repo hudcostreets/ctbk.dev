@@ -67,6 +67,7 @@ def main(api_base: str, mode: str, table: str, limit: int, repeats: int,
     url = f'{api_base.rstrip("/")}/api/d1-probe'
 
     all_runs: list[dict] = []
+    colos: list[dict] = []
     for inv in range(invocations):
         # Force-new invocation by adding a unique cache-buster — same URL =
         # same edge cache key = subsequent hits would HIT instead of MISS.
@@ -75,24 +76,34 @@ def main(api_base: str, mode: str, table: str, limit: int, repeats: int,
         resp = requests.get(url, params=params, timeout=60)
         resp.raise_for_status()
         data = resp.json()
+        colos.append({
+            'invocation': inv,
+            'workerColo': data.get('workerColo'),
+            'd1Colo': data.get('d1Colo'),
+        })
         for run in data.get('runs', []):
             run['invocation'] = inv
+            run['workerColo'] = data.get('workerColo')
+            run['d1Colo'] = data.get('d1Colo')
             all_runs.append(run)
 
     print(json.dumps({
         'mode': mode,
         'table': table,
         'sql': data.get('sql'),
+        'colos': colos,
         'runs': all_runs,
     }, indent=2))
 
     err()
-    err(f"{'inv':>3s} {'call':>4s} {'wall_ms':>9s} {'rows':>6s} {'sql_ms':>7s} mode")
-    err('-' * 50)
+    err(f"{'inv':>3s} {'worker':>6s} {'d1':>4s} {'call':>4s} {'wall_ms':>9s} {'rows':>6s} {'sql_ms':>7s} mode")
+    err('-' * 60)
     for r in all_runs:
         sql_ms = r.get('sqlDurationMs')
         sql_ms_str = f'{sql_ms:.2f}' if sql_ms is not None else '—'
-        err(f"{r['invocation']:>3d} {r['run']:>4d} "
+        wc = r.get('workerColo') or '—'
+        dc = r.get('d1Colo') or '—'
+        err(f"{r['invocation']:>3d} {wc:>6s} {dc:>4s} {r['run']:>4d} "
             f"{r['wallMs']:>9.1f} {r['rows']:>6d} {sql_ms_str:>7s} {r['mode']}")
 
 

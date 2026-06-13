@@ -2,6 +2,13 @@ name = "ctbk-gbfs-api"
 main = "src/index.ts"
 compatibility_date = "2024-09-23"
 
+# Smart Placement: ask CF to migrate the Worker toward its heaviest
+# binding (D1 `RIDES_V3_COARSE` in IAD, observed via `X-Worker-Colo`
+# vs `served_by_colo` — Worker landed in EWR, D1 in IAD, ~5s first-
+# query penalty). If CF pulls us into IAD the D1 RPC stays in-DC.
+[placement]
+mode = "smart"
+
 [vars]
 CORS_ORIGIN = "*"
 # R2 bucket name (S3-compat presigned URL path-style addressing).
@@ -54,6 +61,12 @@ crons = ["*/5 * * * *"]
 # queries at the dev worker — see `www/src/query/stations.ts`.
 [env.dev]
 name = "ctbk-gbfs-api-dev"
+
+# Same Smart Placement on dev — that's where we measure (`d1-probe`
+# is dev-gated). CF needs a handful of invocations to gather routing
+# telemetry before it migrates the Worker.
+[env.dev.placement]
+mode = "smart"
 
 [env.dev.vars]
 CORS_ORIGIN = "*"
