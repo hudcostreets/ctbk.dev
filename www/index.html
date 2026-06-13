@@ -45,5 +45,10 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <!-- Cloudflare Web Analytics (RUM: page views + Core Web Vitals).
+         Manual mode: ctbk.dev is on GH Pages, not proxied through CF, so
+         the beacon JS reports CWV directly to CF's collector. Privacy:
+         no cookies, no individual-visitor tracking. Free tier. -->
+    <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "4bd00e4ade70447c89813154f57c6260"}'></script>
   </body>
 </html>
