@@ -1194,9 +1194,19 @@ export default {
 				v3: { rollup: serveRidesV3, cells: serveRidesV3Cells },
 			} as const;
 			const serve = cellsRoute ? serveByVariant[variant].cells : serveByVariant[variant].rollup;
+			// D1 Sessions API: route reads to nearest read-replica.
+			// `first-unconstrained` = any replica (incl. slightly stale) is OK
+			// for first query — fine because rides shards are immutable
+			// post-ingest. Without this the binding still goes to primary in
+			// IAD and we pay the EWR→IAD ~5s hop on cold isolates. See
+			// `wrangler.toml` `[placement]` and `read_replication: auto`
+			// on the D1 DB (enabled via API 2026-06-13).
+			const ridesV3DB = env.RIDES_V3_COARSE
+				? (env.RIDES_V3_COARSE.withSession('first-unconstrained') as unknown as D1Database)
+				: undefined;
 			let resp: Response;
 			try {
-				resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*', env.RIDES_V3_COARSE);
+				resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*', ridesV3DB);
 			} catch (err: any) {
 				return errorResponse(err.message ?? `rides-${variant} error`, 500, env);
 			}
@@ -1338,8 +1348,11 @@ export default {
 			const dtFrom = parseInt(url.searchParams.get('dt_from') ?? '1761955200000');
 			const dtTo = parseInt(url.searchParams.get('dt_to') ?? '1764547200000');
 			const sqlBase = customSql ?? `SELECT * FROM "${tableName}" WHERE dt >= ? AND dt < ? AND cell IN (${cells.map(() => '?').join(',')}) LIMIT ${limit}`;
-			const backend = useBackend ? d1Backend(env.RIDES_V3_COARSE, { tableTemplate: tableName }) : null;
-			const pyr = usePyramid ? ridesPyramidV3D1(env.RIDES_V3_COARSE, 'start') : null;
+			// Route through the Sessions API so replicas are exercised — see
+			// the rides-v3 dispatch path comment above.
+			const probeDB = env.RIDES_V3_COARSE.withSession('first-unconstrained') as unknown as D1Database;
+			const backend = useBackend ? d1Backend(probeDB, { tableTemplate: tableName }) : null;
+			const pyr = usePyramid ? ridesPyramidV3D1(probeDB, 'start') : null;
 			const runs: any[] = [];
 			for (let i = 0; i < repeats; i++) {
 				const t0 = performance.now();
@@ -1382,7 +1395,7 @@ export default {
 					});
 					rowsLen = rows.length;
 				} else {
-					const stmt = customSql ? env.RIDES_V3_COARSE.prepare(sqlBase) : env.RIDES_V3_COARSE.prepare(sqlBase).bind(dtFrom, dtTo, ...cells);
+					const stmt = customSql ? probeDB.prepare(sqlBase) : probeDB.prepare(sqlBase).bind(dtFrom, dtTo, ...cells);
 					const res = await stmt.all();
 					rowsLen = res.results.length;
 					meta = res.meta;
@@ -1403,7 +1416,7 @@ export default {
 			// ~5s diagnostic itself.
 			let d1Colo: string | null = null;
 			try {
-				const probe = await env.RIDES_V3_COARSE.prepare(`SELECT 1 AS x`).all();
+				const probe = await probeDB.prepare(`SELECT 1 AS x`).all();
 				d1Colo = (probe.meta as any)?.served_by_colo ?? null;
 			} catch (e: any) {
 				d1Colo = `error:${e?.message ?? 'unknown'}`;
