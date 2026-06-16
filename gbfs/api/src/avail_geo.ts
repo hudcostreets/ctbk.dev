@@ -47,7 +47,13 @@ import {
 } from 'pyrmts';
 import { parquetBackend } from 'pyrmts';
 import { r2Storage } from 'pyrmts-cfw';
-import { filterCellsAndRes, planGeoQuery, type BBox } from 'pyrmts-geo';
+import {
+	filterCellsAndRes,
+	getSpatialIndex,
+	planGeoQuery,
+	type BBox,
+	type SpatialIndex,
+} from 'pyrmts-geo';
 
 const METRICS = ['bikes', 'ebikes', 'docks', 'disabled', 'pending'] as const;
 type Metric = typeof METRICS[number];
@@ -230,7 +236,20 @@ function errorResponse(status: number, message: string, cors: string | null): Re
 	return new Response(JSON.stringify({ error: message }), { status, headers });
 }
 
-/** Core handler — runs plan/fetch/filter/stitch and applies reducer. */
+/** Core handler — runs plan/fetch/filter/stitch and applies reducer.
+ *
+ * URL contract mirrors `/api/rides-v{1,2,3}` (`serveRidesReduced`):
+ *   - Either `bbox=…` (planner picks output cells via `pickResolution`),
+ *     or `cells=` + optional `cells.exclude=` (caller-supplied cover, e.g.
+ *     `s2Index.minimalCover` output for an I/E station-set).
+ *   - When `cells=` is provided, `bbox` is ignored. The cover may be
+ *     mixed-resolution (S2 `minimalCover` emits parent + leaf entries);
+ *     the planner skips `pickResolution` and the post-fetch filter uses
+ *     `filterCellsByCover` (lineage walk) instead of single-level
+ *     `filterCellsAndRes`.
+ *   - No I/E sign-flip arithmetic here (avail uses the histogram monoid;
+ *     subtraction is ill-defined). The lineage walk just drops rows under
+ *     exclude ancestors, keeping rows under include ancestors. */
 async function serveGeoReduced(
 	pyramid: Pyramid,
 	request: Request,
@@ -246,8 +265,24 @@ async function serveGeoReduced(
 	if (binBudget === null) return errorResponse(400, 'invalid bin_budget', cors);
 	const cellBudget = parsePositiveInt(url.searchParams.get('cell_budget'), 1024);
 	if (cellBudget === null) return errorResponse(400, 'invalid cell_budget', cors);
-	const bbox = parseBBox(url.searchParams.get('bbox'));
-	if (bbox === null) return errorResponse(400, 'bbox required (minLat,minLng,maxLat,maxLng)', cors);
+
+	// Optional caller-supplied cover. When present, `bbox` is unused.
+	const cellsRaw = url.searchParams.get('cells');
+	const userCells = cellsRaw
+		? cellsRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+		: null;
+	if (userCells !== null && userCells.length === 0) {
+		return errorResponse(400, '`cells` param given but empty', cors);
+	}
+	const cellsExcludeRaw = url.searchParams.get('cells.exclude');
+	const userCellsExclude = cellsExcludeRaw
+		? cellsExcludeRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+		: [];
+
+	const bbox = userCells === null ? parseBBox(url.searchParams.get('bbox')) : null;
+	if (userCells === null && bbox === null) {
+		return errorResponse(400, 'either `bbox` or `cells` is required', cors);
+	}
 
 	const reducerRaw = url.searchParams.get('reducer') ?? DEFAULT_REDUCER;
 	if (!REDUCERS.includes(reducerRaw as Reducer)) {
@@ -255,24 +290,64 @@ async function serveGeoReduced(
 	}
 	const reducer = reducerRaw as Reducer;
 
-	const plan = planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox, cellBudget });
+	const index: SpatialIndex = getSpatialIndex(pyramid);
+	// `userOutputRes` mirrors the rides handler: single-level cover →
+	// that level; mixed-resolution cover (or includes+excludes) → `-1`
+	// sentinel ("don't filter rows by exact level"). Avail's exact-match
+	// filter below doesn't actually use `outputRes` but the plan response
+	// carries it so the FE knows what was used.
+	const userCoverLevels = userCells !== null
+		? Array.from(new Set(userCells.map((c) => index.cellLevel(c))))
+		: [];
+	const userOutputRes = userCells !== null
+		? (userCoverLevels.length > 1 || userCellsExclude.length > 0 ? -1 : userCoverLevels[0]!)
+		: null;
+
+	// `outputCells: {res, cells}` path bypasses `pickResolution`. See
+	// `pyrmts/specs/done/plan-geo-query-precomputed-cover.md`.
+	const plan = userCells !== null
+		? planGeoQuery(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells } })
+		: planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox: bbox!, cellBudget });
+
+	// Push the cell list down as an RG-prune filter on the cellCol. For
+	// `(cell, dt)`-sorted shards this lets hyparquet skip whole row groups
+	// whose `cellCol` range doesn't overlap the cover.
+	const allCoverCells = userCells !== null ? [...userCells, ...userCellsExclude] : null;
+	const cellCol = pyramid.geo!.cellCol;
+	const allFilters = allCoverCells
+		? [{ col: cellCol, values: allCoverCells }]
+		: [];
+
 	// Thread `binCol` + per-segment range so hyparquet prunes row groups by
-	// `dt` column stats. Currently a no-op for v2 shards (`avail_v2.py` writes
-	// them as a single 956K-row RG, and rows are `(cell, dt)`-sorted so a
-	// hypothetical multi-RG file would still have each RG spanning the full
-	// month). The full read-side optimization needs the v2 build to write
-	// smaller, `dt`-first-sorted RGs; until then v2 endpoints OOM on sub-day
-	// queries and only PoC `/api/avail-geo` reliably serves.
+	// `dt` column stats. v2 shards: `avail_v2.py` writes single 956K-row RG
+	// per shard (rows `(cell, dt)`-sorted), so a sub-day query would still
+	// read the full month. See `avail-pyramid-v2.md` §7 (smaller RGs +
+	// `dt`-first sort) for the build-side fix.
 	const shardRows = await Promise.all(
 		plan.segments.map((seg) => pyramid.storage.fetchSegment(seg, {
 			binCol: pyramid.binCol,
 			range: { from: seg.from, to: seg.to },
+			filters: allFilters.length ? allFilters : undefined,
 		})),
 	);
-	// Filter to chosen output resolution + bbox-covering cells.
-	const filtered = shardRows.map((rows) =>
-		filterCellsAndRes(rows, pyramid.geo!.cellCol, plan.outputRes, plan.outputCells),
-	);
+
+	// Filter to keep only rows the cover claims. Three paths:
+	//   - User cover (include∪exclude — multi-level or single, no sign-flip
+	//     arithmetic since avail is the histogram monoid). Exact-match by
+	//     cell ID against the include set. Note: this works correctly for
+	//     covers `minimalCover` emits whose include cells live at the same
+	//     resolutions the data was materialized at. A mixed-resolution
+	//     cover with a parent include + child exclude would NOT give
+	//     "parent minus child" — for that we'd need cover-aware filtering
+	//     at the build/sum level, deferred until a real consumer demands it.
+	//   - No user cover: bbox-derived `plan.outputCells` membership at
+	//     `plan.outputRes`.
+	const filtered = userCells !== null
+		? (() => {
+			const includeSet = new Set(userCells);
+			return shardRows.map((rows) => rows.filter((r) => includeSet.has(r[cellCol] as string)));
+		})()
+		: shardRows.map((rows) => filterCellsAndRes(rows, cellCol, plan.outputRes, plan.outputCells, index));
 	const stitched = stitch({ pyramid, plan, shardRows: filtered });
 	const reduced = reduceRows(stitched, reducer);
 
