@@ -520,11 +520,9 @@ async function serveRidesReduced(
 		: [];
 
 	const tPlan = performance.now();
-	const plan = planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox, cellBudget });
-	const outputCells = userCells ?? plan.outputCells;
 	const index: SpatialIndex = getSpatialIndex(pyramid);
 	// Cover semantics:
-	//   - No user cover: bbox-derived single-level (planner).
+	//   - No user cover: bbox-derived single-level (planner runs `pickResolution`).
 	//   - Single-level user cover (no excludes): exact-match push-down; rows
 	//     at the cover's own level survive (v1/v2 H3 path).
 	//   - MIXED-level cover (possibly with excludes): algebraic mode. Push
@@ -537,9 +535,18 @@ async function serveRidesReduced(
 		? Array.from(new Set(userCells.map((c) => index.cellLevel(c))))
 		: [];
 	const userCoverIsMixed = userCells !== null && (userCoverLevels.length > 1 || userCellsExclude.length > 0);
-	const outputRes = userCells !== null
+	const userOutputRes = userCells !== null
 		? (userCoverIsMixed ? -1 : userCoverLevels[0]!)  // -1 sentinel: don't filter by level
-		: plan.outputRes;
+		: null;
+	// `outputCells` (caller-supplied cover) path bypasses `pickResolution`,
+	// skipping `bboxToCells`'s `RegionCoverer` allocation — avoids the V8
+	// GC tail that adds 3-5s to the next async safepoint (`stmt.all()` in
+	// d1Backend). See pyrmts `specs/done/plan-geo-query-precomputed-cover.md`.
+	const plan = userCells !== null
+		? planGeoQuery(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells } })
+		: planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox, cellBudget });
+	const outputCells = userCells ?? plan.outputCells;
+	const outputRes = userCells !== null ? userOutputRes! : plan.outputRes;
 	const allCoverCells = userCells !== null ? [...userCells, ...userCellsExclude] : null;
 	const excludeSet = new Set(userCellsExclude);
 
