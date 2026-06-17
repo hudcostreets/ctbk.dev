@@ -18,5 +18,4 @@ ctbk agg create -gse -ac $m
 ctbk agg create -g ymrgtb -acd $m
 ctbk sm create $m
 ctbk spj create $m
-ctbk ymrgtb-cd -f
 node www/scripts/gen-station-urls.js

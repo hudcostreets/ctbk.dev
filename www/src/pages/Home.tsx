@@ -5,9 +5,9 @@
  * region tag so `buildTraces` filters/stacks naturally.
  *
  * `?pyramid=v3&api=prod` is the default. `?pyramid=v{1,2}` switch the
- * H3-keyed predecessors; `?api=dev` routes against the dev worker.
- * `?screenshot` hides controls for OG/screenshot harness use
- * (see `www/scrns.config.json`).
+ * H3-keyed predecessors (left in for A/B; see #105); `?api=dev` routes
+ * against the dev worker. `?screenshot` hides controls for OG/screenshot
+ * harness use (see `www/scrns.config.json`).
  */
 import { useUrlState, boolParam, numberArrayParam } from 'use-prms'
 import { PlotRelayoutEvent } from 'plotly.js'

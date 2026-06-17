@@ -1,7 +1,7 @@
 """Full pipeline update for a given month.
 
 Runs all stages in order: normalize → consolidate → meta-hists → aggregations →
-station-modes → station-pair-jsons → ymrgtb-cd JSON → station-urls JSON.
+station-modes → station-pair-jsons → station-urls JSON.
 
 Equivalent to the old `update.sh`, but as a proper CLI command with DVC integration.
 """
@@ -18,7 +18,7 @@ from ctbk.cli.git_dvc_cmd import git_dvc_cmd
 @ctbk.command('update')
 @git_dvc_cmd
 @flag('-S', '--no-station-harmonize', help="Skip station-harmonize (requires all consolidated parquets)")
-@flag('-W', '--no-www', help="Skip www asset updates (ymrgtb-cd, station-urls)")
+@flag('-W', '--no-www', help="Skip www asset updates (station-urls)")
 @argument('ym')
 def update(
     ym: str,
@@ -62,7 +62,6 @@ def update(
 
     if not no_www:
         err(f"--- WWW assets ---")
-        ctbk_run('ymrgtb-cd', '-f')
         run('node', 'www/scripts/gen-station-urls.js', dry_run=dry_run)
 
     return f'Process month {ym}'

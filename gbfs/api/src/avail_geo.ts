@@ -1,47 +1,34 @@
 /**
- * pyrmts-geo CFW glue for ctbk's avail pyramids (PoC + v2, served side-by-side).
+ * pyrmts-geo CFW glue for ctbk's avail-v3 pyramid (S2-keyed).
  *
- * Two pyramids, same row schema, same query-handler code path — only the R2
- * key template + tier ladder differ:
+ *   Storage: `avail-v3/<tier>/<period>.parquet`
+ *            (built by `ctbk avail-v3-build`, see `ctbk/avail_v3.py` +
+ *            `specs/avail-pyramid-v3-s2.md`)
+ *   Tiers:   18 — 1m, 2m, 3m, 5m, 10m, 15m, 30m, 1h, 2h, 3h, 6h, 12h,
+ *                 1d, 3d, 7d, 1mo, 3mo, 1y
+ *   Levels:  S2 [10..15] — matches `rides-v3`, so FE covers computed
+ *            via `s2Index.minimalCover` are reusable across both pyramids.
  *
- *   PoC (`avail-geo/<tier>/<period>.parquet`, built by `ctbk avail-geo-build`):
- *     tiers `h1 / d1 / mo1` — derived from Cascade-compactor `avail/agg/h1/`
- *     (has sample-drop gaps; mean ~37 / max 55 min per (station,hour,metric)).
- *     Served at `/api/avail-geo[/cells]` (existing FE consumers stable).
- *
- *   v2  (`avail-v2/<tier>/<period>.parquet`, built by `ctbk avail-v2-build`,
- *     see `ctbk/avail_v2.py` + `specs/avail-pyramid-v2.md`):
- *     tiers `1h / 2h / 3h / 6h / 12h / 1d / 3d / 7d / 1mo / 1y` — derived
- *     directly from loader 1m@1m shards (no drops). Served at
- *     `/api/avail-v2[/cells]` for shadow-mode dual-read against the PoC
- *     before the eventual cutover (§5 step 3 of `specs/avail-pyramid-v2.md`).
- *
- * Tiers omitted from the v2 serving config (still built on R2):
- *   - sub-hour (1m, 2m, 3m, 5m, 10m, 15m, 30m): path-format mismatch with
- *     pyrmts's `formatPeriod('1h')` — R2 uses `<date>/<hh>.parquet`; pyrmts
- *     wants `<date>T<hh>.parquet`. Reconciliation is a follow-up.
- *   - 3mo: pyrmts `floorToSpan` doesn't support multi-unit calendar bins.
- *
- *  Schema (per row):
- *    h3_cell : STRING       (resolution encoded in high bits)
- *    dt      : INT64        unix ms — bucket start
- *    bikes   : STRING       JSON {state: minutes}
- *    ebikes  : STRING       JSON
- *    docks   : STRING       JSON
- *    disabled: STRING       JSON
- *    pending : STRING       JSON
+ *   Row schema:
+ *     s2_cell : STRING       S2 hex token (level encoded in length)
+ *     dt      : INT64        unix ms — bucket start
+ *     bikes   : STRING       JSON {state_str: observation_count}
+ *     ebikes  : STRING       JSON
+ *     docks   : STRING       JSON
+ *     disabled: STRING       JSON
+ *     pending : STRING       JSON
  *
  * Endpoints (mounted from `index.ts`):
- *   GET /api/avail-geo[/cells]?from=&to=&bbox=&bin_budget=&cell_budget=&reducer=
- *   GET /api/avail-v2[/cells]?from=&to=&bbox=&bin_budget=&cell_budget=&reducer=
+ *   GET /api/avail-v3[/cells]?from=&to=&bbox=&bin_budget=&cell_budget=&reducer=
+ *                            [&cells=…&cells.exclude=…]
  *
  * Server-side reducer dispatch: when `?reducer=mean|p50|min|max|...` (default
  * `mean`), each metric's histogram column collapses to a scalar before the
  * response is serialized. ~10–20× smaller payloads than `?reducer=hist`.
+ *
  */
 import {
 	stitch,
-	type Pyramid,
 	type Row,
 	type Tier,
 } from 'pyrmts';
@@ -49,11 +36,10 @@ import { parquetBackend } from 'pyrmts';
 import { r2Storage } from 'pyrmts-cfw';
 import {
 	filterCellsAndRes,
-	getSpatialIndex,
 	planGeoQuery,
 	s2Index,
 	type BBox,
-	type SpatialIndex,
+	type GeoPyramid,
 } from 'pyrmts-geo';
 
 const METRICS = ['bikes', 'ebikes', 'docks', 'disabled', 'pending'] as const;
@@ -63,30 +49,11 @@ export const REDUCERS = ['mean', 'min', 'max', 'p05', 'p25', 'p50', 'p75', 'p95'
 export type Reducer = typeof REDUCERS[number];
 const DEFAULT_REDUCER: Reducer = 'mean';
 
-const POC_TIERS: Tier[] = [
-	{ name: 'h1',  bin: '1h',  shard: '1d'  },
-	{ name: 'd1',  bin: '1d',  shard: '1mo' },
-	{ name: 'mo1', bin: '1mo', shard: '1y'  },
-];
-
-const V2_TIERS: Tier[] = [
-	{ name: '1h',  bin: '1h',  shard: '1mo' },
-	{ name: '2h',  bin: '2h',  shard: '1mo' },
-	{ name: '3h',  bin: '3h',  shard: '1mo' },
-	{ name: '6h',  bin: '6h',  shard: '1mo' },
-	{ name: '12h', bin: '12h', shard: '1mo' },
-	{ name: '1d',  bin: '1d',  shard: '1y'  },
-	{ name: '3d',  bin: '3d',  shard: '1y'  },
-	{ name: '7d',  bin: '7d',  shard: '1y'  },
-	{ name: '1mo', bin: '1mo', shard: '1y'  },
-	{ name: '1y',  bin: '1y',  shard: 'all' },
-];
-
-/** v3 — full 18-tier ladder mirroring `ctbk/avail_v3.py:TIER_SPECS`.
- *  R2 path names use `<N>m` for minutes (matching the builder's
+/** Full 18-tier ladder mirroring `ctbk/avail_v3.py:TIER_SPECS`.
+ *  R2 path `name`s use `<N>m` for minutes (matching the builder's
  *  `TIER_SPECS` keys); pyrmts `bin`/`shard` Duration strings use the
  *  typed `<N>min` form (`m` collides with `mo` in pyrmts's TimeUnit). */
-const V3_TIERS: Tier[] = [
+const TIERS: Tier[] = [
 	{ name: '1m',  bin: '1min',  shard: '1h'  },
 	{ name: '2m',  bin: '2min',  shard: '1h'  },
 	{ name: '3m',  bin: '3min',  shard: '1h'  },
@@ -95,71 +62,47 @@ const V3_TIERS: Tier[] = [
 	{ name: '15m', bin: '15min', shard: '1d'  },
 	{ name: '30m', bin: '30min', shard: '1d'  },
 	{ name: '1h',  bin: '1h',    shard: '1mo' },
-	{ name: '2h',  bin: '2h',  shard: '1mo' },
-	{ name: '3h',  bin: '3h',  shard: '1mo' },
-	{ name: '6h',  bin: '6h',  shard: '1mo' },
-	{ name: '12h', bin: '12h', shard: '1mo' },
-	{ name: '1d',  bin: '1d',  shard: '1y'  },
-	{ name: '3d',  bin: '3d',  shard: '1y'  },
-	{ name: '7d',  bin: '7d',  shard: '1y'  },
-	{ name: '1mo', bin: '1mo', shard: '1y'  },
-	{ name: '3mo', bin: '3mo', shard: '1y'  },
-	{ name: '1y',  bin: '1y',  shard: 'all' },
+	{ name: '2h',  bin: '2h',    shard: '1mo' },
+	{ name: '3h',  bin: '3h',    shard: '1mo' },
+	{ name: '6h',  bin: '6h',    shard: '1mo' },
+	{ name: '12h', bin: '12h',   shard: '1mo' },
+	{ name: '1d',  bin: '1d',    shard: '1y'  },
+	{ name: '3d',  bin: '3d',    shard: '1y'  },
+	{ name: '7d',  bin: '7d',    shard: '1y'  },
+	{ name: '1mo', bin: '1mo',   shard: '1y'  },
+	{ name: '3mo', bin: '3mo',   shard: '1y'  },
+	{ name: '1y',  bin: '1y',    shard: 'all' },
 ];
 
-/** Cell-axis config — defaulted for H3 (back-compat for v1/PoC/v2). v3
- *  overrides with S2 levels + s2Index. */
-interface GeoConfig {
-	cellCol: string;
-	resolutions: number[];
-	index?: SpatialIndex;
-}
-const H3_GEO: GeoConfig = { cellCol: 'h3_cell', resolutions: [9, 7, 5] };
-const S2_GEO: GeoConfig = { cellCol: 's2_cell', resolutions: [15, 14, 13, 12, 11, 10], index: s2Index };
+const KEY_TEMPLATE = 'avail-v3/{tier}/{period}.parquet';
+const RESOLUTIONS = [15, 14, 13, 12, 11, 10];
 
-/** Shared pyramid skeleton; only key-template + tier ladder + geo + `dims` vary. */
-function makeBaseProps(bucket: R2Bucket, keyTemplate: string, tiers: Tier[], geo: GeoConfig): Omit<Pyramid, 'dims'> {
+function makeBaseProps(bucket: R2Bucket): Omit<GeoPyramid, 'dims'> {
 	return {
 		storage: parquetBackend(r2Storage(bucket)),
-		keyTemplate,
+		keyTemplate: KEY_TEMPLATE,
 		axis: 'time',
 		binCol: 'dt',
 		metrics: METRICS.map((name) => ({ name, monoid: 'histogram' as const })),
-		tiers,
-		geo: {
-			cellCol: geo.cellCol,
-			resolutions: geo.resolutions,
-			...(geo.index ? { index: geo.index } : {}),
-		},
+		tiers: TIERS,
+		geo: { cellCol: 's2_cell', resolutions: RESOLUTIONS, index: s2Index },
 	};
 }
 
-/** PoC pyramid — `avail-geo/<tier>/<period>.parquet`, 3-tier ladder. */
-export function availGeoPyramid(bucket: R2Bucket): Pyramid {
-	return { ...makeBaseProps(bucket, 'avail-geo/{tier}/{period}.parquet', POC_TIERS, H3_GEO), dims: [] };
-}
-export function availGeoCellsPyramid(bucket: R2Bucket): Pyramid {
-	return { ...makeBaseProps(bucket, 'avail-geo/{tier}/{period}.parquet', POC_TIERS, H3_GEO), dims: [{ name: 'h3_cell', type: 'string' }] };
+/** Rollup pyramid — empty `dims` so `stitch` collapses cells, leaving
+ *  one row per (dt) summed across the bbox/cells covering set. */
+export function availV3Pyramid(bucket: R2Bucket): GeoPyramid {
+	return { ...makeBaseProps(bucket), dims: [] };
 }
 
-/** v2 pyramid — `avail-v2/<tier>/<period>.parquet`, 10-tier ladder. */
-export function availV2Pyramid(bucket: R2Bucket): Pyramid {
-	return { ...makeBaseProps(bucket, 'avail-v2/{tier}/{period}.parquet', V2_TIERS, H3_GEO), dims: [] };
-}
-export function availV2CellsPyramid(bucket: R2Bucket): Pyramid {
-	return { ...makeBaseProps(bucket, 'avail-v2/{tier}/{period}.parquet', V2_TIERS, H3_GEO), dims: [{ name: 'h3_cell', type: 'string' }] };
-}
-
-/** v3 pyramid — `avail-v3/<tier>/<period>.parquet`, S2-keyed, 18-tier ladder. */
-export function availV3Pyramid(bucket: R2Bucket): Pyramid {
-	return { ...makeBaseProps(bucket, 'avail-v3/{tier}/{period}.parquet', V3_TIERS, S2_GEO), dims: [] };
-}
-export function availV3CellsPyramid(bucket: R2Bucket): Pyramid {
-	return { ...makeBaseProps(bucket, 'avail-v3/{tier}/{period}.parquet', V3_TIERS, S2_GEO), dims: [{ name: 's2_cell', type: 'string' }] };
+/** Per-cell pyramid — adds `s2_cell` to dims so stitch preserves
+ *  cell-level breakdown. */
+export function availV3CellsPyramid(bucket: R2Bucket): GeoPyramid {
+	return { ...makeBaseProps(bucket), dims: [{ name: 's2_cell', type: 'string' }] };
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Histogram reducer math (faithful port of legacy `availHistQuantile`).
+// Histogram reducer math.
 
 function histogramMean(h: Record<string, number>): number | null {
 	let total = 0;
@@ -233,7 +176,7 @@ function applyOne(h: Record<string, number>, r: Reducer): number | null {
 
 /** Collapse each metric column from `Record<string, number>` (histogram) to a
  *  single scalar per the requested reducer. Non-histogram columns
- *  (dt / h3_cell / other dims) pass through unchanged. `hist` returns the
+ *  (dt / s2_cell / other dims) pass through unchanged. `hist` returns the
  *  rows untouched (caller wants the full distribution). */
 export function reduceRows(rows: Row[], reducer: Reducer): Row[] {
 	if (reducer === 'hist') return rows;
@@ -296,7 +239,7 @@ function errorResponse(status: number, message: string, cors: string | null): Re
  *     subtraction is ill-defined). The lineage walk just drops rows under
  *     exclude ancestors, keeping rows under include ancestors. */
 async function serveGeoReduced(
-	pyramid: Pyramid,
+	pyramid: GeoPyramid,
 	request: Request,
 	cors: string | null,
 ): Promise<Response> {
@@ -335,7 +278,7 @@ async function serveGeoReduced(
 	}
 	const reducer = reducerRaw as Reducer;
 
-	const index: SpatialIndex = getSpatialIndex(pyramid);
+	const index = s2Index;
 	// `userOutputRes` mirrors the rides handler: single-level cover →
 	// that level; mixed-resolution cover (or includes+excludes) → `-1`
 	// sentinel ("don't filter rows by exact level"). Avail's exact-match
@@ -364,10 +307,8 @@ async function serveGeoReduced(
 		: [];
 
 	// Thread `binCol` + per-segment range so hyparquet prunes row groups by
-	// `dt` column stats. v2 shards: `avail_v2.py` writes single 956K-row RG
-	// per shard (rows `(cell, dt)`-sorted), so a sub-day query would still
-	// read the full month. See `avail-pyramid-v2.md` §7 (smaller RGs +
-	// `dt`-first sort) for the build-side fix.
+	// `dt` column stats — shards are `(dt, s2_cell)`-sorted with small
+	// row groups, so a sub-shard time window reads only the matching RGs.
 	const shardRows = await Promise.all(
 		plan.segments.map((seg) => pyramid.storage.fetchSegment(seg, {
 			binCol: pyramid.binCol,
@@ -416,26 +357,6 @@ async function serveGeoReduced(
 			})),
 		},
 	}), { headers });
-}
-
-/** HTTP handler for `/api/avail-geo` — PoC rollup over bbox. */
-export async function serveAvailGeo(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
-	return serveGeoReduced(availGeoPyramid(bucket), request, corsOrigin || null);
-}
-
-/** HTTP handler for `/api/avail-geo/cells` — PoC per-cell rows preserved. */
-export async function serveAvailGeoCells(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
-	return serveGeoReduced(availGeoCellsPyramid(bucket), request, corsOrigin || null);
-}
-
-/** HTTP handler for `/api/avail-v2` — v2 rollup over bbox. */
-export async function serveAvailV2(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
-	return serveGeoReduced(availV2Pyramid(bucket), request, corsOrigin || null);
-}
-
-/** HTTP handler for `/api/avail-v2/cells` — v2 per-cell rows preserved. */
-export async function serveAvailV2Cells(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
-	return serveGeoReduced(availV2CellsPyramid(bucket), request, corsOrigin || null);
 }
 
 /** HTTP handler for `/api/avail-v3` — v3 rollup over bbox (S2-keyed). */

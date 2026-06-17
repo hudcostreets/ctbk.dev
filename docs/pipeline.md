@@ -18,7 +18,6 @@ The `ctbk` CLI provides 8 core pipeline stages, each processing Citi Bike trip d
 | `StationPairsJson` | `station-pairs-json`, `spj` | Station pair JSONs | by month |
 
 Plus utility stages:
-- `YmrgtbCdJson` (`ymrgtb-cd`): Dashboard aggregation (cross-month)
 - `YmdgtbCdJson` (`ymdgtb-cd`): Per-station monthly trip aggregations (see *Per-Station Trips*, below)
 - `Partition` (`partition`): v0 data splitting utility
 
@@ -177,14 +176,6 @@ SMH(in) + SMH(il) + AGG(e,c) → SM → SPJ ← AGG(se,c)
 
 - **SM (ModesMonthJson)**: Computes canonical station info by taking the mode (most common value) across the month
 - **SPJ (StationPairsJson)**: Generates JSON files for station pair visualizations
-
-### Cross-Month Stage
-
-**YmrgtbCdJson** is unique: it aggregates `agg -g ymrgtb -a cd` outputs across ALL months into a single dashboard JSON file (`ymrgtb_cd.json`).
-
-This is a "fan-in" pattern: ~150 monthly parquets → 1 JSON file.
-
-**DVX Tracking Note**: Currently `www/public/assets/ymrgtb_cd.json` is Git-tracked but not DVX-tracked. Adding DVX tracking would complete the DAG visualization by showing how all monthly aggregated files flow into the final dashboard JSON. Unlike DVC (which uses `.dvc` as storage pointers), DVX `.dvx` files describe computation metadata and can coexist with Git-tracked outputs.
 
 ## Month Parameterization
 

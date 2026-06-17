@@ -73,10 +73,6 @@ jobs:
             dvc pull s3/tripdata/*${ym}*.dvc || true
           fi
 
-      - name: Pull prior aggregated data
-        if: steps.args.outputs.args
-        run: dvc pull s3/ctbk/aggregated/ymrgtb_cd_20*.parquet.dvc || true
-
       - uses: actions/setup-node@v5
         if: steps.args.outputs.args
         with:

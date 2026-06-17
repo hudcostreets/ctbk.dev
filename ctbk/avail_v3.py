@@ -1,11 +1,6 @@
-"""Build the v3 avail pyramid: histogram monoid + S2 inline + dense ladder.
+"""Build the avail-v3 pyramid: histogram monoid + S2 inline + dense ladder.
 
-S2-keyed replacement for `ctbk/avail_v2.py` (H3). See
-`specs/avail-pyramid-v3-s2.md` for motivation (H3 boundary-triangle
-artifacts; alignment with `rides-v3`'s S2 SpatialIndex; FE cover-reuse
-across both pyramids).
-
-R2 layout: `avail-v3/<tier>/<period>.parquet` (mirrors v2's `avail-v2/`).
+R2 layout: `avail-v3/<tier>/<period>.parquet`
 
 Output schema (per `pyrmts-geo` convention):
     s2_cell  : STRING        S2 hex token, e.g. '89c25b1'
@@ -322,9 +317,6 @@ def r2_head(cli, key: str) -> dict | None:
 
 
 # ─── Cascade derived tiers ─────────────────────────────────────────────
-#
-# Spatial-index-agnostic — identical logic to `avail_v2.py`'s cascade;
-# just reads/writes the `s2_cell` column instead of `h3_cell`.
 
 def dt_floor_ms_fixed(dt_ms: int, bin_sec: int) -> int:
     """Floor `dt_ms` (unix ms) to the start of its `bin_sec`-second bucket."""

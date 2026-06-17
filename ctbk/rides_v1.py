@@ -260,7 +260,7 @@ def dt_floor_ms_calendar(dt_ms: int, tier: str) -> int:
     return int(floored.timestamp()) * 1000
 
 
-# ─── R2 client (mirrors avail_v2.r2_client) ────────────────────────────
+# ─── R2 client ─────────────────────────────────────────────────────────
 
 def r2_endpoint() -> str:
     aid = os.environ.get('CLOUDFLARE_ACCOUNT_ID') or os.environ.get('R2_ACCOUNT_ID')

@@ -1,6 +1,6 @@
 /**
  * Pure trace-building logic for ymrgtb stacked-bar + rolling-avg charts.
- * Shared between the homepage (system-wide ymrgtb_cd.json) and the
+ * Shared between the homepage (system-wide /api/rides-{v1,v2,v3}) and the
  * station detail page (per-station ymdgtb_cd.json, filtered to one station).
  *
  * No React, no URL state — just data → Plotly traces.

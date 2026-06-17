@@ -10,7 +10,7 @@ Each row has shape:
       Rideable Type, Count, Duration }
 
 User Type values are remapped `Customer`→`Daily`, `Subscriber`→`Annual`
-to match the homepage `ymrgtb_cd.json` convention.
+to match the homepage chart's display convention.
 
 The output directory is DVC-tracked as a single artifact.
 """

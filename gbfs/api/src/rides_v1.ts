@@ -11,7 +11,7 @@
  * `?pyramid=v1|v2` (mapped to endpoint `/api/rides-v{1,2}[/cells]`).
  *
  * 11-tier ladder: 1h / 3h / 6h / 12h / 1d / 3d / 7d / 14d / 1mo / 3mo / 1y.
- * h3 resolutions: 9 / 7 / 5 (same as avail-v2).
+ * h3 resolutions: 9 / 7 / 5.
  *
  *  Schema (per row, sum-monoid):
  *    {anchor}_h3_cell : STRING       (resolution encoded in high bits)

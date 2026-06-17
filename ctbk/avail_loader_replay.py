@@ -10,7 +10,7 @@ build the same 1m@1m parquet shard pyarrow-side and PUT it to R2 at the
 canonical key. Idempotent (skip-if-exists). Re-derives `dt` from
 `polled_at` exactly like `buildMinuteShard` in `gbfs/lib/avail-monoid.ts`.
 
-The avail-v2 1m-tier build (`avail_v2.py`) then reads from a continuous
+The avail-v3 1m-tier build (`avail_v3.py`) then reads from a continuous
 [2026-04-07, present) range with no gap.
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ from botocore.exceptions import ClientError
 from click import option
 from utz import err
 
-from ctbk.avail_v2 import R2_BUCKET, r2_client, r2_head
+from ctbk.avail_v3 import R2_BUCKET, r2_client, r2_head
 from ctbk.cli.base import ctbk
 
 WAL_PREFIX = 'gbfs/status'
