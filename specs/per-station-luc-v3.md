@@ -199,43 +199,75 @@ list it sends.
 
 ## Migration
 
-### Phase 1: build LUC denorm + rebuild v3 pyramids on `e`
+Each step below is labeled **[laptop]** (code/test work, no heavy R2
+I/O) or **[`e`]** (compute-heavy backfill on EC2). Run laptop steps to
+completion before `e` picks up.
 
-1. `ctbk station-luc-build` → produce `station-luc.json`, upload to R2
-   + commit to repo for FE fetch.
-2. Bump `ctbk/avail_v3.py` and `ctbk/rides_v1.py` builders to read LUC
-   and emit only LUC + ancestors.
-3. Rebuild avail-v3 from scratch on `e`: ~5 min wall (1m tier) +
-   cascade. Overwrite `s3://ctbk/avail-v3/`.
-4. Rebuild rides-v3 incrementally — re-emit all months, similar wall
-   time per month, overwrite `s3://ctbk/rides-v3/`.
+### Phase 1a: builder + denorm code [laptop]
 
-### Phase 2: FE migration
+1. **[laptop]** Implement `ctbk station-luc-build`: read
+   `gbfs/info/<today>.json` from R2, compute LUC per station, write
+   `station-luc.json` to local repo (`www/public/assets/station-luc.json`)
+   + R2 (`s3://ctbk/station-luc.json`). Single-file build, no parallelism
+   needed.
+2. **[laptop]** Bump `ctbk/avail_v3.py:build_1m_hour_table` to read the
+   LUC denorm and emit each station at LUC + ancestors only. Update unit
+   tests to assert the new row distribution. Same change for
+   `ctbk/rides_v1.py`'s v3 build path.
+3. **[laptop]** Run the unit tests (no R2 writes). Commit + push to `e`.
 
-5. `useStationAvailability` → fetch `station-luc.json` once;
-   `useStationAvailability(stationId)` looks up LUC and calls
-   `/api/avail-v3?cells=<luc>` with the right `bin` + `from`/`to`.
-   Delete the `/api/totals` call path.
-6. `useAvailabilityOverview` (the percentile/aggregate per-station hook)
-   → same swap.
-7. `useStationTrips` → `/api/rides-v3?cells=<luc>` with `anchor` +
-   `dims`. Delete the static `ymdgtb_cd_<station>.json` fetch.
+### Phase 1b: rebuild v3 pyramids [`e`]
 
-### Phase 3: backend cleanup
+4. **[`e`]** `cd ~/ctbk && git fetch && grhh`
+5. **[`e`]** Build/sync the LUC denorm: `ctbk station-luc-build` (writes
+   to R2 + local file). Verify the file size + station count match
+   expected (~2400 stations, ~150 KB).
+6. **[`e`]** Rebuild avail-v3 from scratch in a tmux:
+   - `ctbk avail-v3-build -t 1m -f 2026-04-07 -T <today> -c 16 -O`
+     (`-O` overwrites existing shards with the new LUC-anchored format)
+   - Then cascade-up loops as in `specs/done/avail-pyramid-v3-s2.md`.
+   - ~5 min wall for 1m, ~10 min total.
+7. **[`e`]** Rebuild rides-v3 (per-month, all months — heavier):
+   - The exact incantation depends on `ctbk/rides_v1.py`'s CLI; refer
+     to the v3 build path it exposes. Likely a `--variant v3 --overwrite`
+     loop over `[2013-06, now)`.
+   - ~30 min wall on 16 cores.
+8. **[`e`]** Run a sanity check: pull one avail-v3 shard, confirm row
+   count matches expected (~15k rows per dt for the L10-L15 + LUC>L15
+   spread, not ~14.5k from the universal-L10-L15 layout).
 
-8. Delete `executeAvailTotalsQuery` + the `availability` branch of
-   `/api/totals` in `gbfs/api/src/index.ts`. If `/api/totals?kind=trips`
-   has no consumers (probably true), delete the whole route.
-9. Delete `ctbk/avail_agg.py`, `ctbk/avail_raw_day.py`.
-10. Drop the legacy `Build /h1`/`Build /day`/`Build /d1`/`Build /mo1`
-    steps from `.github/workflows/gbfs-compact.yml` — keep only
-    `Compact WAL → parquet` (still needed; it feeds the 1m@1m source).
-11. Delete R2 prefixes `s3://ctbk/avail/agg/`,
-    `s3://ctbk/gbfs/avail/raw/day/`.
-12. Delete `ctbk/stations/trips_jsons.py` + the `spj` / per-station JSON
-    static build (if `useStationTrips` is the only consumer; verify).
-13. Drop `ymdgtb_cd_*` parquet build from the aggregation pipeline
-    (`ctbk/aggregated.py` and update.sh).
+### Phase 2: FE migration [laptop]
+
+9. **[laptop]** `useStationAvailability` → fetch `station-luc.json` once
+   (TSQ-cached, `staleTime: Infinity`); `useStationAvailability(stationId)`
+   looks up LUC and calls `/api/avail-v3?cells=<luc>` with the right
+   `bin` + `from`/`to`. Delete the `/api/totals` call path.
+10. **[laptop]** `useAvailabilityOverview` (the percentile/aggregate
+    per-station hook) → same swap.
+11. **[laptop]** `useStationTrips` → `/api/rides-v3?cells=<luc>` with
+    `anchor` + `dims`. Delete the static `ymdgtb_cd_<station>.json` fetch.
+12. **[laptop]** CIC StationDetail end-to-end against dev worker; verify
+    the new path produces equivalent data to the legacy path on a few
+    sample stations.
+
+### Phase 3: backend cleanup [laptop]
+
+13. **[laptop]** Delete `executeAvailTotalsQuery` + the `availability`
+    branch of `/api/totals` in `gbfs/api/src/index.ts`. If
+    `/api/totals?kind=trips` has no consumers (probably true), delete
+    the whole route.
+14. **[laptop]** Delete `ctbk/avail_agg.py`, `ctbk/avail_raw_day.py`.
+15. **[laptop]** Drop the legacy `Build /h1`/`Build /day`/`Build /d1`/
+    `Build /mo1` steps from `.github/workflows/gbfs-compact.yml` — keep
+    only `Compact WAL → parquet` (still needed; it feeds the 1m@1m
+    source).
+16. **[laptop or `e`]** Delete R2 prefixes `s3://ctbk/avail/agg/`,
+    `s3://ctbk/gbfs/avail/raw/day/` (manual `aws s3 rm --recursive`).
+17. **[laptop]** Delete `ctbk/stations/trips_jsons.py` + the `spj` /
+    per-station JSON static build (if `useStationTrips` is the only
+    consumer; verify).
+18. **[laptop]** Drop `ymdgtb_cd_*` parquet build from the aggregation
+    pipeline (`ctbk/aggregated.py` and update.sh).
 
 ## Open questions
 
