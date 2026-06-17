@@ -19,7 +19,8 @@ import { useStationTrips } from '../hooks/useStationTrips'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   pickAvailBinAuto, prefetchStationDetail,
-  useStationInfo, useStationAvailability,
+  useStationInfo, useStationAvailabilityRouted,
+  type AvailSource,
 } from '../query/stations'
 import { useRollupQuery, type Side } from '../query/rollups'
 import {
@@ -190,7 +191,17 @@ export default function StationDetail() {
     ro.observe(chartContainerRef.current)
     return () => ro.disconnect()
   }, [])
-  const rangeQuery = useStationAvailability(
+  // Soft-cutover toggle for per-station avail backend. Default `totals`
+  // (legacy `/api/totals` reads `avail/agg/{h1,d1,mo1}`). `?availSrc=v3`
+  // routes through `useStationAvailabilityV3` against `/api/avail-v3`.
+  // Once the LUC-anchored avail-v3 rebuild lands on `e` and CIC verifies
+  // parity, default flips to `v3`; the `totals` branch + the entire
+  // /api/totals worker code path retires (see specs/per-station-luc-v3.md
+  // Phase 3 cleanup).
+  const [availSrc] = useUrlState<AvailSource>('availSrc',
+    codeParam<AvailSource>('totals', [['totals', 'totals'], ['v3', 'v3']]))
+  const rangeQuery = useStationAvailabilityRouted(
+    availSrc,
     info?.gbfs_station_id, bufFromS, bufToS, availViewportPx, info?.capacity ?? null,
     binMs > 0 ? Math.floor(binMs / 1000) : undefined,
     isLatestMode,

@@ -392,6 +392,34 @@ export function useStationAvailabilityV3(
   })
 }
 
+export type AvailSource = 'totals' | 'v3'
+
+/** Soft-cutover wrapper. Dispatches between the legacy `/api/totals` path
+ *  and the new avail-v3 path based on `source`. Both underlying hooks are
+ *  always called (with the inactive one nullified via `gbfsId`); React's
+ *  rules-of-hooks require stable call order across renders. The returned
+ *  query is whichever one is active. */
+export function useStationAvailabilityRouted(
+  source: AvailSource,
+  gbfsId: string | null | undefined,
+  fromS: number,
+  toS: number,
+  viewportPx: number,
+  capacityHint: number | null,
+  binOverrideS?: number,
+  liveRefresh: boolean = false,
+) {
+  const totalsResult = useStationAvailability(
+    source === 'totals' ? gbfsId : null,
+    fromS, toS, viewportPx, capacityHint, binOverrideS, liveRefresh,
+  )
+  const v3Result = useStationAvailabilityV3(
+    source === 'v3' ? gbfsId : null,
+    fromS, toS, viewportPx, capacityHint, binOverrideS, liveRefresh,
+  )
+  return source === 'v3' ? v3Result : totalsResult
+}
+
 /** Warm the cache for a station-detail navigation. Called from map hover
  *  handlers. Idempotent — repeat calls within the cache window are no-ops.
  *  Chains `info` → `avail` so the avail-query keys match the eventual page
