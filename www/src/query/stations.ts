@@ -446,4 +446,56 @@ export function useAvailabilityOverview(
   })
 }
 
+/** avail-v3 sibling of `useAvailabilityOverview`. Looks up the station's
+ *  LUC cell from the denorm and queries `/api/avail-v3` with the
+ *  requested reducer; extracts just the requested metric's column.
+ *  Returns the same `AvailabilityOverviewResponse` shape so callers can
+ *  swap in place. */
+export function useAvailabilityOverviewV3(
+  gbfsId: string | undefined,
+  fromS: number,
+  toS: number,
+  binS: number,
+  metric: 'bikes' | 'ebikes' | 'docks' | 'disabled' | 'pending' = 'bikes',
+  agg: 'mean' | 'min' | 'max' | 'p05' | 'p25' | 'p50' | 'p75' | 'p95' = 'mean',
+) {
+  const lucQ = useStationLuc()
+  const luc = lucEntryForUuid(lucQ.data, gbfsId)
+  const binBudget = Math.max(1, Math.ceil((toS - fromS) / binS))
+  return useQuery<AvailabilityOverviewResponse>({
+    queryKey: ['availability-overview-v3', gbfsId, fromS, toS, binS, metric, agg],
+    enabled: !!gbfsId && !!luc && fromS < toS && binS >= 3600,
+    queryFn: async () => {
+      const fromIso = new Date(fromS * 1000).toISOString()
+      const toIso   = new Date(toS   * 1000).toISOString()
+      const url = new URL(`${API_BASE}/api/avail-v3`)
+      url.searchParams.set('cells', luc!.cell)
+      url.searchParams.set('from', fromIso)
+      url.searchParams.set('to', toIso)
+      url.searchParams.set('bin_budget', String(binBudget))
+      url.searchParams.set('reducer', agg)
+      const res = await fetch(url.toString())
+      if (!res.ok) throw new Error(`avail-v3: HTTP ${res.status}`)
+      const data = await res.json() as AvailV3Response
+      // Map the wide-format avail-v3 records to the tall AvailabilityOverviewRow
+      // shape, extracting just the requested metric's column.
+      const rows: AvailabilityOverviewRow[] = data.records.map((r) => ({
+        dt: Math.floor(r.dt / 1000),
+        station_id: gbfsId!,
+        metric,
+        sample_count: 0,  // avail-v3 doesn't expose the per-bin source-row count
+        [agg]: (r as unknown as Record<string, number>)[metric],
+      }) as AvailabilityOverviewRow)
+      return {
+        kind: 'availability',
+        metric,
+        scope: 'stations',
+        tier: data.plan.outputTier,
+        rows,
+      }
+    },
+    placeholderData: keepPreviousData,
+  })
+}
+
 export const stationsApi = { API_BASE }
