@@ -203,7 +203,7 @@ Each step below is labeled **[laptop]** (code/test work, no heavy R2
 I/O) or **[`e`]** (compute-heavy backfill on EC2). Run laptop steps to
 completion before `e` picks up.
 
-### Phase 1a: builder + denorm code [laptop]
+### Phase 1a: avail builder + denorm code [laptop]
 
 1. **[laptop]** Implement `ctbk station-luc-build`: read
    `gbfs/info/<today>.json` from R2, compute LUC per station, write
@@ -212,9 +212,20 @@ completion before `e` picks up.
    needed.
 2. **[laptop]** Bump `ctbk/avail_v3.py:build_1m_hour_table` to read the
    LUC denorm and emit each station at LUC + ancestors only. Update unit
-   tests to assert the new row distribution. Same change for
-   `ctbk/rides_v1.py`'s v3 build path.
+   tests to assert the new row distribution.
 3. **[laptop]** Run the unit tests (no R2 writes). Commit + push to `e`.
+
+**Rides deferred to a separate follow-up commit/round** — rides
+span 13 years of station-ID churn (decommissioned IDs, renumbering
+events). The current GBFS LUC denorm only covers active stations,
+so the rides builder needs either (a) a per-month historical LUC
+denorm derived from station-observations, or (b) `station-harmonize`
+canonicalization that maps every historical ID → current ID → LUC.
+Scoped at open question 2; spec-it-out before implementing. In the
+meantime, rides-v3 keeps its current universal L10-L15 layout —
+wide-rollup queries (Home) are unchanged; per-station rides data
+keeps coming from the static `ymdgtb_cd_*.json` until rides-v3 LUC
+ships.
 
 ### Phase 1b: rebuild v3 pyramids [`e`]
 
@@ -227,14 +238,12 @@ completion before `e` picks up.
      (`-O` overwrites existing shards with the new LUC-anchored format)
    - Then cascade-up loops as in `specs/done/avail-pyramid-v3-s2.md`.
    - ~5 min wall for 1m, ~10 min total.
-7. **[`e`]** Rebuild rides-v3 (per-month, all months — heavier):
-   - The exact incantation depends on `ctbk/rides_v1.py`'s CLI; refer
-     to the v3 build path it exposes. Likely a `--variant v3 --overwrite`
-     loop over `[2013-06, now)`.
-   - ~30 min wall on 16 cores.
-8. **[`e`]** Run a sanity check: pull one avail-v3 shard, confirm row
-   count matches expected (~15k rows per dt for the L10-L15 + LUC>L15
-   spread, not ~14.5k from the universal-L10-L15 layout).
+7. **[`e`]** Run a sanity check: pull one avail-v3 shard, confirm row
+   count matches expected (~15k rows per dt for the LUC + ancestors
+   layout, vs ~14.5k from the universal L10-L15 layout).
+
+Rides rebuild is gated on the historical-LUC follow-up; see the
+"Rides deferred" note above.
 
 ### Phase 2: FE migration [laptop]
 
@@ -244,8 +253,8 @@ completion before `e` picks up.
    `bin` + `from`/`to`. Delete the `/api/totals` call path.
 10. **[laptop]** `useAvailabilityOverview` (the percentile/aggregate
     per-station hook) → same swap.
-11. **[laptop]** `useStationTrips` → `/api/rides-v3?cells=<luc>` with
-    `anchor` + `dims`. Delete the static `ymdgtb_cd_<station>.json` fetch.
+11. **[laptop]** `useStationTrips` migration deferred to the rides-LUC
+    follow-up. Until then it keeps fetching `ymdgtb_cd_<station>.json`.
 12. **[laptop]** CIC StationDetail end-to-end against dev worker; verify
     the new path produces equivalent data to the legacy path on a few
     sample stations.

@@ -50,15 +50,10 @@ INFO_PREFIX = 'gbfs/info'                     # daily station info JSON
 
 AVAIL_METRICS: tuple[str, ...] = ('bikes', 'ebikes', 'docks', 'disabled', 'pending')
 
-# S2 levels to materialize (finest first, per pyrmts-geo convention).
-# Matches `rides-v3` (see `ctbk/rides_v1.py` and `gbfs/api/src/rides_v1.ts`).
-#   L15 ≈ 0.08 km² — ~1 station per cell
-#   L14 ≈ 0.32 km² — 1-2 stations
-#   L13 ≈ 1.27 km² — small cluster
-#   L12 ≈ 5.08 km² — subway-line section
-#   L11 ≈ 20.3 km² — neighborhood
-#   L10 ≈ 81.3 km² — borough
-DEFAULT_RESOLUTIONS: tuple[int, ...] = (15, 14, 13, 12, 11, 10)
+# Coarsest S2 level we materialize. Every station contributes at every
+# level from L10 down to its LUC (finest unique level). Matches the
+# `coarsestLevel` arg the FE passes to `s2Index.minimalCover`.
+COARSEST_LEVEL: int = 10
 
 
 @dataclass(frozen=True)
@@ -169,22 +164,18 @@ def output_key(tier: str, period: str) -> str:
     return f'{DST_PREFIX}/{tier}/{period}.parquet'
 
 
-# ─── Station geo (per-date snapshot) ───────────────────────────────────
+# ─── Station LUC denorm ────────────────────────────────────────────────
 
-@lru_cache(maxsize=64)
-def load_station_geo_for_date(date_str: str) -> dict[str, tuple[float, float]]:
-    """Fetch `gbfs/info/<date>.json` from R2 → {station_id: (lat, lng)}."""
+@lru_cache(maxsize=1)
+def load_station_luc() -> dict[str, dict]:
+    """Fetch `station-luc.json` from R2 → {sid: {lat, lng, cell, level}}.
+
+    Produced by `ctbk station-luc-build`. See `ctbk/station_luc.py` and
+    `specs/per-station-luc-v3.md`.
+    """
     cli = r2_client()
-    obj = cli.get_object(Bucket=R2_BUCKET, Key=f'{INFO_PREFIX}/{date_str}.json')
-    info = json.loads(obj['Body'].read())
-    out: dict[str, tuple[float, float]] = {}
-    for s in info['data']['stations']:
-        sid = s.get('station_id')
-        if sid is None: continue
-        lat, lng = s.get('lat'), s.get('lon')
-        if lat is None or lng is None: continue
-        out[sid] = (float(lat), float(lng))
-    return out
+    obj = cli.get_object(Bucket=R2_BUCKET, Key='station-luc.json')
+    return json.loads(obj['Body'].read())
 
 
 # ─── 1m tier: build one 1-hour shard from 60 minute-files ──────────────
@@ -212,21 +203,28 @@ def read_minute_shard(cli, key: str) -> pa.Table | None:
 def build_1m_hour_table(
     date_str: str,
     hour: int,
-    station_geo: dict[str, tuple[float, float]],
-    resolutions: tuple[int, ...] = DEFAULT_RESOLUTIONS,
+    station_luc: dict[str, dict],
+    coarsest_level: int = COARSEST_LEVEL,
 ) -> pa.Table | None:
     """Build one avail-v3/1m/<date>/<HH>.parquet table from 60 minute files.
+
+    Each station's observations are materialized at the station's LUC
+    (`station_luc[sid]['level']`) and at every ancestor level down to
+    `coarsest_level`. See `specs/per-station-luc-v3.md` for the
+    architecture.
 
     Returns None if no source minutes are present (shard skipped upstream).
     """
     cli = r2_client()
-    # Precompute station → S2 cell at each level (cheap: ~2400 stations × 6 lvls).
-    station_cells: dict[int, dict[str, str]] = {}
-    for res in resolutions:
-        station_cells[res] = {
-            sid: s2cell.lat_lon_to_token(lat, lng, res)
-            for sid, (lat, lng) in station_geo.items()
-        }
+    # Precompute station → cell list at the levels each station contributes
+    # to (L<coarsest_level> .. L<LUC>). For each station that's
+    # `(LUC - coarsest_level + 1)` cells.
+    station_cell_chain: dict[str, list[str]] = {}
+    for sid, luc in station_luc.items():
+        lat, lng, luc_level, luc_cell = luc['lat'], luc['lng'], luc['level'], luc['cell']
+        chain = [s2cell.lat_lon_to_token(lat, lng, lvl) for lvl in range(coarsest_level, luc_level)]
+        chain.append(luc_cell)
+        station_cell_chain[sid] = chain
 
     # Accumulator: (cell, dt_sec, metric) → {state_str: observation_count}
     accum: dict[tuple[str, int, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -244,8 +242,8 @@ def build_1m_hour_table(
         dts = d['dt']
         metric_vals = {m: d[f'{m}_sum'] for m in AVAIL_METRICS}
         for i, sid in enumerate(sids):
-            geo = station_geo.get(sid)
-            if geo is None:
+            chain = station_cell_chain.get(sid)
+            if chain is None:
                 missing_sids.add(sid)
                 continue
             dt_sec = int(dts[i])
@@ -253,14 +251,13 @@ def build_1m_hour_table(
                 v = metric_vals[m][i]
                 if v is None: continue
                 state_s = str(int(v))
-                for res in resolutions:
-                    cell = station_cells[res][sid]
+                for cell in chain:
                     accum[(cell, dt_sec, m)][state_s] += 1
 
     if n_minutes_seen == 0:
         return None
     if missing_sids:
-        err(f"  {date_str} hr{hour:02d}: dropped {len(missing_sids)} station_ids missing from station_geo "
+        err(f"  {date_str} hr{hour:02d}: dropped {len(missing_sids)} station_ids missing from station-luc.json "
             f"(e.g. {sorted(missing_sids)[:3]})")
 
     # Pivot: (cell, dt_sec) → {metric: json_string}
@@ -477,13 +474,12 @@ def _build_shard_task(
     tier: str,
     shard_start_iso: str,
     overwrite: bool,
-    resolutions: tuple[int, ...],
     all_dates_iso: tuple[str, str] | None,
 ) -> tuple[str, str, int]:
     """ProcessPool worker: build + write one shard (any tier).
 
     Dispatches on `TIER_SPECS[tier].derive_from`:
-      - None → build from 1m@1m source (S2-materialize)
+      - None → build from 1m@1m source (S2-materialize per-station LUC + ancestors)
       - else → cascade-combine from the derive-from tier
     Returns (period_str, status, bytes_written). Status ∈ {"wrote", "skip", "empty"}.
     """
@@ -496,8 +492,8 @@ def _build_shard_task(
         return (period, 'skip', 0)
     if spec.derive_from is None:
         date_str = t.strftime('%Y-%m-%d')
-        geo = load_station_geo_for_date(date_str)
-        table = build_1m_hour_table(date_str, t.hour, geo, resolutions)
+        luc = load_station_luc()
+        table = build_1m_hour_table(date_str, t.hour, luc)
     else:
         ad = (
             (Date.fromisoformat(all_dates_iso[0]), Date.fromisoformat(all_dates_iso[1]))
@@ -512,13 +508,11 @@ def _build_shard_task(
 
 # ─── CLI ───────────────────────────────────────────────────────────────
 
-@ctbk.command('avail-v3-build', help="Build avail-v3/<tier>/<period>.parquet shards (S2-keyed).")
+@ctbk.command('avail-v3-build', help="Build avail-v3/<tier>/<period>.parquet shards (S2-keyed, LUC-anchored).")
 @option('-c', '--concurrency', type=int, default=8, help="Worker process count.")
 @option('-f', '--date-from', 'date_from', required=True, help="Inclusive start (YYYY-MM-DD).")
 @option('-n', '--dry-run', is_flag=True, help="Print shards that would be (re)built, then exit.")
 @option('-O', '--overwrite', '--force', is_flag=True, help="Rebuild even if output exists.")
-@option('-r', '--resolution', 'resolutions', multiple=True, type=int, default=DEFAULT_RESOLUTIONS,
-        help="S2 levels to materialize (repeatable; default 15 14 13 12 11 10).")
 @option('-t', '--tier', required=True, type=str, help="Tier name (see TIER_SPECS).")
 @option('-T', '--date-to', 'date_to', required=True, help="Exclusive end (YYYY-MM-DD).")
 def avail_v3_build_cmd(
@@ -526,7 +520,6 @@ def avail_v3_build_cmd(
     date_from: str,
     dry_run: bool,
     overwrite: bool,
-    resolutions: tuple[int, ...],
     tier: str,
     date_to: str,
 ):
@@ -553,13 +546,12 @@ def avail_v3_build_cmd(
             print(f"  {mark} {out_key}")
         return
 
-    res_tup = tuple(resolutions)
     starts_iso = [s.isoformat() for s in starts]
     all_dates_iso = (date_from, date_to) if spec.shard == 'all' else None
     n_wrote = n_skip = n_empty = bytes_total = 0
     if concurrency <= 1:
         for s_iso in starts_iso:
-            period, status, n = _build_shard_task(tier, s_iso, overwrite, res_tup, all_dates_iso)
+            period, status, n = _build_shard_task(tier, s_iso, overwrite, all_dates_iso)
             err(f"  {status:5s} {period} ({n:,} B)")
             n_wrote  += (status == 'wrote')
             n_skip   += (status == 'skip')
@@ -568,7 +560,7 @@ def avail_v3_build_cmd(
     else:
         with ProcessPoolExecutor(max_workers=concurrency) as pool:
             futs = {
-                pool.submit(_build_shard_task, tier, s_iso, overwrite, res_tup, all_dates_iso): s_iso
+                pool.submit(_build_shard_task, tier, s_iso, overwrite, all_dates_iso): s_iso
                 for s_iso in starts_iso
             }
             for fut in as_completed(futs):
