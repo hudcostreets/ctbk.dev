@@ -51,6 +51,7 @@ import {
 	filterCellsAndRes,
 	getSpatialIndex,
 	planGeoQuery,
+	s2Index,
 	type BBox,
 	type SpatialIndex,
 } from 'pyrmts-geo';
@@ -81,8 +82,43 @@ const V2_TIERS: Tier[] = [
 	{ name: '1y',  bin: '1y',  shard: 'all' },
 ];
 
-/** Shared pyramid skeleton; only key-template + tier ladder + `dims` vary. */
-function makeBaseProps(bucket: R2Bucket, keyTemplate: string, tiers: Tier[]): Omit<Pyramid, 'dims'> {
+/** v3 — full 18-tier ladder mirroring `ctbk/avail_v3.py:TIER_SPECS`.
+ *  R2 path names use `<N>m` for minutes (matching the builder's
+ *  `TIER_SPECS` keys); pyrmts `bin`/`shard` Duration strings use the
+ *  typed `<N>min` form (`m` collides with `mo` in pyrmts's TimeUnit). */
+const V3_TIERS: Tier[] = [
+	{ name: '1m',  bin: '1min',  shard: '1h'  },
+	{ name: '2m',  bin: '2min',  shard: '1h'  },
+	{ name: '3m',  bin: '3min',  shard: '1h'  },
+	{ name: '5m',  bin: '5min',  shard: '1d'  },
+	{ name: '10m', bin: '10min', shard: '1d'  },
+	{ name: '15m', bin: '15min', shard: '1d'  },
+	{ name: '30m', bin: '30min', shard: '1d'  },
+	{ name: '1h',  bin: '1h',    shard: '1mo' },
+	{ name: '2h',  bin: '2h',  shard: '1mo' },
+	{ name: '3h',  bin: '3h',  shard: '1mo' },
+	{ name: '6h',  bin: '6h',  shard: '1mo' },
+	{ name: '12h', bin: '12h', shard: '1mo' },
+	{ name: '1d',  bin: '1d',  shard: '1y'  },
+	{ name: '3d',  bin: '3d',  shard: '1y'  },
+	{ name: '7d',  bin: '7d',  shard: '1y'  },
+	{ name: '1mo', bin: '1mo', shard: '1y'  },
+	{ name: '3mo', bin: '3mo', shard: '1y'  },
+	{ name: '1y',  bin: '1y',  shard: 'all' },
+];
+
+/** Cell-axis config — defaulted for H3 (back-compat for v1/PoC/v2). v3
+ *  overrides with S2 levels + s2Index. */
+interface GeoConfig {
+	cellCol: string;
+	resolutions: number[];
+	index?: SpatialIndex;
+}
+const H3_GEO: GeoConfig = { cellCol: 'h3_cell', resolutions: [9, 7, 5] };
+const S2_GEO: GeoConfig = { cellCol: 's2_cell', resolutions: [15, 14, 13, 12, 11, 10], index: s2Index };
+
+/** Shared pyramid skeleton; only key-template + tier ladder + geo + `dims` vary. */
+function makeBaseProps(bucket: R2Bucket, keyTemplate: string, tiers: Tier[], geo: GeoConfig): Omit<Pyramid, 'dims'> {
 	return {
 		storage: parquetBackend(r2Storage(bucket)),
 		keyTemplate,
@@ -91,26 +127,35 @@ function makeBaseProps(bucket: R2Bucket, keyTemplate: string, tiers: Tier[]): Om
 		metrics: METRICS.map((name) => ({ name, monoid: 'histogram' as const })),
 		tiers,
 		geo: {
-			cellCol: 'h3_cell',
-			resolutions: [9, 7, 5],
+			cellCol: geo.cellCol,
+			resolutions: geo.resolutions,
+			...(geo.index ? { index: geo.index } : {}),
 		},
 	};
 }
 
 /** PoC pyramid — `avail-geo/<tier>/<period>.parquet`, 3-tier ladder. */
 export function availGeoPyramid(bucket: R2Bucket): Pyramid {
-	return { ...makeBaseProps(bucket, 'avail-geo/{tier}/{period}.parquet', POC_TIERS), dims: [] };
+	return { ...makeBaseProps(bucket, 'avail-geo/{tier}/{period}.parquet', POC_TIERS, H3_GEO), dims: [] };
 }
 export function availGeoCellsPyramid(bucket: R2Bucket): Pyramid {
-	return { ...makeBaseProps(bucket, 'avail-geo/{tier}/{period}.parquet', POC_TIERS), dims: [{ name: 'h3_cell', type: 'string' }] };
+	return { ...makeBaseProps(bucket, 'avail-geo/{tier}/{period}.parquet', POC_TIERS, H3_GEO), dims: [{ name: 'h3_cell', type: 'string' }] };
 }
 
 /** v2 pyramid — `avail-v2/<tier>/<period>.parquet`, 10-tier ladder. */
 export function availV2Pyramid(bucket: R2Bucket): Pyramid {
-	return { ...makeBaseProps(bucket, 'avail-v2/{tier}/{period}.parquet', V2_TIERS), dims: [] };
+	return { ...makeBaseProps(bucket, 'avail-v2/{tier}/{period}.parquet', V2_TIERS, H3_GEO), dims: [] };
 }
 export function availV2CellsPyramid(bucket: R2Bucket): Pyramid {
-	return { ...makeBaseProps(bucket, 'avail-v2/{tier}/{period}.parquet', V2_TIERS), dims: [{ name: 'h3_cell', type: 'string' }] };
+	return { ...makeBaseProps(bucket, 'avail-v2/{tier}/{period}.parquet', V2_TIERS, H3_GEO), dims: [{ name: 'h3_cell', type: 'string' }] };
+}
+
+/** v3 pyramid — `avail-v3/<tier>/<period>.parquet`, S2-keyed, 18-tier ladder. */
+export function availV3Pyramid(bucket: R2Bucket): Pyramid {
+	return { ...makeBaseProps(bucket, 'avail-v3/{tier}/{period}.parquet', V3_TIERS, S2_GEO), dims: [] };
+}
+export function availV3CellsPyramid(bucket: R2Bucket): Pyramid {
+	return { ...makeBaseProps(bucket, 'avail-v3/{tier}/{period}.parquet', V3_TIERS, S2_GEO), dims: [{ name: 's2_cell', type: 'string' }] };
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -391,4 +436,14 @@ export async function serveAvailV2(bucket: R2Bucket, request: Request, corsOrigi
 /** HTTP handler for `/api/avail-v2/cells` — v2 per-cell rows preserved. */
 export async function serveAvailV2Cells(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
 	return serveGeoReduced(availV2CellsPyramid(bucket), request, corsOrigin || null);
+}
+
+/** HTTP handler for `/api/avail-v3` — v3 rollup over bbox (S2-keyed). */
+export async function serveAvailV3(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
+	return serveGeoReduced(availV3Pyramid(bucket), request, corsOrigin || null);
+}
+
+/** HTTP handler for `/api/avail-v3/cells` — v3 per-cell rows preserved. */
+export async function serveAvailV3Cells(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
+	return serveGeoReduced(availV3CellsPyramid(bucket), request, corsOrigin || null);
 }

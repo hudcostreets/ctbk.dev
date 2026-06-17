@@ -494,7 +494,7 @@ import { createHandlers } from '@rdub/file-tree/server';
 import { getHealthSnapshot } from './health';
 import { runAlerts } from './alerts';
 import { executeAvailViaPyrmts, shadowDelta } from './avail_pyrmts';
-import { serveAvailGeo, serveAvailGeoCells, serveAvailV2, serveAvailV2Cells } from './avail_geo';
+import { serveAvailGeo, serveAvailGeoCells, serveAvailV2, serveAvailV2Cells, serveAvailV3, serveAvailV3Cells } from './avail_geo';
 import { serveRidesV1, serveRidesV1Cells, serveRidesV2, serveRidesV2Cells, serveRidesV3, serveRidesV3Cells } from './rides_v1';
 
 /**
@@ -1170,6 +1170,26 @@ export default {
 				return await serveAvailV2Cells(env.R2, request, env.CORS_ORIGIN ?? '*');
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'avail-v2/cells error', 500, env);
+			}
+		}
+
+		// /api/avail-v3[/cells] — v3 pyrmts-geo serving (avail-v3/<tier> paths,
+		// 18-tier ladder 1m–1y, S2-keyed at levels 10..15). Built by
+		// `ctbk/avail_v3.py`. Same query contract as /api/avail-v2 (incl.
+		// `cells=`+`cells.exclude=` station-set predicate). See
+		// `specs/avail-pyramid-v3-s2.md`.
+		if (url.pathname === '/api/avail-v3') {
+			try {
+				return await serveAvailV3(env.R2, request, env.CORS_ORIGIN ?? '*');
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'avail-v3 error', 500, env);
+			}
+		}
+		if (url.pathname === '/api/avail-v3/cells') {
+			try {
+				return await serveAvailV3Cells(env.R2, request, env.CORS_ORIGIN ?? '*');
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'avail-v3/cells error', 500, env);
 			}
 		}
 
