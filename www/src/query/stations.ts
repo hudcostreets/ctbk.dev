@@ -6,7 +6,7 @@
  *   binned per `binOverrideS` or `pickAvailBinAuto`. Single shape regardless
  *   of window size (the worker handles tier selection: mo1/d1/h1/raw).
  */
-import { keepPreviousData, type QueryClient, useQuery } from '@tanstack/react-query'
+import { keepPreviousData, type QueryClient, useQuery, type UseQueryResult } from '@tanstack/react-query'
 
 // Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
@@ -231,6 +231,158 @@ export function useStationAvailability(
     // `undefined` so the chart shows a spinner instead of the previous
     // station's data — which is misleading when the new station has different
     // capacity / activity profile.
+    placeholderData: (prev, prevQuery) => {
+      if (!prev || !prevQuery) return undefined
+      const prevGbfsId = (prevQuery.queryKey as readonly unknown[])[1]
+      return prevGbfsId === gbfsId ? prev : undefined
+    },
+    refetchInterval: liveRefresh ? 60_000 : false,
+  })
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// avail-v3 path (per-station via station-LUC denorm)
+//
+// See `specs/per-station-luc-v3.md`. Once the avail-v3 backfill on `e`
+// completes with the LUC-anchored builder, these hooks replace
+// `useStationAvailability` / `useAvailabilityOverview` as the per-station
+// query path. The legacy `/api/totals` path is then deleted.
+// ─────────────────────────────────────────────────────────────────────
+
+interface StationLucEntry {
+  lat: number
+  lng: number
+  cell: string   // S2 hex token at `level`
+  level: number  // LUC level (typically 13..19)
+  uuid: string   // most-recently-seen GBFS station_id for this short_name
+}
+
+export interface StationLuc {
+  by_short_name: Record<string, StationLucEntry>
+  by_uuid: Record<string, string>  // gbfs_station_id → canonical short_name
+}
+
+const STATION_LUC_URL = '/assets/station-luc.json' as const
+
+/** Fetch the station-LUC denorm once (TSQ infinite-stale). The file is
+ *  built by `ctbk station-luc-build` and shipped both as a Git-tracked
+ *  static asset and to R2. ~400 KB. */
+export function useStationLuc(): UseQueryResult<StationLuc> {
+  return useQuery<StationLuc>({
+    queryKey: ['station-luc'],
+    staleTime: Infinity,
+    queryFn: async () => {
+      const res = await fetch(STATION_LUC_URL)
+      if (!res.ok) throw new Error(`station-luc: HTTP ${res.status}`)
+      return res.json()
+    },
+  })
+}
+
+/** Look up a station's LUC entry from its GBFS UUID. Returns null if the
+ *  station isn't in the denorm (rare — usually means the station was
+ *  decommissioned before the window-union snapshot range, or the LUC
+ *  denorm is stale). */
+export function lucEntryForUuid(luc: StationLuc | undefined, gbfsId: string | null | undefined): StationLucEntry | null {
+  if (!luc || !gbfsId) return null
+  const shortName = luc.by_uuid[gbfsId]
+  if (!shortName) return null
+  return luc.by_short_name[shortName] ?? null
+}
+
+interface AvailV3Record {
+  s2_cell: string
+  dt: number  // unix ms (bin start)
+  bikes: number
+  ebikes: number
+  docks: number
+  disabled: number
+  pending: number
+}
+
+interface AvailV3Response {
+  records: AvailV3Record[]
+  reducer: string
+  plan: { outputTier: string; outputBin: string; outputRes: number; outputCells: string[] }
+}
+
+/** Reshape `/api/avail-v3` wide records into per-bin `AvailabilityRow`s
+ *  the chart consumes. */
+function availV3RowsToAvailabilityRows(
+  records: AvailV3Record[],
+  stationId: string,
+): AvailabilityRow[] {
+  return records
+    .map((r) => ({
+      // `dt` is ms; AvailabilityRow uses unix-s.
+      polled_at: Math.floor(r.dt / 1000),
+      ts: Math.floor(r.dt / 1000),
+      station_id: stationId,
+      num_bikes_available: r.bikes,
+      num_ebikes_available: r.ebikes,
+      num_docks_available: r.docks,
+      num_bikes_disabled: r.disabled,
+      num_docks_disabled: r.pending,
+      is_installed: 1,
+      is_renting: 1,
+      is_returning: 1,
+      last_reported: Math.floor(r.dt / 1000),
+    }))
+    .sort((a, b) => a.polled_at - b.polled_at)
+}
+
+const stationAvailV3Key = (gbfsId: string, fromS: number, toS: number, binBudget: number) =>
+  ['station-avail-v3', gbfsId, fromS, toS, `bb${binBudget}`] as const
+
+const stationAvailV3Fn = async (
+  gbfsId: string, luc: StationLucEntry, fromS: number, toS: number, binBudget: number, capacityHint: number | null,
+): Promise<StationRangeResponse & { binS: number }> => {
+  const fromIso = new Date(fromS * 1000).toISOString()
+  const toIso   = new Date(toS   * 1000).toISOString()
+  const url = new URL(`${API_BASE}/api/avail-v3`)
+  url.searchParams.set('cells', luc.cell)
+  url.searchParams.set('from', fromIso)
+  url.searchParams.set('to', toIso)
+  url.searchParams.set('bin_budget', String(binBudget))
+  url.searchParams.set('reducer', 'mean')
+  const res = await fetch(url.toString())
+  if (!res.ok) throw new Error(`avail-v3: HTTP ${res.status}`)
+  const data = await res.json() as AvailV3Response
+  // Reverse-engineer the bin size the planner picked, so the chart's
+  // sample-count + tooltip line up. `outputBin` is a pyrmts Duration
+  // string like '1h' / '30min'.
+  const binS = Math.max(1, Math.round((toS - fromS) / Math.max(1, binBudget)))
+  return {
+    station_id: gbfsId,
+    from: fromS,
+    to: toS,
+    capacity: capacityHint,
+    last_polled_at: null,
+    rows: availV3RowsToAvailabilityRows(data.records, gbfsId),
+    binS,
+  }
+}
+
+/** Per-station avail via avail-v3. Looks up the station's LUC cell from
+ *  the denorm and queries `/api/avail-v3?cells=<luc>`. Returns the same
+ *  shape as `useStationAvailability` so callers can swap. */
+export function useStationAvailabilityV3(
+  gbfsId: string | null | undefined,
+  fromS: number,
+  toS: number,
+  viewportPx: number,
+  capacityHint: number | null,
+  binOverrideS?: number,
+  liveRefresh: boolean = false,
+) {
+  const lucQ = useStationLuc()
+  const luc = lucEntryForUuid(lucQ.data, gbfsId)
+  const binS = binOverrideS ?? pickAvailBinAuto(toS - fromS, viewportPx)
+  const binBudget = Math.max(1, Math.ceil((toS - fromS) / binS))
+  return useQuery<StationRangeResponse & { binS: number }>({
+    queryKey: stationAvailV3Key(gbfsId ?? '', fromS, toS, binBudget),
+    enabled: !!gbfsId && !!luc,
+    queryFn: () => stationAvailV3Fn(gbfsId!, luc!, fromS, toS, binBudget, capacityHint),
     placeholderData: (prev, prevQuery) => {
       if (!prev || !prevQuery) return undefined
       const prevGbfsId = (prevQuery.queryKey as readonly unknown[])[1]
