@@ -167,11 +167,14 @@ def output_key(tier: str, period: str) -> str:
 # ─── Station LUC denorm ────────────────────────────────────────────────
 
 @lru_cache(maxsize=1)
-def load_station_luc() -> dict[str, dict]:
-    """Fetch `station-luc.json` from R2 → {sid: {lat, lng, cell, level}}.
+def load_station_luc() -> dict:
+    """Fetch `station-luc.json` from R2.
 
-    Produced by `ctbk station-luc-build`. See `ctbk/station_luc.py` and
-    `specs/per-station-luc-v3.md`.
+    Schema (see `ctbk/station_luc.py`):
+      {
+        "by_short_name": {<short_name>: {lat, lng, cell, level, uuid}, ...},
+        "by_uuid":       {<gbfs_station_id>: <short_name>, ...},
+      }
     """
     cli = r2_client()
     obj = cli.get_object(Bucket=R2_BUCKET, Key='station-luc.json')
@@ -203,28 +206,32 @@ def read_minute_shard(cli, key: str) -> pa.Table | None:
 def build_1m_hour_table(
     date_str: str,
     hour: int,
-    station_luc: dict[str, dict],
+    station_luc: dict,
     coarsest_level: int = COARSEST_LEVEL,
 ) -> pa.Table | None:
     """Build one avail-v3/1m/<date>/<HH>.parquet table from 60 minute files.
 
     Each station's observations are materialized at the station's LUC
-    (`station_luc[sid]['level']`) and at every ancestor level down to
-    `coarsest_level`. See `specs/per-station-luc-v3.md` for the
-    architecture.
+    + all ancestor levels down to `coarsest_level`. WAL rows carry the
+    GBFS UUID; resolve via `station_luc['by_uuid']` → canonical
+    short_name → `by_short_name[…]` LUC entry. See
+    `specs/per-station-luc-v3.md` for the architecture.
 
     Returns None if no source minutes are present (shard skipped upstream).
     """
     cli = r2_client()
-    # Precompute station → cell list at the levels each station contributes
-    # to (L<coarsest_level> .. L<LUC>). For each station that's
-    # `(LUC - coarsest_level + 1)` cells.
-    station_cell_chain: dict[str, list[str]] = {}
-    for sid, luc in station_luc.items():
-        lat, lng, luc_level, luc_cell = luc['lat'], luc['lng'], luc['level'], luc['cell']
+    by_short_name: dict[str, dict] = station_luc['by_short_name']
+    by_uuid: dict[str, str] = station_luc['by_uuid']
+    # Precompute UUID → cell chain (L<coarsest_level>..L<LUC>) once.
+    uuid_cell_chain: dict[str, list[str]] = {}
+    for uuid, sn in by_uuid.items():
+        entry = by_short_name.get(sn)
+        if entry is None:
+            continue  # by_uuid maps to a short_name we don't have LUC for
+        lat, lng, luc_level, luc_cell = entry['lat'], entry['lng'], entry['level'], entry['cell']
         chain = [s2cell.lat_lon_to_token(lat, lng, lvl) for lvl in range(coarsest_level, luc_level)]
         chain.append(luc_cell)
-        station_cell_chain[sid] = chain
+        uuid_cell_chain[uuid] = chain
 
     # Accumulator: (cell, dt_sec, metric) → {state_str: observation_count}
     accum: dict[tuple[str, int, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -242,7 +249,7 @@ def build_1m_hour_table(
         dts = d['dt']
         metric_vals = {m: d[f'{m}_sum'] for m in AVAIL_METRICS}
         for i, sid in enumerate(sids):
-            chain = station_cell_chain.get(sid)
+            chain = uuid_cell_chain.get(sid)
             if chain is None:
                 missing_sids.add(sid)
                 continue

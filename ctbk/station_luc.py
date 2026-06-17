@@ -1,38 +1,56 @@
-"""Build `station-luc.json` — the station_id → LUC denorm.
+"""Build `station-luc.json` — the canonical station → LUC denorm.
 
-For each active station in the current `gbfs/info` snapshot, compute its
-LUC (Lowest-resolution Uniquely-containing S2 Cell): the coarsest S2
-level at which the station's cell contains no other station. The output
-JSON powers per-station queries against the v3 pyramids and the FE-side
-polygon point-in-region filtering.
+For each canonical station observed in any `gbfs/info/<date>.json`
+snapshot in a chosen window, compute its LUC (Lowest-resolution
+Uniquely-containing S2 Cell): the coarsest S2 level at which the
+station's cell contains no other station.
+
+The output is dual-indexed:
+
+  - `by_short_name`: the authoritative LUC info per canonical short_name
+    (e.g. `5033.01`). Includes stations decommissioned mid-window (their
+    last-observed lat/lng) so the avail builder can still materialize
+    their per-minute observations from WAL data that predates today.
+  - `by_uuid`: every GBFS station_id (UUID) ever seen in the window,
+    mapped to the canonical short_name that owned it at observation
+    time. Lets the avail builder resolve a WAL row's UUID → short_name
+    → LUC entry even if that UUID has since retired or been
+    re-assigned.
 
 See `specs/per-station-luc-v3.md` for architecture.
 
 Output schema:
   {
-    "<gbfs_station_id>": {
-      "lat":   40.7505,
-      "lng":  -73.9505,
-      "cell":  "89c25901",     # LUC cell token (variable-length hex)
-      "level": 15,             # LUC S2 level (typically 13..19)
+    "by_short_name": {
+      "<canonical_short_name>": {
+        "lat":   40.7505,
+        "lng":  -73.9505,
+        "cell":  "89c25901",     # LUC cell token
+        "level": 15,             # LUC S2 level
+        "uuid":  "00284700-..."  # most-recently-seen UUID for this short_name
+      },
+      ...
     },
-    ...
+    "by_uuid": {
+      "<gbfs_station_id_uuid>": "<canonical_short_name>",
+      ...
+    }
   }
 
-The CLI writes to two destinations:
+Destinations:
   - Local: `www/public/assets/station-luc.json` (committed; FE fetches)
   - R2:    `s3://ctbk/station-luc.json` (worker reads via env.R2)
 
 Usage:
-  ctbk station-luc-build                    # use today's gbfs/info snapshot
-  ctbk station-luc-build -d 2026-06-16     # use a specific snapshot
-  ctbk station-luc-build --no-r2           # skip R2 upload (laptop testing)
+  ctbk station-luc-build                              # default: union over the WAL window
+  ctbk station-luc-build -f 2026-04-07 -T 2026-06-18  # explicit window
+  ctbk station-luc-build --no-r2                      # write local file only
 """
 from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import date as Date, datetime, timezone
+from datetime import date as Date, datetime, timedelta, timezone
 
 import s2cell
 from click import option
@@ -46,86 +64,142 @@ OUTPUT_KEY = 'station-luc.json'                          # R2 key
 LOCAL_PATH = 'www/public/assets/station-luc.json'        # FE-fetched
 
 # Range of S2 levels to consider for LUC. L10 is the coarsest level the
-# pyramids materialize (also the `coarsestLevel` cap on `minimalCover`).
-# L20 is well past any observed collision (empirically max LUC = L19 at
-# 2026-06-16; +1 buffer).
+# pyramids materialize (matches the `coarsestLevel` cap on
+# `s2Index.minimalCover`). L20 is past any observed collision in
+# practice (max LUC seen at 2026-06-16 was L19); +1 buffer.
 LUC_MIN_LEVEL = 10
 LUC_MAX_LEVEL = 20
 
-
-def load_station_geo(cli, date_str: str) -> dict[str, tuple[float, float]]:
-    """Read `gbfs/info/<date>.json` → {station_id: (lat, lng)}."""
-    key = f'gbfs/info/{date_str}.json'
-    obj = cli.get_object(Bucket=R2_BUCKET, Key=key)
-    info = json.loads(obj['Body'].read())
-    out: dict[str, tuple[float, float]] = {}
-    for s in info['data']['stations']:
-        sid = s.get('station_id')
-        if sid is None: continue
-        lat, lng = s.get('lat'), s.get('lon')
-        if lat is None or lng is None: continue
-        out[sid] = (float(lat), float(lng))
-    return out
+# WAL parquets start here — gbfs/info snapshots covering the WAL period
+# should be the default union range. See `gbfs/api/wrangler.toml` cron
+# + `gbfs/compact-r2.py` for the actual ingest pipeline.
+WAL_PERIOD_START = '2026-04-06'
 
 
-def compute_luc(station_geo: dict[str, tuple[float, float]]) -> dict[str, dict]:
-    """For each station, find the coarsest S2 level where its cell is
-    unique among the station set. Returns {sid: {lat, lng, cell, level}}.
+def list_info_dates(cli, date_from: Date, date_to: Date) -> list[str]:
+    """Enumerate `gbfs/info/<date>.json` keys with date in `[from, to)`.
+
+    Returns the date_str values (no `gbfs/info/` prefix, no `.json` suffix)
+    in chronological order.
     """
-    # Pre-compute cells at every candidate level (cheap: ~2400 × 11 levels).
+    paginator = cli.get_paginator('list_objects_v2')
+    found: list[str] = []
+    for page in paginator.paginate(Bucket=R2_BUCKET, Prefix='gbfs/info/'):
+        for obj in page.get('Contents', []):
+            key = obj['Key']
+            if not key.endswith('.json'):
+                continue
+            stem = key[len('gbfs/info/'):-len('.json')]
+            try:
+                d = Date.fromisoformat(stem)
+            except ValueError:
+                continue
+            if date_from <= d < date_to:
+                found.append(stem)
+    return sorted(found)
+
+
+def load_snapshot(cli, date_str: str) -> list[dict]:
+    """Read `gbfs/info/<date>.json` → list of station dicts (raw GBFS shape)."""
+    obj = cli.get_object(Bucket=R2_BUCKET, Key=f'gbfs/info/{date_str}.json')
+    return json.loads(obj['Body'].read())['data']['stations']
+
+
+def union_stations(cli, dates: list[str]) -> tuple[dict[str, dict], dict[str, str]]:
+    """Union station-info across `dates` snapshots in chronological order.
+
+    Returns:
+      by_short_name — {short_name: {lat, lng, uuid}} — last-observed wins.
+      by_uuid       — {uuid: short_name} — every UUID seen across the
+                      window, mapped to the short_name it had at the
+                      time of observation. (If a UUID maps to multiple
+                      short_names over time, last-observed wins so the
+                      reverse-lookup tracks the same view as
+                      `by_short_name`.)
+    """
+    by_short_name: dict[str, dict] = {}
+    by_uuid: dict[str, str] = {}
+    for d in dates:
+        for s in load_snapshot(cli, d):
+            sn = s.get('short_name')
+            uid = s.get('station_id')
+            lat = s.get('lat')
+            lng = s.get('lon')
+            if sn is None or uid is None or lat is None or lng is None:
+                continue
+            by_short_name[sn] = {'lat': float(lat), 'lng': float(lng), 'uuid': uid}
+            by_uuid[uid] = sn
+    return by_short_name, by_uuid
+
+
+def compute_luc(stations: dict[str, dict]) -> dict[str, dict]:
+    """For each station, find the coarsest S2 level where its cell is
+    unique among the station set. Mutates `stations` in place, adding
+    `cell` + `level` per entry, and returns it.
+    """
     cells_at: dict[int, dict[str, str]] = {
-        lvl: {sid: s2cell.lat_lon_to_token(lat, lng, lvl) for sid, (lat, lng) in station_geo.items()}
+        lvl: {sn: s2cell.lat_lon_to_token(v['lat'], v['lng'], lvl) for sn, v in stations.items()}
         for lvl in range(LUC_MIN_LEVEL, LUC_MAX_LEVEL + 1)
     }
-    # Occupancy count per cell per level.
     occupancy_at: dict[int, Counter] = {
         lvl: Counter(cells_at[lvl].values())
         for lvl in cells_at
     }
-
-    out: dict[str, dict] = {}
     no_luc_found: list[str] = []
-    for sid, (lat, lng) in station_geo.items():
+    for sn in list(stations.keys()):
         for lvl in range(LUC_MIN_LEVEL, LUC_MAX_LEVEL + 1):
-            cell = cells_at[lvl][sid]
+            cell = cells_at[lvl][sn]
             if occupancy_at[lvl][cell] == 1:
-                out[sid] = {'lat': lat, 'lng': lng, 'cell': cell, 'level': lvl}
+                stations[sn]['cell'] = cell
+                stations[sn]['level'] = lvl
                 break
         else:
-            no_luc_found.append(sid)
-
+            no_luc_found.append(sn)
     if no_luc_found:
         raise RuntimeError(
             f"{len(no_luc_found)} stations still share their L{LUC_MAX_LEVEL} cell "
             f"with at least one other; bump LUC_MAX_LEVEL. Sample: {no_luc_found[:3]}"
         )
-    return out
+    return stations
 
 
-def luc_distribution_summary(luc: dict[str, dict]) -> str:
-    counts = Counter(v['level'] for v in luc.values())
-    n = len(luc)
-    lines = [f'  L{lvl:<3} {counts[lvl]:6d}  {100*counts[lvl]/n:5.1f}%' for lvl in sorted(counts)]
-    return '\n'.join(lines)
+def luc_distribution_summary(by_short_name: dict[str, dict]) -> str:
+    counts = Counter(v['level'] for v in by_short_name.values())
+    n = len(by_short_name)
+    return '\n'.join(f'  L{lvl:<3} {counts[lvl]:6d}  {100*counts[lvl]/n:5.1f}%' for lvl in sorted(counts))
 
 
-@ctbk.command('station-luc-build', help="Build station-luc.json (station_id → LUC denorm) from the current gbfs/info snapshot.")
-@option('-d', '--date', 'date_str', default=None, help="Snapshot date (YYYY-MM-DD; default: today UTC).")
+@ctbk.command('station-luc-build', help="Build station-luc.json (canonical short_name → LUC denorm) by unioning gbfs/info snapshots across a date window.")
+@option('-f', '--date-from', 'date_from', default=WAL_PERIOD_START, help=f"Inclusive start (YYYY-MM-DD; default: {WAL_PERIOD_START}, matching the WAL period start).")
+@option('-T', '--date-to', 'date_to', default=None, help="Exclusive end (YYYY-MM-DD; default: tomorrow UTC, so today's snapshot is included).")
 @flag('-R', '--no-r2', help="Skip R2 upload; write local file only.")
-def station_luc_build_cmd(date_str: str | None, no_r2: bool):
-    if date_str is None:
-        date_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    err(f"station-luc-build: date={date_str}")
+def station_luc_build_cmd(date_from: str, date_to: str | None, no_r2: bool):
+    df = Date.fromisoformat(date_from)
+    if date_to is None:
+        dt = (datetime.now(timezone.utc).date() + timedelta(days=1))
+    else:
+        dt = Date.fromisoformat(date_to)
 
+    err(f"station-luc-build: window [{df}, {dt})")
     cli = r2_client()
-    station_geo = load_station_geo(cli, date_str)
-    err(f"  loaded {len(station_geo)} stations from gbfs/info/{date_str}.json")
 
-    luc = compute_luc(station_geo)
+    dates = list_info_dates(cli, df, dt)
+    err(f"  {len(dates)} gbfs/info snapshots in window")
+    if not dates:
+        raise SystemExit("no snapshots found in window; bail")
+
+    by_short_name, by_uuid = union_stations(cli, dates)
+    err(f"  union: {len(by_short_name)} short_names, {len(by_uuid)} uuids")
+
+    compute_luc(by_short_name)
     err(f"  LUC distribution:")
-    err(luc_distribution_summary(luc))
+    err(luc_distribution_summary(by_short_name))
 
-    body = json.dumps(luc, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    body = json.dumps(
+        {'by_short_name': by_short_name, 'by_uuid': by_uuid},
+        sort_keys=True,
+        separators=(',', ':'),
+    ).encode('utf-8')
     err(f"  output: {len(body):,} bytes")
 
     with open(LOCAL_PATH, 'wb') as f:

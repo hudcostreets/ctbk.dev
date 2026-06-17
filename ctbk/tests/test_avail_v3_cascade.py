@@ -40,15 +40,23 @@ S1 = {'lat': 40.7500, 'lng': -73.9900}
 S2 = {'lat': 40.7510, 'lng': -73.9890}
 S3 = {'lat': 40.7530, 'lng': -73.9870}
 
-STATION_GEO: dict[str, tuple[float, float]] = {
-    's1': (S1['lat'], S1['lng']),
-    's2': (S2['lat'], S2['lng']),
-    's3': (S3['lat'], S3['lng']),
+# Treat the synthetic station's GBFS UUID = the short_name to keep the
+# dual-index mapping trivial. Production `station-luc-build` distinguishes
+# them (UUID is the WAL key, short_name is the canonical denorm key); for
+# build-table tests the mapping is identity.
+_BY_SHORT_NAME: dict[str, dict] = {
+    's1': {'lat': S1['lat'], 'lng': S1['lng'], 'uuid': 's1'},
+    's2': {'lat': S2['lat'], 'lng': S2['lng'], 'uuid': 's2'},
+    's3': {'lat': S3['lat'], 'lng': S3['lng'], 'uuid': 's3'},
 }
-STATION_LUC: dict[str, dict] = compute_luc(STATION_GEO)
-S1_LUC_LEVEL = STATION_LUC['s1']['level']
-S2_LUC_LEVEL = STATION_LUC['s2']['level']
-S3_LUC_LEVEL = STATION_LUC['s3']['level']
+compute_luc(_BY_SHORT_NAME)
+STATION_LUC: dict = {
+    'by_short_name': _BY_SHORT_NAME,
+    'by_uuid': {'s1': 's1', 's2': 's2', 's3': 's3'},
+}
+S1_LUC_LEVEL = _BY_SHORT_NAME['s1']['level']
+S2_LUC_LEVEL = _BY_SHORT_NAME['s2']['level']
+S3_LUC_LEVEL = _BY_SHORT_NAME['s3']['level']
 MAX_LUC_LEVEL = max(S1_LUC_LEVEL, S2_LUC_LEVEL, S3_LUC_LEVEL)
 
 HOUR_START = datetime(2026, 5, 22, 0, tzinfo=timezone.utc)
@@ -123,7 +131,7 @@ def test_build_1m_hour_table_no_rows_above_station_luc():
     """For every station, no row appears at any level finer than its LUC."""
     tab = run_build_1m_hour()
     cells = set(tab['s2_cell'].to_pylist())
-    for sid, luc in STATION_LUC.items():
+    for sid, luc in STATION_LUC['by_short_name'].items():
         lat, lng, luc_level = luc['lat'], luc['lng'], luc['level']
         for above in range(luc_level + 1, MAX_LUC_LEVEL + 1):
             forbidden = s2cell.lat_lon_to_token(lat, lng, above)
@@ -136,7 +144,7 @@ def test_build_1m_hour_table_luc_row_is_unique_to_station():
     s3 is alone in its L14 cell by LUC construction (s1 and s2 share a
     different L14 cell)."""
     tab = run_build_1m_hour()
-    s3_luc_cell = STATION_LUC['s3']['cell']
+    s3_luc_cell = STATION_LUC['by_short_name']['s3']['cell']
     rows_for_s3_luc = [r for r in tab.to_pylist() if r['s2_cell'] == s3_luc_cell]
     # 60 minute rows for s3's LUC cell.
     assert len(rows_for_s3_luc) == 60
