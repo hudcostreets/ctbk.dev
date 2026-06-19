@@ -28,7 +28,10 @@
  *
  */
 import {
+	addSpan,
+	parseDuration,
 	stitch,
+	type ParsedTimeSpan,
 	type Row,
 	type Tier,
 } from 'pyrmts';
@@ -204,6 +207,101 @@ function parseInstant(s: string | null): Date | null {
 	return Number.isNaN(d.getTime()) ? null : d;
 }
 
+// ─── Manifest-driven per-tier watermarks ────────────────────────────────
+//
+// `pyramid-cascade` writes `avail-v3/_manifest.json` after each build:
+//   { "tiers": { "<name>": { "latest_period": "<period_label>" } } }
+//
+// We convert each `latest_period` to its end-of-period Date (the
+// authoritative watermark for that tier — pyrmts's planner will fall
+// through to finer tiers for any segment past this).
+//
+// Cache module-level for 60s — every Worker isolate fetches once per minute.
+
+const MANIFEST_KEY = 'avail-v3/_manifest.json';
+const WATERMARK_CACHE_TTL_MS = 60_000;
+
+interface WatermarkCache {
+	watermarks: Record<string, Date>;
+	ts: number;
+}
+let _watermarkCache: WatermarkCache | null = null;
+
+async function loadWatermarks(bucket: R2Bucket): Promise<Record<string, Date>> {
+	const now = Date.now();
+	if (_watermarkCache && (now - _watermarkCache.ts) < WATERMARK_CACHE_TTL_MS) {
+		return _watermarkCache.watermarks;
+	}
+	try {
+		const obj = await bucket.get(MANIFEST_KEY);
+		if (!obj) {
+			_watermarkCache = { watermarks: {}, ts: now };
+			return {};
+		}
+		const manifest = await obj.json<{ tiers?: Record<string, { latest_period?: string }> }>();
+		const watermarks: Record<string, Date> = {};
+		for (const [name, info] of Object.entries(manifest.tiers ?? {})) {
+			const tier = TIERS.find((t) => t.name === name);
+			if (!tier || !info?.latest_period) continue;
+			const end = periodEndFromLabel(tier.shard, info.latest_period);
+			if (end !== null) watermarks[name] = end;
+		}
+		_watermarkCache = { watermarks, ts: now };
+		return watermarks;
+	} catch {
+		// On any parse / fetch failure, return empty (no watermark gating).
+		// Better to over-trust shards than to crash queries on a malformed
+		// manifest.
+		_watermarkCache = { watermarks: {}, ts: now };
+		return {};
+	}
+}
+
+/** Convert a `formatPeriod`-style label (e.g. "2026-06-17", "2026-06",
+ *  "2026", "all") plus the tier's shard spec to the end Date of that
+ *  shard — i.e. the start of the NEXT shard. Returns null for `'all'`
+ *  (no watermark needed; tier covers everything). */
+function periodEndFromLabel(shardSpec: string, label: string): Date | null {
+	if (shardSpec === 'all' || label === 'all') return null;
+	const span = parseDuration(shardSpec);
+	const start = parsePeriodLabel(label, span);
+	if (!start) return null;
+	return addSpan(start, span);
+}
+
+function parsePeriodLabel(label: string, span: ParsedTimeSpan): Date | null {
+	let iso: string;
+	switch (span.unit) {
+		case 'y':
+			iso = `${label}-01-01T00:00:00Z`;
+			break;
+		case 'mo':
+			iso = `${label}-01T00:00:00Z`;
+			break;
+		case 'd':
+			iso = `${label}T00:00:00Z`;
+			break;
+		case 'h': {
+			const idx = label.indexOf('T');
+			if (idx === -1) return null;
+			iso = `${label.slice(0, idx)}T${label.slice(idx + 1)}:00:00Z`;
+			break;
+		}
+		case 'min': {
+			const [date, time] = label.split('T', 2);
+			if (!date || !time) return null;
+			const [hh, mi] = time.split('-', 2);
+			if (!hh || !mi) return null;
+			iso = `${date}T${hh}:${mi}:00Z`;
+			break;
+		}
+		default:
+			return null;
+	}
+	const d = new Date(iso);
+	return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function parseBBox(s: string | null): BBox | null {
 	if (s === null) return null;
 	const parts = s.split(',').map((x) => Number(x.trim()));
@@ -240,6 +338,7 @@ function errorResponse(status: number, message: string, cors: string | null): Re
  *     exclude ancestors, keeping rows under include ancestors. */
 async function serveGeoReduced(
 	pyramid: GeoPyramid,
+	bucket: R2Bucket,
 	request: Request,
 	cors: string | null,
 ): Promise<Response> {
@@ -291,11 +390,17 @@ async function serveGeoReduced(
 		? (userCoverLevels.length > 1 || userCellsExclude.length > 0 ? -1 : userCoverLevels[0]!)
 		: null;
 
+	// Watermark fall-through: the planner clips each tier to its
+	// `pyramid-cascade`-emitted manifest watermark (latest complete shard
+	// end), then walks finer tiers to fill the post-watermark tail.
+	// Empty `watermarks` = trust all shards (legacy behavior pre-manifest).
+	const watermarks = await loadWatermarks(bucket);
+
 	// `outputCells: {res, cells}` path bypasses `pickResolution`. See
 	// `pyrmts/specs/done/plan-geo-query-precomputed-cover.md`.
 	const plan = userCells !== null
-		? planGeoQuery(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells } })
-		: planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox: bbox!, cellBudget });
+		? planGeoQuery(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells }, watermarks })
+		: planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox: bbox!, cellBudget, watermarks });
 
 	// Push the cell list down as an RG-prune filter on the cellCol. For
 	// `(cell, dt)`-sorted shards this lets hyparquet skip whole row groups
@@ -361,10 +466,10 @@ async function serveGeoReduced(
 
 /** HTTP handler for `/api/avail-v3` — v3 rollup over bbox (S2-keyed). */
 export async function serveAvailV3(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
-	return serveGeoReduced(availV3Pyramid(bucket), request, corsOrigin || null);
+	return serveGeoReduced(availV3Pyramid(bucket), bucket, request, corsOrigin || null);
 }
 
 /** HTTP handler for `/api/avail-v3/cells` — v3 per-cell rows preserved. */
 export async function serveAvailV3Cells(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
-	return serveGeoReduced(availV3CellsPyramid(bucket), request, corsOrigin || null);
+	return serveGeoReduced(availV3CellsPyramid(bucket), bucket, request, corsOrigin || null);
 }
