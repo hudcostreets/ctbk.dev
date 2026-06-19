@@ -23,6 +23,7 @@ dependencies = [
     # Pinned for byte-reproducible parquet output
     "pandas==2.3.3",
     "plotly>=6.1.2",
+    "polars>=1.41.0",
     # Pinned for byte-reproducible parquet output
     "pyarrow==22.0.0",
     "pyrmts @ git+https://github.com/runsascoded/pyrmts.git@c8de71f#subdirectory=python/pyrmts",

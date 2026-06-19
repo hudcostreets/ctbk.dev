@@ -1,0 +1,55 @@
+# ctbk avail-v3 pyramid config.
+#
+# S2-keyed, LUC-anchored (per specs/per-station-luc-v3.md): each station's
+# observations materialize at L10..LUC. Histogram monoid on bike/dock state
+# counts per (cell, dt, metric).
+#
+# Shard sizing: target N≈1440 bins per shard. Sub-day tiers are
+# epoch-anchored at N×bin durations. Multi-day tiers are calendar-anchored.
+# Capped at /7d (no /1mo+ yet — data is only ~2 months old).
+storage:
+  type: s3
+  bucket: ctbk
+  key: "avail-v3/{tier}/{period}.parquet"
+
+axis: time
+binCol: dt
+
+dims:
+  - { name: s2_cell, type: string }
+
+metrics:
+  - { name: bikes,    monoid: histogram }
+  - { name: ebikes,   monoid: histogram }
+  - { name: docks,    monoid: histogram }
+  - { name: disabled, monoid: histogram }
+  - { name: pending,  monoid: histogram }
+
+# Tiers in canonical (finest → coarsest) order.
+# Note: pyrmts duration format uses `min` (not `m`) for minutes — `m` is
+# reserved for months prefix. Tier `name` keeps the short `m` (e.g. `1m`,
+# `2m`) for readability; `bin`/`shard` use the canonical `min`/`mo`/`h`/`d`/`y`.
+tiers:
+  # epoch-anchored (N=1440)
+  - { name: 1m,  bin: 1min,  shard: 1d  }
+  - { name: 2m,  bin: 2min,  shard: 2d  }
+  - { name: 3m,  bin: 3min,  shard: 3d  }
+  - { name: 5m,  bin: 5min,  shard: 5d  }
+  - { name: 10m, bin: 10min, shard: 10d }
+  - { name: 15m, bin: 15min, shard: 15d }
+  # calendar-anchored (single-unit only until pyrmts-py adds multi-unit
+  # calendar shards — currently 2mo/4mo/6mo/2y raise in floor_to_span).
+  - { name: 30m, bin: 30min, shard: 1mo }
+  - { name: 1h,  bin: 1h,    shard: 1mo }
+  - { name: 2h,  bin: 2h,    shard: 1mo }
+  - { name: 3h,  bin: 3h,    shard: 1mo }
+  - { name: 6h,  bin: 6h,    shard: 1y  }
+  - { name: 12h, bin: 12h,   shard: 1y  }
+  - { name: 1d,  bin: 1d,    shard: 1y  }
+  - { name: 3d,  bin: 3d,    shard: all }
+  - { name: 7d,  bin: 7d,    shard: all }
+
+geo:
+  cellCol: s2_cell
+  # S2 levels (canonical pyrmts order: finest → coarsest)
+  resolutions: [15, 14, 13, 12, 11, 10]

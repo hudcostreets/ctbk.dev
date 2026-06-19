@@ -1,0 +1,165 @@
+"""Orchestrator tests on synthetic data + MemStorage.
+
+Validates the map-shuffle-reduce flow end-to-end without R2 or real source:
+  - Multi-block fan-out via ProcessPool
+  - Block-owned finals vs partials
+  - Reduce phase: merge partials → finals
+  - Manifest emission
+"""
+from __future__ import annotations
+
+import io
+import json
+from datetime import datetime, timezone
+
+import polars as pl
+import pyarrow.parquet as pq
+import pytest
+from pyrmts import Dim, Metric, Pyramid, Tier
+from pyrmts.storage import MemStorage
+
+from ctbk.pyramid_cascade.orchestrator import pyramid_cascade
+
+
+def _hist(d: dict[int, int]) -> str:
+    return json.dumps({str(k): v for k, v in sorted(d.items())}, separators=(',', ':'))
+
+
+def synth_rows(date_str: str, hours: int) -> pl.LazyFrame:
+    base = datetime.fromisoformat(f'{date_str}T00:00:00+00:00')
+    base_ms = int(base.timestamp() * 1000)
+    rows = []
+    for h in range(hours):
+        for m in range(60):
+            dt_ms = base_ms + (h * 3600 + m * 60) * 1000
+            rows.append({'s2_cell': 'cellA', 'dt': dt_ms, 'bikes': _hist({m % 5: 1})})
+    return pl.DataFrame(rows, schema={'s2_cell': pl.Utf8, 'dt': pl.Int64, 'bikes': pl.Utf8}).lazy()
+
+
+def _ingester_2026_06_17_to_19(block_from, block_to):
+    # Source is 2 days of synthetic 1m data starting 2026-06-17.
+    day_starts = {
+        datetime(2026, 6, 17, 0, 0, tzinfo=timezone.utc): '2026-06-17',
+        datetime(2026, 6, 18, 0, 0, tzinfo=timezone.utc): '2026-06-18',
+    }
+    for start, date_str in day_starts.items():
+        if start == block_from:
+            return synth_rows(date_str, hours=24)
+    return pl.DataFrame(schema={'s2_cell': pl.Utf8, 'dt': pl.Int64, 'bikes': pl.Utf8}).lazy()
+
+
+def _pyramid() -> Pyramid:
+    """2-day-spanning pyramid: 1m base, 2m@1d (block-owned at 1d task_size),
+    1h@1mo (partial → needs reduce across both day-blocks)."""
+    return Pyramid(
+        storage=MemStorage(),
+        keyTemplate='avail-test/{tier}/{period}.parquet',
+        binCol='dt',
+        dims=[Dim(name='s2_cell', type='string')],
+        metrics=[Metric(name='bikes', monoid='histogram')],
+        tiers=[
+            Tier(name='1m', bin='1min', shard='1d'),
+            Tier(name='2m', bin='2min', shard='1d'),
+            Tier(name='1h', bin='1h',   shard='1mo'),
+        ],
+    )
+
+
+def test_orchestrator_single_block_single_process():
+    """1-day range × 1d task_size = 1 block. Workers=1 (sync, debuggable).
+
+    Should produce:
+    - 1 final 2m@1d (block fully owns the day)
+    - 1 partial 1h@1mo (block doesn't fully own the month) → reduced to 1 final
+    """
+    pyramid = _pyramid()
+    range_ = (
+        datetime(2026, 6, 17, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 6, 18, 0, 0, tzinfo=timezone.utc),
+    )
+
+    result = pyramid_cascade(
+        pyramid,
+        range_,
+        _ingester_2026_06_17_to_19,
+        task_size='1d',
+        workers=1,
+        staging_uri='mem://',
+        base_tier='1m',
+    )
+
+    assert result.blocks == 1
+    assert result.finals == 1, f"expected 1 block-owned final, got {result.finals}"
+    assert result.partials_written == 1
+    assert result.finals_via_reduce == 1
+
+
+def test_orchestrator_two_blocks_with_reduce():
+    """2-day range × 1d task_size = 2 blocks.
+
+    - 2 finals (one per day) for 2m@1d
+    - 2 partials for 1h@1mo (one per day, same month) → reduced to 1 final
+    """
+    pyramid = _pyramid()
+    range_ = (
+        datetime(2026, 6, 17, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 6, 19, 0, 0, tzinfo=timezone.utc),
+    )
+
+    result = pyramid_cascade(
+        pyramid,
+        range_,
+        _ingester_2026_06_17_to_19,
+        task_size='1d',
+        workers=1,  # sync for deterministic test
+        staging_uri='mem://',
+        base_tier='1m',
+    )
+
+    assert result.blocks == 2
+    assert result.finals == 2, f"expected 2 block-owned finals (2m on each day), got {result.finals}"
+    assert result.partials_written == 2, \
+        f"expected 2 partials (1h@1mo from each day), got {result.partials_written}"
+    assert result.finals_via_reduce == 1, \
+        f"expected 1 reduced final (merged 1h@2026-06), got {result.finals_via_reduce}"
+
+    # Verify the reduced 1h shard contains BOTH days' contributions.
+    blob = pyramid.storage.get('avail-test/1h/2026-06.parquet')
+    assert blob is not None
+    df = pl.from_arrow(pq.read_table(io.BytesIO(blob)))
+    # 2 days × 24 hours = 48 hourly bins for cellA.
+    assert df.height == 48, f"expected 48 hourly bins, got {df.height}"
+
+    # Each hourly bin: 60 minutes × histogram {m%5: 1} for m∈[0..59].
+    # Expected: {0:12, 1:12, 2:12, 3:12, 4:12}.
+    sample = df.row(0, named=True)
+    hist = json.loads(sample['bikes'])
+    assert hist == {'0': 12, '1': 12, '2': 12, '3': 12, '4': 12}, \
+        f"hourly bin should sum to {{state: 12}} for state in 0..4, got {hist}"
+
+
+def test_orchestrator_emits_manifest():
+    """After a run, `_manifest.json` records the latest period per tier."""
+    pyramid = _pyramid()
+    range_ = (
+        datetime(2026, 6, 17, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 6, 19, 0, 0, tzinfo=timezone.utc),
+    )
+
+    pyramid_cascade(
+        pyramid,
+        range_,
+        _ingester_2026_06_17_to_19,
+        task_size='1d',
+        workers=1,
+        staging_uri='mem://',
+        base_tier='1m',
+    )
+
+    manifest_bytes = pyramid.storage.get('avail-test/_manifest.json')
+    assert manifest_bytes is not None
+    manifest = json.loads(manifest_bytes)
+    assert '2m' in manifest['tiers']
+    assert manifest['tiers']['2m']['latest_period'] == '2026-06-18'
+    assert '1h' in manifest['tiers']
+    assert manifest['tiers']['1h']['latest_period'] == '2026-06'
