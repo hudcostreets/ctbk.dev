@@ -35,6 +35,7 @@ from pyrmts import (
 from pyrmts.axis import add_span, floor_to_span
 from pyrmts.storage import FsStorage, MemStorage
 
+from .config import parse_rg_sizes, rg_size_for
 from .engine import Ingester, ShardWriteSet, cascade_block
 
 
@@ -45,6 +46,7 @@ def _block_task(
     ingester_target: str,  # "module.path:fn_name" — must be importable
     staging_root_uri: str | None,
     base_tier: str | None,
+    rg_sizes: dict[str, int] | None,
 ) -> ShardWriteSet:
     """ProcessPool worker. Reconstructs Pyramid + ingester from serializable
     args so we don't pickle boto3 clients or other unpicklable objects.
@@ -75,6 +77,7 @@ def _block_task(
         ingester,
         staging_storage=staging_storage,
         base_tier=base_tier,
+        rg_sizes=rg_sizes,
     )
 
 
@@ -169,6 +172,9 @@ def pyramid_cascade(
     blocks = _enumerate_blocks(range_from, range_to, task_size)
     n_blocks = len(blocks)
 
+    # Per-tier RG sizes (from YAML `defaults.rg_size` + per-tier `rg_size`).
+    rg_sizes = parse_rg_sizes(config_yaml) if config_yaml else None
+
     result = CascadeRunResult(blocks=n_blocks)
 
     all_partials: list[tuple[str, str, str]] = []
@@ -192,6 +198,7 @@ def pyramid_cascade(
                 pyramid, (bf, bt), ingester,
                 staging_storage=staging_storage,
                 base_tier=base_tier,
+                rg_sizes=rg_sizes,
             )
             _consume(ws)
     else:
@@ -206,7 +213,7 @@ def pyramid_cascade(
             )
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = [
-                pool.submit(_block_task, config_yaml, r, ingester_target, staging_uri, base_tier)
+                pool.submit(_block_task, config_yaml, r, ingester_target, staging_uri, base_tier, rg_sizes)
                 for r in block_range_isos
             ]
             for fut in as_completed(futures):
@@ -225,7 +232,10 @@ def pyramid_cascade(
             pyramid.keyTemplate,
             {'tier': tier_name, 'period': period_label},
         )
-        merged_blob = _merge_partials(staging_storage, staged_keys, pyramid, tier)
+        merged_blob = _merge_partials(
+            staging_storage, staged_keys, pyramid, tier,
+            rg_size=rg_size_for(rg_sizes, tier_name),
+        )
         if merged_blob is None:
             continue
         pyramid.storage.put(final_key, merged_blob)
@@ -267,6 +277,8 @@ def _merge_partials(
     staged_keys: list[str],
     pyramid: Pyramid,
     tier,
+    *,
+    rg_size: int = 2048,
 ) -> bytes | None:
     """Read partial parquets, concat + group_by + histogram-sum, return
     serialized final parquet bytes."""
@@ -301,7 +313,7 @@ def _merge_partials(
 
     buf = io.BytesIO()
     table = merged.to_arrow()
-    pq.write_table(table, buf, row_group_size=2048, compression='snappy')
+    pq.write_table(table, buf, row_group_size=rg_size, compression='snappy')
     # Delete the staged partials AFTER successful write.
     for key in staged_keys:
         try:

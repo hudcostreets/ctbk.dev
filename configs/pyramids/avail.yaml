@@ -12,6 +12,12 @@ storage:
   bucket: ctbk
   key: "avail-v3/{tier}/{period}.parquet"
 
+# Per-tier row-group size. Default 2k rows: keeps single-cell scans tight
+# (~1 RG-hit per shard, ~30 KB data scan) while footer overhead stays
+# manageable. Override per-tier with `rg_size: N` on a tier entry.
+defaults:
+  rg_size: 2048
+
 axis: time
 binCol: dt
 

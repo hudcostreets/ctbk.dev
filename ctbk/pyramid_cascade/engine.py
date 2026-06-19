@@ -36,6 +36,8 @@ from pyrmts import (
 )
 from pyrmts.axis import ShardPeriod
 
+from .config import DEFAULT_RG_SIZE, rg_size_for
+
 # Ingester contract: (block_range) → LazyFrame of base-tier rows.
 # Schema: (s2_cell: str, dt: i64 unix ms, <metric>: str — histogram JSON, ...)
 Ingester = Callable[[datetime, datetime], pl.LazyFrame]
@@ -61,6 +63,7 @@ def cascade_block(
     staging_storage=None,
     staging_key_template: str | None = None,
     base_tier: str | None = None,
+    rg_sizes: dict[str, int] | None = None,
 ) -> ShardWriteSet:
     """Cascade one block. Streams source via `ingester`, emits all derived
     tiers' shards via Polars groupby+histogram-sum.
@@ -133,7 +136,9 @@ def cascade_block(
             # Sort by (s2_cell, dt) for RG-prune-friendly layout.
             sort_cols = dim_names + [bin_col]
             table = table.sort_by([(c, 'ascending') for c in sort_cols if c in table.column_names])
-            pq.write_table(table, buf, row_group_size=2048, compression='snappy')
+            pq.write_table(table, buf,
+                row_group_size=rg_size_for(rg_sizes, tier.name),
+                compression='snappy')
             data = buf.getvalue()
 
             if not partial:
