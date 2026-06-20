@@ -25,7 +25,7 @@ import io
 import json
 import os
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date as Date, datetime, timedelta, timezone
 from functools import lru_cache
@@ -296,10 +296,19 @@ def build_1m_hour_table(
 
 def write_table_to_r2(cli, table: pa.Table, key: str) -> int:
     """Serialize `table` to parquet via `pyrmts.write_tier_parquet` (sorts by
-    `(dt, s2_cell)` + picks RG size for hyparquet RG-pruning) and PUT to R2.
+    `(s2_cell, dt)` + picks RG size for hyparquet RG-pruning) and PUT to R2.
+
+    Cell-first sort makes per-cell queries (StationDetail's LUC anchor)
+    cheap: each RG's `s2_cell` range covers a contiguous slice of cells, so
+    hyparquet skips most RGs given a `cellCol IN (one_cell)` filter. The
+    alternative dt-first sort scattered every cell across every RG, so
+    single-cell scans had to decompress whole shards — at 7d × L15 this
+    blew the Worker 50ms CPU cap (~9s, CF 1102). Daily-shard windows are
+    aligned to the shard boundary so we don't lose dt RG-pruning.
+
     Returns bytes written."""
     buf = io.BytesIO()
-    write_tier_parquet(table, out=buf, sort=['dt', 's2_cell'])
+    write_tier_parquet(table, out=buf, sort=['s2_cell', 'dt'])
     body = buf.getvalue()
     cli.put_object(
         Bucket=R2_BUCKET,
@@ -475,6 +484,222 @@ def build_cascade_shard(
     return pa.table(arrays, names=names)
 
 
+# ─── Single-pass cascade from 1m source ────────────────────────────────
+
+def _bin_floor(tier: str, dt_ms: int) -> int:
+    """Floor `dt_ms` to the start of `tier`'s bucket — fixed-bin or calendar."""
+    spec = TIER_SPECS[tier]
+    if spec.bin_sec is not None:
+        return dt_floor_ms_fixed(dt_ms, spec.bin_sec)
+    return dt_floor_ms_calendar(dt_ms, tier)
+
+
+def _derived_from_1m() -> list[tuple[str, TierSpec]]:
+    """All 17 tiers that transitively derive from 1m, in topo order
+    (descendants ordered by ascending bin_sec / shard size). 1m itself
+    excluded; calendar tiers included (they derive_from 1d which is itself
+    derived from 1m via the bin-tier chain, so we can roll them up
+    directly from streamed 1m rows using `_bin_floor`)."""
+    out: list[tuple[str, TierSpec]] = []
+    visited: set[str] = set()
+    # BFS from 1m.
+    frontier = ['1m']
+    while frontier:
+        nxt: list[str] = []
+        for parent in frontier:
+            for name, spec in TIER_SPECS.items():
+                if spec.derive_from == parent and name not in visited:
+                    visited.add(name)
+                    out.append((name, spec))
+                    nxt.append(name)
+        frontier = nxt
+    return out
+
+
+def _accum_to_table(data: dict[tuple[str, int, str], dict[str, int]]) -> pa.Table:
+    """Pivot `(cell, dt_out, metric) → hist` accumulator into the
+    avail-v3 output schema (`s2_cell, dt, bikes, ebikes, docks, disabled,
+    pending`). Histograms are sorted by integer state for byte-stable diffs."""
+    rows: dict[tuple[str, int], dict[str, str]] = {}
+    for (cell, dt_out, metric), hist in data.items():
+        sorted_hist = dict(sorted(hist.items(), key=lambda kv: int(kv[0])))
+        rows.setdefault((cell, dt_out), {})[metric] = json.dumps(sorted_hist, separators=(',', ':'))
+    keys = list(rows.keys())
+    s2_cell_col = [k[0] for k in keys]
+    dt_ms_col = [k[1] for k in keys]
+    metric_cols: dict[str, list[str | None]] = {m: [] for m in AVAIL_METRICS}
+    for k in keys:
+        r = rows[k]
+        for m in AVAIL_METRICS:
+            metric_cols[m].append(r.get(m))
+    arrays = [
+        pa.array(s2_cell_col, type=pa.string()),
+        pa.array(dt_ms_col, type=pa.int64()),
+    ]
+    names = ['s2_cell', 'dt']
+    for m in AVAIL_METRICS:
+        arrays.append(pa.array(metric_cols[m], type=pa.string()))
+        names.append(m)
+    return pa.table(arrays, names=names)
+
+
+def cascade_from_1m(
+    date_from: Date,
+    date_to: Date,
+    concurrency: int = 8,
+    overwrite: bool = False,
+    dry_run: bool = False,
+    all_dates: tuple[Date, Date] | None = None,
+) -> tuple[int, int, int]:
+    """Stream over 1m source shards once, emitting all 17 derived tiers.
+
+    Each 1m hourly source shard's rows fan out to per-tier accumulators
+    keyed by `(cell, _bin_floor(tier, dt), metric)`. Tier accumulators are
+    flushed (written to R2) as their output shard period closes — when the
+    next source hour falls in a new period for that tier.
+
+    Single-process by design: a 17-tier dict-merge per source shard
+    dominates per-shard cost (~5 s), and IPC-pickling those partials to a
+    ProcessPool actually slowed total wall vs the in-process merge. For
+    coarse parallelism across a long date range, split the range into
+    blocks (e.g. one process per year-aligned slice) and run independent
+    `cascade_from_1m` invocations — output shards align with the
+    block boundaries so processes never race on the same key.
+
+    `concurrency` sizes the R2-fetch thread pool that prefetches source
+    shards while the main loop accumulates the previous one.
+
+    Memory: at peak, the largest open accumulator is `{1h..12h}`'s 1mo
+    shard (~720 hourly bins × ~2400 cells × 5 metrics) and `{1d, 3d, 7d}`'s
+    1y shard. Empirically ~750 MB peak for a full pyramid build.
+
+    `all_dates=(from, to)` is required for the 1y tier's `shard='all'`
+    output filename derivation; pass the full build window so the single
+    `all`-shard period name is stable across resumed runs.
+
+    Returns `(n_wrote, n_skip, bytes_total)`.
+    """
+    cli = r2_client()
+    derived = _derived_from_1m()
+    derived_names = [t for t, _ in derived]
+    err(f"cascade-from-1m: emitting {len(derived)} tiers: {derived_names}")
+
+    source_starts = shard_starts('1h', date_from, date_to)
+    err(f"  {len(source_starts)} source 1m shards in [{date_from}, {date_to})")
+
+    if dry_run:
+        for tier, spec in derived:
+            sample_period = (
+                shard_period(spec.shard, source_starts[0]) if source_starts
+                else '<empty>'
+            )
+            err(f"  {tier:4s} → avail-v3/{tier}/{sample_period}.parquet (and successors)")
+        return (0, 0, 0)
+
+    # (tier, period) → {(cell, dt_out, metric): {state: count}}
+    accum: dict[tuple[str, str], dict[tuple[str, int, str], dict[str, int]]] = {}
+    open_period: dict[str, str] = {}
+    n_wrote = n_skip = bytes_total = 0
+
+    def flush(tier: str, period: str):
+        nonlocal n_wrote, n_skip, bytes_total
+        data = accum.pop((tier, period), None)
+        if not data:
+            return
+        out_key = output_key(tier, period)
+        if not overwrite and r2_head(cli, out_key) is not None:
+            err(f"  skip  {tier:4s} {period}")
+            n_skip += 1
+            return
+        tab = _accum_to_table(data)
+        n = write_table_to_r2(cli, tab, out_key)
+        err(f"  wrote {tier:4s} {period} ({n:,} B, {tab.num_rows:,} rows)")
+        n_wrote += 1
+        bytes_total += n
+
+    def read_source(period: str) -> pa.Table | None:
+        return read_v3_shard(cli, '1m', period)
+
+    # Pipelined R2 reads: a small thread-pool prefetches source shards in
+    # submission order while the main loop accumulates the previous one.
+    # In-order consumption preserves the period-rollover-flush invariant.
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+        periods = [shard_period('1h', s) for s in source_starts]
+        futures = [pool.submit(read_source, p) for p in periods]
+
+        for source_start, period_src, fut in zip(source_starts, periods, futures):
+            tab = fut.result()
+            if tab is None:
+                err(f"  miss  1m   {period_src}")
+                continue
+            cell_col = tab['s2_cell'].to_pylist()
+            dt_col = tab['dt'].to_pylist()
+            metric_cols_in = {m: tab[m].to_pylist() for m in AVAIL_METRICS}
+
+            # Parse each row's metrics ONCE — same parsed value gets
+            # dispatched to all 17 tier accumulators.
+            n_rows = tab.num_rows
+            row_parsed: list[list[tuple[str, dict[str, int]]]] = []
+            for i in range(n_rows):
+                this_row: list[tuple[str, dict[str, int]]] = []
+                for m in AVAIL_METRICS:
+                    js = metric_cols_in[m][i]
+                    if js is None:
+                        continue
+                    d = json.loads(js)
+                    if d:
+                        this_row.append((m, d))
+                row_parsed.append(this_row)
+
+            # Cache _bin_floor(tier, dt_in) per (tier, unique_dt). Inputs
+            # within one source hour share ≤60 unique dts; memoizing here
+            # turns ~17 × 60k → ~17 × 60 floor calls per source shard.
+            unique_dts = sorted(set(dt_col))
+            dt_out_for_tier: dict[str, dict[int, int]] = {}
+
+            for tier, spec in derived:
+                if spec.shard == 'all':
+                    if all_dates is None:
+                        raise ValueError(f"tier {tier!r} has shard='all'; pass all_dates=(from,to)")
+                    output_period = 'all'
+                else:
+                    output_period = shard_period(spec.shard, source_start)
+                # If this tier's period just rolled over, flush the previous one.
+                prev = open_period.get(tier)
+                if prev is not None and prev != output_period:
+                    flush(tier, prev)
+                open_period[tier] = output_period
+
+                # Per-tier dt_in → dt_out map (memoized).
+                bin_map = dt_out_for_tier.get(tier)
+                if bin_map is None:
+                    bin_map = {dt_in: _bin_floor(tier, dt_in) for dt_in in unique_dts}
+                    dt_out_for_tier[tier] = bin_map
+
+                acc = accum.setdefault((tier, output_period), {})
+                for i in range(n_rows):
+                    parsed = row_parsed[i]
+                    if not parsed:
+                        continue
+                    cell = cell_col[i]
+                    dt_out = bin_map[dt_col[i]]
+                    for m, d in parsed:
+                        key = (cell, dt_out, m)
+                        acc_d = acc.get(key)
+                        if acc_d is None:
+                            acc[key] = dict(d)
+                        else:
+                            for k, v in d.items():
+                                acc_d[k] = acc_d.get(k, 0) + v
+
+    # Final flush — anything still open after the last source shard.
+    for tier, period in list(open_period.items()):
+        flush(tier, period)
+
+    err(f"done: {n_wrote} wrote, {n_skip} skip, {bytes_total:,} bytes total")
+    return (n_wrote, n_skip, bytes_total)
+
+
 # ─── Per-shard worker (top-level for ProcessPool pickling) ─────────────
 
 def _build_shard_task(
@@ -579,3 +804,28 @@ def avail_v3_build_cmd(
                 bytes_total += n
 
     err(f"done: {n_wrote} wrote, {n_skip} skip, {n_empty} empty, {bytes_total:,} bytes total")
+
+
+@ctbk.command('avail-v3-cascade-from-1m', help="Single-pass cascade: emit all 17 derived tiers from the 1m source.")
+@option('-c', '--concurrency', type=int, default=8, help="R2-fetch thread-pool size.")
+@option('-f', '--date-from', 'date_from', required=True, help="Inclusive start (YYYY-MM-DD).")
+@option('-n', '--dry-run', is_flag=True, help="Print tiers/periods that would be written, then exit.")
+@option('-O', '--overwrite', '--force', is_flag=True, help="Rebuild even if output exists.")
+@option('-T', '--date-to', 'date_to', required=True, help="Exclusive end (YYYY-MM-DD).")
+def avail_v3_cascade_from_1m_cmd(
+    concurrency: int,
+    date_from: str,
+    dry_run: bool,
+    overwrite: bool,
+    date_to: str,
+):
+    df = Date.fromisoformat(date_from)
+    dt = Date.fromisoformat(date_to)
+    cascade_from_1m(
+        date_from=df,
+        date_to=dt,
+        concurrency=concurrency,
+        overwrite=overwrite,
+        dry_run=dry_run,
+        all_dates=(df, dt),
+    )

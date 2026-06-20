@@ -1,164 +1,118 @@
-# avail-v3 cascade perf: single-pass over 1m source
+# avail-v3 cascade: single-pass over 1m source
 
 ## Goal
 
-Cut the avail-v3 full-rebuild wall time by ~50% by having a single pass
-over each 1m hourly shard emit **all** six descendant tiers
-({2m, 3m, 5m, 10m, 15m, 30m}) in one read.
+Cut the avail-v3 full-rebuild wall time from ~35 min → ~5–10 min by
+having **one streaming pass over the 1m source** emit *all 17 derived
+tiers* in one go.
 
-Current state (per [scripts/avail-v3-cascade.sh](../scripts/avail-v3-cascade.sh))
-already parallelizes siblings within each level — that alone cuts ~75 min
-→ ~35 min. The remaining cost is dominated by reading each 1m hourly
-shard 6 separate times. This spec proposes reading them once.
+## Insight
 
-## Today
+Every derived tier in the avail-v3 pyramid is a histogram-monoid roll-up
+of 1m rows under some `_bin_floor(tier, dt)` function. The bin function
+is fixed-width for {2m..7d} and calendar-grouped for {1mo, 3mo, 1y} —
+but in both cases each output row's contents are an additive sum of 1m
+histograms. So the *cascade graph* — which tier derives from which —
+is a code-arbitrary choice, not a property of the data. Every tier is
+*directly* derivable from 1m.
 
-`TIER_SPECS` in `ctbk/avail_v3.py` declares each output tier's
-`derive_from` source. `cascade_tiers` (and the per-tier
-`build_cascade_shard`) iterates `shard_starts(tier_shard, …)` and for
-each output shard reads every source shard in its window via
-`read_v3_shard`.
+The original `cascade_tiers(tier, ...)` walked the `derive_from` chain
+recursively, reading each level's output as input to the next. That
+means:
 
-For 1m→2m: 1728 source reads → 1728 output writes (both hourly).
-For 1m→5m: 1728 source reads → 72 output writes (daily output).
-Net: **the 1m@1h shards are read 6 times** across the level — 6 × 1728 =
-10,368 R2 GETs + decompressions for what is conceptually a single linear
-pass.
+- 1m hourly source is read 6× (once per direct descendant — 2m, 3m,
+  5m, 10m, 15m, 30m)
+- 30m daily output is read 5× (once per 1h..12h descendant)
+- 1h monthly output is read 3× (once per 1d, 3d, 7d)
+- 1d yearly output is read 3× (once per 1mo, 3mo, 1y)
 
-Per-shard cost is dominated by R2 GET + parquet decompress + pyarrow
-table allocation; the histogram-sum is cheap. So a 6x reduction in
-source reads ≈ 6x speed-up for the level.
-
-Same shape (smaller win) applies to:
-- 30m → {1h, 2h, 3h, 6h, 12h}: 5x redundant reads of 30m daily shards
-- 1h → {1d, 3d, 7d}: 3x
-- 1d → {1mo, 3mo, 1y}: 3x
-
-Total redundant reads in a full rebuild: 6×1728 + 5×72 + 3×3 + 3×3 = ~10.7k
-extra reads. Single-pass eliminates all of them.
+Net: ~10.7k redundant R2 GETs + decompresses per full rebuild on top of
+the actual unique reads.
 
 ## Design
 
-### Concept
+`cascade_from_1m(date_from, date_to, ...)` (in `ctbk/avail_v3.py`)
+walks the 1m source in chronological order via a thread-pool prefetch
+buffer, and maintains a per-`(tier, output_period)` accumulator. As
+each source 1m hourly shard arrives:
 
-Replace the per-tier `cascade_tiers(tier, …)` entry point with a
-per-source-tier entry point: `cascade_from(source_tier, …)` that reads
-each source shard once and emits all of its descendants.
+1. For each derived tier `T`, compute `output_period =
+   shard_period(T.shard, source_start)`.
+2. If `T` already had a different period open, **flush** it: pivot the
+   accumulator into a `pa.Table`, write the parquet shard to R2, clear
+   the accumulator entry. This is what makes the streaming pass
+   memory-bounded.
+3. Re-bin each source row by `_bin_floor(T, dt_in)` and merge its
+   histogram into the accumulator under
+   `(cell, dt_out, metric) → {state: count}`.
 
-For 1m as source, the descendants are {2m, 3m, 5m, 10m, 15m, 30m}.
-Their output shard granularities differ:
+The same code path covers both bin-derived ({2m..7d}, 14 tiers) and
+calendar ({1mo, 3mo, 1y}, 3 tiers) — `_bin_floor` dispatches on
+`TIER_SPECS[T].bin_sec is None`.
 
-| descendant | bin_sec | output shard |
+### Memory model
+
+Peak open accumulators at any one moment:
+
+| group | shard | open at peak |
 |---|---|---|
-| 2m, 3m | 120, 180 | 1h (same as source) |
-| 5m..30m | 300, 600, 900, 1800 | 1d (24 hour-shards per output) |
+| `{2m, 3m}`      | `1h`  | none persists (closes after each source hour) |
+| `{5m..30m}`     | `1d`  | 4 tiers × 1 day each   |
+| `{1h..12h}`     | `1mo` | 5 tiers × 1 month each |
+| `{1d, 3d, 7d}`  | `1y`  | 3 tiers × 1 year each  |
+| `{1mo, 3mo}`    | `1y`  | 2 tiers × 1 year each  |
+| `{1y}`          | `all` | 1 tier (whole build window — tiny) |
 
-### Sketch
+Empirically ~750 MB peak at full pyramid scope (~2400 cells × ~5 metrics
+× sparse histograms). Fits comfortably on a single process.
 
-```python
-def cascade_from(source_tier: str, date_from: Date, date_to: Date, ...):
-    """One pass over `source_tier`'s shards, emitting all descendants."""
-    descendants = [t for t in TIER_SPECS.values() if t.derive_from == source_tier]
-    # Group by output shard granularity.
-    by_shard: dict[str, list[TierSpec]] = defaultdict(list)
-    for d in descendants:
-        by_shard[d.shard].append(d)
+### Concurrency
 
-    # For each output shard granularity, maintain a per-tier accumulator
-    # that flushes at the granularity boundary.
-    accumulators: dict[(str, str), pa.Table] = {}  # (tier, shard_period) → accum
+The bottleneck is R2 latency, not CPU. A `ThreadPoolExecutor` of size
+`-c CONC` prefetches source shards in submission order; the main loop
+consumes futures **in order** so the period-rollover-flush invariant is
+preserved. CPU work (JSON parse, dict merge) overlaps with the next
+R2 fetch.
 
-    for source_start in shard_starts(TIER_SPECS[source_tier].shard, date_from, date_to):
-        src = read_v3_shard(cli, source_tier, source_start)
-        for desc in descendants:
-            period = shard_period(desc.shard, source_start)
-            accumulators[(desc.name, period)] = (
-                merge_into(accumulators.get((desc.name, period)),
-                           rebin(src, desc.bin_sec))
-            )
-        # Flush any output shards whose period just closed.
-        for (tier, period), tab in list(accumulators.items()):
-            if period_closed(tier, period, source_start):
-                write_v3_shard(cli, tier, period, tab)
-                del accumulators[(tier, period)]
-    # Final flush.
-    for (tier, period), tab in accumulators.items():
-        write_v3_shard(cli, tier, period, tab)
-```
-
-The hot loop reads each source shard once and dispatches to all 6
-output tiers' accumulators.
-
-### Concurrency model
-
-The current per-shard ProcessPool parallelism (`-c 16`) parallelizes
-*output* shards. For single-pass, parallelism should run over *source*
-shards: each worker reads one source shard, returns 6 partial
-accumulator deltas, and the main process merges them into the
-shard-period accumulators.
-
-Implementation note: keep the source-side parallel; main process owns
-the global accumulator state (or per-source-shard partials get merged in
-the main process). 16 workers × ~1728 source shards = ~108 work units
-per worker; reasonable.
-
-### Resume / idempotency
-
-Per-tier outputs are stable filenames (`avail-v3/<tier>/<period>.parquet`).
-Resume = skip any source shard whose **descendants are all already
-written and have correct content** for the source's contribution.
-
-Simplification: ignore resume in v1 — `--overwrite` flag, full rerun.
-Resume is a v2 add-on (probably not worth the bookkeeping at our shard
-counts).
-
-### Calendar tiers (1mo, 3mo, 1y)
-
-These don't have a `bin_sec` (calendar-grouping). The current cascade
-handles them with their own derive logic. Out of scope here; this spec
-covers `bin_sec`-tiers only.
+`ProcessPool` over source shards isn't useful here: every worker would
+have to merge into the same global accumulator state, which would
+require either inter-process IPC of partial deltas or per-worker
+duplicated state. Single-process + thread-pool I/O is the sweet spot
+at our cell + bin counts.
 
 ## Tradeoffs
 
-| approach | rebuild wall time | code change |
-|---|---|---|
-| Sequential per-tier (status quo before scripts/) | ~75 min | 0 |
-| **scripts/avail-v3-cascade.sh sibling parallelism** | **~35 min** | **+1 shell script** |
-| Single-pass cascade_from (this spec) | ~10 min | refactor `cascade_tiers` |
-| Single-pass + parallelism on source shards | ~5 min | + ProcessPool over source |
+| approach | wall | code | R2 GETs (full pyramid) |
+|---|---|---|---|
+| sequential per-tier | ~75 min | status-quo `cascade_tiers` | unique × 4 (input re-reads) |
+| sibling-parallel script | ~35 min | `scripts/avail-v3-cascade.sh` (Bash) | same as above |
+| **single-pass `cascade_from_1m`** | **~5–10 min** | one function, one CLI | **unique sources only** |
 
-The status-quo + scripts already covers the easy win. This spec is
-worth pursuing when rebuild cadence is high enough that 30 minutes per
-rebuild × N rebuilds adds up — e.g. after every station-luc denorm
-change.
+The script is now a one-liner: `ctbk avail-v3-cascade-from-1m -f $FROM -T $TO -c $NPROC`.
 
 ## Migration
 
-1. **[laptop]** Add `cascade_from(source_tier, …)` next to
-   `cascade_tiers(tier, …)` in `ctbk/avail_v3.py`. Don't remove
-   `cascade_tiers` — keep as the per-tier code path for single-tier
-   refresh use cases.
-2. **[laptop]** New CLI: `ctbk avail-v3-cascade-from -s <source_tier>
-   -f ... -T ...` (or extend `ctbk avail-v3-build`).
-3. **[laptop]** Update tests: add a `cascade_from` round-trip vs the
-   per-tier `cascade_tiers` output (byte-identical assertion).
-4. **[laptop]** `scripts/avail-v3-cascade.sh`: replace the
-   per-level-parallel block for `1m`/`30m`/`1h`/`1d` sources with one
-   `cascade_from` invocation per source-tier.
-5. **[`e`]** Re-run rebuild with the new script. Should hit ~10 min
-   vs ~35 min.
+1. **[laptop]** Add `cascade_from_1m` to `ctbk/avail_v3.py`. Done in
+   this PR.
+2. **[laptop]** Test: `test_cascade_from_1m_matches_per_level_cascade`
+   asserts byte-equivalent rowsets vs the per-level `build_cascade_shard`
+   path on a synthetic 1-day window across all 17 derived tiers.
+3. **[laptop]** Add CLI `ctbk avail-v3-cascade-from-1m`. Done.
+4. **[laptop]** Smoke test against real R2 data on a 1-day slice; confirm
+   17 tier outputs land and probe latency through the worker. Done.
+5. **[`e`]** Replace `scripts/avail-v3-cascade.sh` invocation with a
+   single `ctbk avail-v3-cascade-from-1m -f $FROM -T $TO -c $NPROC`.
+   Full-pyramid rebuild target: ~5–10 min.
+6. **[`e`]** Re-run rebuild with the new code + cell-first parquet sort
+   (`s2_cell, dt`) from `ctbk/avail_v3.py:write_table_to_r2`. The
+   resulting shards unlock the FE flip — single-cell queries at any
+   tier+window combination drop from CPU-cap (CF 1102) to <1 s.
 
-## Open questions
+## Out of scope (later)
 
-1. **Memory footprint**: with 6 descendants × {hourly or daily-shard}
-   accumulators in memory, what's the peak working set? Each daily-shard
-   accumulator at L10-L19 + LUC layout is ~5 MB → ×4 daily descendants
-   × ~24 in-flight hours = ~480 MB during the daily-shard-flush boundary
-   crossing. Fits comfortably; not a concern at our scale.
-2. **Single-pass over higher levels**: 30m → {1h..12h} is 5x reads on 72
-   daily 30m shards = 360 redundant reads. Smaller win (~3 min off the
-   cascade), but the same refactor handles it. Recommend yes.
-3. **Worker-shard partials**: should each ProcessPool worker return the
-   pre-aggregated partial (one row per (cell, dt_out_bucket)), and the
-   main process do final merge? Lower IPC than passing back raw tables.
-   YES; that's the design above.
+- `cascade_tiers` left in place for single-tier refresh use cases (e.g.
+  rebuilding just `1h` after a station-luc update). Could retire later
+  if nothing depends on it.
+- Per-tier RG-prune behaviour is set by the writer (`sort=['s2_cell',
+  'dt']` in `write_table_to_r2`) and is shared between `cascade_from_1m`
+  and `cascade_tiers`.

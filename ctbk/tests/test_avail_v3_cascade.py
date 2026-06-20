@@ -23,8 +23,10 @@ from ctbk import avail_v3
 from ctbk.avail_v3 import (
     AVAIL_METRICS,
     COARSEST_LEVEL,
+    TIER_SPECS,
     build_1m_hour_table,
     build_cascade_shard,
+    cascade_from_1m,
     dt_floor_ms_fixed,
 )
 from ctbk.station_luc import compute_luc
@@ -257,3 +259,126 @@ def test_cascade_1h_from_30m_matches_manual_sum():
             expected[str(v)] = expected.get(str(v), 0) + 1
     expected = dict(sorted(expected.items(), key=lambda kv: int(kv[0])))
     assert cascaded_bikes == expected
+
+
+# ─── Single-pass cascade_from_1m ───────────────────────────────────────
+
+def _table_rowset(tab: pa.Table) -> set[tuple]:
+    """Hashable representation of a table's rows for unordered equality."""
+    return {tuple(r.items()) for r in [
+        {c: row[c] for c in tab.column_names} for row in tab.to_pylist()
+    ]}
+
+
+def test_cascade_from_1m_matches_per_level_cascade():
+    """The single-pass `cascade_from_1m` over a synthetic 1-day source
+    must produce the same `(s2_cell, dt, metrics)` set for every derived
+    tier as the per-level `build_cascade_shard` does.
+
+    This is the byte-/row-level invariant that justifies the rewrite:
+    each output tier is a pure histogram-sum roll-up of 1m rows, so a
+    direct-from-1m emit and an intermediate-tier-relay emit must agree.
+    """
+    from datetime import date as Date
+
+    date_str = '2026-05-22'
+    one_m_tables = build_1m_for_full_day(date_str)
+    one_d = Date.fromisoformat(date_str)
+    next_d = Date.fromisoformat('2026-05-23')
+
+    # cascade_from_1m's storage. Capture writes; serve reads from
+    # the per-level relay (1m source + each intermediate it needs).
+    written: dict[str, pa.Table] = {}
+
+    def fake_read_v3_shard(cli, tier, period):
+        # cascade_from_1m only reads 1m source.
+        if tier == '1m':
+            return one_m_tables.get(period)
+        # build_cascade_shard reads its derive_from tier — synthesize
+        # via recursive cascade up from 1m, mirroring the same logic
+        # cascade_from_1m exercises.
+        return _relay_cascade.get((tier, period))
+
+    def fake_write(cli, table, key):
+        # `avail-v3/<tier>/<period>.parquet`
+        _, tier, leaf = key.split('/', 2)
+        period = leaf[:-len('.parquet')]
+        written[f'{tier}/{period}'] = table
+        return len(table.to_pandas().to_csv(index=False))  # arbitrary; only sign matters
+
+    def fake_head(cli, key):
+        return None  # never skip
+
+    # Pre-build the per-level relay outputs for comparison.
+    _relay_cascade: dict[tuple[str, str], pa.Table] = {}
+    # Helper to relay-build any tier's expected output for the 1-day window.
+    def relay_build(tier: str, shard_start_iso: str):
+        spec = TIER_SPECS[tier]
+        shard_start = datetime.fromisoformat(shard_start_iso).replace(tzinfo=timezone.utc)
+        with patch.object(avail_v3, 'read_v3_shard', _relay_read), \
+             patch.object(avail_v3, 'r2_client', lambda: None):
+            tab = build_cascade_shard(tier, shard_start, all_dates=(one_d, next_d))
+        return tab
+
+    def _relay_read(cli, tier, period):
+        if tier == '1m':
+            return one_m_tables.get(period)
+        return _relay_cascade.get((tier, period))
+
+    # Build expected per-tier outputs in derive-from order.
+    # 1m → {2m..30m} hourly|daily, 30m → {1h..12h} monthly,
+    # 1h → {1d..7d} yearly, 1d → {1mo..1y} yearly|all.
+    expected_writes: dict[str, pa.Table] = {}
+    for tier, spec in TIER_SPECS.items():
+        if spec.derive_from is None:
+            continue
+        # Enumerate output shards covering the test window.
+        if spec.shard == '1h':
+            starts = [f'{date_str}T{h:02d}:00:00' for h in range(24)]
+        elif spec.shard == '1d':
+            starts = [f'{date_str}T00:00:00']
+        elif spec.shard == '1mo':
+            starts = ['2026-05-01T00:00:00']
+        elif spec.shard == '1y':
+            starts = ['2026-01-01T00:00:00']
+        else:  # 'all'
+            starts = ['2026-05-22T00:00:00']
+        for s_iso in starts:
+            tab = relay_build(tier, s_iso)
+            if tab is None:
+                continue
+            shard_start = datetime.fromisoformat(s_iso).replace(tzinfo=timezone.utc)
+            period = (
+                'all' if spec.shard == 'all'
+                else avail_v3.shard_period(spec.shard, shard_start)
+            )
+            _relay_cascade[(tier, period)] = tab
+            expected_writes[f'{tier}/{period}'] = tab
+
+    # Now run cascade_from_1m on the same window and capture writes.
+    with patch.object(avail_v3, 'read_v3_shard', fake_read_v3_shard), \
+         patch.object(avail_v3, 'write_table_to_r2', fake_write), \
+         patch.object(avail_v3, 'r2_head', fake_head), \
+         patch.object(avail_v3, 'r2_client', lambda: None):
+        cascade_from_1m(
+            date_from=one_d,
+            date_to=next_d,
+            concurrency=1,  # deterministic ordering for test
+            overwrite=True,
+            all_dates=(one_d, next_d),
+        )
+
+    # Every derived tier the relay produced should appear in `written`,
+    # and conversely cascade_from_1m shouldn't invent extras.
+    assert set(written) == set(expected_writes), (
+        f"tier/period set mismatch:\n"
+        f"  only in cascade_from_1m: {sorted(set(written) - set(expected_writes))}\n"
+        f"  only in relay:           {sorted(set(expected_writes) - set(written))}"
+    )
+
+    # Row-set equality per (tier, period).
+    for key in sorted(expected_writes):
+        single_pass = written[key]
+        relay = expected_writes[key]
+        assert _table_rowset(single_pass) == _table_rowset(relay), \
+            f"row mismatch for {key}"
