@@ -250,7 +250,7 @@ def pyramid_cascade(
             shutil.rmtree(root, ignore_errors=True)
 
     if emit_manifest:
-        _emit_manifest(pyramid, range_)
+        _emit_manifest(pyramid)
 
     result.wall_seconds = time.time() - t0
     return result
@@ -314,14 +314,21 @@ def _merge_partials(
     buf = io.BytesIO()
     table = merged.to_arrow()
     pq.write_table(table, buf, row_group_size=rg_size, compression='snappy')
-    # Delete the staged partials AFTER successful write.
+    data = buf.getvalue()
+
+    # Delete the staged partials AFTER serializing the final blob. We log
+    # on failure rather than silently swallowing — important for R2-staging
+    # runs where leaked partials would accumulate.
     for key in staged_keys:
+        if not hasattr(storage, 'delete'):
+            break  # Storage backend doesn't support delete (e.g. MemStorage in tests).
         try:
-            if hasattr(storage, 'delete'):
-                storage.delete(key)
-        except Exception:
-            pass
-    return buf.getvalue()
+            storage.delete(key)
+        except Exception as e:
+            import sys
+            print(f"[pyramid-cascade] WARN: failed to delete staged partial {key!r}: {e}",
+                  file=sys.stderr)
+    return data
 
 
 def _merge_long(
@@ -365,10 +372,16 @@ def _merge_long(
     return pivoted.select(dim_names + [bin_col] + metric_cols)
 
 
-def _emit_manifest(pyramid: Pyramid, range_: tuple[datetime, datetime]) -> None:
+def _emit_manifest(pyramid: Pyramid) -> None:
     """Write `<root>/_manifest.json` with the latest written shard per tier.
 
     Worker reads this on cold start to drive watermark-aware planning.
+
+    Note: we LIST each tier prefix and take the lexically-greatest key
+    (period labels are lex-sortable by construction). That captures the
+    real on-storage state, including shards written by prior runs — not
+    just this run's window. The manifest is a per-tier watermark, not a
+    per-run summary.
     """
     manifest: dict[str, dict] = {'tiers': {}}
     for tier in pyramid.tiers:

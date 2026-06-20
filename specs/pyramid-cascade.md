@@ -137,7 +137,9 @@ contributed) or N files (if N blocks contributed).
 
 ### Reduce phase (one task per multi-block output shard)
 
-For each `(tier, period)` with `N > 1` staged files:
+For each `(tier, period)` with `N ≥ 1` staged files (the `N == 1` case
+short-circuits to a no-op rewrite that just re-emits the partial as the
+final shard):
 
 1. Read all N partial parquets.
 2. Concat + groupby `(s2_cell, dt_out, metric)` + histogram-sum.
@@ -198,9 +200,10 @@ Built-in ingesters:
 - `--ingester rides`: reads monthly CSV.zip from S3 tripdata, splits each
   ride into start/end events, bins by minute and cell.
 
-For one-off pyramids, callers can pass `--ingester-module
-my_module.fn_name` to plug in their own. Ingester contract is part of
-pyrmts-py once we factor.
+For now only the built-in `_INGESTERS` registry (in
+`ctbk/pyramid_cascade/cli.py`) is wired; new ingesters land as registry
+entries. A `--ingester-module my_module:fn_name` plug-in flag would be
+straightforward to add if a real out-of-tree caller emerges.
 
 ## Epoch vs calendar shard anchoring
 
@@ -243,19 +246,17 @@ tier ~5 GB for 13y. Avail 1m is dense (every station polled every minute)
 
 ## Row-group sizing
 
-Per-tier RG size tunable via `--rg-size-rows N` (default: pyrmts default
-of 16384). For fine tiers where single-cell queries dominate, smaller
-RGs (~2k rows) win on data scan but lose on footer overhead — net
-break-even at ~4–8k rows for our 7-column schema.
+**Shipped (commit `8e590a42`)**: default 2k rows per RG via
+`defaults.rg_size:` in the YAML, per-tier override via a `rg_size:`
+key on any tier entry. Engine + reduce-phase write both consume it.
 
-**v1**: ship with pyrmts default (16k); add per-tier override later
-after benchmarking. Bench plan:
+For fine tiers with cell-first sort + single-cell queries, smaller RGs
+win on data scan; for our 7-column schema the empirical sweet spot is
+~2–4 k rows. Footer overhead with 2k rows is negligible (~1 MB / shard
+at ~1k RGs, < 1% of a typical shard).
 
-1. Write 3 shards of `15m@15d` at RG sizes ∈ {2k, 4k, 8k, 16k, 64k}.
-2. Cold-query each via the worker for: (a) single-cell × full window,
-   (b) single-cell × sub-window, (c) bbox × full window.
-3. Measure CPU + wall + bytes-fetched.
-4. Pick the per-tier winner.
+Per-tier benchmarking on real shards (single-cell cold query latency at
+varying RG sizes) is still a worthwhile followup; not blocking.
 
 ## Integration with existing compactor
 
@@ -313,9 +314,10 @@ In parallel (not blocking):
    `runsascoded/hyparquet`). For zstd, import a JS zstd decoder (e.g.
    `fzstd`) in the worker and pass it as `compressors.ZSTD`. Defer until
    storage cost matters; snappy is fine for v1.
-2. **Per-tier RG-size override**: default `2k` rows for all tiers;
-   override per-tier via the config (see "Config file" below). Pyrmts
-   writer accepts `row_group_size` already.
+2. **Per-tier RG-size override**: default `2k` rows for all tiers via
+   `defaults.rg_size:` in the YAML, with optional per-tier `rg_size:`
+   override on any tier entry. Engine + reduce-phase write both
+   consume it. Shipped in `8e590a42`.
 3. **Ingester contract**: ctbk-internal for v1. Each pyramid supplies
    its `(block_range) → pl.LazyFrame` callable. Factor to pyrmts-py
    after a second project hits the same shape.
@@ -325,41 +327,7 @@ In parallel (not blocking):
 
 ## Config file
 
-`ctbk/configs/pyramids/{avail,rides}.yaml`:
-
-```yaml
-# avail.yaml
-name: avail-v3
-base:
-  tier: 1m
-  shard: 1d
-  rg_size: 4096          # override default 2k for the dense base tier
-  ingester: ctbk.avail.ingest_1m
-tiers:
-  - { bin: 2m,  shard: 2d   }
-  - { bin: 3m,  shard: 3d   }
-  - { bin: 5m,  shard: 5d   }
-  - { bin: 10m, shard: 10d  }
-  - { bin: 15m, shard: 15d  }
-  - { bin: 30m, shard: 1mo  }
-  - { bin: 1h,  shard: 2mo  }
-  - { bin: 2h,  shard: 4mo  }
-  - { bin: 3h,  shard: 6mo  }
-  - { bin: 6h,  shard: 1y   }
-  - { bin: 12h, shard: 2y   }
-  - { bin: 1d,  shard: 4y   }
-  - { bin: 3d,  shard: all  }
-  - { bin: 7d,  shard: all  }
-defaults:
-  rg_size: 2048
-  compression: snappy      # zstd later
-```
-
-CLI becomes:
-
-```bash
-ctbk pyramid-cascade -c avail.yaml -r 2026-04-08/2026-06-19 -j 32
-```
-
-Rides config differs only by `name`, `ingester`, and the additional
-calendar tiers `{1mo@all, 3mo@all, 1y@all}`.
+Live YAML at `configs/pyramids/avail.yaml` (and `rides.yaml`, when it
+ships) is the source of truth for tier list, dims, metrics, storage,
+RG sizing, compression. The "CLI surface" section above shows how the
+CLI consumes it; the YAML itself documents the schema inline.
