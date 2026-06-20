@@ -38,7 +38,7 @@ from utz import err
 
 from ._hist import build_hist_json_lazy as _build_hist_json
 from .config import parse_rg_sizes, rg_size_for
-from .engine import PIVOT_CHUNKS, Ingester, ShardWriteSet, cascade_block
+from .engine import Ingester, ShardWriteSet, cascade_block
 from .storage import storage_from_cfg
 
 
@@ -84,6 +84,42 @@ def _block_task(
     )
 
 
+def _reduce_task(
+    config_yaml: str,
+    tier_name: str,
+    period_label: str,
+    staged_keys: list[str],
+    staging_root_uri: str | None,
+    rg_sizes: dict[str, int] | None,
+) -> tuple[str, str, int, int] | None:
+    """ProcessPool worker for the reduce phase. Reconstructs the Pyramid +
+    staging-storage handle in-process, runs one `(tier, period)` merge,
+    writes the final shard, returns `(tier, period, n_partials, n_bytes)`.
+
+    Returns None if all staged partials were missing/empty.
+    """
+    from pyrmts import parse_pyramid_yaml, pyramid_from_config
+
+    cfg = parse_pyramid_yaml(config_yaml)
+    storage = storage_from_cfg(cfg.storage)
+    pyramid = pyramid_from_config(cfg, storage)
+    tier = pyramid.tier(tier_name)
+    staging_storage = _resolve_staging(staging_root_uri)
+
+    final_key = substitute_key(
+        pyramid.keyTemplate,
+        {'tier': tier_name, 'period': period_label},
+    )
+    merged_blob = _merge_partials(
+        staging_storage, staged_keys, pyramid, tier,
+        rg_size=rg_size_for(rg_sizes, tier_name),
+    )
+    if merged_blob is None:
+        return None
+    pyramid.storage.put(final_key, merged_blob)
+    return (tier_name, period_label, len(staged_keys), len(merged_blob))
+
+
 def _resolve_staging(uri: str | None):
     """Map a `file:///tmp/...` or `mem://` URI to a Storage instance."""
     if uri is None:
@@ -120,6 +156,7 @@ def pyramid_cascade(
     *,
     task_size: str = '1d',
     workers: int = 1,
+    reduce_workers: int | None = None,
     staging_uri: str | None = None,
     base_tier: str | None = None,
     emit_manifest: bool = True,
@@ -137,7 +174,12 @@ def pyramid_cascade(
         range_: half-open (from, to) UTC range.
         ingester: callable `(block_from, block_to) → pl.LazyFrame`.
         task_size: block duration (pyrmts Duration string).
-        workers: process pool size. 1 = synchronous (debuggable).
+        workers: ProcessPool size for the block phase. 1 = synchronous
+            (debuggable).
+        reduce_workers: ProcessPool size for the reduce phase. Defaults
+            to `workers`. Set independently if the reduce phase needs
+            more (it operates on much smaller data per worker than the
+            block phase, so it's safe to fan out wider).
         staging_uri: where to write partial shards. Defaults to
             `file:///tmp/pyramid-cascade-<pid>/`.
         base_tier: which tier the ingester populates. Defaults to
@@ -217,24 +259,60 @@ def pyramid_cascade(
 
     result.partials_written = len(all_partials)
 
+    n_reduce_workers = reduce_workers if reduce_workers is not None else workers
     if by_key:
-        err(f"reduce: {len(by_key)} (tier, period) groups from {len(all_partials)} partials")
+        err(f"reduce: {len(by_key)} (tier, period) groups from {len(all_partials)} partials "
+            f"across {n_reduce_workers} workers")
     t_reduce = time.time()
-    for (tier_name, period_label), staged_keys in by_key.items():
-        tier = pyramid.tier(tier_name)
-        final_key = substitute_key(
-            pyramid.keyTemplate,
-            {'tier': tier_name, 'period': period_label},
-        )
-        merged_blob = _merge_partials(
-            staging_storage, staged_keys, pyramid, tier,
-            rg_size=rg_size_for(rg_sizes, tier_name),
-        )
-        if merged_blob is None:
-            continue
-        pyramid.storage.put(final_key, merged_blob)
-        result.finals_via_reduce += 1
-        result.bytes_written += len(merged_blob)
+
+    if n_reduce_workers <= 1 or len(by_key) <= 1:
+        # Sync path: works without `config_yaml` (e.g. in tests with
+        # MemStorage).
+        for (tier_name, period_label), staged_keys in by_key.items():
+            tier = pyramid.tier(tier_name)
+            final_key = substitute_key(
+                pyramid.keyTemplate,
+                {'tier': tier_name, 'period': period_label},
+            )
+            merged_blob = _merge_partials(
+                staging_storage, staged_keys, pyramid, tier,
+                rg_size=rg_size_for(rg_sizes, tier_name),
+            )
+            if merged_blob is None:
+                continue
+            pyramid.storage.put(final_key, merged_blob)
+            result.finals_via_reduce += 1
+            result.bytes_written += len(merged_blob)
+    else:
+        # Parallel path: ProcessPool over (tier, period) merge groups.
+        # Workers re-construct Pyramid + storage from `config_yaml` in
+        # their own process (boto3 client isn't pickleable).
+        if config_yaml is None:
+            raise ValueError(
+                "pyramid_cascade(reduce_workers>1) needs `config_yaml=` "
+                "(YAML text) to reconstruct storage/pyramid per worker"
+            )
+        with ProcessPoolExecutor(max_workers=n_reduce_workers) as pool:
+            futures = [
+                pool.submit(
+                    _reduce_task,
+                    config_yaml, tier_name, period_label,
+                    staged_keys, staging_uri, rg_sizes,
+                )
+                for (tier_name, period_label), staged_keys in by_key.items()
+            ]
+            done = 0
+            for fut in as_completed(futures):
+                res = fut.result()
+                done += 1
+                if res is None:
+                    continue
+                tier_name, period_label, n_parts, n_bytes = res
+                result.finals_via_reduce += 1
+                result.bytes_written += n_bytes
+                err(f"reduce {done}/{len(by_key)}: {tier_name:4s} {period_label} "
+                    f"({n_parts} partials → {n_bytes/1024:.0f} KiB)")
+
     if by_key:
         err(f"reduce: wrote {result.finals_via_reduce} finals in {time.time() - t_reduce:.1f}s")
 
@@ -369,45 +447,9 @@ def _merge_long(
         .agg(pl.col('count').sum())
     )
 
-    # Chunk by hash of the leading dim (same strategy as engine._build_tier_shard).
-    # Keeps each chunk's groupby+pivot transient bounded. For single-process
-    # reduce-phase the absolute size is smaller than block-phase, but the
-    # pivot has the same shape so we use the same guardrail.
-    chunk_col = dim_names[0] if dim_names else None
-    if chunk_col is None:
-        return _merge_long_finish(long, dim_names, bin_col, metric_cols)
-    long = long.with_columns(
-        (pl.col(chunk_col).hash(seed=0) % PIVOT_CHUNKS).alias('_chunk')
-    )
-    out_chunks: list[pl.DataFrame] = []
-    for chunk in long.partition_by('_chunk', maintain_order=False):
-        chunk = chunk.drop('_chunk')
-        per_metric = _build_hist_json(
-            chunk,
-            group_keys=dim_names + [bin_col, 'metric'],
-            state_col='state',
-            count_col='count',
-        )
-        out_chunks.append(per_metric.pivot(
-            on='metric',
-            index=dim_names + [bin_col],
-            values='hist_json',
-        ))
-
-    pivoted = pl.concat(out_chunks, how='diagonal_relaxed')
-    for m in metric_cols:
-        if m not in pivoted.columns:
-            pivoted = pivoted.with_columns(pl.lit(None, dtype=pl.Utf8).alias(m))
-    return pivoted.select(dim_names + [bin_col] + metric_cols)
-
-
-def _merge_long_finish(
-    long: pl.DataFrame,
-    dim_names: list[str],
-    bin_col: str,
-    metric_cols: list[str],
-) -> pl.DataFrame:
-    """Unchunked fallback path for pyramids with no dim columns."""
+    # Reduce-time data is small (<100 MB per merge group), so we run one
+    # straight pivot — no need to chunk the way `engine._build_tier_shard`
+    # does for memory bounding.
     per_metric = _build_hist_json(
         long,
         group_keys=dim_names + [bin_col, 'metric'],
