@@ -149,6 +149,16 @@ final shard):
 
 After reduce: delete the staging directory.
 
+### Manifest
+
+After both phases, write `<root>/_manifest.json` recording the latest
+period per tier. Built by LISTing each tier prefix and taking the
+lexically-greatest period (period labels are constructed to be
+lex-sortable). Reflects on-storage state including shards from prior
+runs — see `_emit_manifest` docstring for the stale-prior-run edge
+case. The worker reads this on cold start to drive watermark-aware
+planning (see `gbfs/api/src/avail_geo.ts` → `loadWatermarks`).
+
 ### Parallelism
 
 - **Map phase**: trivially data-parallel; one process per block, `-j N`

@@ -382,6 +382,13 @@ def _emit_manifest(pyramid: Pyramid) -> None:
     real on-storage state, including shards written by prior runs — not
     just this run's window. The manifest is a per-tier watermark, not a
     per-run summary.
+
+    Edge case: if a prior run wrote shards past this run's `to` (e.g.
+    built through 2027, then re-ran only 2026), the manifest still
+    reflects the 2027 latest. The worker treats the manifest as
+    authoritative-up-to-that-period; if you delete prior shards and
+    don't rebuild, downstream queries can fall through to a stale
+    watermark. In practice we rebuild forward-only, so this is benign.
     """
     manifest: dict[str, dict] = {'tiers': {}}
     for tier in pyramid.tiers:
