@@ -38,7 +38,7 @@ from utz import err
 
 from ._hist import build_hist_json_lazy as _build_hist_json
 from .config import parse_rg_sizes, rg_size_for
-from .engine import Ingester, ShardWriteSet, cascade_block
+from .engine import PIVOT_CHUNKS, Ingester, ShardWriteSet, cascade_block
 from .storage import storage_from_cfg
 
 
@@ -369,13 +369,51 @@ def _merge_long(
         .agg(pl.col('count').sum())
     )
 
+    # Chunk by hash of the leading dim (same strategy as engine._build_tier_shard).
+    # Keeps each chunk's groupby+pivot transient bounded. For single-process
+    # reduce-phase the absolute size is smaller than block-phase, but the
+    # pivot has the same shape so we use the same guardrail.
+    chunk_col = dim_names[0] if dim_names else None
+    if chunk_col is None:
+        return _merge_long_finish(long, dim_names, bin_col, metric_cols)
+    long = long.with_columns(
+        (pl.col(chunk_col).hash(seed=0) % PIVOT_CHUNKS).alias('_chunk')
+    )
+    out_chunks: list[pl.DataFrame] = []
+    for chunk in long.partition_by('_chunk', maintain_order=False):
+        chunk = chunk.drop('_chunk')
+        per_metric = _build_hist_json(
+            chunk,
+            group_keys=dim_names + [bin_col, 'metric'],
+            state_col='state',
+            count_col='count',
+        )
+        out_chunks.append(per_metric.pivot(
+            on='metric',
+            index=dim_names + [bin_col],
+            values='hist_json',
+        ))
+
+    pivoted = pl.concat(out_chunks, how='diagonal_relaxed')
+    for m in metric_cols:
+        if m not in pivoted.columns:
+            pivoted = pivoted.with_columns(pl.lit(None, dtype=pl.Utf8).alias(m))
+    return pivoted.select(dim_names + [bin_col] + metric_cols)
+
+
+def _merge_long_finish(
+    long: pl.DataFrame,
+    dim_names: list[str],
+    bin_col: str,
+    metric_cols: list[str],
+) -> pl.DataFrame:
+    """Unchunked fallback path for pyramids with no dim columns."""
     per_metric = _build_hist_json(
         long,
         group_keys=dim_names + [bin_col, 'metric'],
         state_col='state',
         count_col='count',
     )
-
     pivoted = per_metric.pivot(
         on='metric',
         index=dim_names + [bin_col],

@@ -108,11 +108,16 @@ def avail_ingest_1m(
     if not minute_dfs:
         return _empty_long_lf()
 
-    src = pl.concat(minute_dfs, how='vertical_relaxed')
+    # CRITICAL: build a lazy plan end-to-end. If we kept things eager here
+    # the downstream `collect(engine='streaming')` is a no-op and the
+    # explode+unpivot peak memory blows up (16 GB+ per 1d block observed).
+    # Lazy concat + lazy joins + lazy unpivot + lazy group_by lets Polars's
+    # streaming engine chunk the work to a bounded working set (~1-2 GB).
+    src = pl.concat([df.lazy() for df in minute_dfs], how='vertical_relaxed')
 
     joined = (
         src.with_columns((pl.col('dt') * 1000).alias('dt'))
-        .join(luc_df, on='station_id', how='inner')
+        .join(luc_df.lazy(), on='station_id', how='inner')
         .explode('cells')
         .rename({'cells': 's2_cell'})
     )
@@ -135,9 +140,7 @@ def avail_ingest_1m(
         .drop('metric_col')
     )
 
-    counted = long.group_by(['s2_cell', 'dt', 'metric', 'state']).agg(pl.len().alias('count'))
-
-    return counted.lazy() if not isinstance(counted, pl.LazyFrame) else counted
+    return long.group_by(['s2_cell', 'dt', 'metric', 'state']).agg(pl.len().alias('count'))
 
 
 def _empty_long_lf() -> pl.LazyFrame:

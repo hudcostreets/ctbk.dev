@@ -43,6 +43,12 @@ from .config import rg_size_for
 # JSON serialization happens only at parquet-write time, in `_build_tier_shard`.
 Ingester = Callable[[datetime, datetime], pl.LazyFrame]
 
+# Per-tier work partitions the long_df by `s2_cell.hash() % PIVOT_CHUNKS` so
+# each chunk's groupby+pivot transient stays bounded. 16 keeps per-chunk
+# data at ~1/16 of total → per-worker peak ~1 GB instead of ~12 GB. Tune
+# this if cell count or block size changes materially.
+PIVOT_CHUNKS = 16
+
 
 @dataclass
 class ShardWriteSet:
@@ -220,27 +226,37 @@ def _build_tier_shard(
             (pl.col(bin_col) // bin_ms * bin_ms).alias('dt_out')
         )
 
-    # groupby (*dims, dt_out, metric, state).sum(count)
-    group_cols = dim_names + ['dt_out', 'metric', 'state']
-    summed = bucketed.group_by(group_cols).agg(pl.col('count').sum())
-
-    # Build `{state:count,...}` JSON per (cell, dt_out, metric) — fully
-    # vectorized; see _hist.build_hist_json_lazy for the idiom.
-    per_metric = _build_hist_json(
-        summed,
-        group_keys=dim_names + ['dt_out', 'metric'],
-        state_col='state',
-        count_col='count',
+    # Chunk by an s2_cell hash bucket so groupby+pivot run on slices of the
+    # block, not the whole thing at once. The unchunked path peaked at
+    # ~10–14 GB per worker during the per-tier pivot for tier 2m on a 1d
+    # block (× 4 workers = OOM at 55 GB). Each (s2_cell, dt_out) lives in
+    # exactly one chunk, so chunked sums equal the unchunked sums.
+    bucketed = bucketed.with_columns(
+        (pl.col('s2_cell').hash(seed=0) % PIVOT_CHUNKS).alias('_chunk')
     )
 
-    # Final pivot to wide: (*dims, dt_out) → one row with N hist_json cols.
-    pivoted = per_metric.pivot(
-        on='metric',
-        index=dim_names + ['dt_out'],
-        values='hist_json',
-    ).rename({'dt_out': bin_col})
+    group_cols = dim_names + ['dt_out', 'metric', 'state']
+    out_chunks: list[pl.DataFrame] = []
+    for chunk in bucketed.partition_by('_chunk', maintain_order=False):
+        chunk = chunk.drop('_chunk')
+        summed = chunk.group_by(group_cols).agg(pl.col('count').sum())
+        per_metric = _build_hist_json(
+            summed,
+            group_keys=dim_names + ['dt_out', 'metric'],
+            state_col='state',
+            count_col='count',
+        )
+        out_chunks.append(per_metric.pivot(
+            on='metric',
+            index=dim_names + ['dt_out'],
+            values='hist_json',
+        ))
 
-    # Ensure every metric column exists (Polars pivot drops missing metrics).
+    # Diagonal concat aligns schemas (chunks may differ on which metric
+    # columns survived their pivot if a metric had no rows in that chunk).
+    pivoted = pl.concat(out_chunks, how='diagonal_relaxed').rename({'dt_out': bin_col})
+
+    # Ensure every metric column exists (in case it was missing in ALL chunks).
     missing = [m for m in metric_cols if m not in pivoted.columns]
     if missing:
         pivoted = pivoted.with_columns([pl.lit(None, dtype=pl.Utf8).alias(m) for m in missing])
