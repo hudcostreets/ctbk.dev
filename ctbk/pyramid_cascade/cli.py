@@ -4,17 +4,16 @@ Loads a pyramid YAML config, wires storage (R2/S3), invokes the
 orchestrator. Per `specs/pyramid-cascade.md`."""
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 from click import BadParameter, option
 from pyrmts import parse_pyramid_yaml, pyramid_from_config
-from pyrmts.storage import S3Storage
 from utz import err
 
 from ctbk.cli.base import ctbk
 from .orchestrator import pyramid_cascade
+from .storage import storage_from_cfg
 
 
 def _parse_range(s: str) -> tuple[datetime, datetime]:
@@ -31,24 +30,6 @@ def _parse_range(s: str) -> tuple[datetime, datetime]:
     if to <= from_:
         raise BadParameter(f"range end must be after start ({a} → {b})")
     return from_, to
-
-
-def _make_storage(storage_cfg: dict):
-    """Materialize a pyrmts Storage from a YAML `storage:` block."""
-    typ = storage_cfg['type']
-    if typ != 's3':
-        raise BadParameter(f"unsupported storage.type {typ!r}; only 's3' implemented")
-    return S3Storage(
-        bucket=storage_cfg['bucket'],
-        endpoint_url=(
-            os.environ.get('R2_ENDPOINT_URL')
-            or (f"https://{os.environ['CLOUDFLARE_ACCOUNT_ID']}.r2.cloudflarestorage.com"
-                if 'CLOUDFLARE_ACCOUNT_ID' in os.environ else None)
-        ),
-        region_name='auto',
-        aws_access_key_id=os.environ.get('R2_ACCESS_KEY_ID') or os.environ.get('AWS_ACCESS_KEY_ID'),
-        aws_secret_access_key=os.environ.get('R2_SECRET_ACCESS_KEY') or os.environ.get('AWS_SECRET_ACCESS_KEY'),
-    )
 
 
 # Built-in ingester registry. Each entry maps a name to an importable
@@ -91,7 +72,7 @@ def pyramid_cascade_cmd(
 ):
     config_yaml = Path(config_path).read_text()
     cfg = parse_pyramid_yaml(config_yaml)
-    storage = _make_storage(cfg.storage)
+    storage = storage_from_cfg(cfg.storage)
     pyramid = pyramid_from_config(cfg, storage)
 
     range_tuple = _parse_range(range_)

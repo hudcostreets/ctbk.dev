@@ -18,13 +18,11 @@ Caller (orchestrator) then runs the reduce phase over partials.
 from __future__ import annotations
 
 import io
-import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, Iterator
+from typing import Callable
 
 import polars as pl
-import pyarrow as pa
 import pyarrow.parquet as pq
 from pyrmts import (
     Pyramid,
@@ -34,12 +32,15 @@ from pyrmts import (
     shard_periods_covering,
     substitute_key,
 )
-from pyrmts.axis import ShardPeriod
+from utz import err
 
-from .config import DEFAULT_RG_SIZE, rg_size_for
+from ._hist import build_hist_json_lazy as _build_hist_json
+from .config import rg_size_for
 
-# Ingester contract: (block_range) → LazyFrame of base-tier rows.
-# Schema: (s2_cell: str, dt: i64 unix ms, <metric>: str — histogram JSON, ...)
+# Ingester contract: (block_range) → LazyFrame of base-tier rows IN LONG FORM.
+# Schema: (*dims, bin_col: i64 unix ms, metric: str, state: i64, count: i64)
+# i.e. one row per (cell, dt, metric, state) with the observation count.
+# JSON serialization happens only at parquet-write time, in `_build_tier_shard`.
 Ingester = Callable[[datetime, datetime], pl.LazyFrame]
 
 
@@ -95,15 +96,21 @@ def cascade_block(
 
     result = ShardWriteSet()
 
-    # Load source ONCE — Polars LazyFrame, melt to long form, collect
-    # eagerly. Subsequent per-tier work iterates this DataFrame instead of
-    # rescanning the lazy source for each (tier, period).
+    # Load source ONCE — ingester already returns long form
+    # (cell, dt, metric, state, count). Collect eagerly; subsequent
+    # per-tier work iterates this DataFrame instead of rescanning the
+    # lazy source for each (tier, period).
+    import time
+    t_ingest = time.time()
     src_lf = ingester(block_from, block_to)
-    long_lf = _melt_histograms(src_lf, bin_col, dim_names, metric_cols)
-    long_df = long_lf.collect(engine='streaming')
+    long_df = src_lf.collect(engine='streaming')
+    err(f"  block {_block_id(block_from, block_to)}: "
+        f"collected {len(long_df):,} long-form rows in {time.time() - t_ingest:.1f}s")
 
     # For each derived tier, compute its shards.
     for tier in derived:
+        t_tier = time.time()
+        tier_finals = tier_partials = tier_empty = tier_bytes = 0
         for period in shard_periods_covering(block_from, block_to, tier.shard):
             # Clamp the period to our block range — we only emit rows in
             # the intersection. If period extends past block_to, this is a
@@ -127,6 +134,7 @@ def cascade_block(
 
             if shard_df.is_empty():
                 result.empty.append((tier.name, period.label))
+                tier_empty += 1
                 continue
 
             buf = io.BytesIO()
@@ -140,6 +148,7 @@ def cascade_block(
                 row_group_size=rg_size_for(rg_sizes, tier.name),
                 compression='snappy')
             data = buf.getvalue()
+            tier_bytes += len(data)
 
             if not partial:
                 key = substitute_key(
@@ -148,6 +157,7 @@ def cascade_block(
                 )
                 pyramid.storage.put(key, data)
                 result.finals.append(key)
+                tier_finals += 1
             else:
                 staging_tmpl = staging_key_template or f"_tmp/{block_id}/{{tier}}/{{period}}.parquet"
                 staging_key = substitute_key(
@@ -157,59 +167,11 @@ def cascade_block(
                 target_storage = staging_storage or pyramid.storage
                 target_storage.put(staging_key, data)
                 result.partials.append((tier.name, period.label, staging_key))
+                tier_partials += 1
+        err(f"    tier {tier.name}: {tier_finals} finals, {tier_partials} partials, "
+            f"{tier_empty} empty, {tier_bytes/1024:.0f} KiB, {time.time() - t_tier:.1f}s")
 
     return result
-
-
-def _melt_histograms(
-    src: pl.LazyFrame,
-    bin_col: str,
-    dim_names: list[str],
-    metric_cols: list[str],
-) -> pl.LazyFrame:
-    """Pivot wide-histogram rows to long format: one row per
-    (s2_cell, dt, metric, state) with `count` column.
-
-    Source schema: (bin_col, *dim_names, metric_1: hist_json, metric_2: hist_json, ...)
-    Output schema: (bin_col, *dim_names, metric: str, state: i64, count: i64)
-    """
-    keep = [bin_col, *dim_names]
-    # Melt the metric columns into (metric_name, hist_json) rows.
-    long = src.unpivot(
-        on=metric_cols,
-        index=keep,
-        variable_name='metric',
-        value_name='hist_json',
-    ).filter(pl.col('hist_json').is_not_null())
-
-    # Parse each JSON string into a {state: count} struct, then explode.
-    # Polars 1.x has `str.json_decode` with explicit dtype.
-    state_count_dtype = pl.List(pl.Struct([
-        pl.Field('state', pl.Utf8),
-        pl.Field('count', pl.Int64),
-    ]))
-
-    def _parse_hist_json(s: str) -> list[dict]:
-        if not s:
-            return []
-        d = json.loads(s)
-        return [{'state': str(k), 'count': int(v)} for k, v in d.items()]
-
-    return (
-        long.with_columns(
-            pl.col('hist_json')
-              .map_elements(_parse_hist_json, return_dtype=state_count_dtype)
-              .alias('state_counts')
-        )
-        .drop('hist_json')
-        .explode('state_counts')
-        .filter(pl.col('state_counts').is_not_null())
-        .with_columns([
-            pl.col('state_counts').struct.field('state').cast(pl.Int64).alias('state'),
-            pl.col('state_counts').struct.field('count').alias('count'),
-        ])
-        .drop('state_counts')
-    )
 
 
 def _build_tier_shard(
@@ -262,22 +224,13 @@ def _build_tier_shard(
     group_cols = dim_names + ['dt_out', 'metric', 'state']
     summed = bucketed.group_by(group_cols).agg(pl.col('count').sum())
 
-    # Rebuild per-metric hist JSON via struct-list group_by.
-    per_metric = (
-        summed
-        .sort(['state'])  # stable order inside each hist
-        .group_by(dim_names + ['dt_out', 'metric'])
-        .agg(
-            pl.struct(['state', 'count']).alias('hist')
-        )
-        .with_columns(
-            pl.col('hist').map_elements(
-                lambda lst: json.dumps({int(d['state']): int(d['count']) for d in lst},
-                                       separators=(',', ':')),
-                return_dtype=pl.Utf8,
-            ).alias('hist_json')
-        )
-        .drop('hist')
+    # Build `{state:count,...}` JSON per (cell, dt_out, metric) — fully
+    # vectorized; see _hist.build_hist_json_lazy for the idiom.
+    per_metric = _build_hist_json(
+        summed,
+        group_keys=dim_names + ['dt_out', 'metric'],
+        state_col='state',
+        count_col='count',
     )
 
     # Final pivot to wide: (*dims, dt_out) → one row with N hist_json cols.

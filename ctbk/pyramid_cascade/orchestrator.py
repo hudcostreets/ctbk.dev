@@ -34,9 +34,12 @@ from pyrmts import (
 )
 from pyrmts.axis import add_span, floor_to_span
 from pyrmts.storage import FsStorage, MemStorage
+from utz import err
 
+from ._hist import build_hist_json_lazy as _build_hist_json
 from .config import parse_rg_sizes, rg_size_for
 from .engine import Ingester, ShardWriteSet, cascade_block
+from .storage import storage_from_cfg
 
 
 # Top-level functions for ProcessPool pickling.
@@ -61,7 +64,7 @@ def _block_task(
 
     # Reimport here so the boto3 client is constructed in-process.
     cfg = parse_pyramid_yaml(config_yaml)
-    storage = _make_storage_from_cfg(cfg.storage)
+    storage = storage_from_cfg(cfg.storage)
     pyramid = pyramid_from_config(cfg, storage)
 
     mod_path, fn_name = ingester_target.split(':', 1)
@@ -78,28 +81,6 @@ def _block_task(
         staging_storage=staging_storage,
         base_tier=base_tier,
         rg_sizes=rg_sizes,
-    )
-
-
-def _make_storage_from_cfg(storage_cfg: dict):
-    """Construct a pyrmts Storage from a YAML `storage:` mapping (same
-    semantics as `ctbk.pyramid_cascade.cli._make_storage`)."""
-    import os
-    from pyrmts.storage import S3Storage
-
-    typ = storage_cfg['type']
-    if typ != 's3':
-        raise ValueError(f"unsupported storage.type {typ!r} in worker")
-    return S3Storage(
-        bucket=storage_cfg['bucket'],
-        endpoint_url=(
-            os.environ.get('R2_ENDPOINT_URL')
-            or (f"https://{os.environ['CLOUDFLARE_ACCOUNT_ID']}.r2.cloudflarestorage.com"
-                if 'CLOUDFLARE_ACCOUNT_ID' in os.environ else None)
-        ),
-        region_name='auto',
-        aws_access_key_id=os.environ.get('R2_ACCESS_KEY_ID') or os.environ.get('AWS_ACCESS_KEY_ID'),
-        aws_secret_access_key=os.environ.get('R2_SECRET_ACCESS_KEY') or os.environ.get('AWS_SECRET_ACCESS_KEY'),
     )
 
 
@@ -193,13 +174,17 @@ def pyramid_cascade(
         # Sync path: share the orchestrator's staging_storage instance with
         # cascade_block directly, so MemStorage (which doesn't share state
         # across processes/instances) works for tests.
-        for bf, bt in blocks:
+        for i, (bf, bt) in enumerate(blocks):
+            t_blk = time.time()
+            err(f"block {i+1}/{n_blocks}: {bf.isoformat()} → {bt.isoformat()}")
             ws = cascade_block(
                 pyramid, (bf, bt), ingester,
                 staging_storage=staging_storage,
                 base_tier=base_tier,
                 rg_sizes=rg_sizes,
             )
+            err(f"block {i+1}/{n_blocks}: done in {time.time() - t_blk:.1f}s — "
+                f"{len(ws.finals)} finals, {len(ws.partials)} partials")
             _consume(ws)
     else:
         # Parallel path: each worker re-constructs Pyramid (with its own
@@ -211,13 +196,19 @@ def pyramid_cascade(
                 "pyramid_cascade(workers>1) needs `config_yaml=` (YAML text) "
                 "and `ingester_target=` (dotted 'module:fn_name' import path)"
             )
+        err(f"dispatching {n_blocks} blocks across {workers} workers")
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = [
                 pool.submit(_block_task, config_yaml, r, ingester_target, staging_uri, base_tier, rg_sizes)
                 for r in block_range_isos
             ]
+            done = 0
             for fut in as_completed(futures):
-                _consume(fut.result())
+                ws = fut.result()
+                done += 1
+                err(f"block done ({done}/{n_blocks}): "
+                    f"{len(ws.finals)} finals, {len(ws.partials)} partials")
+                _consume(ws)
 
     # ── Reduce phase ──
     by_key: dict[tuple[str, str], list[str]] = defaultdict(list)
@@ -226,6 +217,9 @@ def pyramid_cascade(
 
     result.partials_written = len(all_partials)
 
+    if by_key:
+        err(f"reduce: {len(by_key)} (tier, period) groups from {len(all_partials)} partials")
+    t_reduce = time.time()
     for (tier_name, period_label), staged_keys in by_key.items():
         tier = pyramid.tier(tier_name)
         final_key = substitute_key(
@@ -241,6 +235,8 @@ def pyramid_cascade(
         pyramid.storage.put(final_key, merged_blob)
         result.finals_via_reduce += 1
         result.bytes_written += len(merged_blob)
+    if by_key:
+        err(f"reduce: wrote {result.finals_via_reduce} finals in {time.time() - t_reduce:.1f}s")
 
     # Clean up staging.
     if staging_uri and staging_uri.startswith('file://'):
@@ -337,11 +333,16 @@ def _merge_long(
     bin_col: str,
     metric_cols: list[str],
 ) -> pl.DataFrame:
-    """Histogram-sum merge across concatenated partials. Each row has
-    multiple metric_cols with JSON-string histograms; we melt to long,
-    parse, sum per (cell, dt, metric, state), then re-pivot."""
-    from .avail_ingester import _sum_hist_jsons  # reuse impl
+    """Histogram-sum merge across concatenated partials. Each input row
+    has multiple metric_cols with JSON-string histograms (shape
+    `{"state":count,...}`); we melt to long, parse natively (NO
+    map_elements), sum per (cell, dt, metric, state), then re-pivot.
 
+    The JSON object has dynamic keys (state values vary), so
+    `str.json_decode` with a static dtype won't work. Instead we strip
+    the braces, split on `,`, explode, then split each `"state":count`
+    pair on `:` and cast.
+    """
     long = (
         cat.unpivot(
             on=metric_cols,
@@ -349,19 +350,33 @@ def _merge_long(
             variable_name='metric',
             value_name='hist_json',
         )
-        .filter(pl.col('hist_json').is_not_null())
-        .group_by(dim_names + [bin_col, 'metric'])
-        .agg(pl.col('hist_json').alias('hist_jsons'))
+        .filter(pl.col('hist_json').is_not_null() & (pl.col('hist_json').str.len_chars() > 2))
         .with_columns(
-            pl.col('hist_jsons').map_elements(
-                lambda jsons: json.dumps(_sum_hist_jsons(jsons), separators=(',', ':')),
-                return_dtype=pl.Utf8,
-            ).alias('hist_json')
+            pl.col('hist_json')
+              .str.strip_chars('{}')
+              .str.split(',')
+              .alias('pairs')
         )
-        .drop('hist_jsons')
+        .drop('hist_json')
+        .explode('pairs')
+        .with_columns(pl.col('pairs').str.split(':').alias('kv'))
+        .with_columns([
+            pl.col('kv').list.get(0).str.strip_chars('"').cast(pl.Int64).alias('state'),
+            pl.col('kv').list.get(1).cast(pl.Int64).alias('count'),
+        ])
+        .drop('pairs', 'kv')
+        .group_by(dim_names + [bin_col, 'metric', 'state'])
+        .agg(pl.col('count').sum())
     )
 
-    pivoted = long.pivot(
+    per_metric = _build_hist_json(
+        long,
+        group_keys=dim_names + [bin_col, 'metric'],
+        state_col='state',
+        count_col='count',
+    )
+
+    pivoted = per_metric.pivot(
         on='metric',
         index=dim_names + [bin_col],
         values='hist_json',
