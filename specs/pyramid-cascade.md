@@ -3,10 +3,18 @@
 ## Goal
 
 A reusable CLI for cascading-pyramid generation that supports both ctbk
-pyramids (avail, rides) with **linear CPU scaling** (32–64 cores at ~100%
-utilization). One pass over the base tier emits all derived tiers; the
-orchestrator splits the date range into parallel blocks and runs a small
-reduce phase to merge partial shards at block boundaries.
+pyramids (avail, rides). One pass over the base tier emits all derived
+tiers per block; the orchestrator splits the date range into parallel
+blocks and runs a small reduce phase to merge partial shards at block
+boundaries.
+
+**Parallelism is block-bounded.** With `task_size=1d` and an N-day
+rebuild, there are N blocks → `-j > N` buys nothing. For a 60-day
+range and 32 workers, ~2 blocks per worker (decent, not saturated).
+Pushing past ~8-16 workers on small rebuilds requires either a smaller
+`task_size` (more, smaller blocks) or sub-block parallelism (e.g.
+parallel tier-emit within a block) — neither shipped yet; tracked as
+followup.
 
 Replaces the per-pyramid ad-hoc cascade scripts (`cascade_from_1m` in
 `ctbk/avail_v3.py`, `cascade_tiers` in `ctbk/rides_v1.py` ancestors,
@@ -27,41 +35,31 @@ tier list as configuration.
 
 ```bash
 ctbk pyramid-cascade \
-    -b 1m \                                      # base tier (or path)
-    -o 2m@2d,3m@3d,5m@5d,10m@10d,15m@15d, \      # output tiers (bin@shard)
-       30m@1mo,1h@2mo,2h@4mo,3h@6mo, \
-       6h@1y,12h@2y,1d@4y,3d@all,7d@all \
-    -r 2026-04-08/2026-06-18 \                   # range (excludes in-progress)
-    --task-size 1d \                             # map-phase block size
-    -j 32 \                                      # workers (default: cpu_count)
-    --ingester avail \                           # ctbk-specific base ingester
-    --staging file:///tmp/cascade-$$/ \          # shuffle dir
-    --engine polars                              # default
+    -c configs/pyramids/avail.yaml \             # required: pyramid config
+    -i avail \                                   # required: built-in ingester
+    -r 2026-04-08/2026-06-19 \                   # range (excludes in-progress)
+    -t 1d \                                      # block / task size
+    -j 16 \                                      # workers (default: 1)
+    -s file:///tmp/cascade-$$/                   # staging URI (default: tmp)
 ```
 
-Per pyramid:
+Tier list, dims, metrics, RG sizes etc. live in the YAML config —
+they're stable per pyramid; the CLI takes invocation-level args only.
+Configs live at `configs/pyramids/{avail,rides}.yaml` (project root,
+not under `ctbk/`).
 
-```bash
-# Avail (cap at /7d; no /1mo for ~2mo of data)
-ctbk pyramid-cascade --ingester avail -b 1m \
-  -o 2m@2d,3m@3d,5m@5d,10m@10d,15m@15d,30m@1mo,1h@2mo, \
-     2h@4mo,3h@6mo,6h@1y,12h@2y,1d@4y,3d@all,7d@all \
-  -r 2026-04-08/2026-06-18 --task-size 1d
-
-# Rides (add calendar tiers; sparse 1m base from monthly CSV.zip)
-ctbk pyramid-cascade --ingester rides -b 1m \
-  -o 2m@2d,3m@3d,5m@5d,10m@10d,15m@15d,30m@1mo,1h@2mo, \
-     2h@4mo,3h@6mo,6h@1y,12h@2y,1d@4y,3d@all,7d@all, \
-     1mo@all,3mo@all,1y@all \
-  -r 2013-06-01/2026-06-01 --task-size 1mo
-```
+Currently only `avail.yaml` is shipped; `rides.yaml` is the next step
+(see #109).
 
 ## Tier list (shared layout for both pyramids)
 
 Both pyramids use the same S2-cell LUC scheme (#108, #109) and `1m@1d`
-base, so the tier layout is identical. Differences:
+base, so the **target** layout is identical. Differences:
 - Avail caps at `/7d` (no `1mo`/`3mo`/`1y` while data is < 1y old).
+  Adding them later is a YAML-only edit (no enforcement in code).
 - Rides keeps calendar tiers since data spans 13+ years.
+
+### Target (full N≈1440 scheme — pyrmts-py multi-unit calendar shards)
 
 ```
 1m@1d, 2m@2d, 3m@3d, 5m@5d, 10m@10d, 15m@15d                       # epoch-anchored, N=1440
@@ -69,6 +67,22 @@ base, so the tier layout is identical. Differences:
 1d@4y, 3d@all, 7d@all                                                # mixed (3d/7d roll up rare)
 1mo@all, 3mo@all, 1y@all                                            # calendar (rides only)
 ```
+
+### Shipped (single-unit calendar shards)
+
+Pyrmts-py's `floor_to_span` currently refuses multi-unit calendar bins
+like `2mo`, `4mo`, `2y` (#122). Until that lands, calendar shards are
+single-unit. Shipped `avail.yaml`:
+
+```
+1m@1d, 2m@2d, 3m@3d, 5m@5d, 10m@10d, 15m@15d                       # epoch-anchored, N=1440
+30m@1mo, 1h@1mo, 2h@1mo, 3h@1mo, 6h@1y, 12h@1y, 1d@1y               # calendar (single-unit)
+3d@all, 7d@all
+```
+
+This shrinks per-tier N for the hourly tiers (1h@1mo = 720 vs 1440
+target) — still much better than the old pyramid's 1h@1mo + 12h@1mo,
+and acceptable until #122 lands.
 
 Sizing principle: target **N ≈ 1440 bins per shard** (matches `1m@1d`
 reference). Epoch-anchored for fixed-duration tiers, calendar-anchored
@@ -91,10 +105,25 @@ For each block `[t_block_start, t_block_end)`:
 
 A block fully owns an output shard when the shard's `[from, to)` is
 contained within the block's range. For `--task-size 1d`:
-- 2m, 3m, 5m..30m (shard ≤ 1d): always fully owned by their day-block
-- 1h..12h (shard 1mo–2y): straddle blocks → write partial → staging
-- 1d, 3d, 7d (shard 1y–all): straddle → partial → staging
-- 1mo, 3mo, 1y (shard `all`): straddle → partial → staging
+- Only `1m@1d` (shard exactly = task_size) is fully owned by its
+  day-block — and we don't write it (base tier; see "1m base passthrough"
+  below).
+- Every other shipped tier has a shard larger than 1d → block straddles
+  → write partial → staging:
+  - `2m@2d`, `3m@3d`, `5m@5d`, …, `15m@15d`
+  - `30m@1mo` through `12h@1y`
+  - `1d, 3d, 7d` @ 1y or `all`
+- So at `task_size=1d`, *every* derived tier goes through staging + reduce.
+  Pick a larger `task_size` (e.g. `1mo`) to write `5m@5d`..`15m@15d` direct.
+
+### 1m base passthrough
+
+The cascade does **not** write the `1m@1d` base tier — that's the
+ingester's input, owned by the live compactor (`gbfs/compactor/` →
+`gbfs/avail/agg=1m/cons=1m/<date>/<HHMM>.parquet`). The pyramid is built
+from the existing 1m source; the worker reads `/1m` queries from that
+legacy path. Only the **derived** tiers (`2m, 3m, …, 7d`) flow through
+pyramid-cascade and into `avail-v3/<tier>/<period>.parquet`.
 
 ### Shuffle (between phases)
 
@@ -127,21 +156,27 @@ After reduce: delete the staging directory.
 - **Bottleneck**: shuffle disk-write between phases. Shouldn't dominate;
   partials are small (one block × one tier's contribution).
 
-Expected scaling: linear with cores for the map phase (data is much larger
-than per-block state). Reduce is much smaller; usually a few percent of
-wall time.
+Expected scaling: linear with cores **up to the block count**. Reduce
+is much smaller; usually a few percent of wall time.
 
 ## Engine
 
 **Polars**. Per-block ingestion + group-by + histogram-merge runs in
-Polars expressions, ~10–50× faster than the Python dict loop in the
-current `cascade_from_1m`. Streaming/lazy mode auto-spills to disk if
-in-flight state exceeds available memory.
+Polars expressions, much faster than the Python dict loop in the
+legacy `cascade_from_1m`. Per-block memory ~1.3 GB (avail / 1-hour
+input, measured) — bounded by the source Arrow columnar size, not by
+Python object overhead.
 
-Histogram representation in-flight: Polars `Map<int, int>` (sparse).
-Serialized to JSON string at write-time for parquet-storage compatibility
-with the existing worker reader. (Future: native Map types in parquet —
-needs hyparquet support.)
+In-flight design: streaming applies to the **ingest + long-form melt**
+phase (`long_lf.collect(engine='streaming')` at block start); subsequent
+per-tier work iterates the collected long-form DataFrame eagerly, since
+each tier needs the full block's rows for its groupby. So "in-flight
+state" = one block's long-form table — not infinite.
+
+Histogram representation: stored as JSON strings in the parquet (Polars
+can't natively decode arbitrary-key JSON into a typed struct). Per-row
+parsing happens at melt-and-groupby time. (Future: native Map types in
+parquet via hyparquet upgrade.)
 
 ## Ingester contract
 
@@ -254,15 +289,22 @@ second user emerges. Develop pyrmts changes locally via `pds l pyrmts-py`.
 
 ## Migration plan
 
-1. **Land pyrmts multi-tier bin packing** (see
-   `~/c/pyrmts/specs/multi-tier-bin-packing.md`). Required so the planner
-   serves arbitrary-bin queries from the new tier list correctly.
-2. **Build `pyramid-cascade` CLI** in this repo, single-pyramid first.
-3. **Validate avail rebuild** end-to-end on `e` with new tier list.
+1. **Build `pyramid-cascade` CLI** in this repo, single-pyramid first.
+   Independent of pyrmts query-side changes (cascade is build-side only).
+2. **Validate avail rebuild** end-to-end on `e` with new tier list.
    Probe perf; CIC StationDetail with `availSrc=v3`.
-4. **Rides pyramid-v3-LUC backfill** (#109). Uses the same tool.
-5. **Phase 3 cleanup** (#112): retire `cascade_from_1m`,
+3. **Rides pyramid-v3-LUC backfill** (#109). Uses the same tool.
+4. **Phase 3 cleanup** (#112): retire `cascade_from_1m`,
    `cascade_tiers`, `scripts/avail-v3-cascade.sh`.
+
+In parallel (not blocking):
+- **pyrmts multi-tier bin packing** (shipped — pyrmts commit
+  `b373195`). Unlocks arbitrary-phase, arbitrary-width queries via
+  `targetBin`. The build tool produces shards compatible with both
+  legacy single-tier and new multi-tier planners.
+- **pyrmts-py multi-unit calendar shards** (#122) — when this lands,
+  swap `avail.yaml` to the multi-unit target layout (1h@2mo etc.) for
+  the cleaner N=1440 sizing.
 
 ## Resolved
 
