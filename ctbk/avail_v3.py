@@ -553,6 +553,7 @@ def cascade_from_1m(
     dry_run: bool = False,
     all_dates: tuple[Date, Date] | None = None,
     prefix: str = DST_PREFIX,
+    src_prefix: str | None = None,
 ) -> tuple[int, int, int]:
     """Stream over 1m source shards once, emitting all 17 derived tiers.
 
@@ -583,9 +584,12 @@ def cascade_from_1m(
     Returns `(n_wrote, n_skip, bytes_total)`.
     """
     cli = r2_client()
+    src_prefix = src_prefix or prefix
     derived = _derived_from_1m()
     derived_names = [t for t, _ in derived]
     err(f"cascade-from-1m: emitting {len(derived)} tiers: {derived_names}")
+    if src_prefix != prefix:
+        err(f"  src_prefix: {src_prefix}  →  dst_prefix: {prefix}")
 
     source_starts = shard_starts('1h', date_from, date_to)
     err(f"  {len(source_starts)} source 1m shards in [{date_from}, {date_to})")
@@ -621,7 +625,7 @@ def cascade_from_1m(
         bytes_total += n
 
     def read_source(period: str) -> pa.Table | None:
-        return read_v3_shard(cli, '1m', period, prefix=prefix)
+        return read_v3_shard(cli, '1m', period, prefix=src_prefix)
 
     # Pipelined R2 reads: a small thread-pool prefetches source shards in
     # submission order while the main loop accumulates the previous one.
@@ -817,7 +821,8 @@ def avail_v3_build_cmd(
 @option('-f', '--date-from', 'date_from', required=True, help="Inclusive start (YYYY-MM-DD).")
 @option('-n', '--dry-run', is_flag=True, help="Print tiers/periods that would be written, then exit.")
 @option('-O', '--overwrite', '--force', is_flag=True, help="Rebuild even if output exists.")
-@option('-p', '--prefix', default=DST_PREFIX, show_default=True, help="R2 prefix for both source 1m reads and derived-tier writes (e.g. `avail-v3-test`).")
+@option('-p', '--prefix', default=DST_PREFIX, show_default=True, help="R2 output prefix for derived-tier writes (default also for source 1m reads unless `--src-prefix` is given).")
+@option('-S', '--src-prefix', default=None, help="R2 prefix for source 1m reads. Defaults to --prefix. Use this to read from prod 1m while writing derived tiers to a test prefix.")
 @option('-T', '--date-to', 'date_to', required=True, help="Exclusive end (YYYY-MM-DD).")
 def avail_v3_cascade_from_1m_cmd(
     concurrency: int,
@@ -825,6 +830,7 @@ def avail_v3_cascade_from_1m_cmd(
     dry_run: bool,
     overwrite: bool,
     prefix: str,
+    src_prefix: str | None,
     date_to: str,
 ):
     df = Date.fromisoformat(date_from)
@@ -837,4 +843,5 @@ def avail_v3_cascade_from_1m_cmd(
         dry_run=dry_run,
         all_dates=(df, dt),
         prefix=prefix,
+        src_prefix=src_prefix,
     )
