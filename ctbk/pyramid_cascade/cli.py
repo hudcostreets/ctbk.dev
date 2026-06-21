@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import click
+import yaml
 from click import BadParameter, option
 from pyrmts import parse_pyramid_yaml, pyramid_from_config
 from utz import err
@@ -15,6 +16,27 @@ from utz import err
 from ctbk.cli.base import ctbk
 from .orchestrator import pyramid_cascade
 from .storage import storage_from_cfg
+
+
+def _override_key_prefix(config_yaml: str, prefix: str) -> str:
+    """Rewrite `storage.key` so everything before `{tier}` becomes `<prefix>/`.
+
+    Used to redirect output to a sibling prefix (e.g. `avail-v3-test`)
+    without maintaining a second YAML. Round-trips via PyYAML, so
+    comments are stripped — workers re-parse and don't depend on them.
+    """
+    data = yaml.safe_load(config_yaml)
+    if not isinstance(data, dict):
+        raise BadParameter(f"can't override --prefix: top-level YAML isn't a mapping")
+    storage = data.get('storage')
+    if not isinstance(storage, dict) or 'key' not in storage:
+        raise BadParameter(f"can't override --prefix: YAML has no `storage.key`")
+    key = storage['key']
+    if '{tier}' not in key:
+        raise BadParameter(f"can't override --prefix: `storage.key` ({key!r}) has no `{{tier}}` placeholder")
+    suffix = key.split('{tier}', 1)[1]
+    storage['key'] = f"{prefix.rstrip('/')}/{{tier}}{suffix}"
+    return yaml.safe_dump(data, sort_keys=False)
 
 
 def _parse_range(s: str) -> tuple[datetime, datetime]:
@@ -80,6 +102,7 @@ def _resolve_stream_source(name: str) -> tuple:
 @option('-i', '--ingester', required=True, help='Built-in ingester / source name (e.g. `avail`).')
 @option('-j', '--workers', type=int, default=1, show_default=True, help='ProcessPool worker count. Ignored for `--engine streaming` (single-process by design).')
 @option('-n', '--dry-run', is_flag=True, help='Print plan (blocks, tiers, periods) and exit.')
+@option('-p', '--prefix', default=None, help='Override the YAML `storage.key` prefix (everything before `{tier}`). Use to redirect output, e.g. `-p avail-v3-test` for a staging build that shares the prod YAML.')
 @option('-r', '--range', 'range_', required=True, help='UTC range `YYYY-MM-DD/YYYY-MM-DD` (half-open).')
 @option('-s', '--staging', 'staging_uri', default=None, help='Staging URI for partial shards (default: `file:///tmp/pyramid-cascade-<pid>/`). Block engine only.')
 @option('-t', '--task-size', 'task_size', default='1d', show_default=True, help='Block duration (pyrmts Duration, e.g. `1d`, `1mo`). Block engine only.')
@@ -89,11 +112,14 @@ def pyramid_cascade_cmd(
     ingester: str,
     workers: int,
     dry_run: bool,
+    prefix: str | None,
     range_: str,
     staging_uri: str | None,
     task_size: str,
 ):
     config_yaml = Path(config_path).read_text()
+    if prefix is not None:
+        config_yaml = _override_key_prefix(config_yaml, prefix)
     cfg = parse_pyramid_yaml(config_yaml)
     storage = storage_from_cfg(cfg.storage)
     pyramid = pyramid_from_config(cfg, storage)
@@ -102,6 +128,8 @@ def pyramid_cascade_cmd(
 
     err(f"pyramid-cascade")
     err(f"  config:    {config_path}")
+    if prefix is not None:
+        err(f"  prefix:    {prefix}  (override; effective key: {cfg.keyTemplate})")
     err(f"  engine:    {engine_name}")
     err(f"  ingester:  {ingester}")
     err(f"  range:     {range_tuple[0].isoformat()} → {range_tuple[1].isoformat()}")

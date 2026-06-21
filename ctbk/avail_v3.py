@@ -160,8 +160,8 @@ def shard_starts(shard: str, date_from: Date, date_to: Date) -> list[datetime]:
     return out
 
 
-def output_key(tier: str, period: str) -> str:
-    return f'{DST_PREFIX}/{tier}/{period}.parquet'
+def output_key(tier: str, period: str, prefix: str = DST_PREFIX) -> str:
+    return f'{prefix}/{tier}/{period}.parquet'
 
 
 # ─── Station LUC denorm ────────────────────────────────────────────────
@@ -393,9 +393,9 @@ def input_periods_for_output(
     return [shard_period(input_shard, s) for s in starts if output_shard_start <= s < end]
 
 
-def read_v3_shard(cli, tier: str, period: str) -> pa.Table | None:
-    """Fetch one `avail-v3/<tier>/<period>.parquet` from R2; None on 404."""
-    key = output_key(tier, period)
+def read_v3_shard(cli, tier: str, period: str, *, prefix: str = DST_PREFIX) -> pa.Table | None:
+    """Fetch one `<prefix>/<tier>/<period>.parquet` from R2; None on 404."""
+    key = output_key(tier, period, prefix)
     try:
         obj = cli.get_object(Bucket=R2_BUCKET, Key=key)
     except ClientError as e:
@@ -410,6 +410,8 @@ def build_cascade_shard(
     tier: str,
     shard_start: datetime,
     all_dates: tuple[Date, Date] | None = None,
+    *,
+    prefix: str = DST_PREFIX,
 ) -> pa.Table | None:
     """Build one cascaded output shard for `tier` covering `[shard_start, end)`.
 
@@ -429,7 +431,7 @@ def build_cascade_shard(
     accum: dict[tuple[str, int, str], dict[str, int]] = {}
     n_present = 0
     for p in periods:
-        tab = read_v3_shard(cli, spec.derive_from, p)
+        tab = read_v3_shard(cli, spec.derive_from, p, prefix=prefix)
         if tab is None:
             continue
         n_present += 1
@@ -550,6 +552,7 @@ def cascade_from_1m(
     overwrite: bool = False,
     dry_run: bool = False,
     all_dates: tuple[Date, Date] | None = None,
+    prefix: str = DST_PREFIX,
 ) -> tuple[int, int, int]:
     """Stream over 1m source shards once, emitting all 17 derived tiers.
 
@@ -593,7 +596,7 @@ def cascade_from_1m(
                 shard_period(spec.shard, source_starts[0]) if source_starts
                 else '<empty>'
             )
-            err(f"  {tier:4s} → avail-v3/{tier}/{sample_period}.parquet (and successors)")
+            err(f"  {tier:4s} → {prefix}/{tier}/{sample_period}.parquet (and successors)")
         return (0, 0, 0)
 
     # (tier, period) → {(cell, dt_out, metric): {state: count}}
@@ -606,7 +609,7 @@ def cascade_from_1m(
         data = accum.pop((tier, period), None)
         if not data:
             return
-        out_key = output_key(tier, period)
+        out_key = output_key(tier, period, prefix)
         if not overwrite and r2_head(cli, out_key) is not None:
             err(f"  skip  {tier:4s} {period}")
             n_skip += 1
@@ -618,7 +621,7 @@ def cascade_from_1m(
         bytes_total += n
 
     def read_source(period: str) -> pa.Table | None:
-        return read_v3_shard(cli, '1m', period)
+        return read_v3_shard(cli, '1m', period, prefix=prefix)
 
     # Pipelined R2 reads: a small thread-pool prefetches source shards in
     # submission order while the main loop accumulates the previous one.
@@ -707,6 +710,7 @@ def _build_shard_task(
     shard_start_iso: str,
     overwrite: bool,
     all_dates_iso: tuple[str, str] | None,
+    prefix: str = DST_PREFIX,
 ) -> tuple[str, str, int]:
     """ProcessPool worker: build + write one shard (any tier).
 
@@ -718,7 +722,7 @@ def _build_shard_task(
     t = datetime.fromisoformat(shard_start_iso)
     spec = TIER_SPECS[tier]
     period = shard_period(spec.shard, t)
-    out_key = output_key(tier, period)
+    out_key = output_key(tier, period, prefix)
     cli = r2_client()
     if not overwrite and r2_head(cli, out_key) is not None:
         return (period, 'skip', 0)
@@ -731,7 +735,7 @@ def _build_shard_task(
             (Date.fromisoformat(all_dates_iso[0]), Date.fromisoformat(all_dates_iso[1]))
             if all_dates_iso else None
         )
-        table = build_cascade_shard(tier, t, ad)
+        table = build_cascade_shard(tier, t, ad, prefix=prefix)
     if table is None:
         return (period, 'empty', 0)
     n = write_table_to_r2(cli, table, out_key)
@@ -740,11 +744,12 @@ def _build_shard_task(
 
 # ─── CLI ───────────────────────────────────────────────────────────────
 
-@ctbk.command('avail-v3-build', help="Build avail-v3/<tier>/<period>.parquet shards (S2-keyed, LUC-anchored).")
+@ctbk.command('avail-v3-build', help="Build <prefix>/<tier>/<period>.parquet shards (S2-keyed, LUC-anchored).")
 @option('-c', '--concurrency', type=int, default=8, help="Worker process count.")
 @option('-f', '--date-from', 'date_from', required=True, help="Inclusive start (YYYY-MM-DD).")
 @option('-n', '--dry-run', is_flag=True, help="Print shards that would be (re)built, then exit.")
 @option('-O', '--overwrite', '--force', is_flag=True, help="Rebuild even if output exists.")
+@option('-p', '--prefix', default=DST_PREFIX, show_default=True, help="R2 output prefix (e.g. `avail-v3-test` for staging builds).")
 @option('-t', '--tier', required=True, type=str, help="Tier name (see TIER_SPECS).")
 @option('-T', '--date-to', 'date_to', required=True, help="Exclusive end (YYYY-MM-DD).")
 def avail_v3_build_cmd(
@@ -752,6 +757,7 @@ def avail_v3_build_cmd(
     date_from: str,
     dry_run: bool,
     overwrite: bool,
+    prefix: str,
     tier: str,
     date_to: str,
 ):
@@ -772,7 +778,7 @@ def avail_v3_build_cmd(
         cli = r2_client()
         for s in starts:
             period = shard_period(spec.shard, s)
-            out_key = output_key(tier, period)
+            out_key = output_key(tier, period, prefix)
             present = r2_head(cli, out_key) is not None
             mark = 'EXISTS' if present and not overwrite else 'BUILD'
             print(f"  {mark} {out_key}")
@@ -783,7 +789,7 @@ def avail_v3_build_cmd(
     n_wrote = n_skip = n_empty = bytes_total = 0
     if concurrency <= 1:
         for s_iso in starts_iso:
-            period, status, n = _build_shard_task(tier, s_iso, overwrite, all_dates_iso)
+            period, status, n = _build_shard_task(tier, s_iso, overwrite, all_dates_iso, prefix)
             err(f"  {status:5s} {period} ({n:,} B)")
             n_wrote  += (status == 'wrote')
             n_skip   += (status == 'skip')
@@ -792,7 +798,7 @@ def avail_v3_build_cmd(
     else:
         with ProcessPoolExecutor(max_workers=concurrency) as pool:
             futs = {
-                pool.submit(_build_shard_task, tier, s_iso, overwrite, all_dates_iso): s_iso
+                pool.submit(_build_shard_task, tier, s_iso, overwrite, all_dates_iso, prefix): s_iso
                 for s_iso in starts_iso
             }
             for fut in as_completed(futs):
@@ -811,12 +817,14 @@ def avail_v3_build_cmd(
 @option('-f', '--date-from', 'date_from', required=True, help="Inclusive start (YYYY-MM-DD).")
 @option('-n', '--dry-run', is_flag=True, help="Print tiers/periods that would be written, then exit.")
 @option('-O', '--overwrite', '--force', is_flag=True, help="Rebuild even if output exists.")
+@option('-p', '--prefix', default=DST_PREFIX, show_default=True, help="R2 prefix for both source 1m reads and derived-tier writes (e.g. `avail-v3-test`).")
 @option('-T', '--date-to', 'date_to', required=True, help="Exclusive end (YYYY-MM-DD).")
 def avail_v3_cascade_from_1m_cmd(
     concurrency: int,
     date_from: str,
     dry_run: bool,
     overwrite: bool,
+    prefix: str,
     date_to: str,
 ):
     df = Date.fromisoformat(date_from)
@@ -828,4 +836,5 @@ def avail_v3_cascade_from_1m_cmd(
         overwrite=overwrite,
         dry_run=dry_run,
         all_dates=(df, dt),
+        prefix=prefix,
     )
