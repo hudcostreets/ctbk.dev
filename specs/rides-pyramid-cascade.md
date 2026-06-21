@@ -48,32 +48,58 @@ migration, not a reshape.
 
 ## Blockers / scope
 
-### 1. Engine generalization: sum-monoid support
+### 1. Engine generalization: vectorized cascade primitive in pyrmts
 
 `ctbk/pyramid_cascade/engine.py:_build_tier_shard` is currently
 hard-coded to histogram-monoid: groups by `(dims, dt_out, metric,
 state)` then pivots `metric→hist_json`. That shape doesn't apply to
 rides, where each metric is a single Int64 to sum-aggregate.
 
-**Two paths:**
+**Where this work belongs: pyrmts, not ctbk.** Two reasons:
 
-a. **Add monoid dispatch in the engine.** Read `cfg.metrics[i].monoid`
-   and branch:
-   - `histogram` → existing path (long-form ingester → group by
-     `state` → pivot per metric → hist_json wide).
-   - `sum` → simpler path (wide ingester → group by `(dims, dt_out)`
-     → sum per metric → wide output, no pivot).
-   The ingester contract becomes monoid-typed: histogram returns
-   long-form, sum returns wide.
+1. **Monoid abstraction already lives in pyrmts.**
+   `~/pyrmts/python/pyrmts/src/pyrmts/monoids.py` defines the `Monoid`
+   ABC + `_Sum`, `_Count`, `_Histogram` impls. The dispatch is
+   solved — ctbk's engine just doesn't consume it.
+2. **Pyrmts already has a generic cascade primitive.**
+   `pyrmts/cascade.py:cascade_tiers` is monoid-polymorphic but
+   row-at-a-time (Python dicts). It's what rides-v3 uses today.
+   The vectorized Polars rewrite is the natural **successor** to
+   `cascade_tiers`, not a parallel implementation in ctbk.
 
-b. **Force everything through long-form.** Possible but wasteful
-   for sum — adds an unnecessary unpivot/pivot round-trip and
-   loses the numeric type (everything becomes `(metric, value,
-   count)`). Reject.
+**Clean split:**
 
-→ Take **(a)**. Ingester registry already returns
-`(callable, base_tier)`; extend to `(callable, base_tier, monoid)`
-or look up monoid from the YAML at dispatch time.
+- **pyrmts**: per-block vectorized cascade primitive. Takes a source
+  `pl.LazyFrame` (or `pa.Table`) + `Pyramid` + `(t_block_from,
+  t_block_to)`, yields `(tier_name, period, pa.Table)` shards.
+  Monoid-dispatched group_by + reducer per tier. No ProcessPool,
+  no staging, no R2. Replaces `cascade_tiers` over time (or sits
+  beside it as the vectorized variant — bikeshed later).
+- **ctbk**: orchestrator — block enumeration, ProcessPool,
+  staging/reduce phase, manifest emission, ingester registry, R2
+  storage config, CLI. Refactors `engine.py:_build_tier_shard` to
+  call the pyrmts primitive instead of hand-rolling the per-tier
+  group_by + pivot.
+
+**Monoid handling in the new primitive:**
+
+- `histogram` → group by `(dims, dt_out, metric, state)`, sum
+  `count`, pivot `metric` to wide hist_json columns. (Existing
+  ctbk behavior.)
+- `sum` → group by `(dims, dt_out)`, sum each metric's
+  state-columns (`_n`, `_sum`, `_sumsq` per `Monoid.state_suffixes`).
+  Wide in, wide out. No pivot.
+- `count` → like sum but single column per metric.
+
+Ingester contract becomes monoid-typed:
+- histogram ingester returns long-form `(dim_cols, dt, metric,
+  state, count)` (current avail shape).
+- sum/count ingester returns wide form `(dim_cols, dt,
+  <metric>_n, <metric>_sum, <metric>_sumsq, ...)`.
+
+The pyrmts primitive picks the right group_by/reducer based on
+`pyramid.metrics[i].monoid`. ctbk's ingester registry adds a
+`monoid` field per entry (or reads it from the YAML).
 
 ### 2. Rides ingester (`ctbk/pyramid_cascade/rides_ingester.py`)
 
@@ -155,15 +181,32 @@ anchors' outputs.
 
 ## Phases
 
-### Phase 1: Engine generalization (sum-monoid)
+### Phase 1a: Pyrmts — vectorized cascade primitive
 
-- Add monoid dispatch in `engine.py:_build_tier_shard` (and the
-  reduce-merge path in `orchestrator.py:_merge_long`).
-- Update ingester contract: third tuple element is `monoid`
-  (`'histogram' | 'sum'`); engine picks the right reducer.
-- Unit tests in `ctbk/pyramid_cascade/tests/` covering sum-monoid
-  groupby/cascade (mirror the existing histogram tests).
-- Smoke against avail to make sure histogram path is unchanged.
+In `~/pyrmts/python/pyrmts/src/pyrmts/`:
+
+- New module (e.g. `cascade_polars.py`) exposing a
+  `cascade_block(source, pyramid, time_range) ->
+  Iterator[(tier_name, period, pa.Table)]` primitive.
+- Monoid dispatch using the existing `monoids.py` catalog
+  (histogram: long-form group_by + pivot; sum/count: wide
+  group_by + reducer).
+- Chunked-pivot mitigation (lift the `PIVOT_CHUNKS = 16`
+  hash-bucket pattern from `ctbk/pyramid_cascade/engine.py`).
+- Unit tests in `~/pyrmts/python/pyrmts/tests/` covering both
+  monoids, mirroring existing `test_cascade.py` shape.
+- Dist build via `npm-dist`-equivalent (pyrmts has its own
+  publish/dev workflow — confirm with maintainer).
+
+### Phase 1b: Ctbk — refactor engine to call pyrmts primitive
+
+- `engine.py:_build_tier_shard` calls the new pyrmts primitive
+  instead of hand-rolling group_by/pivot.
+- `orchestrator.py:_merge_long` similarly delegates to a pyrmts
+  reduce primitive (or the same one applied to staging partials).
+- Ingester contract: add `monoid` to `_INGESTERS` registry entries.
+- Existing avail histogram tests must continue to pass (regression
+  guard).
 
 ### Phase 2: Rides ingester
 
@@ -228,6 +271,10 @@ pyramid-cascade + S2 LUC, the FE work is:
 
 ## Risks / open questions
 
+- **Pyrmts coordination.** The vectorized primitive lives in pyrmts,
+  so its release/dist cadence gates ctbk. Either iterate locally via
+  `pds l pyrmts` then ship pyrmts + ctbk together, or land pyrmts
+  first + bump ctbk's pinned pyrmts SHA.
 - **Engine generalization scope.** Sum-monoid path is simpler than
   histogram (no pivot), but reduce-phase `_merge_long` is built around
   the long-form schema; need to inspect whether a wide sum-form
@@ -251,10 +298,15 @@ pyramid-cascade + S2 LUC, the FE work is:
 ## Pickup checklist
 
 ```bash
+# In pyrmts (Phase 1a starts here)
+cd ~/pyrmts
+git pull
+ls python/pyrmts/src/pyrmts/    # cascade.py (row-at-a-time), monoids.py (catalog)
+
+# In ctbk (Phase 1b after pyrmts lands)
+cd ~/ctbk
 git pull
 spd && uv sync
-git log --oneline | head -20            # confirm prefix-config + cutover commits present
-
-# Phase 1 starts in ctbk/pyramid_cascade/engine.py:_build_tier_shard
-grep -n 'state\|monoid' ctbk/pyramid_cascade/engine.py | head
+git log --oneline | head -20    # confirm prefix-config + cutover commits present
+grep -n 'state\|pivot' ctbk/pyramid_cascade/engine.py | head
 ```
