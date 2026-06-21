@@ -447,20 +447,37 @@ def _merge_long(
         .agg(pl.col('count').sum())
     )
 
-    # Reduce-time data is small (<100 MB per merge group), so we run one
-    # straight pivot — no need to chunk the way `engine._build_tier_shard`
-    # does for memory bounding.
-    per_metric = _build_hist_json(
-        long,
-        group_keys=dim_names + [bin_col, 'metric'],
-        state_col='state',
-        count_col='count',
-    )
-    pivoted = per_metric.pivot(
-        on='metric',
-        index=dim_names + [bin_col],
-        values='hist_json',
-    )
+    # Chunk by hash of the leading dim — same strategy as
+    # `engine._build_tier_shard`. The "<100 MB per group" assumption that
+    # let us drop chunking only held at smoke scale; at full-rebuild scale
+    # the largest merges (tier 30m × shard 1mo with 24+ partials) explode
+    # the unpivot+explode+pivot transient past per-worker memory and OOM.
+    from .engine import PIVOT_CHUNKS
+    chunk_col = dim_names[0] if dim_names else None
+    if chunk_col is None:
+        per_metric = _build_hist_json(
+            long, group_keys=dim_names + [bin_col, 'metric'],
+            state_col='state', count_col='count',
+        )
+        pivoted = per_metric.pivot(
+            on='metric', index=dim_names + [bin_col], values='hist_json',
+        )
+    else:
+        long = long.with_columns(
+            (pl.col(chunk_col).hash(seed=0) % PIVOT_CHUNKS).alias('_chunk')
+        )
+        out_chunks: list[pl.DataFrame] = []
+        for chunk in long.partition_by('_chunk', maintain_order=False):
+            chunk = chunk.drop('_chunk')
+            per_metric = _build_hist_json(
+                chunk, group_keys=dim_names + [bin_col, 'metric'],
+                state_col='state', count_col='count',
+            )
+            out_chunks.append(per_metric.pivot(
+                on='metric', index=dim_names + [bin_col], values='hist_json',
+            ))
+        pivoted = pl.concat(out_chunks, how='diagonal_relaxed')
+
     for m in metric_cols:
         if m not in pivoted.columns:
             pivoted = pivoted.with_columns(pl.lit(None, dtype=pl.Utf8).alias(m))
