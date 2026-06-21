@@ -113,18 +113,58 @@ H3 — **Polars wins**: chunked-block beats parallel-original by ≥1.5×.
 
 ## Results
 
-(Filled in after runs complete)
+Run on 2026-06-21, c7a.16xlarge (16 vCPU, 64 GB), 7-day range
+`2026-06-11 → 2026-06-18`. Logs: `logs/bench-cascade-*-7d*.log`.
 
-| contender         | wall     | peak RSS | R2 GETs | R2 PUTs | notes |
-|-------------------|----------|----------|---------|---------|-------|
-| orig-baseline     | TBD      | TBD      | 168     | TBD     |       |
-| orig-parallel j=4 | TBD      | TBD      | 168     | TBD     |       |
-| polars-chunked j=4| ~520s    | ~18 GB   | 168     | ~120    | from §2 |
+| contender                 | wall      | map / reduce      | RSS peak  | shards out | notes |
+|---------------------------|-----------|-------------------|-----------|------------|-------|
+| orig-baseline (j=1)       | ~85 min ext. | n/a            | ~10 GB @ 14 min | n/a   | killed at 14 min / 12 of 168 source shards processed (~7 %); per-shard wall ~30 s; extrapolation only |
+| orig-parallel j=7         | 991.7 s   | 948.1 / 43.6      | ~16 GB    | 365        | clamped from `-j 16`: `cascade_from_1m` takes Date not datetime, so natural max is 1 worker per day. Per-worker per-shard wall: 33 s @ j=4 vs 40 s @ j=7 — modest CPU/R2 contention. |
+| polars-chunked j=4        | **504 s** | 349.7 / 154.6     | ~18 GB (§2) | 21 finals from 98 partials | block phase: 7 blocks × 1d task-size; reduce-phase wall is real but small fraction of total |
 
-### Interpretation
+(§2 reference: 520 s — confirmed within noise on re-run.)
 
-(After results, decide which of H1/H2/H3 holds and what it implies for
-rides Phase 1a.)
+### Verdict: **H3 — Polars wins** (~2× over parallel-original, ~10× over single-process baseline extrapolation)
+
+Even with the long-form pivot RT overhead, chunked-block Polars beats
+the best Python-dict parallelism by roughly 2× at the same hardware.
+The pivot-RT cost is real but is dwarfed by the per-row dispatch cost
+that Python pays.
+
+#### Why the gap
+
+- **Per-shard sequential cost** in Python is dominated by row-by-row
+  dict-update + json.loads/json.dumps. We measured ~30-33 s per source
+  hour at j=1 / j=4, going up to ~40 s at j=7 (CPU/R2 contention).
+- **Polars** batches the same logical work via long-form group_by +
+  sum, paying a small pivot overhead but doing the inner aggregation
+  in Rust. Per-block wall is ~50 s for 1 day's worth of source × all
+  17 tiers via chunked pivot — call it ~2 s per source hour
+  effectively. ~15× per-source-hour speedup at the inner level.
+- **The reduce phase** (block-boundary partials → final shards) takes
+  ~155 s for Polars vs ~44 s for parallel-original. Polars writes
+  fewer, larger partials; reduce per-shard is heavier but total
+  reduce-time is still small relative to map.
+
+#### Implications for rides Phase 1a
+
+The pyrmts vectorized cascade primitive can be **Polars-only** — no
+need for a dict-accumulator fast path for the histogram-monoid branch.
+The current `cascade.py:cascade_tiers` row-at-a-time API stays as the
+"correctness reference"; the new primitive is the perf path.
+
+#### Followups (not blocking)
+
+- **`-j 16` true scaling**: requires refactoring `cascade_from_1m` to
+  accept datetime ranges (currently Date-only). Going from j=7 to j=16
+  on 7 days = sub-day splits. Trend suggests diminishing returns
+  (per-shard cost grew from j=4 to j=7), but worth measuring once.
+- **Polars at j=16**: trivially possible (pyramid-cascade already
+  supports it via `task_size=1d` × N day-blocks). Likely 2-3 min wall
+  for 7 days but R2 bandwidth may saturate.
+- **Shared shard layout**: standardize legacy + new engines on the
+  same shard sizes so byte-equality concordance becomes a valid 3-way
+  check, not just wall-time.
 
 ## Followups
 
