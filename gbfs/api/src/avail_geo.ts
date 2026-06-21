@@ -2,10 +2,12 @@
  * pyrmts-geo CFW glue for ctbk's avail-v3 pyramid (S2-keyed).
  *
  *   Storage: `avail-v3/<tier>/<period>.parquet`
- *            (built by `ctbk avail-v3-build`, see `ctbk/avail_v3.py` +
- *            `specs/avail-pyramid-v3-s2.md`)
- *   Tiers:   18 — 1m, 2m, 3m, 5m, 10m, 15m, 30m, 1h, 2h, 3h, 6h, 12h,
- *                 1d, 3d, 7d, 1mo, 3mo, 1y
+ *            (built by `ctbk pyramid-cascade -c configs/pyramids/avail.yaml`,
+ *            see `ctbk/pyramid_cascade/*.py` + `specs/pyramid-cascade.md`)
+ *   Tiers:   15 — 1m, 2m, 3m, 5m, 10m, 15m, 30m, 1h, 2h, 3h, 6h, 12h,
+ *                 1d, 3d, 7d (capped at /7d; the prior 1mo/3mo/1y tiers
+ *                 dropped because the avail dataset is only ~2 months
+ *                 old — re-add to YAML + here when data outgrows the cap)
  *   Levels:  S2 [10..15] — matches `rides-v3`, so FE covers computed
  *            via `s2Index.minimalCover` are reusable across both pyramids.
  *
@@ -52,29 +54,39 @@ export const REDUCERS = ['mean', 'min', 'max', 'p05', 'p25', 'p50', 'p75', 'p95'
 export type Reducer = typeof REDUCERS[number];
 const DEFAULT_REDUCER: Reducer = 'mean';
 
-/** Full 18-tier ladder mirroring `ctbk/avail_v3.py:TIER_SPECS`.
+/** 15-tier ladder for the new pyramid-cascade layout (per
+ *  `configs/pyramids/avail.yaml`). Shard sizes here MUST track the
+ *  YAML's `shard` per tier — the worker constructs R2 keys from
+ *  `(tier, period)` via `KEY_TEMPLATE`, so a mismatch silently 404s.
+ *
  *  R2 path `name`s use `<N>m` for minutes (matching the builder's
- *  `TIER_SPECS` keys); pyrmts `bin`/`shard` Duration strings use the
- *  typed `<N>min` form (`m` collides with `mo` in pyrmts's TimeUnit). */
+ *  tier keys); pyrmts `bin`/`shard` Duration strings use the typed
+ *  `<N>min` form (`m` collides with `mo` in pyrmts's TimeUnit).
+ *
+ *  Tiers `1mo`/`3mo`/`1y` (in the prior `TIER_SPECS` ladder) are not
+ *  materialized in the current pyramid-cascade build because the avail
+ *  data is only ~2 months old — those tiers would have 0-2 bins each.
+ *  Add them back here when the YAML grows them.
+ *
+ *  Base tier `1m` stays at `shard='1h'` because it's the existing
+ *  source layout at `avail-v3/1m/<date>/<HH>.parquet` (not rewritten
+ *  by pyramid-cascade — only consumed by it). */
 const TIERS: Tier[] = [
 	{ name: '1m',  bin: '1min',  shard: '1h'  },
-	{ name: '2m',  bin: '2min',  shard: '1h'  },
-	{ name: '3m',  bin: '3min',  shard: '1h'  },
-	{ name: '5m',  bin: '5min',  shard: '1d'  },
-	{ name: '10m', bin: '10min', shard: '1d'  },
-	{ name: '15m', bin: '15min', shard: '1d'  },
-	{ name: '30m', bin: '30min', shard: '1d'  },
+	{ name: '2m',  bin: '2min',  shard: '2d'  },
+	{ name: '3m',  bin: '3min',  shard: '3d'  },
+	{ name: '5m',  bin: '5min',  shard: '5d'  },
+	{ name: '10m', bin: '10min', shard: '10d' },
+	{ name: '15m', bin: '15min', shard: '15d' },
+	{ name: '30m', bin: '30min', shard: '1mo' },
 	{ name: '1h',  bin: '1h',    shard: '1mo' },
 	{ name: '2h',  bin: '2h',    shard: '1mo' },
 	{ name: '3h',  bin: '3h',    shard: '1mo' },
-	{ name: '6h',  bin: '6h',    shard: '1mo' },
-	{ name: '12h', bin: '12h',   shard: '1mo' },
+	{ name: '6h',  bin: '6h',    shard: '1y'  },
+	{ name: '12h', bin: '12h',   shard: '1y'  },
 	{ name: '1d',  bin: '1d',    shard: '1y'  },
-	{ name: '3d',  bin: '3d',    shard: '1y'  },
-	{ name: '7d',  bin: '7d',    shard: '1y'  },
-	{ name: '1mo', bin: '1mo',   shard: '1y'  },
-	{ name: '3mo', bin: '3mo',   shard: '1y'  },
-	{ name: '1y',  bin: '1y',    shard: 'all' },
+	{ name: '3d',  bin: '3d',    shard: 'all' },
+	{ name: '7d',  bin: '7d',    shard: 'all' },
 ];
 
 const KEY_TEMPLATE = 'avail-v3/{tier}/{period}.parquet';
