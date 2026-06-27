@@ -65,14 +65,20 @@ const DEFAULT_REDUCER: Reducer = 'mean';
  *  data is only ~2 months old — those tiers would have 0-2 bins each.
  *  Add them back here when the YAML grows them.
  *
- *  Base tier `1m` (bin=1min, shard=1d) is served by the avail-v3
- *  cascading CFW (task #130): /5m cron writes partial sub-shards at
- *  `avail-v3/1m/p{cadence}/<period>.parquet`; on midnight UTC boundary
- *  it promotes to canonical `avail-v3/1m/<date>.parquet`. The planner's
- *  tier+cadence walk picks the freshest reachable cell (partial
- *  fall-through to /1m@p5min closes the freshness gap to ≤5 minutes). */
+ *  Base tier `/1m` is REMOVED from `TIERS` until backfill catches up.
+ *  Why: pyrmts treats a (tier, cadence) watermark as "data is valid
+ *  for ALL periods up to watermark.end" — assumes back-to-epoch
+ *  coverage. /1m partials roll forward in time only (cascade CFW
+ *  started writing today); periods before cascade-start don't exist
+ *  but the watermark still claims them. Planner's segment loop walks
+ *  /1m as a fall-through for any output tier and emits partial keys
+ *  for non-existent periods → 404. Until pyrmts supports a partial-
+ *  earliest (per-(tier, cadence) start date), OR partials backfill
+ *  to cover from epoch, /1m can't safely be in TIERS. The cascade
+ *  keeps running (writes accumulate); restore /1m here once partials
+ *  cover enough history that an `AVAIL_1M_EARLIEST` gate is reliable.
+ *  See `specs/avail-v3-cascade-cfw.md` and ctbk task #130 followups. */
 const TIERS: Tier[] = [
-	{ name: '1m',  bin: '1min',  shard: '1d'  },
 	{ name: '2m',  bin: '2min',  shard: '2d'  },
 	{ name: '3m',  bin: '3min',  shard: '3d'  },
 	{ name: '5m',  bin: '5min',  shard: '5d'  },
@@ -96,19 +102,12 @@ function makeBaseProps(bucket: R2Bucket): Omit<GeoPyramid, 'dims'> {
 	return {
 		storage: parquetBackend(r2Storage(bucket)),
 		keyTemplate: KEY_TEMPLATE,
-		// Per `configs/pyramids/avail.yaml#storage.partialKey` — the cascading
-		// CFW (#130) writes partial sub-shards at this path; the planner
-		// reads them via watermark fall-through. `{shard}` substitutes to the
-		// cadence label (e.g. `5min`, `1h`).
-		partialKey: 'avail-v3/{tier}/p{shard}/{period}.parquet',
-		// Sub-shard cadence ladder per `configs/pyramids/avail.yaml#partials`.
-		// Each cadence applies to every tier where `cadence < tier.shard` and
-		// `cadence % tier.bin == 0`.
-		// 7d intentionally omitted: 7d is not a multiple of 3d, breaking
-		// pyrmts's divisibility-chain requirement on the cadence ladder.
-		// The /7d tier still gets canonical-only coverage (its `shard: all`
-		// is the only-shard anyway; no partial would shrink it usefully).
-		partials: ['5min', '10min', '30min', '1h', '3h', '12h', '1d', '3d'],
+		// `partials` + `partialKey` intentionally omitted here for now —
+		// only /1m had partials in scope (#130), and /1m is removed from
+		// TIERS above pending pyrmts support for per-(tier, cadence) start
+		// dates. Re-enable both when /1m is restored. The cascading CFW
+		// continues to write partials at `avail-v3/1m/p{cadence}/...` paths
+		// and record D1 watermarks; the api just doesn't read them yet.
 		axis: 'time',
 		binCol: 'dt',
 		metrics: METRICS.map((name) => ({ name, monoid: 'histogram' as const })),
@@ -249,13 +248,6 @@ function parseInstant(s: string | null): Date | null {
 const PYRAMID_NAME = 'avail';
 const WATERMARK_CACHE_TTL_MS = 60_000;
 
-// /1m partials are populated forward in time by the cascading CFW (task
-// #130); no historical backfill exists. This date gates the planner from
-// emitting /1m partial keys for periods before the cascade's first write.
-// Update when partial backfill catches up further; ideally replace with a
-// D1 `MIN(period_start)` lookup (see TODO at the use site).
-const AVAIL_1M_EARLIEST = new Date('2026-06-27T00:00:00Z');
-
 let _shardIndex: ShardIndex | null = null;
 function getShardIndex(db: D1Database): ShardIndex {
 	if (_shardIndex === null) {
@@ -322,20 +314,8 @@ async function serveGeoReduced(
 	if (from === null || to === null) {
 		return errorResponse(400, 'from and to query params required (ISO-8601)', cors);
 	}
-	const userBinBudget = parsePositiveInt(url.searchParams.get('bin_budget'), 1024);
-	if (userBinBudget === null) return errorResponse(400, 'invalid bin_budget', cors);
-	// /1m exclusion for historical queries: pyrmts's `earliestWatermarks`
-	// can gate /1m from emitting segments before partial coverage starts,
-	// but `pickTier` runs first and doesn't consider earliest. If /1m
-	// becomes the output and then emits 0 segments, the planner returns no
-	// plan (no fall-through to coarser tiers in that direction). Workaround:
-	// when the query range extends before the /1m partial rollout, cap
-	// binBudget below /1m's bin count so pickTier picks /2m+ instead.
-	const rangeMinutes = Math.ceil((to.getTime() - from.getTime()) / 60_000);
-	const queryExtendsBeforePartials = from < AVAIL_1M_EARLIEST;
-	const binBudget = queryExtendsBeforePartials
-		? Math.min(userBinBudget, rangeMinutes - 1)
-		: userBinBudget;
+	const binBudget = parsePositiveInt(url.searchParams.get('bin_budget'), 1024);
+	if (binBudget === null) return errorResponse(400, 'invalid bin_budget', cors);
 	const cellBudget = parsePositiveInt(url.searchParams.get('cell_budget'), 1024);
 	if (cellBudget === null) return errorResponse(400, 'invalid cell_budget', cors);
 
