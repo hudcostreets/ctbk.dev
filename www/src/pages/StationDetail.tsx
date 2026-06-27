@@ -191,14 +191,18 @@ export default function StationDetail() {
     ro.observe(chartContainerRef.current)
     return () => ro.disconnect()
   }, [])
-  // Soft-cutover toggle for per-station avail backend. Default `v3`
-  // (`/api/avail-v3`, LUC-anchored, S2-keyed pyramid-cascade layout).
-  // `?availSrc=totals` is the kill-switch back to legacy `/api/totals`
-  // (reads `avail/agg/{h1,d1,mo1}`). The `totals` branch + the entire
-  // /api/totals worker code path retires once the kill-switch is no
-  // longer needed (see specs/per-station-luc-v3.md Phase 3 cleanup).
+  // Soft-cutover toggle for per-station avail backend. Default `totals`
+  // (legacy `/api/totals`, reads `avail/agg/{h1,d1,mo1}` — has up-to-
+  // the-minute data via the gbfs/cascade legacy pipeline). `?availSrc=v3`
+  // opts in to the LUC-anchored S2 pyramid-cascade layout (#106), which
+  // is CORRECT for older windows but currently STALE for fresh queries:
+  // `e`'s pyramid-cascade canonical ends ~2026-06-18, and our /1m
+  // partials (#130, written by `gbfs/cascade` since 2026-06-27) aren't
+  // readable yet (blocked on pyrmts #135 — per-(tier, cadence) earliest-
+  // watermark gating). v3 default returns once the freshness path is
+  // closed. See `specs/per-station-luc-v3.md` Phase 3 cleanup.
   const [availSrc] = useUrlState<AvailSource>('availSrc',
-    codeParam<AvailSource>('v3', [['totals', 'totals'], ['v3', 'v3']]))
+    codeParam<AvailSource>('totals', [['totals', 'totals'], ['v3', 'v3']]))
   const rangeQuery = useStationAvailabilityRouted(
     availSrc,
     info?.gbfs_station_id, bufFromS, bufToS, availViewportPx, info?.capacity ?? null,
