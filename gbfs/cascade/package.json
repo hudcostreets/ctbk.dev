@@ -16,6 +16,9 @@
     "wrangler": "^4.0.0"
   },
   "dependencies": {
-    "hyparquet-writer": "^0.13.0"
+    "hyparquet-writer": "^0.13.0",
+    "pyrmts": "https://github.com/runsascoded/pyrmts#0fdf458e03710383a90d4c9aaf7b06d045d1c121&path:/js/packages/pyrmts",
+    "pyrmts-cfw": "https://github.com/runsascoded/pyrmts#0fdf458e03710383a90d4c9aaf7b06d045d1c121&path:/js/packages/pyrmts-cfw",
+    "pyrmts-geo": "https://github.com/runsascoded/pyrmts#0fdf458e03710383a90d4c9aaf7b06d045d1c121&path:/js/packages/pyrmts-geo"
   }
 }

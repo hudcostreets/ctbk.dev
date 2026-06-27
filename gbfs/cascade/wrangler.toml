@@ -12,3 +12,33 @@ crons = ["* * * * *"]
 [[r2_buckets]]
 binding = "R2"
 bucket_name = "ctbk"
+
+# D1 for the avail-v3 sub-shard cascade (task #130): records per-(tier,
+# cadence) watermarks in `pyramid_watermarks` via `D1ShardIndex.recordShard`.
+# Same database as the api worker reads from — write path here, read path
+# in gbfs/api/src/avail_geo.ts.
+[[d1_databases]]
+binding = "DB"
+database_name = "ctbk-gbfs"
+database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
+
+# ─── Dev environment ───────────────────────────────────────────────────
+# Sibling worker `ctbk-gbfs-cascade-dev` for iterating on the avail-v3
+# cascade without touching prod. Same R2 + D1 bindings (writes namespace
+# under a `dev-` pyramid name so prod's watermark grid isn't disturbed —
+# see avail3/cascade.ts). Cron disabled; trigger via `wrangler dev --remote
+# --test-scheduled` or `curl /__cron`.
+[env.dev]
+name = "ctbk-gbfs-cascade-dev"
+
+[[env.dev.r2_buckets]]
+binding = "R2"
+bucket_name = "ctbk"
+
+[[env.dev.d1_databases]]
+binding = "DB"
+database_name = "ctbk-gbfs"
+database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
+
+[env.dev.triggers]
+crons = []

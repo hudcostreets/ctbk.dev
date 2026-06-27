@@ -54,9 +54,11 @@ import {
 	rowsToCols,
 } from '../../lib/cascade';
 import { AVAIL_1M_ROW_GROUP_SIZE } from '../../lib/avail-monoid';
+import { avail3Tick } from './avail3/cascade';
 
 interface Env {
 	R2: R2Bucket;
+	DB: D1Database;
 	COMPACTOR_SECRET?: string;
 }
 
@@ -254,6 +256,16 @@ export default {
 	async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
 		const tickMin = Math.floor(event.scheduledTime / 60000);
 		ctx.waitUntil(cronTick(env.R2, tickMin));
+		// avail-v3 sub-shard cascade (task #130). Self-gates to /5m ticks.
+		const tickTime = new Date(event.scheduledTime);
+		ctx.waitUntil(avail3Tick(env.R2, env.DB, tickTime).then((results) => {
+			const summary = results
+				.filter((r) => r.status === 'wrote' || (r.status !== 'exists' && r.status !== 'no_inputs'))
+				.map((r) => r.status === 'wrote'
+					? `${r.key}: wrote ${r.bytes}B (${r.rows} rows)`
+					: `${r.key}: ${r.status}`);
+			if (summary.length) console.log(`avail3 tick ${tickTime.toISOString()}: ${summary.join(' | ')}`);
+		}).catch((err) => console.error('avail3 tick error:', err)));
 	},
 
 	async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
@@ -287,8 +299,33 @@ export default {
 				headers: { 'content-type': 'application/json' },
 			});
 		}
+		// Manual avail-v3 tick trigger (dev / debugging). `?t=` is the
+		// UTC ISO timestamp of the tick to process; must be /5m-aligned.
+		// Secret-gated, same as /backfill.
+		if (url.pathname === '/avail3') {
+			if (!env.COMPACTOR_SECRET) {
+				return new Response('cascade secret not configured\n', { status: 503 });
+			}
+			if (request.headers.get('x-compactor-secret') !== env.COMPACTOR_SECRET) {
+				return new Response('unauthorized\n', { status: 401 });
+			}
+			const tParam = url.searchParams.get('t');
+			if (!tParam) {
+				return new Response('usage: /avail3?t=YYYY-MM-DDTHH:MM:SSZ (must be /5m-aligned)\n', { status: 400 });
+			}
+			const tickTime = new Date(tParam);
+			if (Number.isNaN(tickTime.getTime())) {
+				return new Response(`invalid t: ${tParam}\n`, { status: 400 });
+			}
+			const results = await avail3Tick(env.R2, env.DB, tickTime);
+			return new Response(JSON.stringify({ tickTime: tickTime.toISOString(), results }, null, 2) + '\n', {
+				headers: { 'content-type': 'application/json' },
+			});
+		}
 		return new Response(
-			'GBFS cascade compactor.\n  GET /backfill?date=YYYY-MM-DD&{cons|agg}=<level> (secret-gated)\n',
+			'GBFS cascade compactor.\n' +
+			'  GET /backfill?date=YYYY-MM-DD&{cons|agg}=<level> (secret-gated)\n' +
+			'  GET /avail3?t=<iso-ts>                            (secret-gated)\n',
 		);
 	},
 } satisfies ExportedHandler<Env>;
