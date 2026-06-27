@@ -65,15 +65,14 @@ const DEFAULT_REDUCER: Reducer = 'mean';
  *  data is only ~2 months old — those tiers would have 0-2 bins each.
  *  Add them back here when the YAML grows them.
  *
- *  Base tier `1m` is omitted until ctbk task #129 lands (poller
- *  dual-writes `avail-v3/1m/<period>.parquet` at the canonical path).
- *  Re-adding it earlier would 404: the legacy `gbfs-compact` writes
- *  `<date>/<HH>.parquet` (subdir per day), and pyrmts's substitution
- *  produces `<date>T<HH>.parquet` (flat) — path mismatch. When #129
- *  ships and the new path is populated, restore the `1m` row to TIERS
- *  and ensure D1 has a `pyramid_watermarks` row for it (the cascading
- *  CFW in task #130 records this on each /1m parquet write). */
+ *  Base tier `1m` (bin=1min, shard=1d) is served by the avail-v3
+ *  cascading CFW (task #130): /5m cron writes partial sub-shards at
+ *  `avail-v3/1m/p{cadence}/<period>.parquet`; on midnight UTC boundary
+ *  it promotes to canonical `avail-v3/1m/<date>.parquet`. The planner's
+ *  tier+cadence walk picks the freshest reachable cell (partial
+ *  fall-through to /1m@p5min closes the freshness gap to ≤5 minutes). */
 const TIERS: Tier[] = [
+	{ name: '1m',  bin: '1min',  shard: '1d'  },
 	{ name: '2m',  bin: '2min',  shard: '2d'  },
 	{ name: '3m',  bin: '3min',  shard: '3d'  },
 	{ name: '5m',  bin: '5min',  shard: '5d'  },
@@ -97,6 +96,19 @@ function makeBaseProps(bucket: R2Bucket): Omit<GeoPyramid, 'dims'> {
 	return {
 		storage: parquetBackend(r2Storage(bucket)),
 		keyTemplate: KEY_TEMPLATE,
+		// Per `configs/pyramids/avail.yaml#storage.partialKey` — the cascading
+		// CFW (#130) writes partial sub-shards at this path; the planner
+		// reads them via watermark fall-through. `{shard}` substitutes to the
+		// cadence label (e.g. `5min`, `1h`).
+		partialKey: 'avail-v3/{tier}/p{shard}/{period}.parquet',
+		// Sub-shard cadence ladder per `configs/pyramids/avail.yaml#partials`.
+		// Each cadence applies to every tier where `cadence < tier.shard` and
+		// `cadence % tier.bin == 0`.
+		// 7d intentionally omitted: 7d is not a multiple of 3d, breaking
+		// pyrmts's divisibility-chain requirement on the cadence ladder.
+		// The /7d tier still gets canonical-only coverage (its `shard: all`
+		// is the only-shard anyway; no partial would shrink it usefully).
+		partials: ['5min', '10min', '30min', '1h', '3h', '12h', '1d', '3d'],
 		axis: 'time',
 		binCol: 'dt',
 		metrics: METRICS.map((name) => ({ name, monoid: 'histogram' as const })),

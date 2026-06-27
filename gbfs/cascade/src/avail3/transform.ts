@@ -106,9 +106,13 @@ export function transformMinuteRows(
 		if (!stationId) continue;
 		const chain = luc.chains.get(stationId);
 		if (!chain) continue;
-		const dt = row.dt as bigint | number | null;
-		if (dt === null || dt === undefined) continue;
-		const dtKey = typeof dt === 'bigint' ? dt.toString() : String(dt);
+		const dtRaw = row.dt as bigint | number | null;
+		if (dtRaw === null || dtRaw === undefined) continue;
+		// Raw 1m@1m loader writes `dt` in SECONDS (legacy convention,
+		// shared with gbfs/avail/agg=*/cons=*). avail-v3 expects MS to
+		// match pyrmts's `binCol: dt` Date interpretation. Convert here.
+		const dtMs = typeof dtRaw === 'bigint' ? dtRaw * 1000n : BigInt(dtRaw) * 1000n;
+		const dtKey = dtMs.toString();
 		const metrics = rowMetrics(row);
 		if (metrics === null) continue;
 

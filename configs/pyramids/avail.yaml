@@ -33,7 +33,10 @@ partials:
   - 12h
   - 1d
   - 3d
-  - 7d
+  # 7d intentionally omitted: 7d is not a multiple of 3d, breaking
+  # pyrmts's divisibility-chain requirement on the cadence ladder
+  # (`validatePartials`). The /7d tier gets canonical-only coverage
+  # (its `shard: all` is the only-shard anyway).
 
 # Per-tier row-group size. Default 2k rows: keeps single-cell scans tight
 # (~1 RG-hit per shard, ~30 KB data scan) while footer overhead stays
