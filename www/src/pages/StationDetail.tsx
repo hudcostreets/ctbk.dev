@@ -191,15 +191,14 @@ export default function StationDetail() {
     ro.observe(chartContainerRef.current)
     return () => ro.disconnect()
   }, [])
-  // Soft-cutover toggle for per-station avail backend. Default `totals`
-  // (legacy `/api/totals` reads `avail/agg/{h1,d1,mo1}`). `?availSrc=v3`
-  // routes through `useStationAvailabilityV3` against `/api/avail-v3`.
-  // Once the LUC-anchored avail-v3 rebuild lands on `e` and CIC verifies
-  // parity, default flips to `v3`; the `totals` branch + the entire
-  // /api/totals worker code path retires (see specs/per-station-luc-v3.md
-  // Phase 3 cleanup).
+  // Soft-cutover toggle for per-station avail backend. Default `v3`
+  // (`/api/avail-v3`, LUC-anchored, S2-keyed pyramid-cascade layout).
+  // `?availSrc=totals` is the kill-switch back to legacy `/api/totals`
+  // (reads `avail/agg/{h1,d1,mo1}`). The `totals` branch + the entire
+  // /api/totals worker code path retires once the kill-switch is no
+  // longer needed (see specs/per-station-luc-v3.md Phase 3 cleanup).
   const [availSrc] = useUrlState<AvailSource>('availSrc',
-    codeParam<AvailSource>('totals', [['totals', 'totals'], ['v3', 'v3']]))
+    codeParam<AvailSource>('v3', [['totals', 'totals'], ['v3', 'v3']]))
   const rangeQuery = useStationAvailabilityRouted(
     availSrc,
     info?.gbfs_station_id, bufFromS, bufToS, availViewportPx, info?.capacity ?? null,
