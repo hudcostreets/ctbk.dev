@@ -23,6 +23,7 @@ import MonthRangePicker from "../components/MonthRangePicker"
 import { Radios } from "../components/Radios"
 import { useIsInView } from "../hooks/useIsInView"
 import { useTheme } from "../contexts/ThemeContext"
+import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts"
 import { DateRange2Dates, dateRangeParam, parseDuration, isDurationBased, isExplicitRange, formatDuration } from "../date-range"
 import {
   Gender,
@@ -87,7 +88,7 @@ const StackByV2QueryStrings: [StackByV2, string][] = [
 
 export default function Home() {
   useLocation()
-  const { actualTheme } = useTheme()
+  const { actualTheme, toggleTheme } = useTheme()
 
   const [yAxis, setYAxis] = useUrlState('y', codeParam<YAxis>('Rides', YAxisQueryStrings))
   const [stackBy, setStackBy] = useUrlState('s', codeParam<StackByV2>('None', StackByV2QueryStrings))
@@ -108,6 +109,39 @@ export default function Home() {
   const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
   const [windowWidth, setWindowWidth] = useState(() => typeof window !== 'undefined' ? window.innerWidth : 800)
   const [snapCounter, setSnapCounter] = useState(0)
+
+  // Keyboard shortcuts (use-kbd) — registers Date Range / Stack By /
+  // Y-Axis / Toggle / Other action groups. The `?` shortcut to open
+  // the ShortcutsModal works without this, but the actions themselves
+  // (e.g. press `1` for "1 year" date range) need the registration.
+  // Dropped in the HomeV2 → Home cutover (`a1c21c8f`), restored as part
+  // of #126.
+  useKeyboardShortcuts({
+    dateRange,
+    setDateRange,
+    // Home uses a narrowed StackByV2 (no 'Docking'); the hook signature
+    // takes the broader StackBy. Safe cast — all hook bindings call
+    // setStackBy with values in StackByV2.
+    setStackBy: setStackBy as (s: import('../data').StackBy) => void,
+    setYAxis,
+    setRollingAvgs,
+    rollingAvgs,
+    setStackRelative,
+    stackRelative,
+    setShowLegend,
+    showLegendValue,
+    setControlsOpen,
+    controlsOpen,
+    toggleTheme,
+    setRegions,
+    regions,
+    setUserTypes,
+    userTypes,
+    setGenders,
+    genders,
+    setRideableTypes,
+    rideableTypes,
+  })
 
   useEffect(() => {
     const handleResize = () => setWindowWidth(window.innerWidth)
