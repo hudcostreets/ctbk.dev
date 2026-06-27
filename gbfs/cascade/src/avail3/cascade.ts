@@ -251,7 +251,9 @@ export async function avail3Tick(
 	const tickMs = tickTime.getTime();
 	if (tickMs % (5 * 60_000) !== 0) return [];
 
+	console.log(`avail3Tick entered for ${tickTime.toISOString()} (tickMs=${tickMs})`);
 	const luc = await getLucIndex(r2);
+	console.log(`avail3Tick: LUC loaded, ${luc.chains.size} stations`);
 	const shardIndex = new D1ShardIndex(db);
 	const results: WriteResult[] = [];
 
