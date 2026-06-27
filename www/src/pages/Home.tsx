@@ -11,15 +11,17 @@
  */
 import { useUrlState, boolParam, numberArrayParam } from 'use-prms'
 import { PlotRelayoutEvent } from 'plotly.js'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
 import { Plot } from 'pltly/react'
-import { useLocation } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import css from "../index.module.css"
 import controlCss from "../controls.module.css"
 import { Checkbox } from "../components/Checkbox"
 import { Checklist } from "../components/Checklist"
+import { Footer } from "../components/Footer"
 import MonthRangePicker from "../components/MonthRangePicker"
 import { Radios } from "../components/Radios"
+import { useIsInView } from "../hooks/useIsInView"
 import { useTheme } from "../contexts/ThemeContext"
 import { DateRange2Dates, dateRangeParam, parseDuration, isDurationBased, isExplicitRange, formatDuration } from "../date-range"
 import {
@@ -48,6 +50,26 @@ import { useRidesV1, type Pyramid, type ApiTarget } from '../query/ridesV1'
 
 const Pyramids: Pyramid[] = ['v1', 'v2', 'v3']
 const ApiTargets: ApiTarget[] = ['prod', 'dev']
+
+export const RideableTypesExample = "/?y=m&s=b&rt=ce&d=2002-"
+
+const StationMapEmbed = lazy(() => import("../components/StationMapEmbed"))
+
+function LazyStationMap() {
+  const [ref, isInView] = useIsInView<HTMLDivElement>('400px')
+  const fullScreen = <Link to="/stations">Full screen version →</Link>
+  return (
+    <div ref={ref}>
+      {isInView ? (
+        <Suspense fallback={<div className={css.map} />}>
+          <StationMapEmbed mapClassName={css.map} captionTrailing={fullScreen} />
+        </Suspense>
+      ) : (
+        <div className={css.map} />
+      )}
+    </div>
+  )
+}
 
 function dateToMonth(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
@@ -352,6 +374,34 @@ export default function Home() {
           </details>
         </div>
         )}
+
+        <hr />
+
+        <div className={css.row}>
+          <h4>Examples</h4>
+          <ul>
+            <li><Link to="/?r=jh">JC + Hoboken</Link> (<Link to="/?r=jh&s=r">stacked</Link>)</li>
+            <li><Link to="/?y=m&s=g&pct=&g=mf&d=1406-2102">Ride minute %'s, Men vs. Women</Link>, Jun '14 – Jan '21</li>
+            <li><Link to="/?s=u&pct=">Member vs. customer %'s</Link></li>
+            <li><Link to={RideableTypesExample}>Classic / E-bike ride minutes</Link> (<Link to={`${RideableTypesExample}&pct`}>stacked</Link>)</li>
+            <li><Link to="/s/8-ave-w-33-st">8 Ave &amp; W 33 St — live availability + trip history</Link> (per-station page)</li>
+            <li><Link to="/">Default view (system-wide rides over time)</Link></li>
+          </ul>
+          <p>This plot refreshes when <a href="https://www.citibikenyc.com/system-data" target="_blank" rel="noopener noreferrer">new data is published by Citi Bike</a> (typically the 1st or 2nd week of each month, covering the previous month).</p>
+          <p><a href="https://github.com/hudcostreets/ctbk.dev" target="_blank" rel="noopener noreferrer">The GitHub repo</a> has more info as well as <a href="https://github.com/hudcostreets/ctbk.dev/issues" target="_blank" rel="noopener noreferrer">planned enhancements</a>. Data updates are performed <a href="https://github.com/hudcostreets/ctbk.dev/actions" target="_blank" rel="noopener noreferrer">by Github Actions</a>.</p>
+
+          <hr />
+
+          <h3 id="map">Map: Stations + Common Destinations</h3>
+          <LazyStationMap />
+
+          <hr />
+
+          <h3 id="pipeline">Data Pipeline</h3>
+          <p>See the <Link to="/pipeline">pipeline documentation</Link> for details on data processing stages, sources, and <Link to="/pipeline#legacy-data">data-quality issues</Link> (e.g. gender data removed since 2021-02).</p>
+
+          <Footer />
+        </div>
       </main>
     </div>
   )
