@@ -147,6 +147,13 @@ export interface WriteResult {
 	key: string;
 	bytes?: number;
 	rows?: number;
+	// Input-coverage tracking for watermark integrity. A `wrote` result with
+	// `inputsPresent < inputsExpected` means we shipped a parquet with HOLES
+	// — the watermark MUST NOT be recorded as authoritative, else queries
+	// will see those holes as zero-data (silently wrong). Caller gates
+	// `recordShard` on `inputsPresent === inputsExpected`.
+	inputsPresent?: number;
+	inputsExpected?: number;
 }
 
 /** Write `/1m@p5min` for the period `[T-5min, T)`. Reads 5× raw 1m@1m
@@ -158,18 +165,21 @@ async function write1m5min(
 	periodStart: Date,
 ): Promise<WriteResult> {
 	const cadence = CADENCES[0];
+	const inputsExpected = cadence.minutes;
 	const key = partialKey('1m', cadence, periodStart);
-	if (await r2.head(key)) return { status: 'exists', key };
+	if (await r2.head(key)) return { status: 'exists', key, inputsExpected };
 	const minuteRows: AvailV3Row[] = [];
+	let inputsPresent = 0;
 	for (let i = 0; i < cadence.minutes; i++) {
 		const t = new Date(periodStart.getTime() + i * 60_000);
 		const raw = await readRawMinute(r2, t);
 		if (raw === null) continue;
+		inputsPresent++;
 		minuteRows.push(...transformMinuteRows(raw, luc));
 	}
-	if (minuteRows.length === 0) return { status: 'no_inputs', key };
+	if (minuteRows.length === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
 	const bytes = await writeParquet(r2, key, minuteRows);
-	return { status: 'wrote', key, bytes, rows: minuteRows.length };
+	return { status: 'wrote', key, bytes, rows: minuteRows.length, inputsPresent, inputsExpected };
 }
 
 /** Write `/1m@<cadence>` for the period `[T-cadence, T)`. Reads N× finer-
@@ -182,21 +192,22 @@ async function write1mPartial(
 	const cadence = CADENCES[cadenceIdx];
 	const prevCadence = CADENCES[cadenceIdx - 1];
 	const key = partialKey('1m', cadence, periodStart);
-	if (await r2.head(key)) return { status: 'exists', key };
-	const count = cadence.minutes / prevCadence.minutes;
+	const inputsExpected = cadence.minutes / prevCadence.minutes;
+	if (await r2.head(key)) return { status: 'exists', key, inputsExpected };
 	const inputRowSets: AvailV3Row[][] = [];
-	for (let i = 0; i < count; i++) {
+	for (let i = 0; i < inputsExpected; i++) {
 		const inputStart = new Date(periodStart.getTime() + i * prevCadence.minutes * 60_000);
 		const inputKey = partialKey('1m', prevCadence, inputStart);
 		const rows = await readPartial(r2, inputKey);
 		if (rows === null) continue;
 		inputRowSets.push(rows);
 	}
-	if (inputRowSets.length === 0) return { status: 'no_inputs', key };
+	const inputsPresent = inputRowSets.length;
+	if (inputsPresent === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
 	const merged = mergeRows(inputRowSets);
-	if (merged.length === 0) return { status: 'empty', key };
+	if (merged.length === 0) return { status: 'empty', key, inputsPresent, inputsExpected };
 	const bytes = await writeParquet(r2, key, merged);
-	return { status: 'wrote', key, bytes, rows: merged.length };
+	return { status: 'wrote', key, bytes, rows: merged.length, inputsPresent, inputsExpected };
 }
 
 /** Promote /1m partials to /1m canonical for the day ending at `dayEnd`.
@@ -207,21 +218,23 @@ async function promote1mCanonical(
 ): Promise<WriteResult> {
 	const dayStart = new Date(dayEnd.getTime() - CANONICAL_1M_MIN * 60_000);
 	const key = canonicalKey('1m', dayStart, CANONICAL_1M_MIN * 60_000);
-	if (await r2.head(key)) return { status: 'exists', key };
+	const inputsExpected = 2;
+	if (await r2.head(key)) return { status: 'exists', key, inputsExpected };
 	const half = CADENCES[CADENCES.length - 1];  // 12h
 	const inputRowSets: AvailV3Row[][] = [];
-	for (let i = 0; i < 2; i++) {
+	for (let i = 0; i < inputsExpected; i++) {
 		const inputStart = new Date(dayStart.getTime() + i * half.minutes * 60_000);
 		const inputKey = partialKey('1m', half, inputStart);
 		const rows = await readPartial(r2, inputKey);
 		if (rows === null) continue;
 		inputRowSets.push(rows);
 	}
-	if (inputRowSets.length === 0) return { status: 'no_inputs', key };
+	const inputsPresent = inputRowSets.length;
+	if (inputsPresent === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
 	const merged = mergeRows(inputRowSets);
-	if (merged.length === 0) return { status: 'empty', key };
+	if (merged.length === 0) return { status: 'empty', key, inputsPresent, inputsExpected };
 	const bytes = await writeParquet(r2, key, merged);
-	return { status: 'wrote', key, bytes, rows: merged.length };
+	return { status: 'wrote', key, bytes, rows: merged.length, inputsPresent, inputsExpected };
 }
 
 // ─── Per-tick orchestration ─────────────────────────────────────────────
@@ -242,13 +255,25 @@ export async function avail3Tick(
 	const shardIndex = new D1ShardIndex(db);
 	const results: WriteResult[] = [];
 
+	// Record a watermark ONLY when input coverage was complete. A wrote
+	// result with partial coverage means we shipped a parquet with holes
+	// (e.g. the loader missed a minute); recording its periodEnd as
+	// authoritative would mislead the planner into trusting the gaps. The
+	// parquet still gets written (it has whatever data DID arrive); the
+	// watermark just stays at the previous successful boundary.
+	const fullyCovered = (r: WriteResult) =>
+		r.status === 'wrote' &&
+		r.inputsPresent !== undefined &&
+		r.inputsExpected !== undefined &&
+		r.inputsPresent === r.inputsExpected;
+
 	// Finest cadence: 5min. Always closes at /5m ticks. Read raw 1m@1m × 5.
 	{
 		const cadence = CADENCES[0];
 		const periodStart = new Date(tickMs - cadence.minutes * 60_000);
 		const r = await write1m5min(r2, luc, periodStart);
 		results.push(r);
-		if (r.status === 'wrote') {
+		if (fullyCovered(r)) {
 			await shardIndex.recordShard({
 				pyramidName: PYRAMID_NAME, tier: '1m', cadence: cadence.durationStr,
 				periodStart, periodEnd: tickTime, key: r.key,
@@ -263,7 +288,7 @@ export async function avail3Tick(
 		const periodStart = new Date(tickMs - cadence.minutes * 60_000);
 		const r = await write1mPartial(r2, i, periodStart);
 		results.push(r);
-		if (r.status === 'wrote') {
+		if (fullyCovered(r)) {
 			await shardIndex.recordShard({
 				pyramidName: PYRAMID_NAME, tier: '1m', cadence: cadence.durationStr,
 				periodStart, periodEnd: tickTime, key: r.key,
@@ -275,7 +300,7 @@ export async function avail3Tick(
 	if (tickMs % (CANONICAL_1M_MIN * 60_000) === 0) {
 		const r = await promote1mCanonical(r2, tickTime);
 		results.push(r);
-		if (r.status === 'wrote') {
+		if (fullyCovered(r)) {
 			const periodStart = new Date(tickMs - CANONICAL_1M_MIN * 60_000);
 			await shardIndex.recordShard({
 				pyramidName: PYRAMID_NAME, tier: '1m', cadence: null,
