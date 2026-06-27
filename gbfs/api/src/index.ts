@@ -1142,14 +1142,14 @@ export default {
 		// `specs/avail-pyramid-v3-s2.md`.
 		if (url.pathname === '/api/avail-v3') {
 			try {
-				return await serveAvailV3(env.R2, request, env.CORS_ORIGIN ?? '*');
+				return await serveAvailV3(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*');
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'avail-v3 error', 500, env);
 			}
 		}
 		if (url.pathname === '/api/avail-v3/cells') {
 			try {
-				return await serveAvailV3Cells(env.R2, request, env.CORS_ORIGIN ?? '*');
+				return await serveAvailV3Cells(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*');
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'avail-v3/cells error', 500, env);
 			}

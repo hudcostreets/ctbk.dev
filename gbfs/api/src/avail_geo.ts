@@ -30,15 +30,12 @@
  *
  */
 import {
-	addSpan,
-	parseDuration,
 	stitch,
-	type ParsedTimeSpan,
 	type Row,
 	type Tier,
 } from 'pyrmts';
-import { parquetBackend } from 'pyrmts';
-import { r2Storage } from 'pyrmts-cfw';
+import { parquetBackend, CachedShardIndex, type ShardIndex } from 'pyrmts';
+import { r2Storage, D1ShardIndex } from 'pyrmts-cfw';
 import {
 	filterCellsAndRes,
 	planGeoQuery,
@@ -54,7 +51,7 @@ export const REDUCERS = ['mean', 'min', 'max', 'p05', 'p25', 'p50', 'p75', 'p95'
 export type Reducer = typeof REDUCERS[number];
 const DEFAULT_REDUCER: Reducer = 'mean';
 
-/** 15-tier ladder for the new pyramid-cascade layout (per
+/** 14-tier ladder for the new pyramid-cascade layout (per
  *  `configs/pyramids/avail.yaml`). Shard sizes here MUST track the
  *  YAML's `shard` per tier — the worker constructs R2 keys from
  *  `(tier, period)` via `KEY_TEMPLATE`, so a mismatch silently 404s.
@@ -68,11 +65,15 @@ const DEFAULT_REDUCER: Reducer = 'mean';
  *  data is only ~2 months old — those tiers would have 0-2 bins each.
  *  Add them back here when the YAML grows them.
  *
- *  Base tier `1m` stays at `shard='1h'` because it's the existing
- *  source layout at `avail-v3/1m/<date>/<HH>.parquet` (not rewritten
- *  by pyramid-cascade — only consumed by it). */
+ *  Base tier `1m` is omitted until ctbk task #129 lands (poller
+ *  dual-writes `avail-v3/1m/<period>.parquet` at the canonical path).
+ *  Re-adding it earlier would 404: the legacy `gbfs-compact` writes
+ *  `<date>/<HH>.parquet` (subdir per day), and pyrmts's substitution
+ *  produces `<date>T<HH>.parquet` (flat) — path mismatch. When #129
+ *  ships and the new path is populated, restore the `1m` row to TIERS
+ *  and ensure D1 has a `pyramid_watermarks` row for it (the cascading
+ *  CFW in task #130 records this on each /1m parquet write). */
 const TIERS: Tier[] = [
-	{ name: '1m',  bin: '1min',  shard: '1h'  },
 	{ name: '2m',  bin: '2min',  shard: '2d'  },
 	{ name: '3m',  bin: '3min',  shard: '3d'  },
 	{ name: '5m',  bin: '5min',  shard: '5d'  },
@@ -219,99 +220,40 @@ function parseInstant(s: string | null): Date | null {
 	return Number.isNaN(d.getTime()) ? null : d;
 }
 
-// ─── Manifest-driven per-tier watermarks ────────────────────────────────
+// ─── ShardIndex-driven per-(tier, cadence) watermarks ─────────────────
 //
-// `pyramid-cascade` writes `avail-v3/_manifest.json` after each build:
-//   { "tiers": { "<name>": { "latest_period": "<period_label>" } } }
+// Watermarks live in D1 (`pyramid_watermarks` table). Backfilled from the
+// legacy `avail-v3/_manifest.json` once at adoption; subsequent updates
+// come from `pyramid-cascade` (canonical shards) and the /5m sub-shard
+// CFW (partials, ctbk task #130) via `D1ShardIndex.recordShard`.
 //
-// We convert each `latest_period` to its end-of-period Date (the
-// authoritative watermark for that tier — pyrmts's planner will fall
-// through to finer tiers for any segment past this).
+// `CachedShardIndex` wraps the D1 read with a 60s TTL + in-flight dedupe
+// so concurrent requests share one D1 round-trip. See pyrmts
+// `specs/done/partial-shards.md` §Watermark index.
 //
-// Cache module-level for 60s — every Worker isolate fetches once per minute.
+// Per-isolate singleton — Workers reuse isolates across requests, so the
+// CachedShardIndex's in-memory TTL applies across them.
 
-const MANIFEST_KEY = 'avail-v3/_manifest.json';
+const PYRAMID_NAME = 'avail';
 const WATERMARK_CACHE_TTL_MS = 60_000;
 
-interface WatermarkCache {
-	watermarks: Record<string, Date>;
-	ts: number;
-}
-let _watermarkCache: WatermarkCache | null = null;
-
-async function loadWatermarks(bucket: R2Bucket): Promise<Record<string, Date>> {
-	const now = Date.now();
-	if (_watermarkCache && (now - _watermarkCache.ts) < WATERMARK_CACHE_TTL_MS) {
-		return _watermarkCache.watermarks;
+let _shardIndex: ShardIndex | null = null;
+function getShardIndex(db: D1Database): ShardIndex {
+	if (_shardIndex === null) {
+		_shardIndex = new CachedShardIndex(new D1ShardIndex(db), { ttlMs: WATERMARK_CACHE_TTL_MS });
 	}
+	return _shardIndex;
+}
+
+async function loadWatermarks(db: D1Database): Promise<Record<string, Date>> {
 	try {
-		const obj = await bucket.get(MANIFEST_KEY);
-		if (!obj) {
-			_watermarkCache = { watermarks: {}, ts: now };
-			return {};
-		}
-		const manifest = await obj.json<{ tiers?: Record<string, { latest_period?: string }> }>();
-		const watermarks: Record<string, Date> = {};
-		for (const [name, info] of Object.entries(manifest.tiers ?? {})) {
-			const tier = TIERS.find((t) => t.name === name);
-			if (!tier || !info?.latest_period) continue;
-			const end = periodEndFromLabel(tier.shard, info.latest_period);
-			if (end !== null) watermarks[name] = end;
-		}
-		_watermarkCache = { watermarks, ts: now };
-		return watermarks;
+		const map = await getShardIndex(db).getWatermarks(PYRAMID_NAME);
+		return Object.fromEntries(map);
 	} catch {
-		// On any parse / fetch failure, return empty (no watermark gating).
-		// Better to over-trust shards than to crash queries on a malformed
-		// manifest.
-		_watermarkCache = { watermarks: {}, ts: now };
+		// On any D1 fetch failure, return empty (no watermark gating).
+		// Better to over-trust shards than to crash queries on a transient D1 error.
 		return {};
 	}
-}
-
-/** Convert a `formatPeriod`-style label (e.g. "2026-06-17", "2026-06",
- *  "2026", "all") plus the tier's shard spec to the end Date of that
- *  shard — i.e. the start of the NEXT shard. Returns null for `'all'`
- *  (no watermark needed; tier covers everything). */
-function periodEndFromLabel(shardSpec: string, label: string): Date | null {
-	if (shardSpec === 'all' || label === 'all') return null;
-	const span = parseDuration(shardSpec);
-	const start = parsePeriodLabel(label, span);
-	if (!start) return null;
-	return addSpan(start, span);
-}
-
-function parsePeriodLabel(label: string, span: ParsedTimeSpan): Date | null {
-	let iso: string;
-	switch (span.unit) {
-		case 'y':
-			iso = `${label}-01-01T00:00:00Z`;
-			break;
-		case 'mo':
-			iso = `${label}-01T00:00:00Z`;
-			break;
-		case 'd':
-			iso = `${label}T00:00:00Z`;
-			break;
-		case 'h': {
-			const idx = label.indexOf('T');
-			if (idx === -1) return null;
-			iso = `${label.slice(0, idx)}T${label.slice(idx + 1)}:00:00Z`;
-			break;
-		}
-		case 'min': {
-			const [date, time] = label.split('T', 2);
-			if (!date || !time) return null;
-			const [hh, mi] = time.split('-', 2);
-			if (!hh || !mi) return null;
-			iso = `${date}T${hh}:${mi}:00Z`;
-			break;
-		}
-		default:
-			return null;
-	}
-	const d = new Date(iso);
-	return Number.isNaN(d.getTime()) ? null : d;
 }
 
 function parseBBox(s: string | null): BBox | null {
@@ -351,6 +293,7 @@ function errorResponse(status: number, message: string, cors: string | null): Re
 async function serveGeoReduced(
 	pyramid: GeoPyramid,
 	bucket: R2Bucket,
+	db: D1Database,
 	request: Request,
 	cors: string | null,
 ): Promise<Response> {
@@ -406,7 +349,7 @@ async function serveGeoReduced(
 	// `pyramid-cascade`-emitted manifest watermark (latest complete shard
 	// end), then walks finer tiers to fill the post-watermark tail.
 	// Empty `watermarks` = trust all shards (legacy behavior pre-manifest).
-	const watermarks = await loadWatermarks(bucket);
+	const watermarks = await loadWatermarks(db);
 
 	// `outputCells: {res, cells}` path bypasses `pickResolution`. See
 	// `pyrmts/specs/done/plan-geo-query-precomputed-cover.md`.
@@ -460,7 +403,7 @@ async function serveGeoReduced(
 		records: reduced,
 		reducer,
 		plan: {
-			outputTier: plan.outputTier.name,
+			outputTier: plan.outputTier?.name ?? null,
 			outputBin: plan.outputBin,
 			outputRes: plan.outputRes,
 			outputCells: plan.outputCells,
@@ -477,11 +420,11 @@ async function serveGeoReduced(
 }
 
 /** HTTP handler for `/api/avail-v3` — v3 rollup over bbox (S2-keyed). */
-export async function serveAvailV3(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
-	return serveGeoReduced(availV3Pyramid(bucket), bucket, request, corsOrigin || null);
+export async function serveAvailV3(bucket: R2Bucket, db: D1Database, request: Request, corsOrigin: string): Promise<Response> {
+	return serveGeoReduced(availV3Pyramid(bucket), bucket, db, request, corsOrigin || null);
 }
 
 /** HTTP handler for `/api/avail-v3/cells` — v3 per-cell rows preserved. */
-export async function serveAvailV3Cells(bucket: R2Bucket, request: Request, corsOrigin: string): Promise<Response> {
-	return serveGeoReduced(availV3CellsPyramid(bucket), bucket, request, corsOrigin || null);
+export async function serveAvailV3Cells(bucket: R2Bucket, db: D1Database, request: Request, corsOrigin: string): Promise<Response> {
+	return serveGeoReduced(availV3CellsPyramid(bucket), bucket, db, request, corsOrigin || null);
 }

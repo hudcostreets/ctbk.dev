@@ -630,7 +630,7 @@ async function serveRidesReduced(
 	const workerColo = (request as any).cf?.colo;
 	if (workerColo) headers['X-Worker-Colo'] = workerColo;
 	const planSummary = {
-		outputTier: plan.outputTier.name,
+		outputTier: plan.outputTier?.name ?? null,
 		outputBin: plan.outputBin,
 		outputRes,
 		outputCells,

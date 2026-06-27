@@ -215,7 +215,7 @@ export function availWatermarks(now: Date = new Date()): Record<string, Date> {
 // End-to-end: plan → fetch → pivot → stitch → reduce
 
 export interface PyrmtsAvailResult {
-	tier: string;
+	tier: string | null;
 	rows: ReducedRow[];
 	authoritativeEnd: string | null;   // ISO timestamp where the pyramid stops covering
 }
@@ -276,7 +276,7 @@ export async function executeAvailViaPyrmts(
 	const reducedRows = applyReducer(filtered, p.metric as AvailMetric, reducer);
 
 	return {
-		tier: plan.outputTier.name,
+		tier: plan.outputTier?.name ?? null,
 		rows: reducedRows,
 		authoritativeEnd: plan.authoritativeEnd?.toISOString() ?? null,
 	};
@@ -286,7 +286,7 @@ export async function executeAvailViaPyrmts(
 // Shadow-mode delta logging — caller invokes after legacy path returns.
 
 export interface ShadowDelta {
-	tier: string;
+	tier: string | null;
 	rowsLegacy: number;
 	rowsPyrmts: number;
 	exactMatchPct: number;       // fraction of (dt, station_id) keys whose value matches
