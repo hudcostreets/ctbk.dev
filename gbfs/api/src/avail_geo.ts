@@ -249,6 +249,13 @@ function parseInstant(s: string | null): Date | null {
 const PYRAMID_NAME = 'avail';
 const WATERMARK_CACHE_TTL_MS = 60_000;
 
+// /1m partials are populated forward in time by the cascading CFW (task
+// #130); no historical backfill exists. This date gates the planner from
+// emitting /1m partial keys for periods before the cascade's first write.
+// Update when partial backfill catches up further; ideally replace with a
+// D1 `MIN(period_start)` lookup (see TODO at the use site).
+const AVAIL_1M_EARLIEST = new Date('2026-06-27T00:00:00Z');
+
 let _shardIndex: ShardIndex | null = null;
 function getShardIndex(db: D1Database): ShardIndex {
 	if (_shardIndex === null) {
@@ -315,8 +322,20 @@ async function serveGeoReduced(
 	if (from === null || to === null) {
 		return errorResponse(400, 'from and to query params required (ISO-8601)', cors);
 	}
-	const binBudget = parsePositiveInt(url.searchParams.get('bin_budget'), 1024);
-	if (binBudget === null) return errorResponse(400, 'invalid bin_budget', cors);
+	const userBinBudget = parsePositiveInt(url.searchParams.get('bin_budget'), 1024);
+	if (userBinBudget === null) return errorResponse(400, 'invalid bin_budget', cors);
+	// /1m exclusion for historical queries: pyrmts's `earliestWatermarks`
+	// can gate /1m from emitting segments before partial coverage starts,
+	// but `pickTier` runs first and doesn't consider earliest. If /1m
+	// becomes the output and then emits 0 segments, the planner returns no
+	// plan (no fall-through to coarser tiers in that direction). Workaround:
+	// when the query range extends before the /1m partial rollout, cap
+	// binBudget below /1m's bin count so pickTier picks /2m+ instead.
+	const rangeMinutes = Math.ceil((to.getTime() - from.getTime()) / 60_000);
+	const queryExtendsBeforePartials = from < AVAIL_1M_EARLIEST;
+	const binBudget = queryExtendsBeforePartials
+		? Math.min(userBinBudget, rangeMinutes - 1)
+		: userBinBudget;
 	const cellBudget = parsePositiveInt(url.searchParams.get('cell_budget'), 1024);
 	if (cellBudget === null) return errorResponse(400, 'invalid cell_budget', cors);
 
@@ -362,6 +381,16 @@ async function serveGeoReduced(
 	// end), then walks finer tiers to fill the post-watermark tail.
 	// Empty `watermarks` = trust all shards (legacy behavior pre-manifest).
 	const watermarks = await loadWatermarks(db);
+
+	// /1m is fed exclusively by the cascading CFW's partial sub-shards (task
+	// #130), with no historical backfill. The binBudget cap above keeps
+	// pickTier from selecting /1m for queries that extend before partial
+	// rollout. We can't use pyrmts's `earliestWatermarks` to gate /1m
+	// directly: it propagates "coarser tiers can't start before their
+	// finer source" — but in our case coarser tiers have MORE history (full
+	// backfill on `e`'s pyramid-cascade), not less. Declaring /1m's
+	// earliest would poison every coarser tier and break historical
+	// queries entirely. See pyrmts `planner.ts#effectiveEarliestWatermarks`.
 
 	// `outputCells: {res, cells}` path bypasses `pickResolution`. See
 	// `pyrmts/specs/done/plan-geo-query-precomputed-cover.md`.
