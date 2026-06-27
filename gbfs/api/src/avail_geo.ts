@@ -65,20 +65,14 @@ const DEFAULT_REDUCER: Reducer = 'mean';
  *  data is only ~2 months old — those tiers would have 0-2 bins each.
  *  Add them back here when the YAML grows them.
  *
- *  Base tier `/1m` is REMOVED from `TIERS` until backfill catches up.
- *  Why: pyrmts treats a (tier, cadence) watermark as "data is valid
- *  for ALL periods up to watermark.end" — assumes back-to-epoch
- *  coverage. /1m partials roll forward in time only (cascade CFW
- *  started writing today); periods before cascade-start don't exist
- *  but the watermark still claims them. Planner's segment loop walks
- *  /1m as a fall-through for any output tier and emits partial keys
- *  for non-existent periods → 404. Until pyrmts supports a partial-
- *  earliest (per-(tier, cadence) start date), OR partials backfill
- *  to cover from epoch, /1m can't safely be in TIERS. The cascade
- *  keeps running (writes accumulate); restore /1m here once partials
- *  cover enough history that an `AVAIL_1M_EARLIEST` gate is reliable.
- *  See `specs/avail-v3-cascade-cfw.md` and ctbk task #130 followups. */
+ *  Base tier `/1m` (bin=1min, shard=1d) is fed by the cascading CFW's
+ *  partial sub-shards (#130). pyrmts now supports per-(tier, cadence)
+ *  earliest-watermark gating without cross-tier propagation (pyrmts
+ *  #135 / `specs/per-cadence-earliest.md`), so /1m partials are trusted
+ *  only for windows after cascade-start; coarser tiers' canonical
+ *  coverage is preserved for older windows. */
 const TIERS: Tier[] = [
+	{ name: '1m',  bin: '1min',  shard: '1d'  },
 	{ name: '2m',  bin: '2min',  shard: '2d'  },
 	{ name: '3m',  bin: '3min',  shard: '3d'  },
 	{ name: '5m',  bin: '5min',  shard: '5d'  },
@@ -102,12 +96,16 @@ function makeBaseProps(bucket: R2Bucket): Omit<GeoPyramid, 'dims'> {
 	return {
 		storage: parquetBackend(r2Storage(bucket)),
 		keyTemplate: KEY_TEMPLATE,
-		// `partials` + `partialKey` intentionally omitted here for now —
-		// only /1m had partials in scope (#130), and /1m is removed from
-		// TIERS above pending pyrmts support for per-(tier, cadence) start
-		// dates. Re-enable both when /1m is restored. The cascading CFW
-		// continues to write partials at `avail-v3/1m/p{cadence}/...` paths
-		// and record D1 watermarks; the api just doesn't read them yet.
+		// Per `configs/pyramids/avail.yaml#storage.partialKey` — the cascading
+		// CFW (#130) writes partial sub-shards at this path; the planner reads
+		// them via watermark fall-through. `{shard}` substitutes to the
+		// cadence label (e.g. `5min`, `1h`).
+		partialKey: 'avail-v3/{tier}/p{shard}/{period}.parquet',
+		// Sub-shard cadence ladder per `configs/pyramids/avail.yaml#partials`.
+		// Each cadence applies to every tier where `cadence < tier.shard` and
+		// `cadence % tier.bin == 0`. 7d intentionally omitted: 7d is not a
+		// multiple of 3d, breaking pyrmts's divisibility-chain requirement.
+		partials: ['5min', '10min', '30min', '1h', '3h', '12h', '1d', '3d'],
 		axis: 'time',
 		binCol: 'dt',
 		metrics: METRICS.map((name) => ({ name, monoid: 'histogram' as const })),
@@ -267,6 +265,49 @@ async function loadWatermarks(db: D1Database): Promise<Record<string, Date>> {
 	}
 }
 
+// ─── Per-(tier, cadence) earliest watermarks ─────────────────────────
+//
+// Forward-rolling partials (#130 cascade) need per-cadence "available
+// since" gating so the planner doesn't emit partial keys for periods
+// before the cascade started writing. See pyrmts
+// `specs/per-cadence-earliest.md`. Source: `MIN(period_start)` from
+// the D1 `pyramid_shards` inventory grouped by (tier, cadence).
+// Cached per-isolate alongside the watermark cache.
+
+interface EarliestCache {
+	map: Record<string, Date>;
+	ts: number;
+}
+let _earliestCache: EarliestCache | null = null;
+
+async function loadEarliestPerCadence(db: D1Database): Promise<Record<string, Date>> {
+	const now = Date.now();
+	if (_earliestCache && (now - _earliestCache.ts) < WATERMARK_CACHE_TTL_MS) {
+		return _earliestCache.map;
+	}
+	try {
+		// `pyramid_shards.cadence` is '' for canonical (D1ShardIndex
+		// sentinel; pyrmts encoding uses `${tier}` for canonical, `${tier}@${cadence}`
+		// for partials). Translate at read time.
+		const rs = await db.prepare(
+			`SELECT tier, cadence, MIN(period_start) AS earliest_ms
+			 FROM pyramid_shards
+			 WHERE pyramid = ?
+			 GROUP BY tier, cadence`
+		).bind(PYRAMID_NAME).all<{ tier: string; cadence: string; earliest_ms: number }>();
+		const map: Record<string, Date> = {};
+		for (const row of rs.results ?? []) {
+			const key = row.cadence === '' ? row.tier : `${row.tier}@${row.cadence}`;
+			map[key] = new Date(row.earliest_ms);
+		}
+		_earliestCache = { map, ts: now };
+		return map;
+	} catch {
+		_earliestCache = { map: {}, ts: now };
+		return {};
+	}
+}
+
 function parseBBox(s: string | null): BBox | null {
 	if (s === null) return null;
 	const parts = s.split(',').map((x) => Number(x.trim()));
@@ -314,8 +355,8 @@ async function serveGeoReduced(
 	if (from === null || to === null) {
 		return errorResponse(400, 'from and to query params required (ISO-8601)', cors);
 	}
-	const binBudget = parsePositiveInt(url.searchParams.get('bin_budget'), 1024);
-	if (binBudget === null) return errorResponse(400, 'invalid bin_budget', cors);
+	const userBinBudget = parsePositiveInt(url.searchParams.get('bin_budget'), 1024);
+	if (userBinBudget === null) return errorResponse(400, 'invalid bin_budget', cors);
 	const cellBudget = parsePositiveInt(url.searchParams.get('cell_budget'), 1024);
 	if (cellBudget === null) return errorResponse(400, 'invalid cell_budget', cors);
 
@@ -362,21 +403,39 @@ async function serveGeoReduced(
 	// Empty `watermarks` = trust all shards (legacy behavior pre-manifest).
 	const watermarks = await loadWatermarks(db);
 
-	// /1m is fed exclusively by the cascading CFW's partial sub-shards (task
-	// #130), with no historical backfill. The binBudget cap above keeps
-	// pickTier from selecting /1m for queries that extend before partial
-	// rollout. We can't use pyrmts's `earliestWatermarks` to gate /1m
-	// directly: it propagates "coarser tiers can't start before their
-	// finer source" — but in our case coarser tiers have MORE history (full
-	// backfill on `e`'s pyramid-cascade), not less. Declaring /1m's
-	// earliest would poison every coarser tier and break historical
-	// queries entirely. See pyrmts `planner.ts#effectiveEarliestWatermarks`.
+	// Per-(tier, cadence) earliest gating: forward-rolling /1m partials
+	// (#130) only have coverage from the cascade's first write onward.
+	// pyrmts #135 (`earliestPerCadence`) gates per-entry without cross-
+	// tier propagation, so old queries fall through cleanly to /2m+
+	// canonical. Source from D1 `MIN(period_start) GROUP BY tier, cadence`.
+	const earliestPerCadence = await loadEarliestPerCadence(db);
+
+	// pickTier doesn't know about `earliestPerCadence` — it picks the
+	// finest tier that fits the bin budget without considering whether
+	// that tier's data covers the query window. If pickTier lands on /1m
+	// for a query starting before /1m's earliest, the segment loop walks
+	// /1m only (outputIdx=0; no fall-through to coarser indices), all
+	// entries get gated out → 0 segments. Workaround: cap binBudget below
+	// /1m's bin count when the query window extends before /1m's earliest
+	// available data, forcing pickTier to /2m+ where canonical coverage
+	// reaches further back.
+	const oneMEarliest = earliestPerCadence['1m@5min']
+		?? earliestPerCadence['1m@10min']
+		?? earliestPerCadence['1m@30min']
+		?? earliestPerCadence['1m@1h']
+		?? earliestPerCadence['1m@3h']
+		?? earliestPerCadence['1m@12h'];
+	const queryStartsBefore1mEarliest = oneMEarliest && from < oneMEarliest;
+	const rangeMinutes = Math.ceil((to.getTime() - from.getTime()) / 60_000);
+	const binBudget = queryStartsBefore1mEarliest
+		? Math.min(userBinBudget, rangeMinutes - 1)
+		: userBinBudget;
 
 	// `outputCells: {res, cells}` path bypasses `pickResolution`. See
 	// `pyrmts/specs/done/plan-geo-query-precomputed-cover.md`.
 	const plan = userCells !== null
-		? planGeoQuery(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells }, watermarks })
-		: planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox: bbox!, cellBudget, watermarks });
+		? planGeoQuery(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells }, watermarks, earliestPerCadence })
+		: planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox: bbox!, cellBudget, watermarks, earliestPerCadence });
 
 	// Push the cell list down as an RG-prune filter on the cellCol. For
 	// `(cell, dt)`-sorted shards this lets hyparquet skip whole row groups

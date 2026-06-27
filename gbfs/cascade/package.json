@@ -17,8 +17,8 @@
   },
   "dependencies": {
     "hyparquet-writer": "^0.13.0",
-    "pyrmts": "https://github.com/runsascoded/pyrmts#0fdf458e03710383a90d4c9aaf7b06d045d1c121&path:/js/packages/pyrmts",
-    "pyrmts-cfw": "https://github.com/runsascoded/pyrmts#0fdf458e03710383a90d4c9aaf7b06d045d1c121&path:/js/packages/pyrmts-cfw",
-    "pyrmts-geo": "https://github.com/runsascoded/pyrmts#0fdf458e03710383a90d4c9aaf7b06d045d1c121&path:/js/packages/pyrmts-geo"
+    "pyrmts": "https://github.com/runsascoded/pyrmts#ca0aa6e5867728d312123d251960a6612b3d3a06&path:/js/packages/pyrmts",
+    "pyrmts-cfw": "https://github.com/runsascoded/pyrmts#ca0aa6e5867728d312123d251960a6612b3d3a06&path:/js/packages/pyrmts-cfw",
+    "pyrmts-geo": "https://github.com/runsascoded/pyrmts#ca0aa6e5867728d312123d251960a6612b3d3a06&path:/js/packages/pyrmts-geo"
   }
 }
