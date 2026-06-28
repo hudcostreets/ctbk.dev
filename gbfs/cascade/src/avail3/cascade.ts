@@ -248,12 +248,14 @@ export async function avail3Tick(
 	db: D1Database,
 	tickTime: Date,
 ): Promise<WriteResult[]> {
-	const tickMs = tickTime.getTime();
-	if (tickMs % (5 * 60_000) !== 0) return [];
-
-	console.log(`avail3Tick entered for ${tickTime.toISOString()} (tickMs=${tickMs})`);
+	// Floor to the minute before /5m alignment check. Cloudflare's cron
+	// `scheduledTime` carries seconds-of-the-minute offset (~53s observed
+	// in prod tail) — the gate must operate on the rounded minute, not
+	// the actual fire time.
+	const tickMinMs = Math.floor(tickTime.getTime() / 60_000) * 60_000;
+	if (tickMinMs % (5 * 60_000) !== 0) return [];
+	const tickMs = tickMinMs;
 	const luc = await getLucIndex(r2);
-	console.log(`avail3Tick: LUC loaded, ${luc.chains.size} stations`);
 	const shardIndex = new D1ShardIndex(db);
 	const results: WriteResult[] = [];
 
@@ -278,7 +280,7 @@ export async function avail3Tick(
 		if (fullyCovered(r)) {
 			await shardIndex.recordShard({
 				pyramidName: PYRAMID_NAME, tier: '1m', cadence: cadence.durationStr,
-				periodStart, periodEnd: tickTime, key: r.key,
+				periodStart, periodEnd: new Date(tickMs), key: r.key,
 			});
 		}
 	}
@@ -293,20 +295,20 @@ export async function avail3Tick(
 		if (fullyCovered(r)) {
 			await shardIndex.recordShard({
 				pyramidName: PYRAMID_NAME, tier: '1m', cadence: cadence.durationStr,
-				periodStart, periodEnd: tickTime, key: r.key,
+				periodStart, periodEnd: new Date(tickMs), key: r.key,
 			});
 		}
 	}
 
 	// Canonical promotion: midnight UTC (1d boundary).
 	if (tickMs % (CANONICAL_1M_MIN * 60_000) === 0) {
-		const r = await promote1mCanonical(r2, tickTime);
+		const r = await promote1mCanonical(r2, new Date(tickMs));
 		results.push(r);
 		if (fullyCovered(r)) {
 			const periodStart = new Date(tickMs - CANONICAL_1M_MIN * 60_000);
 			await shardIndex.recordShard({
 				pyramidName: PYRAMID_NAME, tier: '1m', cadence: null,
-				periodStart, periodEnd: tickTime, key: r.key,
+				periodStart, periodEnd: new Date(tickMs), key: r.key,
 			});
 		}
 	}

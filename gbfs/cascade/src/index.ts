@@ -255,17 +255,25 @@ async function backfillAgg(
 export default {
 	async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
 		const tickMin = Math.floor(event.scheduledTime / 60000);
-		ctx.waitUntil(cronTick(env.R2, tickMin));
-		// avail-v3 sub-shard cascade (task #130). Self-gates to /5m ticks.
 		const tickTime = new Date(event.scheduledTime);
-		ctx.waitUntil(avail3Tick(env.R2, env.DB, tickTime).then((results) => {
+		// avail-v3 sub-shard cascade (task #130). Self-gates to /5m ticks.
+		// AWAITED (not waitUntil-fired) BEFORE the legacy cronTick because the
+		// legacy chain regularly burns the whole cron budget on heavy concat
+		// + writes; running avail3 in parallel via two `ctx.waitUntil` calls
+		// led to silent termination of avail3 mid-flight. Manual `/avail3`
+		// HTTP calls always succeeded → resource contention, not a code bug.
+		try {
+			const results = await avail3Tick(env.R2, env.DB, tickTime);
 			const summary = results
 				.filter((r) => r.status === 'wrote' || (r.status !== 'exists' && r.status !== 'no_inputs'))
 				.map((r) => r.status === 'wrote'
 					? `${r.key}: wrote ${r.bytes}B (${r.rows} rows)`
 					: `${r.key}: ${r.status}`);
 			if (summary.length) console.log(`avail3 tick ${tickTime.toISOString()}: ${summary.join(' | ')}`);
-		}).catch((err) => console.error('avail3 tick error:', err)));
+		} catch (err) {
+			console.error('avail3 tick error:', err);
+		}
+		ctx.waitUntil(cronTick(env.R2, tickMin));
 	},
 
 	async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
