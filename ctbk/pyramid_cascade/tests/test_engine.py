@@ -45,15 +45,12 @@ def pyramid() -> Pyramid:
     )
 
 
-def _hist(d: dict[int, int]) -> str:
-    return json.dumps({str(k): v for k, v in sorted(d.items())}, separators=(',', ':'))
-
-
 def synth_base_rows(date_str: str, hours: int = 1) -> pl.DataFrame:
-    """Synthetic 1m base rows over `hours` hours.
+    """Synthetic 1m base rows over `hours` hours, in LONG form matching the
+    engine's ingester contract: (*dims, bin_col, metric, state, count).
 
-    Two cells (A, B). Every minute, each cell has bikes = `{state: 1}` where
-    state = (minute_of_hour % 5). One station per cell. Trivially verifiable.
+    Two cells (A, B). Every minute, each cell contributes a `bikes` observation
+    of `state = (minute_of_hour % 5)` with count 1.
     """
     base_dt = datetime.fromisoformat(f'{date_str}T00:00:00+00:00')
     base_ms = int(base_dt.timestamp() * 1000)
@@ -63,8 +60,14 @@ def synth_base_rows(date_str: str, hours: int = 1) -> pl.DataFrame:
             dt_ms = base_ms + (h * 3600 + m * 60) * 1000
             state = m % 5
             for cell in ['cellA', 'cellB']:
-                rows.append({'s2_cell': cell, 'dt': dt_ms, 'bikes': _hist({state: 1})})
-    return pl.DataFrame(rows, schema={'s2_cell': pl.Utf8, 'dt': pl.Int64, 'bikes': pl.Utf8})
+                rows.append({
+                    's2_cell': cell, 'dt': dt_ms,
+                    'metric': 'bikes', 'state': state, 'count': 1,
+                })
+    return pl.DataFrame(rows, schema={
+        's2_cell': pl.Utf8, 'dt': pl.Int64,
+        'metric': pl.Utf8, 'state': pl.Int64, 'count': pl.Int64,
+    })
 
 
 # ─── Tests ─────────────────────────────────────────────────────────────
@@ -157,15 +160,14 @@ def test_cascade_block_multi_metric_and_calendar_tier():
     for h in range(3):
         for m in range(60):
             dt_ms = base_ms + (h * 3600 + m * 60) * 1000
-            rows.append({
-                's2_cell': 'cellA',
-                'dt': dt_ms,
-                'bikes':  _hist({h: 1}),
-                'ebikes': _hist({h * 2: 1}),
-            })
+            # Long form: one row per (cell, dt, metric).
+            rows.append({'s2_cell': 'cellA', 'dt': dt_ms,
+                         'metric': 'bikes',  'state': h,     'count': 1})
+            rows.append({'s2_cell': 'cellA', 'dt': dt_ms,
+                         'metric': 'ebikes', 'state': h * 2, 'count': 1})
     df = pl.DataFrame(rows, schema={
         's2_cell': pl.Utf8, 'dt': pl.Int64,
-        'bikes': pl.Utf8, 'ebikes': pl.Utf8,
+        'metric': pl.Utf8, 'state': pl.Int64, 'count': pl.Int64,
     })
     ingester = lambda f, t: df.lazy()
 

@@ -21,19 +21,38 @@ from pyrmts.storage import MemStorage
 from ctbk.pyramid_cascade.orchestrator import pyramid_cascade
 
 
-def _hist(d: dict[int, int]) -> str:
-    return json.dumps({str(k): v for k, v in sorted(d.items())}, separators=(',', ':'))
-
-
 def synth_rows(date_str: str, hours: int) -> pl.LazyFrame:
+    """Emit long-form (s2_cell, dt, metric, state, count) rows for
+    `hours` hours of synthetic 1m source data. Each minute contributes
+    one observation `{state: m%5, count: 1}` for metric `bikes`. Matches
+    the engine.py ingester contract (long form, not wide hist_json)."""
     base = datetime.fromisoformat(f'{date_str}T00:00:00+00:00')
     base_ms = int(base.timestamp() * 1000)
     rows = []
     for h in range(hours):
         for m in range(60):
             dt_ms = base_ms + (h * 3600 + m * 60) * 1000
-            rows.append({'s2_cell': 'cellA', 'dt': dt_ms, 'bikes': _hist({m % 5: 1})})
-    return pl.DataFrame(rows, schema={'s2_cell': pl.Utf8, 'dt': pl.Int64, 'bikes': pl.Utf8}).lazy()
+            rows.append({
+                's2_cell': 'cellA',
+                'dt': dt_ms,
+                'metric': 'bikes',
+                'state': m % 5,
+                'count': 1,
+            })
+    return pl.DataFrame(rows, schema={
+        's2_cell': pl.Utf8,
+        'dt': pl.Int64,
+        'metric': pl.Utf8,
+        'state': pl.Int64,
+        'count': pl.Int64,
+    }).lazy()
+
+
+def _empty_long_lf() -> pl.LazyFrame:
+    return pl.DataFrame(schema={
+        's2_cell': pl.Utf8, 'dt': pl.Int64,
+        'metric': pl.Utf8, 'state': pl.Int64, 'count': pl.Int64,
+    }).lazy()
 
 
 def _ingester_2026_06_17_to_19(block_from, block_to):
@@ -45,7 +64,7 @@ def _ingester_2026_06_17_to_19(block_from, block_to):
     for start, date_str in day_starts.items():
         if start == block_from:
             return synth_rows(date_str, hours=24)
-    return pl.DataFrame(schema={'s2_cell': pl.Utf8, 'dt': pl.Int64, 'bikes': pl.Utf8}).lazy()
+    return _empty_long_lf()
 
 
 def _pyramid() -> Pyramid:
