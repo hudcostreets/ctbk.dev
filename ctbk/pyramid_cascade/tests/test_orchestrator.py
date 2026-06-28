@@ -105,6 +105,7 @@ def test_orchestrator_single_block_single_process():
         workers=1,
         staging_uri='mem://',
         base_tier='1m',
+        partial_cover='overwrite',
     )
 
     assert result.blocks == 1
@@ -133,6 +134,7 @@ def test_orchestrator_two_blocks_with_reduce():
         workers=1,  # sync for deterministic test
         staging_uri='mem://',
         base_tier='1m',
+        partial_cover='overwrite',
     )
 
     assert result.blocks == 2
@@ -173,6 +175,7 @@ def test_orchestrator_emits_manifest():
         workers=1,
         staging_uri='mem://',
         base_tier='1m',
+        partial_cover='overwrite',
     )
 
     manifest_bytes = pyramid.storage.get('avail-test/_manifest.json')
@@ -182,3 +185,123 @@ def test_orchestrator_emits_manifest():
     assert manifest['tiers']['2m']['latest_period'] == '2026-06-18'
     assert '1h' in manifest['tiers']
     assert manifest['tiers']['1h']['latest_period'] == '2026-06'
+
+
+def test_orchestrator_partial_cover_error_default():
+    """Default partial_cover='error' refuses runs whose range only
+    partially covers a shard (e.g. 2-day range against a /1mo shard).
+
+    Catches the failure mode where a gap-fill run silently truncates an
+    existing shard from full-month data to 2-day-only data.
+    """
+    pyramid = _pyramid()
+    range_ = (
+        datetime(2026, 6, 17, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 6, 19, 0, 0, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(RuntimeError, match=r"partial-cover.*shards extend outside"):
+        pyramid_cascade(
+            pyramid,
+            range_,
+            _ingester_2026_06_17_to_19,
+            task_size='1d',
+            workers=1,
+            staging_uri='mem://',
+            base_tier='1m',
+            # partial_cover='error' (default)
+        )
+
+
+def test_orchestrator_partial_cover_merge_extends_existing_shard():
+    """partial_cover='merge' fetches the existing R2 shard and adds it
+    as another partial in the reduce phase, so the final shard contains
+    BOTH the prior data and this run's new data.
+
+    Concretely: build /1h@2026-06 once over 6/17-6/19, then re-run over
+    6/19-6/21 with merge mode. Final shard should contain 4 days of
+    hourly bins (6/17, 6/18, 6/19, 6/20) — not just the 2 new days.
+    """
+    pyramid = _pyramid()
+
+    # Phase 1: build initial /1h@2026-06 shard from 6/17-6/19 (2 days).
+    pyramid_cascade(
+        pyramid,
+        (datetime(2026, 6, 17, 0, 0, tzinfo=timezone.utc),
+         datetime(2026, 6, 19, 0, 0, tzinfo=timezone.utc)),
+        _ingester_2026_06_17_to_21,
+        task_size='1d',
+        workers=1,
+        staging_uri='mem://',
+        base_tier='1m',
+        partial_cover='overwrite',
+    )
+
+    initial_blob = pyramid.storage.get('avail-test/1h/2026-06.parquet')
+    assert initial_blob is not None
+    initial_df = pl.from_arrow(pq.read_table(io.BytesIO(initial_blob)))
+    assert initial_df.height == 48, f"initial /1h should hold 48 bins, got {initial_df.height}"
+
+    # Phase 2: re-cascade 6/19-6/21 in merge mode. Should add 2 more days.
+    pyramid_cascade(
+        pyramid,
+        (datetime(2026, 6, 19, 0, 0, tzinfo=timezone.utc),
+         datetime(2026, 6, 21, 0, 0, tzinfo=timezone.utc)),
+        _ingester_2026_06_17_to_21,
+        task_size='1d',
+        workers=1,
+        staging_uri='mem://',
+        base_tier='1m',
+        partial_cover='merge',
+    )
+
+    merged_blob = pyramid.storage.get('avail-test/1h/2026-06.parquet')
+    assert merged_blob is not None
+    merged_df = pl.from_arrow(pq.read_table(io.BytesIO(merged_blob)))
+    # 4 days × 24 hourly bins = 96. If merge didn't fire, this would be 48
+    # (overwrite with only 6/19-6/21 data).
+    assert merged_df.height == 96, \
+        f"merged /1h should hold 96 bins (4 days × 24h), got {merged_df.height}"
+
+
+def _ingester_2026_06_17_to_21(block_from, block_to):
+    """Wider synthetic ingester covering 6/17 → 6/21 (4 days)."""
+    day_starts = {
+        datetime(2026, 6, d, 0, 0, tzinfo=timezone.utc): f'2026-06-{d:02d}'
+        for d in (17, 18, 19, 20)
+    }
+    for start, date_str in day_starts.items():
+        if start == block_from:
+            return synth_rows(date_str, hours=24)
+    return _empty_long_lf()
+
+
+def test_orchestrator_partial_cover_overwrite_proceeds():
+    """partial_cover='overwrite' bypasses the guard rail.
+
+    Same setup as test_orchestrator_partial_cover_error_default; this one
+    should NOT raise — proceeds with the (silently truncating, in real
+    deployments) overwrite. Exists to document the explicit-opt-in
+    behavior.
+    """
+    pyramid = _pyramid()
+    range_ = (
+        datetime(2026, 6, 17, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 6, 19, 0, 0, tzinfo=timezone.utc),
+    )
+
+    result = pyramid_cascade(
+        pyramid,
+        range_,
+        _ingester_2026_06_17_to_19,
+        task_size='1d',
+        workers=1,
+        staging_uri='mem://',
+        base_tier='1m',
+        partial_cover='overwrite',
+    )
+
+    assert result.blocks == 2
+    # Same expectation as the default 2-block test — proves the cascade
+    # still ran end-to-end after the guard rail bypass.
+    assert result.finals_via_reduce == 1

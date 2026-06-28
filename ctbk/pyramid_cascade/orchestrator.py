@@ -30,6 +30,7 @@ import pyarrow.parquet as pq
 from pyrmts import (
     Pyramid,
     parse_duration,
+    shard_periods_covering,
     substitute_key,
 )
 from pyrmts.axis import add_span, floor_to_span
@@ -162,6 +163,7 @@ def pyramid_cascade(
     emit_manifest: bool = True,
     config_yaml: str | None = None,
     ingester_target: str | None = None,
+    partial_cover: str = 'error',
 ) -> CascadeRunResult:
     """Build all derived tiers of `pyramid` over `range_`.
 
@@ -185,12 +187,48 @@ def pyramid_cascade(
         base_tier: which tier the ingester populates. Defaults to
             pyramid.tiers[0].
         emit_manifest: write `<root>/_manifest.json` at end of run.
+        partial_cover: how to handle shards whose period extends outside
+            `range_` (e.g. /1y shard with a 9-day input range). One of:
+              - 'error' (default): refuse and explain which shards
+                would lose data, so a misspecified range can't silently
+                truncate a shard. Pick this for first runs / new inputs.
+              - 'overwrite': proceed and overwrite — data outside the
+                input range is lost. Pick when you've verified there
+                IS no data outside the input range (e.g. first cascade
+                run, or recovery after corruption).
+              - 'merge': fetch each partial-cover shard's existing R2
+                blob and merge it with this run's partials via the
+                histogram-sum reduce path. Use this for "extend an
+                existing shard with new data" workloads.
     """
     t0 = time.time()
     range_from, range_to = range_
 
+    if partial_cover not in ('error', 'overwrite', 'merge'):
+        raise ValueError(
+            f"partial_cover must be 'error', 'overwrite', or 'merge'; got {partial_cover!r}"
+        )
+
     staging_uri = staging_uri or f"file:///tmp/pyramid-cascade-{int(t0)}/"
     staging_storage = _resolve_staging(staging_uri)
+
+    # Pre-flight: check for shards whose period extends outside the input
+    # range. Without this guard, cascade silently overwrites such shards
+    # with only the input-range data — destroying everything outside the
+    # range (incident on 2026-06-28: a 9-day gap-fill overwrote /1d@1y
+    # 2026 from ~80 days of data to 9).
+    base = pyramid.tier(base_tier) if base_tier else pyramid.tiers[0]
+    partial_cover_shards = _partial_cover_shards(pyramid, range_, base.name)
+    if partial_cover_shards:
+        _log_partial_cover(partial_cover_shards, partial_cover)
+        if partial_cover == 'error':
+            raise RuntimeError(
+                f"partial-cover: {len(partial_cover_shards)} shards extend outside "
+                f"--range {range_from.date()}/{range_to.date()}. Re-run with "
+                f"--partial-cover overwrite (lose outside-range data) or "
+                f"--partial-cover merge (preserve outside-range data via "
+                f"read-modify-write)."
+            )
 
     blocks = _enumerate_blocks(range_from, range_to, task_size)
     n_blocks = len(blocks)
@@ -251,6 +289,18 @@ def pyramid_cascade(
                 err(f"block done ({done}/{n_blocks}): "
                     f"{len(ws.finals)} finals, {len(ws.partials)} partials")
                 _consume(ws)
+
+    # ── Merge mode: pull existing R2 shards into staging as extra partials ──
+    # For each (tier, period) where the shard extends outside `range_`,
+    # fetch the existing blob (if any) and write it to staging so the
+    # reduce phase's histogram-sum picks it up alongside this run's
+    # partials. Works because the reduce monoid is associative+commutative.
+    if partial_cover == 'merge' and partial_cover_shards:
+        merge_count = _stage_existing_for_merge(
+            pyramid, partial_cover_shards, staging_storage, staging_uri,
+            all_partials,
+        )
+        err(f"merge: staged {merge_count} existing shards as extra partials")
 
     # ── Reduce phase ──
     by_key: dict[tuple[str, str], list[str]] = defaultdict(list)
@@ -482,6 +532,85 @@ def _merge_long(
         if m not in pivoted.columns:
             pivoted = pivoted.with_columns(pl.lit(None, dtype=pl.Utf8).alias(m))
     return pivoted.select(dim_names + [bin_col] + metric_cols)
+
+
+def _partial_cover_shards(
+    pyramid: Pyramid,
+    range_: tuple[datetime, datetime],
+    base_tier_name: str,
+) -> list[tuple[str, str, datetime, datetime]]:
+    """Enumerate (tier, period) pairs whose shard period extends OUTSIDE
+    `range_`. These are the shards at risk of silent truncation under
+    `partial_cover='overwrite'` — and the ones merge mode must fetch.
+
+    Returns list of `(tier_name, period_label, period_start, period_end)`.
+    Skips the base tier (cascade reads from it, doesn't write to it).
+    """
+    range_from, range_to = range_
+    out: list[tuple[str, str, datetime, datetime]] = []
+    for tier in pyramid.tiers:
+        if tier.name == base_tier_name:
+            continue
+        for period in shard_periods_covering(range_from, range_to, tier.shard):
+            if period.start < range_from or period.end > range_to:
+                out.append((tier.name, period.label, period.start, period.end))
+    return out
+
+
+def _log_partial_cover(
+    shards: list[tuple[str, str, datetime, datetime]],
+    mode: str,
+) -> None:
+    """Summarize partial-cover shards. Grouped by tier for readability —
+    long lists with many same-tier rows are common (one /1y shard ⇒ one
+    line per affected /6h, /12h, /1d tier)."""
+    by_tier: dict[str, list[tuple[str, datetime, datetime]]] = defaultdict(list)
+    for tier_name, period_label, period_start, period_end in shards:
+        by_tier[tier_name].append((period_label, period_start, period_end))
+    err(f"partial-cover: {len(shards)} shards across {len(by_tier)} tiers (mode={mode})")
+    for tier_name, items in by_tier.items():
+        for period_label, period_start, period_end in items:
+            err(f"  {tier_name:4s} {period_label:12s} "
+                f"[{period_start.date()}, {period_end.date()})")
+
+
+def _stage_existing_for_merge(
+    pyramid: Pyramid,
+    partial_cover_shards: list[tuple[str, str, datetime, datetime]],
+    staging_storage,
+    staging_uri: str | None,
+    all_partials: list[tuple[str, str, str]],
+) -> int:
+    """For each partial-cover (tier, period) with an existing R2 shard,
+    GET its blob and write to staging as an extra partial, then append
+    to `all_partials` so the reduce phase picks it up.
+
+    Histogram-sum is associative+commutative — the order partials are
+    merged in doesn't matter. The existing shard is just one more partial.
+
+    Returns the number of shards staged (i.e., that existed on R2).
+    Shards that don't exist on R2 yet are silently skipped (this is
+    the "first cascade run for that period" case).
+    """
+    n_staged = 0
+    for tier_name, period_label, _, _ in partial_cover_shards:
+        final_key = substitute_key(
+            pyramid.keyTemplate,
+            {'tier': tier_name, 'period': period_label},
+        )
+        blob = pyramid.storage.get(final_key)
+        if blob is None:
+            continue  # First cascade for this period; nothing to merge.
+        # Use a distinct staging key so it doesn't collide with cascade-
+        # generated partial keys (which are scoped under `_tmp/<block_id>/`).
+        staging_key = f"_tmp/_existing/{tier_name}/{period_label}.parquet"
+        if staging_storage is not None:
+            staging_storage.put(staging_key, blob)
+        else:
+            pyramid.storage.put(staging_key, blob)
+        all_partials.append((tier_name, period_label, staging_key))
+        n_staged += 1
+    return n_staged
 
 
 def _emit_manifest(pyramid: Pyramid) -> None:

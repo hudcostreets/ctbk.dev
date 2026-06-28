@@ -102,6 +102,7 @@ def _resolve_stream_source(name: str) -> tuple:
 @option('-i', '--ingester', required=True, help='Built-in ingester / source name (e.g. `avail`).')
 @option('-j', '--workers', type=int, default=1, show_default=True, help='ProcessPool worker count. Ignored for `--engine streaming` (single-process by design).')
 @option('-n', '--dry-run', is_flag=True, help='Print plan (blocks, tiers, periods) and exit.')
+@option('-P', '--partial-cover', 'partial_cover', type=click.Choice(['error', 'overwrite', 'merge']), default='error', show_default=True, help='Behavior when a shard\'s period extends outside --range. `error` (default): refuse, list affected shards. `overwrite`: write the partial as-is (data outside --range is LOST). `merge`: fetch the existing R2 shard and merge with this run\'s partials via histogram-sum.')
 @option('-p', '--prefix', default=None, help='Override the YAML `storage.key` prefix (everything before `{tier}`). Use to redirect output, e.g. `-p avail-v3-test` for a staging build that shares the prod YAML.')
 @option('-r', '--range', 'range_', required=True, help='UTC range `YYYY-MM-DD/YYYY-MM-DD` (half-open).')
 @option('-s', '--staging', 'staging_uri', default=None, help='Staging URI for partial shards (default: `file:///tmp/pyramid-cascade-<pid>/`). Block engine only.')
@@ -112,6 +113,7 @@ def pyramid_cascade_cmd(
     ingester: str,
     workers: int,
     dry_run: bool,
+    partial_cover: str,
     prefix: str | None,
     range_: str,
     staging_uri: str | None,
@@ -137,6 +139,7 @@ def pyramid_cascade_cmd(
         err(f"  task_size: {task_size}")
         err(f"  workers:   {workers}")
         err(f"  staging:   {staging_uri or '<default tmp>'}")
+    err(f"  partial:   {partial_cover}")
     err(f"  tiers:     {len(pyramid.tiers)}: {[t.name for t in pyramid.tiers]}")
 
     if dry_run:
@@ -157,8 +160,27 @@ def pyramid_cascade_cmd(
 
     if engine_name == 'streaming':
         from .engine_streaming import cascade_streaming
-        from .orchestrator import _emit_manifest
+        from .orchestrator import _emit_manifest, _log_partial_cover, _partial_cover_shards
         source_fn, base_tier = _resolve_stream_source(ingester)
+        # Same guard rail as the block engine. Streaming engine doesn't
+        # support merge mode (it writes incrementally as periods complete,
+        # with no reduce phase to merge an existing R2 shard into); error
+        # out if the user asked for it.
+        pcs = _partial_cover_shards(pyramid, range_tuple, base_tier)
+        if pcs:
+            _log_partial_cover(pcs, partial_cover)
+            if partial_cover == 'error':
+                raise click.UsageError(
+                    f"partial-cover: {len(pcs)} shards extend outside --range. "
+                    f"Re-run with --partial-cover overwrite (loses outside-range data) "
+                    f"or switch to --engine block + --partial-cover merge."
+                )
+            if partial_cover == 'merge':
+                raise click.UsageError(
+                    "--partial-cover merge isn't supported by --engine streaming "
+                    "(no reduce phase to merge existing shards into). "
+                    "Use --engine block."
+                )
         result = cascade_streaming(
             pyramid,
             range_tuple,
@@ -183,6 +205,7 @@ def pyramid_cascade_cmd(
         emit_manifest=True,
         config_yaml=config_yaml,
         ingester_target=ingester_target,
+        partial_cover=partial_cover,
     )
 
     err(str(result))
