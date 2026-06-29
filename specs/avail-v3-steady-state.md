@@ -214,12 +214,18 @@ calculation for cadences that haven't fully healed yet. Worth fixing
 **before** Phase 3 (generalize partial cascade) because the bug pattern
 will replicate across every derived tier we add.
 
-### Phase 2: Heartbeat + alerting (~2 hr)
-- `scripts/avail-v3-heartbeat.sh` (or python `ctbk avail-v3-heartbeat`).
-- GHA workflow `.github/workflows/heartbeat.yml` cron `0 */6 * * *`.
-- Email-on-fail via existing GHA notification or new webhook.
-- **Ship before Phase 3+4** so we catch any regressions introduced by
-  bigger changes.
+### Phase 2: Heartbeat + alerting — DONE
+- `ctbk avail-v3-heartbeat` (Python CLI command, R2-aware via shared
+  `pyramid_cascade.storage_from_cfg`).
+- Checks: yesterday's /1m canonical + per-cadence partial freshness
+  (`max_lag = lag_multiplier × cadence_min`, default 2 = tolerates 1
+  missed boundary per cadence).
+- GHA workflow `.github/workflows/avail-v3-heartbeat.yml` cron
+  `0 */6 * * *`. Job failure → GHA email notification (repo
+  settings).
+- Initial state (right after Phase 0 deploy 2026-06-29): will fail
+  for ~12-24h while /p3h /p12h heal, then /1m canonical for
+  2026-06-29 lands at 2026-06-30T00:00:00Z midnight tick.
 
 ### Phase 3: Generalize partial cascade (~1 day)
 - Hard-code TIER_MATRIX in `gbfs/cascade/src/avail3/cascade.ts` (mirrors
