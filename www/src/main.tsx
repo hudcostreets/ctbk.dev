@@ -10,6 +10,8 @@ import { PlotlyProvider } from 'pltly/react'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClient } from "./query/client"
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext"
+import { FlagsProvider } from "./contexts/FlagsContext"
+import { FlagsPanel } from "./components/FlagsPanel"
 import { ThemeToggle } from "./components/ThemeToggle"
 import { HomeButton, ThemeTileToggle } from "./components/TileStyleButton"
 import { useScrollToHash } from "./hooks/useScrollToHash"
@@ -79,6 +81,7 @@ function AppContent() {
       <Omnibar />
       <LookupModal />
       <SequenceModal />
+      <FlagsPanel />
     </>
   )
 }
@@ -101,6 +104,7 @@ function MuiThemeWrapper({ children }: { children: React.ReactNode }) {
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
+      <FlagsProvider>
       <ThemeProvider>
         <HotkeysProvider>
           <MuiThemeWrapper>
@@ -112,6 +116,7 @@ createRoot(document.getElementById('root')!).render(
           </MuiThemeWrapper>
         </HotkeysProvider>
       </ThemeProvider>
+      </FlagsProvider>
     </QueryClientProvider>
   </StrictMode>,
 )

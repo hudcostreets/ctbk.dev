@@ -32,6 +32,7 @@ import {
 } from '../data'
 import { boolParam, intParam, numberArrayParam, stringParam, useUrlState } from 'use-prms'
 import { bufferedBounds, formatDuration, formatTimeRange, roundDuration, timeRangeParam } from '../time-range'
+import { useFlag } from '../contexts/FlagsContext'
 
 const MANIFEST_URL = '/assets/station-urls.json'
 
@@ -191,16 +192,12 @@ export default function StationDetail() {
     ro.observe(chartContainerRef.current)
     return () => ro.disconnect()
   }, [])
-  // Per-station avail backend. Default `v3` — the LUC-anchored S2
-  // pyramid-cascade layout (#106), with mixed-tier tail coverage via
-  // pyrmts's finer-fall-through walk: /15m canonical for historical
-  // window + /1m partial cascade stitched to "now" through
-  // `earliestPerCadence` (#135). `?availSrc=totals` opts back to the
-  // legacy `/api/totals` path (reads `avail/agg/{h1,d1,mo1}` from the
-  // gbfs/cascade v1 pipeline) — retained for parity comparison until
-  // #108 retires it.
-  const [availSrc] = useUrlState<AvailSource>('availSrc',
-    codeParam<AvailSource>('v3', [['totals', 'totals'], ['v3', 'v3']]))
+  // Per-station avail backend. Sourced from FlagsContext: `totals`
+  // default (legacy `/api/totals` — fresh-to-minute via v1 cascade),
+  // `v3` for the LUC-anchored S2 pyramid layout (#106) with mixed-tier
+  // tail coverage. Open the flags panel (cmd+shift+f) to flip; URL
+  // override remains `?flag.availSrc=v3` (or back-compat `?availSrc=v3`).
+  const availSrc: AvailSource = useFlag('availSrc')
   const rangeQuery = useStationAvailabilityRouted(
     availSrc,
     info?.gbfs_station_id, bufFromS, bufToS, availViewportPx, info?.capacity ?? null,
