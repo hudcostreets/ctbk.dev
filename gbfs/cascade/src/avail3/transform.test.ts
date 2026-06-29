@@ -160,6 +160,54 @@ describe('mergeRows', () => {
 		]);
 	});
 
+	test('fast-path: non-overlapping inputs return input rows verbatim (no JSON round-trip)', () => {
+		// In cadence cascades (e.g. /p3h reading 3× /p1h covering disjoint
+		// hours), every (cell, dt) bucket has exactly one contributor. The
+		// merged output must be referentially equal to the input rows — the
+		// JSON parse/serialize round-trip is what was timing out the CFW
+		// for /p3h before this fast path landed.
+		const set1: AvailV3Row[] = [{
+			s2_cell: 'c10', dt: DT_15_00,
+			bikes: '{"7":1}', ebikes: '{}', docks: '{}', disabled: '{}', pending: '{}',
+		}];
+		const set2: AvailV3Row[] = [{
+			s2_cell: 'c10', dt: DT_15_00 + 3600_000n,  // 1h later — disjoint
+			bikes: '{"8":1}', ebikes: '{}', docks: '{}', disabled: '{}', pending: '{}',
+		}];
+		const set3: AvailV3Row[] = [{
+			s2_cell: 'c10', dt: DT_15_00 + 7200_000n,  // 2h later — disjoint
+			bikes: '{"9":1}', ebikes: '{}', docks: '{}', disabled: '{}', pending: '{}',
+		}];
+		const merged = mergeRows([set1, set2, set3]);
+		expect(merged).toHaveLength(3);
+		// Critical: each output row is the SAME object as the input row
+		// (no copy, no JSON parse, no Map round-trip).
+		const byDt = new Map(merged.map((r) => [r.dt, r]));
+		expect(byDt.get(DT_15_00)).toBe(set1[0]);
+		expect(byDt.get(DT_15_00 + 3600_000n)).toBe(set2[0]);
+		expect(byDt.get(DT_15_00 + 7200_000n)).toBe(set3[0]);
+	});
+
+	test('mixed: some buckets single-contributor, some multi', () => {
+		// Validates that the lazy-promote logic correctly routes per-bucket:
+		// (c10, T0) sees 2 contributors → slow path. (c11, T0) sees 1 → fast.
+		const set1: AvailV3Row[] = [
+			{ s2_cell: 'c10', dt: DT_15_00, bikes: '{"7":1}',  ebikes: '{}', docks: '{}', disabled: '{}', pending: '{}' },
+			{ s2_cell: 'c11', dt: DT_15_00, bikes: '{"3":1}',  ebikes: '{}', docks: '{}', disabled: '{}', pending: '{}' },
+		];
+		const set2: AvailV3Row[] = [
+			{ s2_cell: 'c10', dt: DT_15_00, bikes: '{"7":1,"12":1}', ebikes: '{}', docks: '{}', disabled: '{}', pending: '{}' },
+		];
+		const merged = sortRows(mergeRows([set1, set2]));
+		expect(merged).toHaveLength(2);
+		const c10 = merged.find((r) => r.s2_cell === 'c10')!;
+		const c11 = merged.find((r) => r.s2_cell === 'c11')!;
+		// c10: 2 contributors → summed
+		expect(c10.bikes).toBe('{"7":2,"12":1}');
+		// c11: 1 contributor → fast path returns input row verbatim
+		expect(c11).toBe(set1[1]);
+	});
+
 	test('re-bins dt when binMs is provided', () => {
 		const set: AvailV3Row[] = [
 			{ s2_cell: 'c10', dt: DT_15_00,              bikes: '{"7":1}', ebikes: '{}', docks: '{}', disabled: '{}', pending: '{}' },
