@@ -1,17 +1,38 @@
 import { describe, test, expect } from 'vitest';
 import { LADDERS, shardKey } from './cascade';
 
+const toMin = (d: string): number => {
+	const m = /^(\d+)(min|h|d)$/.exec(d)!;
+	const n = Number(m[1]);
+	const unit = m[2];
+	return unit === 'min' ? n : unit === 'h' ? n * 60 : n * 60 * 24;
+};
+
 describe('LADDERS', () => {
-	test('/1m ladder is divisibility-chained (each rung divides the next)', () => {
-		const ladder = LADDERS['1m']!;
-		const toMin = (d: string): number => {
-			const m = /^(\d+)(min|h|d)$/.exec(d)!;
-			const n = Number(m[1]);
-			const unit = m[2];
-			return unit === 'min' ? n : unit === 'h' ? n * 60 : n * 60 * 24;
-		};
-		for (let i = 1; i < ladder.length; i++) {
-			expect(toMin(ladder[i]!) % toMin(ladder[i - 1]!)).toBe(0);
+	test('has all 15 tiers', () => {
+		expect(Object.keys(LADDERS).sort()).toEqual([
+			'10m', '12h', '15m', '1d', '1h', '1m', '2h', '2m', '30m',
+			'3d', '3h', '3m', '5m', '6h', '7d',
+		]);
+	});
+
+	test('every tier is divisibility-chained (each rung divides the next)', () => {
+		for (const [tier, ladder] of Object.entries(LADDERS)) {
+			for (let i = 1; i < ladder.length; i++) {
+				const prev = toMin(ladder[i - 1]!);
+				const cur = toMin(ladder[i]!);
+				expect(cur % prev, `${tier}: ${ladder[i]} % ${ladder[i - 1]} != 0`).toBe(0);
+			}
+		}
+	});
+
+	test('every tier’s adjacent-rung ratio ≤ 5×', () => {
+		for (const [tier, ladder] of Object.entries(LADDERS)) {
+			for (let i = 1; i < ladder.length; i++) {
+				const ratio = toMin(ladder[i]!) / toMin(ladder[i - 1]!);
+				expect(ratio, `${tier}: ${ladder[i - 1]} → ${ladder[i]} = ${ratio}×`)
+					.toBeLessThanOrEqual(5);
+			}
 		}
 	});
 

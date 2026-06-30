@@ -86,11 +86,57 @@ function durationToMin(d: Duration): number {
 
 /** Per-tier shard-duration ladder, smallest → largest. Must match
  *  `gbfs/api/src/avail_geo.ts#TIERS` for the corresponding tier; the
- *  api worker reads what the cascade writes. */
+ *  api worker reads what the cascade writes.
+ *
+ *  Ladder design (see `configs/pyramids/avail.yaml` for the principles):
+ *  fixed-duration only, adjacent ratios ≤ 5×, largest ≈ N=1440 × bin.
+ *  Within-tier rungs must satisfy pyrmts's parser-enforced divisibility
+ *  (each rung divides the next). */
 export const LADDERS: Record<string, Duration[]> = {
-	'1m': ['5min', '10min', '30min', '1h', '3h', '12h', '1d'],
-	// v2: /2m..7d ladders. Sketched in `specs/avail-v3-steady-state.md`.
+	'1m':  ['5min', '10min', '30min', '1h', '3h', '12h', '1d'],
+	'2m':  ['10min', '30min', '1h', '3h', '12h', '1d', '2d'],
+	'3m':  ['15min', '30min', '1h', '3h', '12h', '1d', '3d'],
+	'5m':  ['15min', '30min', '1h', '3h', '12h', '1d', '5d'],
+	'10m': ['30min', '1h', '3h', '12h', '1d', '5d', '10d'],
+	'15m': ['1h', '3h', '12h', '1d', '5d', '15d'],
+	'30m': ['2h', '6h', '1d', '5d', '15d', '30d'],
+	'1h':  ['3h', '12h', '2d', '10d', '30d', '60d'],
+	'2h':  ['6h', '1d', '5d', '20d', '60d', '120d'],
+	'3h':  ['12h', '2d', '10d', '30d', '90d', '180d'],
+	'6h':  ['1d', '5d', '20d', '60d', '180d', '360d'],
+	'12h': ['2d', '10d', '30d', '90d', '360d', '720d'],
+	'1d':  ['3d', '15d', '30d', '90d', '360d', '1440d'],
+	'3d':  ['15d', '30d', '60d', '120d', '360d', '720d', '1440d', '4320d'],
+	'7d':  ['35d', '70d', '140d', '280d', '840d', '1680d', '3360d', '10080d'],
 };
+
+/** Tier-bin (in minutes), parsed once. Used to re-bin /1m source rows
+ *  when a non-/1m tier's smallest rung sources from /1m shards. */
+const TIER_BIN_MIN: Record<string, number> = Object.fromEntries(
+	Object.entries({
+		'1m': '1min', '2m': '2min', '3m': '3min', '5m': '5min',
+		'10m': '10min', '15m': '15min', '30m': '30min',
+		'1h': '1h', '2h': '2h', '3h': '3h', '6h': '6h', '12h': '12h',
+		'1d': '1d', '3d': '3d', '7d': '7d',
+	}).map(([k, v]) => [k, durationToMin(v as Duration)])
+);
+
+/** /1m's shard ladder in ascending minutes — used to pick a source rung
+ *  for non-/1m tiers' smallest rungs. */
+const ONE_M_RUNGS_MIN = LADDERS['1m']!.map((d) => durationToMin(d));
+
+/** Pick the largest /1m rung L such that L ≤ shardDurMin AND L divides
+ *  shardDurMin. Reads of `L`-sized shards span exactly `shardDurMin/L`
+ *  shards and tile the [periodStart, periodStart+shardDurMin) window. */
+function pickOneMSourceRung(shardDurMin: number): { sourceRungMin: number; sourceRungDur: Duration } {
+	for (let i = ONE_M_RUNGS_MIN.length - 1; i >= 0; i--) {
+		const r = ONE_M_RUNGS_MIN[i]!;
+		if (r <= shardDurMin && shardDurMin % r === 0) {
+			return { sourceRungMin: r, sourceRungDur: LADDERS['1m']![i]! };
+		}
+	}
+	throw new Error(`no /1m rung divides ${shardDurMin}min`);
+}
 
 // ─── Source readers ─────────────────────────────────────────────────────
 
@@ -163,21 +209,50 @@ async function writeShard(
 	if (await r2.head(key)) return { status: 'exists', key };
 
 	if (prevShardDur === null) {
-		// Smallest rung: read shardDurMin raw 1m@1m files, LUC-expand, build
-		// histograms.
-		const inputsExpected = shardDurMin;
-		let inputsPresent = 0;
-		const rows: AvailV3Row[] = [];
-		for (let i = 0; i < shardDurMin; i++) {
-			const t = new Date(periodStart.getTime() + i * 60_000);
-			const raw = await readRawMinute(r2, t);
-			if (raw === null) continue;
-			inputsPresent++;
-			rows.push(...transformMinuteRows(raw, luc));
+		if (tier === '1m') {
+			// /1m base case: read shardDurMin raw 1m@1m files, LUC-expand, build
+			// histograms. Only /1m is sourced from raw — coarser tiers source
+			// from /1m shards (already produced this tick).
+			const inputsExpected = shardDurMin;
+			let inputsPresent = 0;
+			const rows: AvailV3Row[] = [];
+			for (let i = 0; i < shardDurMin; i++) {
+				const t = new Date(periodStart.getTime() + i * 60_000);
+				const raw = await readRawMinute(r2, t);
+				if (raw === null) continue;
+				inputsPresent++;
+				rows.push(...transformMinuteRows(raw, luc));
+			}
+			if (rows.length === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
+			const bytes = await writeParquet(r2, key, rows);
+			return { status: 'wrote', key, bytes, rows: rows.length, inputsPresent, inputsExpected };
 		}
-		if (rows.length === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
-		const bytes = await writeParquet(r2, key, rows);
-		return { status: 'wrote', key, bytes, rows: rows.length, inputsPresent, inputsExpected };
+		// Non-/1m tier, smallest rung: source from /1m shards.
+		// Pick the largest /1m rung L that divides shardDurMin and read
+		// shardDurMin/L of them, re-binning from 1-min to tier_bin.
+		const { sourceRungMin, sourceRungDur } = pickOneMSourceRung(shardDurMin);
+		const inputsExpected = shardDurMin / sourceRungMin;
+		const tierBinMin = TIER_BIN_MIN[tier]!;
+		const inputRowSets: AvailV3Row[][] = [];
+		let inputsPresent = 0;
+		for (let i = 0; i < inputsExpected; i++) {
+			const sourceStart = new Date(periodStart.getTime() + i * sourceRungMin * 60_000);
+			const sourceKey = shardKey('1m', sourceRungDur, sourceStart);
+			const rows = await readShard(r2, sourceKey);
+			if (rows === null) continue;
+			inputsPresent++;
+			inputRowSets.push(rows);
+		}
+		if (inputsPresent === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
+		// Re-bin /1m rows (dt at 1-min granularity) to this tier's bin.
+		// `mergeRows` accepts a binMs param that floors dt before grouping
+		// (existing /p3h path uses it). Same monoid combine, just on a
+		// coarser dt-bucket.
+		const binMs = BigInt(tierBinMin * 60_000);
+		const merged = mergeRows(inputRowSets, binMs);
+		if (merged.length === 0) return { status: 'empty', key, inputsPresent, inputsExpected };
+		const bytes = await writeParquet(r2, key, merged);
+		return { status: 'wrote', key, bytes, rows: merged.length, inputsPresent, inputsExpected };
 	}
 
 	// Coarser rung: read N× smaller-rung shards from this tier, merge.

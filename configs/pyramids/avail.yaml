@@ -47,31 +47,43 @@ metrics:
   - { name: pending,  monoid: histogram }
 
 # Tiers in canonical (finest → coarsest) order.
-# Note: pyrmts duration format uses `min` (not `m`) for minutes — `m` is
-# reserved for months. Tier `name` keeps the short `m` (e.g. `1m`, `2m`)
-# for readability; `bin`/`shards` use canonical `min`/`h`/`d`/`mo`/`y`.
+#
+# Ladder design principles:
+# - All fixed-duration (no calendar `mo`/`y` units, even at the
+#   largest rung). Sidesteps month-length variance, keeps every rung's
+#   duration a clean multiple of the tier's bin.
+# - Largest rung ≈ N × bin where N=1440 — same N every tier (matches
+#   the row-count target inherited from the prior canonical layout).
+# - Adjacent rungs within a tier have ratio ≤ 5×. Smaller jumps so
+#   the cron writer can keep coarser rungs fresh without large
+#   compaction cliffs.
+# - Smallest rung K = bins-per-shard at the finest rung: 2-5 depending
+#   on tier (smaller K acceptable when it keeps the ladder cleaner;
+#   per-tier-bin K-=5 doesn't fit past /15m without ugly anchors).
+# - Within-tier rungs DON'T need divisibility (a /10m@5d can be built
+#   from 2 × /10m@2d + half a third). The compactor sub-selects bins
+#   when N+1's duration isn't an exact multiple of N's.
+#
+# Note: pyrmts duration format uses `min` (not `m`) for minutes — `m`
+# is reserved for months. Tier `name` keeps the short `m` (e.g. `1m`,
+# `2m`) for readability; `bin`/`shards` use canonical
+# `min`/`h`/`d`/`y`.
 tiers:
-  # epoch-anchored (finest rung at sub-hour, largest rung = N×bin where N≈1440)
   - { name: 1m,  bin: 1min,  shards: [5min, 10min, 30min, 1h, 3h, 12h, 1d] }
   - { name: 2m,  bin: 2min,  shards: [10min, 30min, 1h, 3h, 12h, 1d, 2d] }
-  - { name: 3m,  bin: 3min,  shards: [30min, 1h, 3h, 12h, 1d, 3d] }
-  - { name: 5m,  bin: 5min,  shards: [30min, 1h, 3h, 12h, 1d, 5d] }
-  - { name: 10m, bin: 10min, shards: [30min, 1h, 3h, 12h, 1d, 10d] }
-  - { name: 15m, bin: 15min, shards: [30min, 1h, 3h, 12h, 1d, 15d] }
-  # calendar-anchored largest rung (single-unit only until pyrmts-py adds
-  # multi-unit calendar shards — currently 2mo/4mo/6mo/2y raise in
-  # floor_to_span). Intermediate rungs stay fixed-duration.
-  - { name: 30m, bin: 30min, shards: [30min, 1h, 3h, 12h, 1d, 1mo] }
-  - { name: 1h,  bin: 1h,    shards: [1h, 3h, 12h, 1d, 1mo] }
-  - { name: 2h,  bin: 2h,    shards: [12h, 1d, 1mo] }
-  - { name: 3h,  bin: 3h,    shards: [3h, 12h, 1d, 1mo] }
-  - { name: 6h,  bin: 6h,    shards: [12h, 1d, 1y] }
-  - { name: 12h, bin: 12h,   shards: [12h, 1d, 1y] }
-  - { name: 1d,  bin: 1d,    shards: [1d, 1y] }
-  # /3d, /7d: largest rung was 'all' (single file for all history); new
-  # model expresses the same intent as 120y (per pyrmts spec).
-  - { name: 3d,  bin: 3d,    shards: [3d, 120y] }
-  - { name: 7d,  bin: 7d,    shards: [7d, 120y] }
+  - { name: 3m,  bin: 3min,  shards: [15min, 30min, 1h, 3h, 12h, 1d, 3d] }
+  - { name: 5m,  bin: 5min,  shards: [15min, 30min, 1h, 3h, 12h, 1d, 5d] }
+  - { name: 10m, bin: 10min, shards: [30min, 1h, 3h, 12h, 1d, 5d, 10d] }
+  - { name: 15m, bin: 15min, shards: [1h, 3h, 12h, 1d, 5d, 15d] }
+  - { name: 30m, bin: 30min, shards: [2h, 6h, 1d, 5d, 15d, 30d] }
+  - { name: 1h,  bin: 1h,    shards: [3h, 12h, 2d, 10d, 30d, 60d] }
+  - { name: 2h,  bin: 2h,    shards: [6h, 1d, 5d, 20d, 60d, 120d] }
+  - { name: 3h,  bin: 3h,    shards: [12h, 2d, 10d, 30d, 90d, 180d] }
+  - { name: 6h,  bin: 6h,    shards: [1d, 5d, 20d, 60d, 180d, 360d] }
+  - { name: 12h, bin: 12h,   shards: [2d, 10d, 30d, 90d, 360d, 720d] }
+  - { name: 1d,  bin: 1d,    shards: [3d, 15d, 30d, 90d, 360d, 1440d] }
+  - { name: 3d,  bin: 3d,    shards: [15d, 30d, 60d, 120d, 360d, 720d, 1440d, 4320d] }
+  - { name: 7d,  bin: 7d,    shards: [35d, 70d, 140d, 280d, 840d, 1680d, 3360d, 10080d] }
 
 geo:
   cellCol: s2_cell
