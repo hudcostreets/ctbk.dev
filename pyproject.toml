@@ -26,8 +26,8 @@ dependencies = [
     "polars>=1.41.0",
     # Pinned for byte-reproducible parquet output
     "pyarrow==22.0.0",
-    "pyrmts @ git+https://github.com/runsascoded/pyrmts.git@38175b1#subdirectory=python/pyrmts",
-    "pyrmts_geo @ git+https://github.com/runsascoded/pyrmts.git@38175b1#subdirectory=python/pyrmts_geo",
+    "pyrmts @ git+https://github.com/runsascoded/pyrmts.git@6b1779f#subdirectory=python/pyrmts",
+    "pyrmts_geo @ git+https://github.com/runsascoded/pyrmts.git@6b1779f#subdirectory=python/pyrmts_geo",
     "python-dateutil>=2.9.0.post0",
     "s2cell>=1.8.0",
     "s3fs>=2025.5.1",

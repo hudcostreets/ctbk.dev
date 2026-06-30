@@ -1,72 +1,23 @@
 """fsck: discover + report (and eventually fill) missing pyramid shards.
 
-Phase A (this commit): discovery only. Enumerates expected (tier,
-shard_dur, period) tuples from the YAML ladder + lists existing R2
-keys + reports the gap.
+Phase A: discovery only. Enumerates expected (tier, shard_dur,
+period) tuples via pyrmts's `list_expected_shards` + lists existing
+R2 keys + reports the gap.
 
-Phase B (when pyrmts ships `list_missing_shards`): swap our local
-`list_expected_shards` for pyrmts's primitive + add the per-gap
-materialization loop. The discovery API in this module mirrors the
-spec'd pyrmts shape (`ExpectedShard` dataclass with the same fields)
-so the swap is a one-line import change.
+Phase B (TODO): per-gap materialization loop. Reads source, builds
+the shard, writes parquet + records in ShardIndex. Materialization
+mirrors `gbfs/cascade/src/avail3/cascade.ts`'s `writeShard` but in
+Python.
 
 See `specs/avail-v3-fsck-backfill.md`.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Iterable
 
-from pyrmts import Pyramid
-from pyrmts.axis import shard_periods_covering
-from pyrmts.keys import substitute_key
+from pyrmts import ExpectedShard, Pyramid, list_expected_shards
 from utz import err
-
-
-@dataclass(frozen=True)
-class ExpectedShard:
-    """One shard the pyramid's ladder declares for a time range. Mirrors
-    the spec'd pyrmts API (`~/c/pyrmts/specs/gap-discovery.md`) — swap
-    `pyrmts.list_missing_shards` in for our local `list_expected_shards`
-    + `diff_with_existing` once it lands."""
-    tier: str
-    shard_dur: str
-    period_start: datetime
-    period_end: datetime          # exclusive
-    key: str
-
-    def __repr__(self) -> str:
-        return f"ExpectedShard(/{self.tier}@{self.shard_dur} {self.period_start.date()})"
-
-
-def list_expected_shards(
-    pyramid: Pyramid,
-    time_range: tuple[datetime, datetime],
-    filter: dict | None = None,
-) -> list[ExpectedShard]:
-    """Enumerate every shard the pyramid's ladders declare for `range`.
-
-    Pure function over the YAML — no storage access. Replace with
-    `pyrmts.list_expected_shards` when that ships; same return shape."""
-    from_, to = time_range
-    filter = filter or {}
-    out: list[ExpectedShard] = []
-    for tier in pyramid.tiers:
-        for shard_dur in tier.shards:
-            for period in shard_periods_covering(from_, to, shard_dur):
-                key = substitute_key(
-                    pyramid.keyTemplate,
-                    {**filter, 'tier': tier.name, 'shard': shard_dur, 'period': period.label},
-                )
-                out.append(ExpectedShard(
-                    tier=tier.name,
-                    shard_dur=shard_dur,
-                    period_start=period.start,
-                    period_end=period.end,
-                    key=key,
-                ))
-    return out
 
 
 def list_existing_keys(
@@ -97,10 +48,9 @@ def diff_with_existing(
 ) -> list[ExpectedShard]:
     """Filter `expected` down to entries whose `key` isn't in `existing_keys`.
 
-    Storage-driven (not index-driven). pyrmts's spec'd
-    `list_missing_shards` is index-driven; we use storage here because
-    Python pyrmts doesn't have a ShardIndex implementation yet
-    (per `~/c/pyrmts/specs/python-unified-ladder.md` scope deferral).
+    Storage-driven (not index-driven). pyrmts's JS `list_missing_shards`
+    is index-driven (diffs against `ShardIndex`); pyrmts Python doesn't
+    have a `ShardIndex` port (per `specs/done/python-unified-ladder.md`).
     The two diverge only when a shard is on R2 but missing from D1 —
     storage-driven counts that as "present"; index-driven counts it
     as "missing." For backfill purposes the storage-driven view is the
