@@ -99,7 +99,7 @@ def _resolve_stream_source(name: str) -> tuple:
 @ctbk.command('pyramid-cascade', help="Build a cascading pyramid: read base-tier source, emit all derived tiers.")
 @option('-c', '--config', 'config_path', required=True, help='Path to pyramid YAML config.')
 @option('-E', '--engine', 'engine_name', type=click.Choice(['block', 'streaming']), default='block', show_default=True, help='Cascade engine. `block` = ProcessPool over time-aligned blocks (vectorized Polars per block). `streaming` = single-process source iterator + per-(tier,period) dict accumulators (matches the prior `cascade-from-1m` design).')
-@option('-i', '--ingester', required=True, help='Built-in ingester / source name (e.g. `avail`).')
+@option('-i', '--ingester', default=None, help='Built-in ingester / source name (e.g. `avail`). Required unless --fsck.')
 @option('-j', '--workers', type=int, default=1, show_default=True, help='ProcessPool worker count. Ignored for `--engine streaming` (single-process by design).')
 @option('-n', '--dry-run', is_flag=True, help='Print plan (blocks, tiers, periods) and exit.')
 @option('-P', '--partial-cover', 'partial_cover', type=click.Choice(['error', 'overwrite', 'merge']), default='error', show_default=True, help='Behavior when a shard\'s period extends outside --range. `error` (default): refuse, list affected shards. `overwrite`: write the partial as-is (data outside --range is LOST). `merge`: fetch the existing R2 shard and merge with this run\'s partials via histogram-sum.')
@@ -107,10 +107,11 @@ def _resolve_stream_source(name: str) -> tuple:
 @option('-r', '--range', 'range_', required=True, help='UTC range `YYYY-MM-DD/YYYY-MM-DD` (half-open).')
 @option('-s', '--staging', 'staging_uri', default=None, help='Staging URI for partial shards (default: `file:///tmp/pyramid-cascade-<pid>/`). Block engine only.')
 @option('-t', '--task-size', 'task_size', default='1d', show_default=True, help='Block duration (pyrmts Duration, e.g. `1d`, `1mo`). Block engine only.')
+@option('-f', '--fsck', is_flag=True, help='Discover + report missing (tier, shard_dur, period) gaps vs the YAML ladder. Currently report-only (Phase A); materialization lands when pyrmts `list_missing_shards` ships.')
 def pyramid_cascade_cmd(
     config_path: str,
     engine_name: str,
-    ingester: str,
+    ingester: str | None,
     workers: int,
     dry_run: bool,
     partial_cover: str,
@@ -118,7 +119,10 @@ def pyramid_cascade_cmd(
     range_: str,
     staging_uri: str | None,
     task_size: str,
+    fsck: bool,
 ):
+    if not fsck and not ingester:
+        raise BadParameter("--ingester is required unless --fsck is set")
     config_yaml = Path(config_path).read_text()
     if prefix is not None:
         config_yaml = _override_key_prefix(config_yaml, prefix)
@@ -127,6 +131,17 @@ def pyramid_cascade_cmd(
     pyramid = pyramid_from_config(cfg, storage)
 
     range_tuple = _parse_range(range_)
+
+    if fsck:
+        # Discovery-only path. Skips the engine + writes nothing.
+        from .fsck import discover_gaps, report_gaps
+        err(f"pyramid-cascade --fsck")
+        err(f"  config:    {config_path}")
+        err(f"  range:     {range_tuple[0].isoformat()} → {range_tuple[1].isoformat()}")
+        err(f"  tiers:     {len(pyramid.tiers)}: {[t.name for t in pyramid.tiers]}")
+        missing = discover_gaps(pyramid, range_tuple)
+        report_gaps(missing)
+        return
 
     err(f"pyramid-cascade")
     err(f"  config:    {config_path}")
