@@ -30,13 +30,11 @@ their pre-unified-ladder framing was actively misleading post-cutover.
 ## Pre-flight (verify)
 
 ```bash
-# Should be at c387d60e or later. (push was cfe2943e..c387d60e.)
+# Should be at c387d60e or later. (Spec-cleanup commits 051f054f, 3150e9c3
+# land on top in the macbook push.)
 grhh                                # align WT to pushed HEAD
-git log --oneline -3
-# expect:
-#   c387d60e cutover: simplify d1-update to clean DELETE; fsck emits for 'exists' too
-#   12c1b3dc pyramid-cascade --fsck --fill: per-gap materialization (Phase B)
-#   9774ef13 pyrmts bump → gap-discovery (...)
+git merge-base --is-ancestor c387d60e HEAD || echo 'OUT OF DATE - pull from macbook'
+git log --oneline -3                # most-recent commits, exact set may evolve
 
 uv sync                             # refresh pyrmts dep + ctbk install
 
