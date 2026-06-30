@@ -4,6 +4,29 @@ What `e` does as part of the avail-v3 unified-shard-ladder cutover.
 Laptop already ran steps 1-5 (D1 ALTER, cascade + api deploy, D1
 canonical-row DELETE, push). This spec covers what `e` does next.
 
+## Where this fits
+
+The avail-v3 cutover migrates the pyramid from the prior
+canonical/partial-shards dichotomy to pyrmts's unified-shard-ladder
+model (per-tier `shards: [...]` ladder, fixed-duration rungs only,
+N=1440 bins per largest shard). Full plan:
+
+- `specs/avail-v3-ladder-migration.md` — **umbrella** (why this
+  cutover, phase index, dependency graph). Skim for context.
+- `specs/avail-v3-fsck-backfill.md` — **fsck design** (companion to
+  this runbook; describes the per-shard materializer dispatched by
+  `(tier, shard_dur)` case).
+- `specs/avail-v3-storage-rename.md` — **R2 / D1 rename runbook**.
+  Most steps already executed by laptop (R2 COPY, D1 ALTER, deploys,
+  canonical-row DELETE). Still useful for the final R2 DELETE legacy
+  cleanup recipe (`scripts/avail-v3-rename.py r2-delete`) the laptop
+  runs post-handoff.
+
+Three earlier specs (`avail-v3-1m-backfill.md`,
+`avail-v3-intermediate-backfill.md`, `avail-v3-steady-state.md`) were
+removed in commit `<this commit>` — fsck subsumes all three, and
+their pre-unified-ladder framing was actively misleading post-cutover.
+
 ## Pre-flight (verify)
 
 ```bash
@@ -113,8 +136,10 @@ check; R2 DELETE legacy via `scripts/avail-v3-rename.py r2-delete`).
 
 ## Cross-reference
 
-- `specs/avail-v3-fsck-backfill.md` — the design behind fsck.
-- `specs/avail-v3-storage-rename.md` — the broader cutover doc.
+See "Where this fits" at the top. Code pointers:
+
 - `gbfs/cascade/src/avail3/cascade.ts` — the steady-state CFW writer
   whose mechanics fsck mirrors.
 - `ctbk/pyramid_cascade/materialize.py` — the per-shard fill driver.
+- `ctbk/pyramid_cascade/fsck.py` — gap discovery + fill orchestration
+  (the `--fsck --fill` CLI path).
