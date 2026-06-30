@@ -33,14 +33,14 @@ def pyramid() -> Pyramid:
     """
     return Pyramid(
         storage=MemStorage(),
-        keyTemplate='avail-test/{tier}/{period}.parquet',
+        keyTemplate='avail-test/{tier}/{shard}/{period}.parquet',
         binCol='dt',
         dims=[Dim(name='s2_cell', type='string')],
         metrics=[Metric(name='bikes', monoid='histogram')],
         tiers=[
-            Tier(name='1m', bin='1min', shard='1d'),
-            Tier(name='2m', bin='2min', shard='1d'),
-            Tier(name='5m', bin='5min', shard='1d'),
+            Tier(name='1m', bin='1min', shards=('1d',)),
+            Tier(name='2m', bin='2min', shards=('1d',)),
+            Tier(name='5m', bin='5min', shards=('1d',)),
         ],
     )
 
@@ -139,7 +139,7 @@ def test_cascade_block_multi_metric_and_calendar_tier():
     """
     pyramid = Pyramid(
         storage=MemStorage(),
-        keyTemplate='avail-test/{tier}/{period}.parquet',
+        keyTemplate='avail-test/{tier}/{shard}/{period}.parquet',
         binCol='dt',
         dims=[Dim(name='s2_cell', type='string')],
         metrics=[
@@ -147,8 +147,8 @@ def test_cascade_block_multi_metric_and_calendar_tier():
             Metric(name='ebikes', monoid='histogram'),
         ],
         tiers=[
-            Tier(name='1m', bin='1min', shard='1d'),
-            Tier(name='1h', bin='1h',   shard='1mo'),
+            Tier(name='1m', bin='1min', shards=('1d',)),
+            Tier(name='1h', bin='1h',   shards=('1mo',)),
         ],
     )
 

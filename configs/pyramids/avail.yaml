@@ -4,39 +4,28 @@
 # observations materialize at L10..LUC. Histogram monoid on bike/dock state
 # counts per (cell, dt, metric).
 #
-# Shard sizing: target N≈1440 bins per shard. Sub-day tiers are
-# epoch-anchored at N×bin durations. Multi-day tiers are calendar-anchored.
-# Capped at /7d (no /1mo+ yet — data is only ~2 months old).
+# Per-tier shard-duration ladder (unified — see
+# ~/c/pyrmts/specs/unified-shard-ladder.md). `shards` is ordered
+# smallest → largest, divisibility-chained. The largest rung is what the
+# old config called the canonical shard; smaller rungs are the
+# intermediate sizes the CFW writes on a /5m cron + the planner reads when
+# present.
+#
+# What writes which rungs:
+#   - CFW (`gbfs/cascade/src/avail3/cascade.ts`) writes /1m at all rungs
+#     every /5m tick. Coarser tiers (/2m..7d) are CFW-v2; for now the
+#     CFW only materializes /1m.
+#   - Python pyramid-cascade (`ctbk/pyramid_cascade/`) writes the LARGEST
+#     rung per tier (= old canonical). Intermediate rungs for /2m..7d
+#     come from P7 historical backfill (see
+#     specs/avail-v3-intermediate-backfill.md).
+#   - api worker (`gbfs/api/src/avail_geo.ts`) reads largest-first via
+#     pyrmts's cursor-aware walk; missing intermediate rungs fall back
+#     to the larger rung transparently.
 storage:
   type: s3
   bucket: ctbk
-  key: "avail-v3/{tier}/{period}.parquet"
-  # Partial sub-shard keys. The `p` prefix disambiguates from tier names
-  # (e.g. `p1h` won't collide with the `1h` tier). See pyrmts
-  # specs/done/partial-shards.md.
-  partialKey: "avail-v3/{tier}/p{shard}/{period}.parquet"
-
-# Sub-shard cadence ladder. Per (tier, cadence) where
-# `cadence % tier.bin == 0` AND `cadence < tier.canonical_shard`, a partial
-# shard is materialized by the cascading /5m CFW (ctbk task #130) — closes
-# the freshness gap between the last canonical-shard rebuild and now.
-# Cadences MUST be fixed-duration (calendar-variable units `mo`/`y` only
-# apply to canonical shards). Each cadence divides all coarser cadences in
-# the ladder ("divisibility chain"), so the /5m cron can short-circuit when
-# `now` isn't aligned with a coarser boundary.
-partials:
-  - 5min
-  - 10min
-  - 30min
-  - 1h
-  - 3h
-  - 12h
-  - 1d
-  - 3d
-  # 7d intentionally omitted: 7d is not a multiple of 3d, breaking
-  # pyrmts's divisibility-chain requirement on the cadence ladder
-  # (`validatePartials`). The /7d tier gets canonical-only coverage
-  # (its `shard: all` is the only-shard anyway).
+  key: "avail-v3/{tier}/{shard}/{period}.parquet"
 
 # Per-tier row-group size. Default 2k rows: keeps single-cell scans tight
 # (~1 RG-hit per shard, ~30 KB data scan) while footer overhead stays
@@ -59,27 +48,30 @@ metrics:
 
 # Tiers in canonical (finest → coarsest) order.
 # Note: pyrmts duration format uses `min` (not `m`) for minutes — `m` is
-# reserved for months prefix. Tier `name` keeps the short `m` (e.g. `1m`,
-# `2m`) for readability; `bin`/`shard` use the canonical `min`/`mo`/`h`/`d`/`y`.
+# reserved for months. Tier `name` keeps the short `m` (e.g. `1m`, `2m`)
+# for readability; `bin`/`shards` use canonical `min`/`h`/`d`/`mo`/`y`.
 tiers:
-  # epoch-anchored (N=1440)
-  - { name: 1m,  bin: 1min,  shard: 1d  }
-  - { name: 2m,  bin: 2min,  shard: 2d  }
-  - { name: 3m,  bin: 3min,  shard: 3d  }
-  - { name: 5m,  bin: 5min,  shard: 5d  }
-  - { name: 10m, bin: 10min, shard: 10d }
-  - { name: 15m, bin: 15min, shard: 15d }
-  # calendar-anchored (single-unit only until pyrmts-py adds multi-unit
-  # calendar shards — currently 2mo/4mo/6mo/2y raise in floor_to_span).
-  - { name: 30m, bin: 30min, shard: 1mo }
-  - { name: 1h,  bin: 1h,    shard: 1mo }
-  - { name: 2h,  bin: 2h,    shard: 1mo }
-  - { name: 3h,  bin: 3h,    shard: 1mo }
-  - { name: 6h,  bin: 6h,    shard: 1y  }
-  - { name: 12h, bin: 12h,   shard: 1y  }
-  - { name: 1d,  bin: 1d,    shard: 1y  }
-  - { name: 3d,  bin: 3d,    shard: all }
-  - { name: 7d,  bin: 7d,    shard: all }
+  # epoch-anchored (finest rung at sub-hour, largest rung = N×bin where N≈1440)
+  - { name: 1m,  bin: 1min,  shards: [5min, 10min, 30min, 1h, 3h, 12h, 1d] }
+  - { name: 2m,  bin: 2min,  shards: [10min, 30min, 1h, 3h, 12h, 1d, 2d] }
+  - { name: 3m,  bin: 3min,  shards: [30min, 1h, 3h, 12h, 1d, 3d] }
+  - { name: 5m,  bin: 5min,  shards: [30min, 1h, 3h, 12h, 1d, 5d] }
+  - { name: 10m, bin: 10min, shards: [30min, 1h, 3h, 12h, 1d, 10d] }
+  - { name: 15m, bin: 15min, shards: [30min, 1h, 3h, 12h, 1d, 15d] }
+  # calendar-anchored largest rung (single-unit only until pyrmts-py adds
+  # multi-unit calendar shards — currently 2mo/4mo/6mo/2y raise in
+  # floor_to_span). Intermediate rungs stay fixed-duration.
+  - { name: 30m, bin: 30min, shards: [30min, 1h, 3h, 12h, 1d, 1mo] }
+  - { name: 1h,  bin: 1h,    shards: [1h, 3h, 12h, 1d, 1mo] }
+  - { name: 2h,  bin: 2h,    shards: [12h, 1d, 1mo] }
+  - { name: 3h,  bin: 3h,    shards: [3h, 12h, 1d, 1mo] }
+  - { name: 6h,  bin: 6h,    shards: [12h, 1d, 1y] }
+  - { name: 12h, bin: 12h,   shards: [12h, 1d, 1y] }
+  - { name: 1d,  bin: 1d,    shards: [1d, 1y] }
+  # /3d, /7d: largest rung was 'all' (single file for all history); new
+  # model expresses the same intent as 120y (per pyrmts spec).
+  - { name: 3d,  bin: 3d,    shards: [3d, 120y] }
+  - { name: 7d,  bin: 7d,    shards: [7d, 120y] }
 
 geo:
   cellCol: s2_cell

@@ -79,17 +79,17 @@ export const VARIANTS = ['v1', 'v2', 'v3'] as const;
 export type Variant = typeof VARIANTS[number];
 
 const V2_TIERS: Tier[] = [
-	{ name: '1h',  bin: '1h',  shard: '1mo' },
-	{ name: '3h',  bin: '3h',  shard: '3mo' },
-	{ name: '6h',  bin: '6h',  shard: '6mo' },
-	{ name: '12h', bin: '12h', shard: '1y'  },
-	{ name: '1d',  bin: '1d',  shard: 'all' },
-	{ name: '3d',  bin: '3d',  shard: 'all' },
-	{ name: '7d',  bin: '7d',  shard: 'all' },
-	{ name: '14d', bin: '14d', shard: 'all' },
-	{ name: '1mo', bin: '1mo', shard: 'all' },
-	{ name: '3mo', bin: '3mo', shard: 'all' },
-	{ name: '1y',  bin: '1y',  shard: 'all' },
+	{ name: '1h',  bin: '1h',  shards: ['1mo'] },
+	{ name: '3h',  bin: '3h',  shards: ['3mo'] },
+	{ name: '6h',  bin: '6h',  shards: ['6mo'] },
+	{ name: '12h', bin: '12h', shards: ['1y']  },
+	{ name: '1d',  bin: '1d',  shards: ['120y'] },
+	{ name: '3d',  bin: '3d',  shards: ['120y'] },
+	{ name: '7d',  bin: '7d',  shards: ['120y'] },
+	{ name: '14d', bin: '14d', shards: ['120y'] },
+	{ name: '1mo', bin: '1mo', shards: ['120y'] },
+	{ name: '3mo', bin: '3mo', shards: ['120y'] },
+	{ name: '1y',  bin: '1y',  shards: ['120y'] },
 ];
 
 /** v1: every tier 1h-12h on 1mo shards, every 1d-3mo tier on 1y, 1y on `all`.
@@ -99,17 +99,17 @@ const V2_TIERS: Tier[] = [
  *  `specs/done/rides-pyramid-v3.md`. */
 const TIERS_BY_VARIANT: Record<Variant, Tier[]> = {
 	v1: [
-		{ name: '1h',  bin: '1h',  shard: '1mo' },
-		{ name: '3h',  bin: '3h',  shard: '1mo' },
-		{ name: '6h',  bin: '6h',  shard: '1mo' },
-		{ name: '12h', bin: '12h', shard: '1mo' },
-		{ name: '1d',  bin: '1d',  shard: '1y'  },
-		{ name: '3d',  bin: '3d',  shard: '1y'  },
-		{ name: '7d',  bin: '7d',  shard: '1y'  },
-		{ name: '14d', bin: '14d', shard: '1y'  },
-		{ name: '1mo', bin: '1mo', shard: '1y'  },
-		{ name: '3mo', bin: '3mo', shard: '1y'  },
-		{ name: '1y',  bin: '1y',  shard: 'all' },
+		{ name: '1h',  bin: '1h',  shards: ['1mo'] },
+		{ name: '3h',  bin: '3h',  shards: ['1mo'] },
+		{ name: '6h',  bin: '6h',  shards: ['1mo'] },
+		{ name: '12h', bin: '12h', shards: ['1mo'] },
+		{ name: '1d',  bin: '1d',  shards: ['1y']  },
+		{ name: '3d',  bin: '3d',  shards: ['1y']  },
+		{ name: '7d',  bin: '7d',  shards: ['1y']  },
+		{ name: '14d', bin: '14d', shards: ['1y']  },
+		{ name: '1mo', bin: '1mo', shards: ['1y']  },
+		{ name: '3mo', bin: '3mo', shards: ['1y']  },
+		{ name: '1y',  bin: '1y',  shards: ['120y'] },
 	],
 	v2: V2_TIERS,
 	v3: V2_TIERS,

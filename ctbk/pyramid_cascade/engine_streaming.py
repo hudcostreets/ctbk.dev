@@ -99,12 +99,15 @@ def cascade_streaming(
     for t in derived:
         bin_span = parse_duration(t.bin)
         is_calendar = bin_span.unit in ('mo', 'y')
+        # Largest rung = old canonical shard; streaming engine writes only this.
+        # Intermediate ladder rungs come from CFW (new data) or P7 backfill.
+        largest_shard = t.shards[-1]
         if is_calendar:
             tier_info[t.name] = {
                 'tier': t,
                 'is_calendar': True,
                 'bin_span': bin_span,
-                'shard': t.shard,
+                'shard': largest_shard,
             }
         else:
             unit_ms = {'min': 60_000, 'h': 3_600_000, 'd': 86_400_000}[bin_span.unit]
@@ -112,7 +115,7 @@ def cascade_streaming(
                 'tier': t,
                 'is_calendar': False,
                 'bin_ms': bin_span.count * unit_ms,
-                'shard': t.shard,
+                'shard': largest_shard,
             }
 
     # accum[(tier_name, period_label)] = {(cell, dt_out_ms, metric): {state: count}}
@@ -136,7 +139,7 @@ def cascade_streaming(
         blob = buf.getvalue()
         key = substitute_key(
             pyramid.keyTemplate,
-            {'tier': tier_name, 'period': period_label},
+            {'tier': tier_name, 'shard': tier_info[tier_name]['shard'], 'period': period_label},
         )
         pyramid.storage.put(key, blob)
         result.finals += 1
@@ -180,19 +183,18 @@ def cascade_streaming(
 
         for t in derived:
             info = tier_info[t.name]
-            # Output period for this source shard.
+            # Output period for this source shard. (Old `shard == 'all'`
+            # sentinel has been replaced by an explicit `120y` Duration per
+            # pyrmts unified-shard-ladder spec.)
             shard_str = info['shard']
-            if shard_str == 'all':
-                period_label = 'all'
-            else:
-                periods = list(shard_periods_covering(
-                    shard_dt_obj,
-                    shard_dt_obj + timedelta(milliseconds=1),
-                    shard_str,
-                ))
-                if not periods:
-                    continue
-                period_label = periods[0].label
+            periods = list(shard_periods_covering(
+                shard_dt_obj,
+                shard_dt_obj + timedelta(milliseconds=1),
+                shard_str,
+            ))
+            if not periods:
+                continue
+            period_label = periods[0].label
 
             # Flush on rollover.
             prev = open_period.get(t.name)

@@ -72,14 +72,14 @@ def _pyramid() -> Pyramid:
     1h@1mo (partial → needs reduce across both day-blocks)."""
     return Pyramid(
         storage=MemStorage(),
-        keyTemplate='avail-test/{tier}/{period}.parquet',
+        keyTemplate='avail-test/{tier}/{shard}/{period}.parquet',
         binCol='dt',
         dims=[Dim(name='s2_cell', type='string')],
         metrics=[Metric(name='bikes', monoid='histogram')],
         tiers=[
-            Tier(name='1m', bin='1min', shard='1d'),
-            Tier(name='2m', bin='2min', shard='1d'),
-            Tier(name='1h', bin='1h',   shard='1mo'),
+            Tier(name='1m', bin='1min', shards=('1d',)),
+            Tier(name='2m', bin='2min', shards=('1d',)),
+            Tier(name='1h', bin='1h',   shards=('1mo',)),
         ],
     )
 
@@ -145,7 +145,7 @@ def test_orchestrator_two_blocks_with_reduce():
         f"expected 1 reduced final (merged 1h@2026-06), got {result.finals_via_reduce}"
 
     # Verify the reduced 1h shard contains BOTH days' contributions.
-    blob = pyramid.storage.get('avail-test/1h/2026-06.parquet')
+    blob = pyramid.storage.get('avail-test/1h/1mo/2026-06.parquet')
     assert blob is not None
     df = pl.from_arrow(pq.read_table(io.BytesIO(blob)))
     # 2 days × 24 hours = 48 hourly bins for cellA.
@@ -237,7 +237,7 @@ def test_orchestrator_partial_cover_merge_extends_existing_shard():
         partial_cover='overwrite',
     )
 
-    initial_blob = pyramid.storage.get('avail-test/1h/2026-06.parquet')
+    initial_blob = pyramid.storage.get('avail-test/1h/1mo/2026-06.parquet')
     assert initial_blob is not None
     initial_df = pl.from_arrow(pq.read_table(io.BytesIO(initial_blob)))
     assert initial_df.height == 48, f"initial /1h should hold 48 bins, got {initial_df.height}"
@@ -255,7 +255,7 @@ def test_orchestrator_partial_cover_merge_extends_existing_shard():
         partial_cover='merge',
     )
 
-    merged_blob = pyramid.storage.get('avail-test/1h/2026-06.parquet')
+    merged_blob = pyramid.storage.get('avail-test/1h/1mo/2026-06.parquet')
     assert merged_blob is not None
     merged_df = pl.from_arrow(pq.read_table(io.BytesIO(merged_blob)))
     # 4 days × 24 hourly bins = 96. If merge didn't fire, this would be 48

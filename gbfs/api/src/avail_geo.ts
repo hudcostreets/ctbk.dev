@@ -72,40 +72,34 @@ const DEFAULT_REDUCER: Reducer = 'mean';
  *  only for windows after cascade-start; coarser tiers' canonical
  *  coverage is preserved for older windows. */
 const TIERS: Tier[] = [
-	{ name: '1m',  bin: '1min',  shard: '1d'  },
-	{ name: '2m',  bin: '2min',  shard: '2d'  },
-	{ name: '3m',  bin: '3min',  shard: '3d'  },
-	{ name: '5m',  bin: '5min',  shard: '5d'  },
-	{ name: '10m', bin: '10min', shard: '10d' },
-	{ name: '15m', bin: '15min', shard: '15d' },
-	{ name: '30m', bin: '30min', shard: '1mo' },
-	{ name: '1h',  bin: '1h',    shard: '1mo' },
-	{ name: '2h',  bin: '2h',    shard: '1mo' },
-	{ name: '3h',  bin: '3h',    shard: '1mo' },
-	{ name: '6h',  bin: '6h',    shard: '1y'  },
-	{ name: '12h', bin: '12h',   shard: '1y'  },
-	{ name: '1d',  bin: '1d',    shard: '1y'  },
-	{ name: '3d',  bin: '3d',    shard: 'all' },
-	{ name: '7d',  bin: '7d',    shard: 'all' },
+	{ name: '1m',  bin: '1min',  shards: ['5min', '10min', '30min', '1h', '3h', '12h', '1d'] },
+	{ name: '2m',  bin: '2min',  shards: ['10min', '30min', '1h', '3h', '12h', '1d', '2d'] },
+	{ name: '3m',  bin: '3min',  shards: ['30min', '1h', '3h', '12h', '1d', '3d'] },
+	{ name: '5m',  bin: '5min',  shards: ['30min', '1h', '3h', '12h', '1d', '5d'] },
+	{ name: '10m', bin: '10min', shards: ['30min', '1h', '3h', '12h', '1d', '10d'] },
+	{ name: '15m', bin: '15min', shards: ['30min', '1h', '3h', '12h', '1d', '15d'] },
+	{ name: '30m', bin: '30min', shards: ['30min', '1h', '3h', '12h', '1d', '1mo'] },
+	{ name: '1h',  bin: '1h',    shards: ['1h', '3h', '12h', '1d', '1mo'] },
+	{ name: '2h',  bin: '2h',    shards: ['12h', '1d', '1mo'] },
+	{ name: '3h',  bin: '3h',    shards: ['3h', '12h', '1d', '1mo'] },
+	{ name: '6h',  bin: '6h',    shards: ['12h', '1d', '1y'] },
+	{ name: '12h', bin: '12h',   shards: ['12h', '1d', '1y'] },
+	{ name: '1d',  bin: '1d',    shards: ['1d', '1y'] },
+	{ name: '3d',  bin: '3d',    shards: ['3d', '120y'] },
+	{ name: '7d',  bin: '7d',    shards: ['7d', '120y'] },
 ];
 
-const KEY_TEMPLATE = 'avail-v3/{tier}/{period}.parquet';
+const KEY_TEMPLATE = 'avail-v3/{tier}/{shard}/{period}.parquet';
 const RESOLUTIONS = [15, 14, 13, 12, 11, 10];
 
 function makeBaseProps(bucket: R2Bucket): Omit<GeoPyramid, 'dims'> {
 	return {
 		storage: parquetBackend(r2Storage(bucket)),
+		// Unified `{tier}/{shard}/{period}` template per unified-shard-ladder
+		// (pyrmts spec). Per-tier `shards: [...]` arrays above declare each
+		// tier's full duration ladder; the planner picks largest-shard-first
+		// per cursor position via the cursor-aware walk.
 		keyTemplate: KEY_TEMPLATE,
-		// Per `configs/pyramids/avail.yaml#storage.partialKey` — the cascading
-		// CFW (#130) writes partial sub-shards at this path; the planner reads
-		// them via watermark fall-through. `{shard}` substitutes to the
-		// cadence label (e.g. `5min`, `1h`).
-		partialKey: 'avail-v3/{tier}/p{shard}/{period}.parquet',
-		// Sub-shard cadence ladder per `configs/pyramids/avail.yaml#partials`.
-		// Each cadence applies to every tier where `cadence < tier.shard` and
-		// `cadence % tier.bin == 0`. 7d intentionally omitted: 7d is not a
-		// multiple of 3d, breaking pyrmts's divisibility-chain requirement.
-		partials: ['5min', '10min', '30min', '1h', '3h', '12h', '1d', '3d'],
 		axis: 'time',
 		binCol: 'dt',
 		metrics: METRICS.map((name) => ({ name, monoid: 'histogram' as const })),
@@ -280,25 +274,30 @@ interface EarliestCache {
 }
 let _earliestCache: EarliestCache | null = null;
 
-async function loadEarliestPerCadence(db: D1Database): Promise<Record<string, Date>> {
+async function loadEarliestPerShard(db: D1Database): Promise<Record<string, Date>> {
 	const now = Date.now();
 	if (_earliestCache && (now - _earliestCache.ts) < WATERMARK_CACHE_TTL_MS) {
 		return _earliestCache.map;
 	}
 	try {
-		// `pyramid_shards.cadence` is '' for canonical (D1ShardIndex
-		// sentinel; pyrmts encoding uses `${tier}` for canonical, `${tier}@${cadence}`
-		// for partials). Translate at read time.
+		// D1 column is still `cadence` pre-P3 rename. Legacy canonical
+		// rows have `cadence = ''`; pyrmts's new unified-ladder API expects
+		// every entry keyed `${tier}@${shardDur}` (no bare-tier sentinel),
+		// so canonical rows translate to the tier's largest configured shard.
 		const rs = await db.prepare(
 			`SELECT tier, cadence, MIN(period_start) AS earliest_ms
 			 FROM pyramid_shards
 			 WHERE pyramid = ?
 			 GROUP BY tier, cadence`
 		).bind(PYRAMID_NAME).all<{ tier: string; cadence: string; earliest_ms: number }>();
+		const largestPerTier: Record<string, string> = Object.fromEntries(
+			TIERS.map((t) => [t.name, t.shards[t.shards.length - 1]!])
+		);
 		const map: Record<string, Date> = {};
 		for (const row of rs.results ?? []) {
-			const key = row.cadence === '' ? row.tier : `${row.tier}@${row.cadence}`;
-			map[key] = new Date(row.earliest_ms);
+			const shardDur = row.cadence === '' ? largestPerTier[row.tier] : row.cadence;
+			if (!shardDur) continue;  // unknown tier; skip
+			map[`${row.tier}@${shardDur}`] = new Date(row.earliest_ms);
 		}
 		_earliestCache = { map, ts: now };
 		return map;
@@ -405,12 +404,12 @@ async function serveGeoReduced(
 
 	// Per-(tier, cadence) earliest gating: forward-rolling /1m partials
 	// (#130) only have coverage from the cascade's first write onward.
-	// pyrmts #135 (`earliestPerCadence`) gates per-entry without cross-
+	// pyrmts #135 (`earliestPerShard`) gates per-entry without cross-
 	// tier propagation, so old queries fall through cleanly to /2m+
 	// canonical. Source from D1 `MIN(period_start) GROUP BY tier, cadence`.
-	const earliestPerCadence = await loadEarliestPerCadence(db);
+	const earliestPerShard = await loadEarliestPerShard(db);
 
-	// pickTier doesn't know about `earliestPerCadence` — it picks the
+	// pickTier doesn't know about `earliestPerShard` — it picks the
 	// finest tier that fits the bin budget without considering whether
 	// that tier's data covers the query window. If pickTier lands on /1m
 	// for a query starting before /1m's earliest, the segment loop walks
@@ -419,12 +418,12 @@ async function serveGeoReduced(
 	// /1m's bin count when the query window extends before /1m's earliest
 	// available data, forcing pickTier to /2m+ where canonical coverage
 	// reaches further back.
-	const oneMEarliest = earliestPerCadence['1m@5min']
-		?? earliestPerCadence['1m@10min']
-		?? earliestPerCadence['1m@30min']
-		?? earliestPerCadence['1m@1h']
-		?? earliestPerCadence['1m@3h']
-		?? earliestPerCadence['1m@12h'];
+	const oneMEarliest = earliestPerShard['1m@5min']
+		?? earliestPerShard['1m@10min']
+		?? earliestPerShard['1m@30min']
+		?? earliestPerShard['1m@1h']
+		?? earliestPerShard['1m@3h']
+		?? earliestPerShard['1m@12h'];
 	const queryStartsBefore1mEarliest = oneMEarliest && from < oneMEarliest;
 	const rangeMinutes = Math.ceil((to.getTime() - from.getTime()) / 60_000);
 	const binBudget = queryStartsBefore1mEarliest
@@ -434,8 +433,8 @@ async function serveGeoReduced(
 	// `outputCells: {res, cells}` path bypasses `pickResolution`. See
 	// `pyrmts/specs/done/plan-geo-query-precomputed-cover.md`.
 	const plan = userCells !== null
-		? planGeoQuery(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells }, watermarks, earliestPerCadence })
-		: planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox: bbox!, cellBudget, watermarks, earliestPerCadence });
+		? planGeoQuery(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells }, watermarks, earliestPerShard })
+		: planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox: bbox!, cellBudget, watermarks, earliestPerShard });
 
 	// Push the cell list down as an RG-prune filter on the cellCol. For
 	// `(cell, dt)`-sorted shards this lets hyparquet skip whole row groups

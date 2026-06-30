@@ -49,9 +49,9 @@ export function availPyramid(bucket: R2Bucket): Pyramid {
 		// iterates in declared order and returns the *finest* tier whose
 		// bin-count fits the budget.
 		tiers: [
-			{ name: 'h1', bin: '1h', shard: '1d' },
-			{ name: 'd1', bin: '1d', shard: '1mo' },
-			{ name: 'mo1', bin: '1mo', shard: '1y' },
+			{ name: 'h1', bin: '1h', shards: ['1d'] },
+			{ name: 'd1', bin: '1d', shards: ['1mo'] },
+			{ name: 'mo1', bin: '1mo', shards: ['1y'] },
 		],
 	};
 }

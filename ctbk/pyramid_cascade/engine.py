@@ -117,7 +117,10 @@ def cascade_block(
     for tier in derived:
         t_tier = time.time()
         tier_finals = tier_partials = tier_empty = tier_bytes = 0
-        for period in shard_periods_covering(block_from, block_to, tier.shard):
+        # Largest rung = old canonical shard; we only materialize that here.
+        # Intermediate rungs come from CFW (new data) or P7 backfill (history).
+        largest_shard = tier.shards[-1]
+        for period in shard_periods_covering(block_from, block_to, largest_shard):
             # Clamp the period to our block range — we only emit rows in
             # the intersection. If period extends past block_to, this is a
             # partial.
@@ -159,7 +162,7 @@ def cascade_block(
             if not partial:
                 key = substitute_key(
                     pyramid.keyTemplate,
-                    {'tier': tier.name, 'period': period.label},
+                    {'tier': tier.name, 'shard': largest_shard, 'period': period.label},
                 )
                 pyramid.storage.put(key, data)
                 result.finals.append(key)

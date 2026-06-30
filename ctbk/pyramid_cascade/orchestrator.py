@@ -109,7 +109,7 @@ def _reduce_task(
 
     final_key = substitute_key(
         pyramid.keyTemplate,
-        {'tier': tier_name, 'period': period_label},
+        {'tier': tier_name, 'shard': tier.shards[-1], 'period': period_label},
     )
     merged_blob = _merge_partials(
         staging_storage, staged_keys, pyramid, tier,
@@ -322,7 +322,7 @@ def pyramid_cascade(
             tier = pyramid.tier(tier_name)
             final_key = substitute_key(
                 pyramid.keyTemplate,
-                {'tier': tier_name, 'period': period_label},
+                {'tier': tier_name, 'shard': tier.shards[-1], 'period': period_label},
             )
             merged_blob = _merge_partials(
                 staging_storage, staged_keys, pyramid, tier,
@@ -551,7 +551,7 @@ def _partial_cover_shards(
     for tier in pyramid.tiers:
         if tier.name == base_tier_name:
             continue
-        for period in shard_periods_covering(range_from, range_to, tier.shard):
+        for period in shard_periods_covering(range_from, range_to, tier.shards[-1]):
             if period.start < range_from or period.end > range_to:
                 out.append((tier.name, period.label, period.start, period.end))
     return out
@@ -594,9 +594,10 @@ def _stage_existing_for_merge(
     """
     n_staged = 0
     for tier_name, period_label, _, _ in partial_cover_shards:
+        tier = pyramid.tier(tier_name)
         final_key = substitute_key(
             pyramid.keyTemplate,
-            {'tier': tier_name, 'period': period_label},
+            {'tier': tier_name, 'shard': tier.shards[-1], 'period': period_label},
         )
         blob = pyramid.storage.get(final_key)
         if blob is None:
@@ -639,20 +640,30 @@ def _emit_manifest(pyramid: Pyramid) -> None:
         if latest_period:
             manifest['tiers'][tier.name] = {'latest_period': latest_period}
 
-    manifest_key = pyramid.keyTemplate.replace('{tier}/{period}.parquet', '_manifest.json')
+    manifest_key = pyramid.keyTemplate.split('{tier}')[0] + '_manifest.json'
     pyramid.storage.put(manifest_key, json.dumps(manifest, indent=2).encode('utf-8'))
 
 
 def _latest_period_in_storage(pyramid: Pyramid, tier) -> str | None:
-    """Find the lexically-greatest period for a tier by LISTing keys."""
-    prefix = pyramid.keyTemplate.split('{tier}')[0] + tier.name + '/'
+    """Find the lexically-greatest period for a tier's LARGEST rung.
+
+    Python pyramid-cascade writes only the largest rung (= old canonical),
+    so the manifest watermark tracks that same path. Intermediate rungs
+    written by CFW live under sibling `<tier>/<smaller_shard>/` prefixes;
+    the api worker tracks those via D1ShardIndex, not this manifest.
+    """
+    prefix = (
+        pyramid.keyTemplate.split('{tier}')[0]
+        + tier.name + '/'
+        + tier.shards[-1] + '/'
+    )
     try:
         keys = list(pyramid.storage.list(prefix))
     except Exception:
         return None
     if not keys:
         return None
-    # Period is the segment between the tier dir and '.parquet'.
+    # Period is the segment between the largest-rung dir and '.parquet'.
     latest = max(keys)  # lex-sorted
     period = latest.removeprefix(prefix).removesuffix('.parquet')
     return period

@@ -16,40 +16,88 @@ declared `(tier, shard_dur)` has a complete historical tiling across
 ## Dependency graph
 
 ```
-            pyrmts ladder refactor (in pyrmts repo, in flight)
-                              │
-                              ├─→  P2  ctbk pyrmts adoption (laptop)
-                              │            │
-                              │            ├─→ P3  D1 schema update (laptop)
-                              │            ├─→ P4  CFW writer rewrite (laptop, deploy)
-                              │            └─→ P5  R2 + D1 inventory rename (e)
-                              │                     │
-                              │                     ├─→ P6  api worker key-template bump (laptop)
-                              │                     └─→ P7  intermediate-size backfill (e)
-                              │                              │
-                              │                              └─→ P8  FE flag flip + retire `totals` (laptop)
-                              │
-P1 /1m@1d historical backfill (e) ───────────────────────────────┘
-   (independent of pyrmts; lands legacy path, renamed in P5)
+pyrmts JS ladder refactor (DONE, pushed)
+            │
+            └─→  PY  pyrmts Python ladder catch-up (in pyrmts repo)
+                        │
+                        ├─→  P0  ctbk Python pyramid_cascade adoption (laptop)
+                        │
+                        └─→  P2  ctbk JS pin bump + avail.yaml rewrite (laptop)
+                                  │
+                                  ├─→ P3  D1 schema update (laptop)
+                                  ├─→ P4  CFW writer rewrite (laptop, deploy)
+                                  ├─→ P5  R2 + D1 inventory rename (e)
+                                  │         │
+                                  │         ├─→ P6  api worker key-template bump (laptop)
+                                  │         └─→ P7  intermediate-size backfill (e)
+                                  │                  │
+                                  │                  └─→ P8  FE flag flip + retire `totals` (laptop)
+                                  │
+                                  └─→ P9  avail.yaml as source-of-truth + JS codegen (laptop)
+
+P1 /1m@1d historical backfill (e) ──── (independent; lands legacy path, renamed in P5)
 ```
 
-P1 can run **today** in parallel with pyrmts. P2-P8 sequence behind
-the pyrmts merge.
+P1 can run **today** in parallel with PY. PY gates everything else.
+P0 + P2 fan out from PY; rest of P3-P9 sequence behind P2.
 
 ## Phase index
 
 | # | Phase | Owner | Spec | Status |
 |---|---|---|---|---|
+| **PY** | pyrmts Python ladder catch-up (data model only; ShardIndex etc. deferred) | pyrmts repo | `~/c/pyrmts/specs/python-unified-ladder.md` | **done** (pyrmts 38175b1) |
+| **P0** | ctbk Python `pyramid_cascade` adoption (largest-rung writer + path-format update) | laptop | inline below | **impl in WT (uncommitted)** — 9/9 tests pass |
 | **P1** | `/1m@1d` historical backfill (2026-04-08..2026-06-28) | `e` | `specs/avail-v3-1m-backfill.md` | spec written |
-| **P2** | ctbk pyrmts pin bump + adoption | laptop | inline below | not yet impl |
+| **P2** | ctbk JS pin bump + `avail.yaml` rewrite | laptop | inline below | **impl in WT (uncommitted)** — JS pins dist 4fc6307; api/cascade/www tc + tests green |
 | **P3** | D1 schema update | laptop | inline below | not yet impl |
-| **P4** | CFW writer rewrite (single per-tier loop) | laptop | inline below + sup. by `avail-v3-steady-state.md` Phase 3/4 (now superseded) | not yet impl |
+| **P4** | CFW writer rewrite (single per-tier loop) | laptop | inline below + sup. by `avail-v3-steady-state.md` Phase 3/4 (now superseded) | impl in WT (uncommitted) |
 | **P5** | R2 + D1 inventory rename | `e` | `specs/avail-v3-storage-rename.md` | spec to write |
-| **P6** | api worker keyTemplate + watermark-grid update | laptop | inline below | not yet impl |
+| **P6** | api worker keyTemplate + watermark-grid update | laptop | inline below | impl in WT (uncommitted) |
 | **P7** | Intermediate-size historical backfill | `e` | `specs/avail-v3-intermediate-backfill.md` | spec to write |
 | **P8** | FE flag default → `v3` + retire `/api/totals` | laptop | follow `availSrc=v3` flip (already done via flag) + sup. by `#108` | not yet impl |
+| **P9** | `avail.yaml` as source of truth + JS codegen | laptop | `specs/avail-yaml-source-of-truth.md` | spec written |
 
 ## Phases
+
+### PY — pyrmts Python ladder catch-up
+
+See `~/c/pyrmts/specs/python-unified-ladder.md`. Brings `python/pyrmts/`
+to the unified-ladder data model: `Tier.shard: str` → `Tier.shards:
+tuple[str, ...]`, YAML accepts new shape, `{shard}` keyTemplate
+placeholder, `cascade_tiers` rewrites to per-tier ladder walk.
+
+Scope deliberately narrow: only what's needed for materialization
+(YAML parse, key substitution, cascade). `ShardIndex` /
+`ManifestShardIndex` / per-(tier,cadence) earliest watermarks /
+planner grid-walk are query-time concerns; deferred until a Python
+query consumer needs them (none today).
+
+This is the gating phase for every subsequent step except P1.
+
+### P0 — ctbk Python `pyramid_cascade` adoption
+
+After PY lands:
+
+```bash
+# Bump Python pin to the new pyrmts version
+# (whichever dist mechanism pyrmts uses — PyPI / GH URL).
+uv sync   # or equivalent
+```
+
+Update `ctbk/pyramid_cascade/` modules that call `cascade_tiers`:
+- `cli.py`: probably no signature change at the CLI level, but verify.
+- `engine.py`, `engine_streaming.py`, `orchestrator.py`: drop the
+  `derive_from` parameter from `cascade_tiers` calls; the per-tier
+  ladder lives in YAML now.
+- `tests/test_engine.py`, `tests/test_orchestrator.py`: update
+  fixtures + assertions to the new shape.
+
+Also `ctbk/avail_v3.py` (`write_tier_parquet` callsite): pass the new
+`shard_dur` argument.
+
+Acceptance: `pytest ctbk/pyramid_cascade/tests` green. Run a
+small-range cascade against a test bucket to verify end-to-end shape
+parity with the JS-side writer.
 
 ### P1 — `/1m@1d` historical backfill
 
@@ -252,6 +300,22 @@ Each splits into 5-10 intermediate sizes × 5-30 sub-periods per size
 = ~25k-150k new shards. R2 storage delta ~10-50 GB. R2 PUTs charged
 per write but cheap at this scale.
 
+### P9 — `avail.yaml` as source of truth + JS codegen
+
+See `specs/avail-yaml-source-of-truth.md`. Replaces the hardcoded
+`LADDERS` / `TIERS` constants in `gbfs/cascade/src/avail3/cascade.ts`
+and `gbfs/api/src/avail_geo.ts` with imports from a generated
+`gbfs/lib/src/ladders.generated.ts`, built from
+`configs/pyramids/avail.yaml` at build time. CI drift-check fails the
+build if the generated file is stale.
+
+Belt-and-suspenders Python parity test asserts the parsed YAML matches
+an embedded golden — catches YAML-side regressions independent of the
+JS check.
+
+Depends on P2 (YAML must already be in the new `shards: [...]`
+format).
+
 ### P8 — FE flag default → `v3` + retire `/api/totals`
 
 After P5+P7 leave the system in steady-state with full tilings
@@ -290,10 +354,13 @@ deferred until then.
 
 ## Cross-reference
 
-- `~/c/pyrmts/specs/unified-shard-ladder.md` — pyrmts-side enabler
+- `~/c/pyrmts/specs/unified-shard-ladder.md` — pyrmts JS enabler (done)
+- `~/c/pyrmts/specs/python-unified-ladder.md` — pyrmts Python catch-up
+  (PY, hard dep on every other phase except P1)
 - `specs/avail-v3-1m-backfill.md` — P1
 - `specs/avail-v3-storage-rename.md` — P5 (to be written)
 - `specs/avail-v3-intermediate-backfill.md` — P7 (to be written)
+- `specs/avail-yaml-source-of-truth.md` — P9
 - `specs/avail-v3-steady-state.md` — predecessor; phases 3-5 there
   are subsumed by P4-P8 here
 - `specs/done/avail-v3-gap-fill.md` — recovery cascade that filled the

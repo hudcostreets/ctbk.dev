@@ -1,26 +1,28 @@
 /**
- * avail-v3 sub-shard cascade.
+ * avail-v3 unified-shard-ladder cascade.
  *
  * Per-/5m tick algorithm:
  *
- *   At T (UTC ms, T % 5min == 0), for each cadence c in the ladder
- *   (finest → coarsest), if T % c == 0 the c-cadence boundary just
- *   closed. Write the just-closed sub-shards in cadence order so coarser
- *   cadences can read the finer cadences' just-written output (R2
- *   strong read-after-write).
+ *   At T (UTC ms, T % 5min == 0), for each tier, walk the tier's
+ *   shard-duration ladder (smallest → largest). For each shardDur where
+ *   T % shardDur == 0, the ladder rung just closed — write that shard.
+ *   Coarser rungs read the just-written finer rungs (R2 strong
+ *   read-after-write).
  *
- * v1 scope: /1m tier partials only. /1m is the freshness-critical tier
- * — it's what coarser-tier queries fall through to when their canonical
- * watermark is stale. Writing /1m partials at 5min..12h closes the
- * fall-through latency for ALL coarser-tier queries.
+ * Storage layout (per `~/c/pyrmts/specs/unified-shard-ladder.md`):
  *
- * Out of scope (v2):
- *   - Coarser-tier partials (/2m@10min, /5m@10min, etc.). The DAG +
- *     re-binning logic is sketched in `specs/avail-v3-cascade-cfw.md`.
+ *   avail-v3/{tier}/{shardDur}/{period}.parquet
  *
- * Canonical promotion: at midnight UTC, after the /1m@p12h write, concat
- * 2× /1m@p12h covering the prior 24h → /1m canonical at
- * `avail-v3/1m/<YYYY-MM-DD>.parquet`. Record canonical watermark.
+ *   Examples:
+ *     avail-v3/1m/5min/2026-06-29T13-40.parquet
+ *     avail-v3/1m/1h/2026-06-29T13.parquet
+ *     avail-v3/1m/1d/2026-06-29.parquet           ← was "canonical"
+ *
+ * No special "canonical" vs "partial" code paths — the largest ladder
+ * rung is the canonical (1d for /1m).
+ *
+ * v1 scope: /1m tier only. Coarser tiers (/2m..7d) get their own
+ * ladders in v2 — same loop, different rungs.
  */
 import { parquetReadObjects } from 'hyparquet';
 import { D1ShardIndex } from 'pyrmts-cfw';
@@ -45,34 +47,21 @@ function rawMinuteKey(t: Date): string {
 	return `gbfs/avail/agg=1m/cons=1m/${dateStr}/${hh}${mm}.parquet`;
 }
 
-/** avail-v3 partial sub-shard key.
- *  Per `configs/pyramids/avail.yaml#partialKey`:
- *    `avail-v3/{tier}/p{shard}/{period}.parquet` */
-export function partialKey(tier: string, cadence: Cadence, periodStart: Date): string {
-	return `${AVAIL_V3_PREFIX}/${tier}/p${cadence.label}/${formatPeriod(periodStart, cadence)}.parquet`;
+/** Unified avail-v3 shard key. Uniform `<tier>/<shardDur>/<period>`
+ *  layout — no canonical/partial dichotomy. */
+export function shardKey(tier: string, shardDur: Duration, periodStart: Date): string {
+	return `${AVAIL_V3_PREFIX}/${tier}/${shardDur}/${formatPeriod(periodStart, durationToMin(shardDur))}.parquet`;
 }
 
-/** avail-v3 canonical shard key.
- *  Per `configs/pyramids/avail.yaml#key`:
- *    `avail-v3/{tier}/{period}.parquet` */
-export function canonicalKey(tier: string, periodStart: Date, canonicalShardMs: number): string {
-	const period = canonicalShardMs === 86400000  // 1 day
-		? periodStart.toISOString().slice(0, 10)
-		: periodStart.toISOString().slice(0, 10);  // TODO: other shard sizes
-	return `${AVAIL_V3_PREFIX}/${tier}/${period}.parquet`;
-}
-
-/** Period label for a partial. Uses minute granularity for sub-day, hour
- *  for sub-1d, date for ≥1d. Matches pyrmts `formatPeriod` for the
- *  applicable durations (kept hand-written here to avoid pulling
- *  pyrmts's calendar machinery into the cron worker). */
-function formatPeriod(periodStart: Date, cadence: Cadence): string {
+/** Period label by minute granularity. Minute-precision for sub-hour,
+ *  hour-precision for sub-day, date-precision for ≥1d. */
+function formatPeriod(periodStart: Date, shardDurMin: number): string {
 	const iso = periodStart.toISOString();  // 2026-06-27T14:35:00.000Z
-	if (cadence.minutes < 60) {
-		// minute-precision: 2026-06-27T14:35
-		return iso.slice(0, 16).replace(':', '-');  // 2026-06-27T14-35
+	if (shardDurMin < 60) {
+		// minute-precision: 2026-06-27T14-35
+		return iso.slice(0, 16).replace(':', '-');
 	}
-	if (cadence.minutes < 60 * 24) {
+	if (shardDurMin < 60 * 24) {
 		// hour-precision: 2026-06-27T14
 		return iso.slice(0, 13);
 	}
@@ -80,26 +69,28 @@ function formatPeriod(periodStart: Date, cadence: Cadence): string {
 	return iso.slice(0, 10);
 }
 
-// ─── Cadence ladder ─────────────────────────────────────────────────────
-
-export interface Cadence {
-	label: string;       // for path/watermark: '5min', '10min', '1h', '12h', etc.
-	minutes: number;     // duration in minutes
-	durationStr: Duration; // for D1ShardIndex.recordShard: '5min', '1h', etc.
+/** Convert a Duration ("5min", "1h", "1d") to minutes. Avoids pulling
+ *  pyrmts's full parser into the CFW. */
+function durationToMin(d: Duration): number {
+	const m = /^(\d+)(min|h|d)$/.exec(d);
+	if (!m) throw new Error(`unsupported Duration in cascade ladder: ${d}`);
+	const n = Number(m[1]);
+	const unit = m[2];
+	if (unit === 'min') return n;
+	if (unit === 'h') return n * 60;
+	if (unit === 'd') return n * 60 * 24;
+	throw new Error(`unreachable: ${d}`);
 }
 
-/** Cadence ladder per `configs/pyramids/avail.yaml#partials`. Ordered
- *  finest → coarsest. Each divides all coarser cadences in the chain. */
-export const CADENCES: Cadence[] = [
-	{ label: '5min',  minutes: 5,         durationStr: '5min'  },
-	{ label: '10min', minutes: 10,        durationStr: '10min' },
-	{ label: '30min', minutes: 30,        durationStr: '30min' },
-	{ label: '1h',    minutes: 60,        durationStr: '1h'    },
-	{ label: '3h',    minutes: 180,       durationStr: '3h'    },
-	{ label: '12h',   minutes: 720,       durationStr: '12h'   },
-];
+// ─── Tier ladders ────────────────────────────────────────────────────
 
-const CANONICAL_1M_MIN = 1440;  // /1m canonical shard = 1d
+/** Per-tier shard-duration ladder, smallest → largest. Must match
+ *  `gbfs/api/src/avail_geo.ts#TIERS` for the corresponding tier; the
+ *  api worker reads what the cascade writes. */
+export const LADDERS: Record<string, Duration[]> = {
+	'1m': ['5min', '10min', '30min', '1h', '3h', '12h', '1d'],
+	// v2: /2m..7d ladders. Sketched in `specs/avail-v3-steady-state.md`.
+};
 
 // ─── Source readers ─────────────────────────────────────────────────────
 
@@ -112,7 +103,7 @@ async function readRawMinute(r2: R2Bucket, t: Date): Promise<Record<string, unkn
 	return (await parquetReadObjects({ file })) as Record<string, unknown>[];
 }
 
-async function readPartial(r2: R2Bucket, key: string): Promise<AvailV3Row[] | null> {
+async function readShard(r2: R2Bucket, key: string): Promise<AvailV3Row[] | null> {
 	const obj = await r2.get(key);
 	if (!obj) return null;
 	const buf = await obj.arrayBuffer();
@@ -140,7 +131,7 @@ async function writeParquet(r2: R2Bucket, key: string, rows: AvailV3Row[]): Prom
 	return buf.byteLength;
 }
 
-// ─── Per-cadence writers ────────────────────────────────────────────────
+// ─── Per-shard writer ───────────────────────────────────────────────────
 
 export interface WriteResult {
 	status: 'wrote' | 'exists' | 'no_inputs' | 'empty';
@@ -156,76 +147,47 @@ export interface WriteResult {
 	inputsExpected?: number;
 }
 
-/** Write `/1m@p5min` for the period `[T-5min, T)`. Reads 5× raw 1m@1m
- *  parquets from `gbfs/avail/agg=1m/cons=1m/...`, LUC-expands, builds
- *  histograms. */
-async function write1m5min(
+/** Unified writer. Reads from raw 1m@1m (when shardDur is the smallest
+ *  rung) or from the next-smaller rung's just-written shards. Merges,
+ *  writes the parquet at the unified path. */
+async function writeShard(
 	r2: R2Bucket,
 	luc: import('./luc').LucIndex,
+	tier: string,
+	shardDur: Duration,
+	prevShardDur: Duration | null,
 	periodStart: Date,
 ): Promise<WriteResult> {
-	const cadence = CADENCES[0];
-	const inputsExpected = cadence.minutes;
-	const key = partialKey('1m', cadence, periodStart);
-	if (await r2.head(key)) return { status: 'exists', key, inputsExpected };
-	const minuteRows: AvailV3Row[] = [];
-	let inputsPresent = 0;
-	for (let i = 0; i < cadence.minutes; i++) {
-		const t = new Date(periodStart.getTime() + i * 60_000);
-		const raw = await readRawMinute(r2, t);
-		if (raw === null) continue;
-		inputsPresent++;
-		minuteRows.push(...transformMinuteRows(raw, luc));
-	}
-	if (minuteRows.length === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
-	const bytes = await writeParquet(r2, key, minuteRows);
-	return { status: 'wrote', key, bytes, rows: minuteRows.length, inputsPresent, inputsExpected };
-}
+	const shardDurMin = durationToMin(shardDur);
+	const key = shardKey(tier, shardDur, periodStart);
+	if (await r2.head(key)) return { status: 'exists', key };
 
-/** Write `/1m@<cadence>` for the period `[T-cadence, T)`. Reads N× finer-
- *  cadence /1m partials. */
-async function write1mPartial(
-	r2: R2Bucket,
-	cadenceIdx: number,
-	periodStart: Date,
-): Promise<WriteResult> {
-	const cadence = CADENCES[cadenceIdx];
-	const prevCadence = CADENCES[cadenceIdx - 1];
-	const key = partialKey('1m', cadence, periodStart);
-	const inputsExpected = cadence.minutes / prevCadence.minutes;
-	if (await r2.head(key)) return { status: 'exists', key, inputsExpected };
+	if (prevShardDur === null) {
+		// Smallest rung: read shardDurMin raw 1m@1m files, LUC-expand, build
+		// histograms.
+		const inputsExpected = shardDurMin;
+		let inputsPresent = 0;
+		const rows: AvailV3Row[] = [];
+		for (let i = 0; i < shardDurMin; i++) {
+			const t = new Date(periodStart.getTime() + i * 60_000);
+			const raw = await readRawMinute(r2, t);
+			if (raw === null) continue;
+			inputsPresent++;
+			rows.push(...transformMinuteRows(raw, luc));
+		}
+		if (rows.length === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
+		const bytes = await writeParquet(r2, key, rows);
+		return { status: 'wrote', key, bytes, rows: rows.length, inputsPresent, inputsExpected };
+	}
+
+	// Coarser rung: read N× smaller-rung shards from this tier, merge.
+	const prevShardDurMin = durationToMin(prevShardDur);
+	const inputsExpected = shardDurMin / prevShardDurMin;
 	const inputRowSets: AvailV3Row[][] = [];
 	for (let i = 0; i < inputsExpected; i++) {
-		const inputStart = new Date(periodStart.getTime() + i * prevCadence.minutes * 60_000);
-		const inputKey = partialKey('1m', prevCadence, inputStart);
-		const rows = await readPartial(r2, inputKey);
-		if (rows === null) continue;
-		inputRowSets.push(rows);
-	}
-	const inputsPresent = inputRowSets.length;
-	if (inputsPresent === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
-	const merged = mergeRows(inputRowSets);
-	if (merged.length === 0) return { status: 'empty', key, inputsPresent, inputsExpected };
-	const bytes = await writeParquet(r2, key, merged);
-	return { status: 'wrote', key, bytes, rows: merged.length, inputsPresent, inputsExpected };
-}
-
-/** Promote /1m partials to /1m canonical for the day ending at `dayEnd`.
- *  Concat 2× /1m@p12h covering the prior 24h. */
-async function promote1mCanonical(
-	r2: R2Bucket,
-	dayEnd: Date,
-): Promise<WriteResult> {
-	const dayStart = new Date(dayEnd.getTime() - CANONICAL_1M_MIN * 60_000);
-	const key = canonicalKey('1m', dayStart, CANONICAL_1M_MIN * 60_000);
-	const inputsExpected = 2;
-	if (await r2.head(key)) return { status: 'exists', key, inputsExpected };
-	const half = CADENCES[CADENCES.length - 1];  // 12h
-	const inputRowSets: AvailV3Row[][] = [];
-	for (let i = 0; i < inputsExpected; i++) {
-		const inputStart = new Date(dayStart.getTime() + i * half.minutes * 60_000);
-		const inputKey = partialKey('1m', half, inputStart);
-		const rows = await readPartial(r2, inputKey);
+		const inputStart = new Date(periodStart.getTime() + i * prevShardDurMin * 60_000);
+		const inputKey = shardKey(tier, prevShardDur, inputStart);
+		const rows = await readShard(r2, inputKey);
 		if (rows === null) continue;
 		inputRowSets.push(rows);
 	}
@@ -239,10 +201,9 @@ async function promote1mCanonical(
 
 // ─── Per-tick orchestration ─────────────────────────────────────────────
 
-/** Per-/5m tick handler. Returns the list of attempted writes for
- *  logging. `tickTime` is the UTC time at the START of the tick (the
- *  tick fires AT that time, so we're processing the period that just
- *  closed, i.e. `[tickTime - cadence, tickTime)`). */
+/** Per-/5m tick handler. Loops every tier's ladder, writes rungs whose
+ *  boundary closed at this tick. Returns the list of attempted writes
+ *  for logging. */
 export async function avail3Tick(
 	r2: R2Bucket,
 	db: D1Database,
@@ -262,54 +223,30 @@ export async function avail3Tick(
 	// Record a watermark ONLY when input coverage was complete. A wrote
 	// result with partial coverage means we shipped a parquet with holes
 	// (e.g. the loader missed a minute); recording its periodEnd as
-	// authoritative would mislead the planner into trusting the gaps. The
-	// parquet still gets written (it has whatever data DID arrive); the
-	// watermark just stays at the previous successful boundary.
+	// authoritative would mislead the planner into trusting the gaps.
 	const fullyCovered = (r: WriteResult) =>
 		r.status === 'wrote' &&
 		r.inputsPresent !== undefined &&
 		r.inputsExpected !== undefined &&
 		r.inputsPresent === r.inputsExpected;
 
-	// Finest cadence: 5min. Always closes at /5m ticks. Read raw 1m@1m × 5.
-	{
-		const cadence = CADENCES[0];
-		const periodStart = new Date(tickMs - cadence.minutes * 60_000);
-		const r = await write1m5min(r2, luc, periodStart);
-		results.push(r);
-		if (fullyCovered(r)) {
-			await shardIndex.recordShard({
-				pyramidName: PYRAMID_NAME, tier: '1m', cadence: cadence.durationStr,
-				periodStart, periodEnd: new Date(tickMs), key: r.key,
-			});
-		}
-	}
+	for (const [tier, ladder] of Object.entries(LADDERS)) {
+		for (let i = 0; i < ladder.length; i++) {
+			const shardDur = ladder[i]!;
+			const shardDurMin = durationToMin(shardDur);
+			if (tickMs % (shardDurMin * 60_000) !== 0) continue;
 
-	// Coarser cadences: only when their boundary closes at this tick.
-	for (let i = 1; i < CADENCES.length; i++) {
-		const cadence = CADENCES[i];
-		if (tickMs % (cadence.minutes * 60_000) !== 0) continue;
-		const periodStart = new Date(tickMs - cadence.minutes * 60_000);
-		const r = await write1mPartial(r2, i, periodStart);
-		results.push(r);
-		if (fullyCovered(r)) {
-			await shardIndex.recordShard({
-				pyramidName: PYRAMID_NAME, tier: '1m', cadence: cadence.durationStr,
-				periodStart, periodEnd: new Date(tickMs), key: r.key,
-			});
-		}
-	}
+			const periodStart = new Date(tickMs - shardDurMin * 60_000);
+			const prevShardDur = i === 0 ? null : ladder[i - 1]!;
+			const r = await writeShard(r2, luc, tier, shardDur, prevShardDur, periodStart);
+			results.push(r);
 
-	// Canonical promotion: midnight UTC (1d boundary).
-	if (tickMs % (CANONICAL_1M_MIN * 60_000) === 0) {
-		const r = await promote1mCanonical(r2, new Date(tickMs));
-		results.push(r);
-		if (fullyCovered(r)) {
-			const periodStart = new Date(tickMs - CANONICAL_1M_MIN * 60_000);
-			await shardIndex.recordShard({
-				pyramidName: PYRAMID_NAME, tier: '1m', cadence: null,
-				periodStart, periodEnd: new Date(tickMs), key: r.key,
-			});
+			if (fullyCovered(r)) {
+				await shardIndex.recordShard({
+					pyramidName: PYRAMID_NAME, tier, shardDur,
+					periodStart, periodEnd: new Date(tickMs), key: r.key,
+				});
+			}
 		}
 	}
 
