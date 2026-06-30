@@ -142,3 +142,47 @@ def report_gaps(missing: list[ExpectedShard], limit_per_rung: int = 3) -> None:
         sample = ", ".join(p.period_start.strftime('%Y-%m-%d') for p in periods[:limit_per_rung])
         more = f" +{len(periods) - limit_per_rung} more" if len(periods) > limit_per_rung else ""
         print(f"  {tier:<5} {shard_dur:<8} {len(periods):>6}  {sample}{more}")
+
+
+# ─── Phase B: fill driver ────────────────────────────────────────────
+
+
+def fill_gaps(
+    pyramid: Pyramid,
+    gaps: list[ExpectedShard],
+    *,
+    pyramid_name: str = 'avail',
+    d1_sql_path: str = 'tmp/fsck-d1-record.sql',
+    limit: int | None = None,
+    skip_existing: bool = True,
+) -> list:
+    """Materialize each gap in dependency order. Returns a list of
+    `MaterializeResult` for the driver to summarize / emit D1 SQL from.
+
+    Reuses the existing R2 client (`ctbk.avail_v3.r2_client`)."""
+    from .materialize import emit_d1_insert_sql, materialize_shard
+    from ctbk.avail_v3 import r2_client
+    r2 = r2_client()
+    results: list = []
+    by_status: dict[str, int] = {}
+    for i, gap in enumerate(gaps):
+        if limit is not None and i >= limit:
+            err(f"  hit --limit {limit}; stopping after {i} gaps")
+            break
+        res = materialize_shard(r2, pyramid, gap, skip_existing=skip_existing)
+        results.append(res)
+        by_status[res.status] = by_status.get(res.status, 0) + 1
+        # Progress every 20 (or on errors / unusual statuses)
+        if res.status == 'error':
+            err(f"  ERR /{gap.tier}@{gap.shard_dur} {gap.period_start.date()}: {res.error}")
+        elif (i + 1) % 20 == 0 or res.status in ('no_inputs', 'empty'):
+            err(f"  [{i+1}/{len(gaps)}] /{gap.tier}@{gap.shard_dur} {gap.period_start.date()} → {res.status}"
+                + (f" ({res.rows}r, {res.bytes_written}b)" if res.status == 'wrote' else ''))
+    err(f"fill summary: " + ", ".join(f"{k}={v}" for k, v in sorted(by_status.items())))
+
+    if any(r.status == 'wrote' for r in results):
+        from pathlib import Path
+        Path(d1_sql_path).parent.mkdir(parents=True, exist_ok=True)
+        emit_d1_insert_sql(pyramid_name, results, d1_sql_path)
+
+    return results

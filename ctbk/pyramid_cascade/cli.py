@@ -107,7 +107,9 @@ def _resolve_stream_source(name: str) -> tuple:
 @option('-r', '--range', 'range_', required=True, help='UTC range `YYYY-MM-DD/YYYY-MM-DD` (half-open).')
 @option('-s', '--staging', 'staging_uri', default=None, help='Staging URI for partial shards (default: `file:///tmp/pyramid-cascade-<pid>/`). Block engine only.')
 @option('-t', '--task-size', 'task_size', default='1d', show_default=True, help='Block duration (pyrmts Duration, e.g. `1d`, `1mo`). Block engine only.')
-@option('-f', '--fsck', is_flag=True, help='Discover + report missing (tier, shard_dur, period) gaps vs the YAML ladder. Currently report-only (Phase A); materialization lands when pyrmts `list_missing_shards` ships.')
+@option('-f', '--fsck', is_flag=True, help='Discover + report missing (tier, shard_dur, period) gaps vs the YAML ladder. Add --fill to materialize the gaps (Phase B).')
+@option('-F', '--fill', is_flag=True, help='With --fsck: materialize each missing shard. Idempotent (HEAD-skip), writes D1 INSERT SQL batch to tmp/fsck-d1-record.sql for the api worker to ingest.')
+@option('-L', '--fill-limit', type=int, default=None, help='With --fill: stop after this many gaps (for staged smoke tests).')
 def pyramid_cascade_cmd(
     config_path: str,
     engine_name: str,
@@ -120,9 +122,13 @@ def pyramid_cascade_cmd(
     staging_uri: str | None,
     task_size: str,
     fsck: bool,
+    fill: bool,
+    fill_limit: int | None,
 ):
     if not fsck and not ingester:
         raise BadParameter("--ingester is required unless --fsck is set")
+    if fill and not fsck:
+        raise BadParameter("--fill requires --fsck")
     config_yaml = Path(config_path).read_text()
     if prefix is not None:
         config_yaml = _override_key_prefix(config_yaml, prefix)
@@ -133,14 +139,18 @@ def pyramid_cascade_cmd(
     range_tuple = _parse_range(range_)
 
     if fsck:
-        # Discovery-only path. Skips the engine + writes nothing.
-        from .fsck import discover_gaps, report_gaps
-        err(f"pyramid-cascade --fsck")
+        from .fsck import discover_gaps, fill_gaps, report_gaps
+        err(f"pyramid-cascade --fsck" + (" --fill" if fill else ""))
         err(f"  config:    {config_path}")
         err(f"  range:     {range_tuple[0].isoformat()} → {range_tuple[1].isoformat()}")
         err(f"  tiers:     {len(pyramid.tiers)}: {[t.name for t in pyramid.tiers]}")
+        if fill_limit is not None:
+            err(f"  limit:     {fill_limit} gaps")
         missing = discover_gaps(pyramid, range_tuple)
         report_gaps(missing)
+        if fill and missing:
+            err("")
+            fill_gaps(pyramid, missing, limit=fill_limit)
         return
 
     err(f"pyramid-cascade")
