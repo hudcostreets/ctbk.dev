@@ -20,6 +20,19 @@ import Home from "./pages/Home"
 import { Box } from "@mui/material"
 import { Footer } from "./components/Footer"
 
+// Cloudflare Web Analytics (RUM: page views + Core Web Vitals). Manual
+// mode — ctbk.dev is on GH Pages, not proxied through CF, so the beacon
+// reports directly to CF's collector. Prod-only: the RUM endpoint
+// rejects CORS preflight from origins not in the token's allowed-domains
+// list, which would spam the console on `localhost` dev.
+if (import.meta.env.PROD) {
+  const s = document.createElement('script')
+  s.defer = true
+  s.src = 'https://static.cloudflareinsights.com/beacon.min.js'
+  s.setAttribute('data-cf-beacon', '{"token": "4bd00e4ade70447c89813154f57c6260"}')
+  document.head.appendChild(s)
+}
+
 // Other routes are lazy so leaflet / station-detail / MDX stay off Home's
 // critical path. Home itself is eagerly imported since it's the common
 // landing page.
