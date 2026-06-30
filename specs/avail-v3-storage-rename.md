@@ -183,31 +183,69 @@ diff tmp/d1-pre-rename.txt tmp/d1-post-rename.txt
 # Expect: cadence column renamed to shard_dur; empty cadence rows show <largest_dur>
 ```
 
-## Cutover ordering
+## Cutover ordering (zero-risk version)
+
+The naive "rename then deploy" ordering opens two risk windows:
+- After D1 `key` rewrite but before new-code deploy, the **deployed
+  old api worker** uses `pyramid_shards.key` to `r2.get(key)`. If
+  `key` now points at new R2 paths but R2 only has legacy paths,
+  every read 404s.
+- After R2 DELETE of legacy paths but before cascade redeploy, the
+  **deployed old cascade** keeps writing to the legacy paths it just
+  recreated — orphans that the new layout never indexes.
+
+A 7-step ordering avoids both:
 
 ```
-1. Deploy NEW CFW cascade   (commit fab241bb's gbfs/cascade — writes new paths only)
-2. Run P5 R2 + D1 rename    (this spec)
-3. Deploy NEW api worker    (commit fab241bb's gbfs/api — reads new paths only)
+1. R2 COPY only (legacy → new, --no-delete --r2-only)   # additive; prod untouched
+2. Verify new paths landed (sample HEADs, count)
+3. Deploy NEW cascade  (gbfs/cascade — writes new paths only)
+4. Deploy NEW api      (gbfs/api  — reads new paths only)
+5. D1 row-value UPDATE (--d1-only)                       # only NEW api reads D1 now
+6. Smoke-test prod (queries across 1d / 7d / 1mo / full-range)
+7. R2 DELETE legacy paths (--delete-only)                # cleanup; risk-free post-(4)
 ```
 
-Why this order:
+Why each gap is safe:
 
-- **CFW before rename.** Old CFW writing to legacy paths AFTER P5
-  runs would create new legacy objects the rename already moved past
-  — orphans, or worse, fresh writes that the new api worker never
-  sees.
-- **Rename before api deploy.** Old api worker reading new paths
-  would 404 every shard.
+- **(1) → (2) → (3)**: legacy R2 untouched, D1 unchanged. Old api +
+  old cascade run with no observable difference. New paths exist
+  but no one references them yet.
+- **(3) → (4)**: new cascade writes only new paths; old api keeps
+  reading legacy paths (still present). New-path writes invisible
+  but harmless.
+- **(4) → (5)**: new api reads legacy keys from D1 (still
+  `cadence=''`). The new-api translation in `loadEarliestPerShard`
+  maps `cadence='' → ${tier}@${largestPerTier[tier]}` at read time,
+  so it works against legacy D1 state too. The R2 path resolution
+  happens via pyrmts's planner — which uses keyTemplate substitution,
+  not `pyramid_shards.key`. (Verify: pyrmts JS doesn't read `.key`
+  for fetch; that column is informational. If it does, swap step
+  ordering: D1 update before api deploy, after rename.)
+- **(5) → (6)**: D1 update changes `cadence=''` → `cadence='<largest>'`
+  and rewrites `key`. New api was already independent of D1 `key`
+  column; D1 cadence-key update brings the map shape to new uniform
+  form. Smoke-test confirms.
+- **(7)**: prod is now entirely on new layout; legacy R2 is dead
+  weight. Delete is purely a cleanup pass.
 
-Brief window between (1) and (2) has split-brain R2: new CFW writing
-new paths + legacy un-renamed still present. The OLD api worker
-still in prod reads legacy fine; the new-path shards are invisible
-to it (its planner doesn't look there) but harmless. Window should
-be minutes — kick off P5 immediately after the cascade deploy
-confirms a couple of /5m ticks landed cleanly.
+### Caveat: does the deployed pyrmts use `pyramid_shards.key`?
 
-Reverse ordering risks data loss as noted above.
+Verify before running step 5: grep `gbfs/api`'s deployed `avail_geo.ts`
++ the deployed pyrmts source for `pyramid_shards.key` reads. If
+nothing reads it (likely — pyrmts's planner does key-template
+substitution from `(tier, shard, period)`, the `.key` column is just
+audit data written by `D1ShardIndex.recordShard`), the ordering above
+holds and D1 update can come after api deploy.
+
+If something does read it (e.g. a `D1ShardIndex` lookup uses
+`.key` to fetch the parquet directly), the ordering changes: D1
+update must precede api deploy, and the window between D1 update
+and api deploy is unsafe (deployed old api would look up new keys
+against old R2 if R2 DELETE somehow precedes — but step 7 is the
+only delete). Net: even in that case, the only unsafe sub-window is
+"D1 updated but new api not yet live", which is minutes. Plan
+accordingly.
 
 ## Rollback
 

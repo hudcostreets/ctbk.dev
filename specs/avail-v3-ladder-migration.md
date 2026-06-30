@@ -18,41 +18,64 @@ declared `(tier, shard_dur)` has a complete historical tiling across
 ```
 pyrmts JS ladder refactor (DONE, pushed)
             │
-            └─→  PY  pyrmts Python ladder catch-up (in pyrmts repo)
+            └─→  PY  pyrmts Python ladder catch-up (DONE — 38175b1)
                         │
-                        ├─→  P0  ctbk Python pyramid_cascade adoption (laptop)
+                        ├─→  P0  ctbk Python pyramid_cascade adoption (DONE — fab241bb)
                         │
-                        └─→  P2  ctbk JS pin bump + avail.yaml rewrite (laptop)
+                        └─→  P2  ctbk JS pin bump + avail.yaml rewrite (DONE — fab241bb)
                                   │
-                                  ├─→ P3  D1 schema update (laptop)
-                                  ├─→ P4  CFW writer rewrite (laptop, deploy)
-                                  ├─→ P5  R2 + D1 inventory rename (e)
+                                  │  ┌────────── DEPLOY CUTOVER (tightly sequenced) ──────────┐
+                                  │  │                                                          │
+                                  ├──┤  P5a  R2 COPY legacy → new (--no-delete, additive)       │
+                                  │  │      │                                                   │
+                                  │  │      └─→ P3   D1 ALTER cadence → shard_dur               │
+                                  │  │             │  (breaks deployed cascade for ~minutes;    │
+                                  │  │             │   step P4 must follow immediately)         │
+                                  │  │             └─→ P4   Deploy new cascade + api workers    │
+                                  │  │                       │                                  │
+                                  │  │                       └─→ P5b  D1 row-value UPDATE       │
+                                  │  │                              │  (canonical sentinel →    │
+                                  │  │                              │   largest-rung; rewrite   │
+                                  │  │                              │   pyramid_shards.key)     │
+                                  │  │                              └─→ P5c  R2 DELETE legacy   │
+                                  │  │                                       (after smoke-test) │
+                                  │  └──────────────────────────────────────────────────────────┘
+                                  │
+                                  ├─→ P7  intermediate-size backfill (e, post-cutover)
                                   │         │
-                                  │         ├─→ P6  api worker key-template bump (laptop)
-                                  │         └─→ P7  intermediate-size backfill (e)
-                                  │                  │
-                                  │                  └─→ P8  FE flag flip + retire `totals` (laptop)
+                                  │         └─→ P8  FE flag flip + retire `totals` (laptop)
                                   │
                                   └─→ P9  avail.yaml as source-of-truth + JS codegen (laptop)
 
-P1 /1m@1d historical backfill (e) ──── (independent; lands legacy path, renamed in P5)
+P1 /1m@1d historical backfill (e) ──── (independent; lands legacy path, renamed in P5a)
 ```
 
-P1 can run **today** in parallel with PY. PY gates everything else.
-P0 + P2 fan out from PY; rest of P3-P9 sequence behind P2.
+PY done; P0 + P2 done (commit fab241bb, uncommitted-then-committed).
+P1 can still run today in parallel with the deploy cutover.
+
+**P3 is now positioned as a hard deploy gate**, not a follow-up.
+Discovery during P5 spec work: the new pyrmts-cfw `D1ShardIndex`
+class hard-codes `SELECT ... shard_dur ... FROM pyramid_shards`, so
+the new cascade/api workers cannot read or write the current D1
+(which has `cadence` column) until P3 ALTERs the column. Conversely
+the deployed old cascade writes to `cadence`, so AFTER the ALTER it
+fails until a redeploy. The deploy window is minutes; cron misses
+1–2 ticks; no data loss (next tick resumes).
 
 ## Phase index
 
 | # | Phase | Owner | Spec | Status |
 |---|---|---|---|---|
 | **PY** | pyrmts Python ladder catch-up (data model only; ShardIndex etc. deferred) | pyrmts repo | `~/c/pyrmts/specs/python-unified-ladder.md` | **done** (pyrmts 38175b1) |
-| **P0** | ctbk Python `pyramid_cascade` adoption (largest-rung writer + path-format update) | laptop | inline below | **impl in WT (uncommitted)** — 9/9 tests pass |
+| **P0** | ctbk Python `pyramid_cascade` adoption (largest-rung writer + path-format update) | laptop | inline below | **done** (commit `fab241bb`) — 9/9 tests pass |
 | **P1** | `/1m@1d` historical backfill (2026-04-08..2026-06-28) | `e` | `specs/avail-v3-1m-backfill.md` | spec written |
-| **P2** | ctbk JS pin bump + `avail.yaml` rewrite | laptop | inline below | **impl in WT (uncommitted)** — JS pins dist 4fc6307; api/cascade/www tc + tests green |
-| **P3** | D1 schema update | laptop | inline below | not yet impl |
-| **P4** | CFW writer rewrite (single per-tier loop) | laptop | inline below + sup. by `avail-v3-steady-state.md` Phase 3/4 (now superseded) | impl in WT (uncommitted) |
-| **P5** | R2 + D1 inventory rename | `e` | `specs/avail-v3-storage-rename.md` | spec to write |
-| **P6** | api worker keyTemplate + watermark-grid update | laptop | inline below | impl in WT (uncommitted) |
+| **P2** | ctbk JS pin bump + `avail.yaml` rewrite | laptop | inline below | **done** (commit `fab241bb`) — api/cascade/www tc + tests green |
+| **P4** | CFW + api code in `fab241bb` (gbfs/cascade + gbfs/api committed; not deployed) | laptop | impl in `fab241bb`; deploy = step in P3/P5 cutover | code done; deploy pending P3+P5a |
+| **P5a** | R2 COPY legacy → new (`--no-delete --r2-only`) | laptop | `specs/avail-v3-storage-rename.md` | spec ready; script TBD |
+| **P3** | D1 `ALTER … RENAME COLUMN cadence TO shard_dur` (both tables) | laptop | inline below + cutover section in `specs/avail-v3-storage-rename.md` | not yet impl |
+| **P4d** | Deploy new cascade + api (immediately follows P3) | laptop | wrangler deploy from `gbfs/cascade` + `gbfs/api` | gated by P3 |
+| **P5b** | D1 row-value UPDATE (`cadence=''` → largest; rewrite `pyramid_shards.key`) | laptop | `specs/avail-v3-storage-rename.md` | spec ready; script TBD |
+| **P5c** | R2 DELETE legacy paths (post-smoke) | laptop | `specs/avail-v3-storage-rename.md` | spec ready; script TBD |
 | **P7** | Intermediate-size historical backfill | `e` | `specs/avail-v3-intermediate-backfill.md` | spec to write |
 | **P8** | FE flag default → `v3` + retire `/api/totals` | laptop | follow `availSrc=v3` flip (already done via flag) + sup. by `#108` | not yet impl |
 | **P9** | `avail.yaml` as source of truth + JS codegen | laptop | `specs/avail-yaml-source-of-truth.md` | spec written |
@@ -161,27 +184,35 @@ Also update `gbfs/api/src/avail_geo.ts` and `gbfs/cascade/src/index.ts`
 to construct the Pyramid object with `shards` arrays instead of
 `shard` + `partials`.
 
-### P3 — D1 schema update
-
-`pyramid_watermarks` and `pyramid_shards` schemas need a column
-rename:
+### P3 — D1 column rename (deploy gate)
 
 ```sql
--- pyramid_watermarks: cadence column → shard_dur (rename)
--- pyramid_shards: cadence column → shard_dur (rename)
 ALTER TABLE pyramid_watermarks RENAME COLUMN cadence TO shard_dur;
-ALTER TABLE pyramid_shards RENAME COLUMN cadence TO shard_dur;
+ALTER TABLE pyramid_shards     RENAME COLUMN cadence TO shard_dur;
 ```
 
-For the canonical sentinel (`cadence=''`): set existing rows to the
-new tier's largest-`shards` entry. E.g. rows with
-`pyramid='avail', tier='1m', cadence=''` get `shard_dur='1d'`. This
-backfill is a one-shot SQL: for each (pyramid, tier) in watermarks
-where shard_dur is empty after the rename, update to the configured
-largest shard.
+**Tight-window operation.** The new pyrmts-cfw `D1ShardIndex` (used by
+both the new cascade worker and any code calling `recordShard` /
+`getWatermarks`) hard-codes `shard_dur` as the column name; the
+deployed old code uses `cadence`. So:
 
-D1 migration via `wrangler d1 migrations` (per ctbk's existing
-convention if any; otherwise direct execute).
+- Before ALTER: new cascade can't `recordShard` (column missing).
+- After ALTER: old cascade can't `recordShard` (column gone).
+
+Sequence: run ALTER, immediately run `wrangler deploy` for both
+gbfs/cascade and gbfs/api. Cron will miss 1–2 /5m ticks during the
+gap; no data loss (next tick resumes; the missing minute is just
+absent from the partial-rung shards — fillable via P7 if desired).
+
+Row-value updates (canonical sentinel `''` → tier's largest shard,
+plus `pyramid_shards.key` rewrites to new R2 paths) are P5b, run
+**after** the deploy completes. Splitting these out keeps the ALTER
+window minimal — it's a single DDL statement per table, not a bulk
+UPDATE.
+
+`pyramid-status.py` reads `cadence` via raw SQL; after this rename
+it'll break until updated. Worth updating in the same commit that
+runs the ALTER.
 
 ### P4 — CFW writer rewrite
 
