@@ -5,6 +5,10 @@ existing R2 keys + D1 inventory rows from the legacy
 canonical/partial split layout to the unified shard-duration-keyed
 layout defined in `~/c/pyrmts/specs/unified-shard-ladder.md`.
 
+**Unblocks deploy** of commit `fab241bb` (P0 + P2 — the api worker
+reads from new paths; prod R2 still has the old layout, so a deploy
+today would 404 every read).
+
 ## Rename map
 
 | Legacy R2 key | New R2 key |
@@ -27,8 +31,30 @@ Where `<largest_shard_dur>` for each tier comes from the new
 /3d, /7d → 120y    (replaces legacy 'all'; see pyrmts spec)
 ```
 
-D1 inventory: `pyramid_shards.cadence` column → `shard_dur`, populated
-per the rename map (empty `cadence` → tier's largest).
+D1 inventory: `pyramid_shards.cadence` rows where `cadence=''`
+(legacy canonical sentinel) get populated to the tier's largest
+shard. `key` column rewritten. **The column itself stays named
+`cadence` here** — the SQL `ALTER COLUMN RENAME` is P3 (separate
+phase), not P5. The api worker at commit `fab241bb` reads the
+existing `cadence` column and translates at read time, so we can
+cut over without coupling P5 to P3.
+
+### Legacy `'all'` → `120y` period label
+
+`<tier>/all.parquet` (for /3d, /7d in the prior model) maps to
+`<tier>/120y/<period>.parquet`. `<period>` for a 120y shard needs a
+real value. Two options:
+
+- **(a) Fixed `1900`** (recommended): a 120y window starting 1900
+  covers `[1900, 2020)` — pre-dates all real data, and any real query
+  window will fall within `shard_periods_covering('120y', from, to)`
+  → matches the `1900` shard. Renamed key:
+  `avail-v3/3d/120y/1900.parquet`.
+- **(b) Compute from data**: open the parquet, derive 120y window
+  from `dt` min, label accordingly. More meaningful, costs a read
+  per shard.
+
+Going with (a). One-line decision, deterministic, no surprises.
 
 ## Implementation
 
@@ -42,21 +68,21 @@ Algorithm:
 
 ```python
 import boto3
-import polars as pl
-from ctbk.pyramid_cascade.config import load_pyramid_config
+from pyrmts import parse_pyramid_yaml
 
-config = load_pyramid_config('configs/pyramids/avail.yaml')
-LARGEST_BY_TIER = {t.name: t.shards[-1] for t in config.tiers}
+cfg = parse_pyramid_yaml(open('configs/pyramids/avail.yaml').read())
+LARGEST_BY_TIER = {t.name: t.shards[-1] for t in cfg.tiers}
 
-for tier in config.tiers:
+for tier in cfg.tiers:
     # 1. Legacy canonical: `avail-v3/<tier>/<period>.parquet`
     for obj in r2.list_objects(prefix=f'avail-v3/{tier.name}/'):
         # Skip sub-paths like avail-v3/<tier>/<dur>/ (already new layout, or partial)
         rel = obj.key.removeprefix(f'avail-v3/{tier.name}/')
         if '/' in rel:
             continue   # already in new layout or legacy partial — handled below
-        # rel = '<period>.parquet'
-        new_key = f'avail-v3/{tier.name}/{LARGEST_BY_TIER[tier.name]}/{rel}'
+        # rel = '<period>.parquet' — for /3d, /7d this is `all.parquet`; substitute.
+        period = '1900.parquet' if rel == 'all.parquet' else rel
+        new_key = f'avail-v3/{tier.name}/{LARGEST_BY_TIER[tier.name]}/{period}'
         rename(obj.key, new_key)
 
     # 2. Legacy partials: `avail-v3/<tier>/p<dur>/<period>.parquet`
@@ -72,31 +98,48 @@ for tier in config.tiers:
             rename(obj.key, new_key)
 ```
 
-`rename(old, new)` uses R2 server-side `CopyObject` then
-`DeleteObject` of the old. Idempotent: if `new` already exists with
-the same ETag/size, skip the copy (don't delete the old yet — wait
-for explicit `--force-delete-orphans` flag in a follow-up sweep).
+`rename(old, new)` uses R2 server-side `CopyObject` then optional
+`DeleteObject` of the old. Two-pass mode recommended:
 
-**D1 inventory update:** after each successful R2 rename, upsert
-`pyramid_shards` to the new shape. Use a transaction per ~100 rows.
+- Default: `CopyObject` to `new`, leave `old` in place. Idempotent
+  (HEAD `new` first; skip copy if exists).
+- `--delete-legacy` second pass (after smoke-testing the new
+  deploy): DELETE everything matching the legacy patterns.
+
+This makes the rename **reversible** until we explicitly run
+`--delete-legacy`. Storage cost of keeping both for a day is
+trivial (~$0.02/GB/mo).
+
+**D1 inventory update:** after R2 rename(s) succeed, update
+`pyramid_shards` + `pyramid_watermarks` in a single batch (via
+`wrangler d1 execute --remote --file tmp/d1-rename.sql`):
 
 ```sql
--- Per (pyramid, tier, old_cadence, period):
+-- Per tier: legacy canonical rows ('') → largest shard
+UPDATE pyramid_watermarks
+SET cadence = '<largest>'
+WHERE pyramid='avail' AND tier='<tier>' AND cadence='';
+
 UPDATE pyramid_shards
-SET shard_dur = ?,
-    key = ?
-WHERE pyramid = ? AND tier = ? AND cadence = ? AND period_start = ?;
+SET cadence = '<largest>',
+    key = REPLACE(key, 'avail-v3/<tier>/', 'avail-v3/<tier>/<largest>/')
+WHERE pyramid='avail' AND tier='<tier>' AND cadence='';
+
+-- Per tier: legacy partial rows (cadence already set) → strip 'p' from key
+UPDATE pyramid_shards
+SET key = REPLACE(key, 'avail-v3/<tier>/p', 'avail-v3/<tier>/')
+WHERE pyramid='avail' AND tier='<tier>' AND cadence!='';
 ```
 
-After all renames complete, also rename the column itself:
+(Generate the script by interpolating tier + largest-shard per tier
+from the YAML.)
 
-```sql
-ALTER TABLE pyramid_shards RENAME COLUMN cadence TO shard_dur;
-ALTER TABLE pyramid_watermarks RENAME COLUMN cadence TO shard_dur;
-```
-
-(P3's schema change can happen up-front if `cadence` is treated as a
-free-text column; ALTER may need rebuilding the table — D1 caveat.)
+**P3 = column rename is separate.** This phase only updates row
+values + the `key` column. The SQL `ALTER COLUMN RENAME cadence TO
+shard_dur` is P3, and depends on us first deploying any code that
+references `cadence` directly (`pyramid-status.py` does — it'd break
+on the rename). Sequence: P5 → deploy api worker → P3 → update
+ctbk-side raw-SQL consumers.
 
 ## Pre-flight
 
@@ -142,29 +185,50 @@ diff tmp/d1-pre-rename.txt tmp/d1-post-rename.txt
 
 ## Cutover ordering
 
-This phase MUST run AFTER P4 (CFW writer rewrite) deploys:
-- P4 deploys new CFW writing to new paths.
-- Then P5 renames legacy paths.
-- During P5, R2 briefly has BOTH layouts (new from CFW + legacy
-  un-renamed); planner reads both (during P6 transition). After P5
-  + P6, only new layout remains.
+```
+1. Deploy NEW CFW cascade   (commit fab241bb's gbfs/cascade — writes new paths only)
+2. Run P5 R2 + D1 rename    (this spec)
+3. Deploy NEW api worker    (commit fab241bb's gbfs/api — reads new paths only)
+```
 
-Reverse order risks data loss: if rename happens before CFW rewrite,
-the still-running OLD CFW writes to legacy paths the rename has
-already moved → either over-creates orphans or loses fresh writes.
+Why this order:
+
+- **CFW before rename.** Old CFW writing to legacy paths AFTER P5
+  runs would create new legacy objects the rename already moved past
+  — orphans, or worse, fresh writes that the new api worker never
+  sees.
+- **Rename before api deploy.** Old api worker reading new paths
+  would 404 every shard.
+
+Brief window between (1) and (2) has split-brain R2: new CFW writing
+new paths + legacy un-renamed still present. The OLD api worker
+still in prod reads legacy fine; the new-path shards are invisible
+to it (its planner doesn't look there) but harmless. Window should
+be minutes — kick off P5 immediately after the cascade deploy
+confirms a couple of /5m ticks landed cleanly.
+
+Reverse ordering risks data loss as noted above.
 
 ## Rollback
 
 If P5 fails mid-run:
-- Re-run with the same algorithm — idempotent (skips if new key
-  exists).
+- Re-run — idempotent (HEAD-skip if new key already exists).
 - If catastrophic (e.g. D1 inventory diverges from R2 reality):
   rebuild `pyramid_shards` from a fresh R2 LIST, infer (tier,
   shard_dur, period) from each path.
 
-If we need to revert to legacy layout entirely (unlikely): inverse
-rename script (swap `dur` and `p<dur>` directions). Pre-rename R2
-snapshot serves as recovery oracle.
+If the new api worker has a regression we want to roll back the
+*deploy* (not the rename), the two-pass `--no-delete` mode keeps
+legacy R2 objects intact:
+- Re-deploy old api worker (reads legacy paths).
+- D1 stays at new shape — old worker reads `cadence=''` as before
+  (its translation logic still works), but `cadence='1d'` rows look
+  like partials it doesn't know about. So the D1 update *is* part of
+  what would need rolling back — restore from the pre-rename D1
+  snapshot.
+
+Hard revert (unlikely): inverse rename script. Pre-rename R2 +
+D1 snapshots in `tmp/` serve as recovery oracles.
 
 ## Cross-reference
 
