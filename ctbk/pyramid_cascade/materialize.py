@@ -326,12 +326,19 @@ def emit_d1_insert_sql(
 
     Both tables get INSERT … ON CONFLICT updates so re-runs are
     idempotent. `written_at`/`updated_at` use a single SQL `unixepoch()*1000`
-    (D1 ts in ms — matches the CFW's `Date.now()`)."""
-    wrote = [r for r in results if r.status == 'wrote']
-    if not wrote:
+    (D1 ts in ms — matches the CFW's `Date.now()`).
+
+    Emits for both `'wrote'` (newly materialized) and `'exists'` (R2
+    path already present, e.g. from a prior r2-copy). The `'exists'`
+    case matters after the cutover-time D1 canonical-row cleanup —
+    /1m..15m shards already on R2 from r2-copy need D1 rows so the api
+    worker sees them. Skipping `'exists'` would leave them invisible
+    until the next steady-state cron tick re-writes them."""
+    eligible = [r for r in results if r.status in ('wrote', 'exists')]
+    if not eligible:
         return 0
     lines: list[str] = []
-    for r in wrote:
+    for r in eligible:
         ps = int(r.gap.period_start.timestamp() * 1000)
         pe = int(r.gap.period_end.timestamp() * 1000)
         # Single quotes inside strings: ctbk's tiers/shards/keys don't
@@ -358,6 +365,6 @@ def emit_d1_insert_sql(
         )
     with open(sql_path, 'w') as f:
         f.write('\n'.join(lines) + '\n')
-    err(f"emitted {len(wrote)} shard INSERTs ({len(lines)} statements) → {sql_path}")
+    err(f"emitted {len(eligible)} shard INSERTs ({len(lines)} statements) → {sql_path}")
     err(f"  run with: (cd gbfs/api && wrangler d1 execute ctbk-gbfs --remote --file {sql_path})")
-    return len(wrote)
+    return len(eligible)

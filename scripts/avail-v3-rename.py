@@ -280,40 +280,41 @@ def d1_alter(dry_run):
 
 @main.command('d1-update')
 @click.option('-n', '--dry-run', is_flag=True)
-@click.pass_context
-def d1_update(ctx, dry_run):
-    """Step 4 (phase P5b): row-value rewrite. Assumes d1-alter has run
-    (so the column is named `shard_dur`).
+def d1_update(dry_run):
+    """Step 4 (phase P5b): drop legacy canonical-sentinel rows. Assumes
+    `d1-alter` has run (column named `shard_dur`).
 
-    Per tier:
-    - canonical rows: `shard_dur=''` → `shard_dur='<largest>'`,
-      and `pyramid_shards.key` gets a new `<largest>` segment inserted.
-    - partial rows: strip the `p` prefix from `pyramid_shards.key`.
-    """
-    largest = ctx.obj['largest']
-    lines: list[str] = []
-    for tier, dur in largest.items():
-        lines.append(
-            f"UPDATE pyramid_watermarks "
-            f"SET shard_dur = '{dur}' "
-            f"WHERE pyramid = '{PYRAMID}' AND tier = '{tier}' AND shard_dur = '';"
-        )
-        lines.append(
-            f"UPDATE pyramid_shards "
-            f"SET shard_dur = '{dur}', "
-            f"    key = REPLACE(key, '{PREFIX}/{tier}/', '{PREFIX}/{tier}/{dur}/') "
-            f"WHERE pyramid = '{PYRAMID}' AND tier = '{tier}' AND shard_dur = '';"
-        )
-        lines.append(
-            f"UPDATE pyramid_shards "
-            f"SET key = REPLACE(key, '{PREFIX}/{tier}/p', '{PREFIX}/{tier}/') "
-            f"WHERE pyramid = '{PYRAMID}' AND tier = '{tier}' AND shard_dur != '';"
-        )
-    sql = '\n'.join(lines) + '\n'
+    Originally this rewrote `cadence=''` rows to their new largest
+    `shard_dur` + REPLACEd the key path. That worked for /1m..15m
+    where the largest-rung name was unchanged across the recent ladder
+    revisions (commit `dbebb0b7`: calendar `1mo`/`1y`/`120y` → fixed
+    `30d`/`60d`/.../`1440d`/`4320d`/`10080d`). For /30m..7d the legacy
+    canonical data is at calendar boundaries that don't align with the
+    new fixed-duration windows — translating the row labels would
+    create dangling references.
+
+    Cleaner: DELETE all `shard_dur=''` rows + let `ctbk pyramid-cascade
+    --fsck --fill` repopulate from /1m source data. `fsck` emits
+    correctly-aligned INSERTs for every (tier, shard_dur, period) the
+    YAML ladder declares. For tiers whose largest didn't change, fsck
+    finds the R2 path already present (from the earlier r2-copy) and
+    INSERTs the D1 row without re-writing R2.
+
+    Partial-rung rows (`shard_dur != ''`) stay as-is: the api worker
+    uses keyTemplate substitution, not `pyramid_shards.key`, so the
+    `p`-prefix in those legacy `key` values is cosmetic. Steady-state
+    cron writes them at the new `(tier, shard_dur, period)` coordinates
+    naturally."""
+    sql = (
+        f"DELETE FROM pyramid_shards     "
+        f"WHERE pyramid = '{PYRAMID}' AND shard_dur = '';\n"
+        f"DELETE FROM pyramid_watermarks "
+        f"WHERE pyramid = '{PYRAMID}' AND shard_dur = '';\n"
+    )
     sql_path = Path('tmp/avail-v3-d1-update.sql')
     sql_path.parent.mkdir(parents=True, exist_ok=True)
     sql_path.write_text(sql)
-    err(f"wrote {sql_path} ({len(lines)} statements)")
+    err(f"wrote {sql_path}:\n{sql}")
     run_wrangler(sql_path, dry_run=dry_run)
 
 
