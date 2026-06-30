@@ -40,6 +40,7 @@ function snap(overrides: Partial<HealthSnapshot> = {}): HealthSnapshot {
 			hourly: { latestKey: 'gbfs/avail/h1/2026-05-24/11.parquet', todayCount: 12 },
 		},
 		cascade: { cells: [], expectedCells: [] },
+		pyramids: [],
 		tripdata: null,
 	};
 	return { ...base, ...overrides };

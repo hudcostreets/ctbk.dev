@@ -37,11 +37,29 @@ interface TripdataHealth {
   recentMonths: string[]
   totalZips: number
 }
+interface PyramidShardStatus {
+  tier: string
+  shardDur: string
+  shardCount: number
+  earliestPeriodStart: string | null
+  latestPeriodEnd: string | null
+  watermarkEnd: string | null
+}
+interface PyramidStatus {
+  name: string
+  tiers: Array<{
+    tier: string
+    bin: string
+    shards: PyramidShardStatus[]
+  }>
+}
+type PyramidsHealth = PyramidStatus[]
 interface HealthSnapshot {
   generatedAt: number
   feed: FeedHealth
   compactions: CompactionHealth
   cascade: CascadeHealth
+  pyramids: PyramidsHealth
   tripdata: TripdataHealth | null
 }
 
@@ -86,6 +104,7 @@ export default function Health() {
       <TripdataSection tripdata={data.tripdata} />
       <FeedSection feed={data.feed} />
       <CompactionsSection compactions={data.compactions} />
+      <PyramidsSection pyramids={data.pyramids} />
       <CascadeSection cascade={data.cascade} />
       <BrowseSection feed={data.feed} compactions={data.compactions} />
       <FooterMeta generatedAt={data.generatedAt} />
@@ -252,48 +271,130 @@ function CompactionsSection({ compactions }: { compactions: CompactionHealth }) 
   )
 }
 
+function PyramidsSection({ pyramids }: { pyramids: PyramidsHealth | undefined }) {
+  if (!pyramids || pyramids.length === 0) {
+    return (
+      <Section title="Avail-v3 / Rides-v3 pyramids">
+        <div style={{ opacity: 0.6, fontSize: '0.9em' }}>
+          No pyramid data — D1 unreachable or empty.
+        </div>
+      </Section>
+    )
+  }
+  return (
+    <Section title="Avail-v3 / Rides-v3 pyramids">
+      {pyramids.map((p) => <PyramidGrid key={p.name} pyramid={p} />)}
+      <div style={{ marginTop: '0.4em', fontSize: '0.8em', opacity: 0.7 }}>
+        n = shard count · <span style={{ color: 'salmon' }}>∅</span> = no shards yet ·
+        <span style={{ color: 'rgba(127,127,127,0.4)' }}> ·</span> = no rung at this column
+      </div>
+    </Section>
+  )
+}
+
+function PyramidGrid({ pyramid }: { pyramid: PyramidStatus }) {
+  // Union of all shard durs across tiers, ordered by their min duration.
+  const allDurs = new Set<string>()
+  pyramid.tiers.forEach((t) => t.shards.forEach((s) => allDurs.add(s.shardDur)))
+  const durs = Array.from(allDurs).sort((a, b) => durMin(a) - durMin(b))
+
+  const cellMap = new Map<string, PyramidShardStatus>()
+  pyramid.tiers.forEach((t) => t.shards.forEach((s) => cellMap.set(`${t.tier}|${s.shardDur}`, s)))
+
+  return (
+    <div style={{ marginBottom: '1em' }}>
+      <div style={{ fontWeight: 600, marginBottom: '0.3em' }}>{pyramid.name}</div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: '0.85em', fontVariantNumeric: 'tabular-nums' }}>
+          <thead>
+            <tr>
+              <th style={cellStyle('left')}>tier \ shard</th>
+              {durs.map((d) => <th key={d} style={cellStyle('center')}>{d}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {pyramid.tiers.map((t) => (
+              <tr key={t.tier}>
+                <td style={{ ...cellStyle('left'), fontWeight: 600 }}>/{t.tier}</td>
+                {durs.map((d) => {
+                  const s = cellMap.get(`${t.tier}|${d}`)
+                  if (s === undefined) {
+                    return <td key={d} style={cellStyle('center', 'rgba(127,127,127,0.25)')}>·</td>
+                  }
+                  if (s.shardCount === 0) {
+                    return <td key={d} style={cellStyle('center', 'salmon')} title="rung declared but no shards yet">∅</td>
+                  }
+                  const wmHint = s.watermarkEnd ? `watermark ${s.watermarkEnd.slice(0, 16)}` : ''
+                  const latestHint = s.latestPeriodEnd ? `latest ${s.latestPeriodEnd.slice(0, 16)}` : ''
+                  const title = [wmHint, latestHint].filter(Boolean).join(' · ')
+                  return (
+                    <td key={d} style={cellStyle('center')} title={title}>
+                      {s.shardCount}
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+/** Parse a pyrmts Duration string (`5min`, `1h`, `1d`, `4320d`) to
+ *  minutes. Used to sort shard-dur columns. */
+function durMin(d: string): number {
+  const m = /^(\d+)(min|h|d|y)$/.exec(d)
+  if (!m) return Number.MAX_SAFE_INTEGER
+  const n = Number(m[1])
+  const unit = m[2]
+  return unit === 'min' ? n : unit === 'h' ? n * 60 : unit === 'd' ? n * 1440 : n * 1440 * 365
+}
+
 function CascadeSection({ cascade }: { cascade: CascadeHealth }) {
-  // Pivot cells into agg × cons grid. Show built (cell value = shardCount),
-  // empty deployed (—), and specced-not-deployed (gray dot).
-  const aggs = ['1m', '5m', '15m', '1h', '1d']
-  const conss = ['1m', '5m', '15m', '1h', '3h', '8h', '1d', '3d', '1w', '10d', '1mo', '2mo', '3mo', '5d', '1y', '3y']
+  // Legacy ymdgtb cascade pyramid (rides v1/v2). Pivot cells into
+  // tier × shard grid (= old agg × cons; renamed in the UI to match
+  // the unified-ladder vocabulary used by the new pyramids section).
+  const tiers = ['1m', '5m', '15m', '1h', '1d']
+  const shards = ['1m', '5m', '15m', '1h', '3h', '8h', '1d', '3d', '1w', '10d', '1mo', '2mo', '3mo', '5d', '1y', '3y']
   const cellMap = new Map<string, CascadeCell>()
   cascade.cells.forEach((c) => cellMap.set(`${c.agg}|${c.cons}`, c))
   const expectedMap = new Map<string, boolean>()
   cascade.expectedCells.forEach((e) => expectedMap.set(`${e.agg}|${e.cons}`, e.deployed))
 
   // Filter to columns that have any expected entry.
-  const activeConss = conss.filter((c) => aggs.some((a) => expectedMap.has(`${a}|${c}`)))
+  const activeShards = shards.filter((s) => tiers.some((t) => expectedMap.has(`${t}|${s}`)))
 
   return (
-    <Section title="Cascade pyramid">
+    <Section title="Legacy cascade (rides v1/v2)">
       <div style={{ overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse', fontSize: '0.85em', fontVariantNumeric: 'tabular-nums' }}>
           <thead>
             <tr>
-              <th style={cellStyle('left')}>agg \ cons</th>
-              {activeConss.map((c) => <th key={c} style={cellStyle('center')}>{c}</th>)}
+              <th style={cellStyle('left')}>tier \ shard</th>
+              {activeShards.map((c) => <th key={c} style={cellStyle('center')}>{c}</th>)}
             </tr>
           </thead>
           <tbody>
-            {aggs.map((a) => (
-              <tr key={a}>
-                <td style={{ ...cellStyle('left'), fontWeight: 600 }}>{a}</td>
-                {activeConss.map((c) => {
-                  const key = `${a}|${c}`
+            {tiers.map((t) => (
+              <tr key={t}>
+                <td style={{ ...cellStyle('left'), fontWeight: 600 }}>{t}</td>
+                {activeShards.map((s) => {
+                  const key = `${t}|${s}`
                   const cell = cellMap.get(key)
                   const deployed = expectedMap.get(key)
                   if (deployed === undefined) {
-                    return <td key={c} style={cellStyle('center', 'rgba(127,127,127,0.25)')}>·</td>
+                    return <td key={s} style={cellStyle('center', 'rgba(127,127,127,0.25)')}>·</td>
                   }
                   if (!deployed) {
-                    return <td key={c} style={cellStyle('center', 'rgba(127,127,127,0.4)')} title="specced (grid.yaml) but not deployed">○</td>
+                    return <td key={s} style={cellStyle('center', 'rgba(127,127,127,0.4)')} title="specced (grid.yaml) but not deployed">○</td>
                   }
                   if (!cell || cell.shardCount === 0) {
-                    return <td key={c} style={cellStyle('center', 'salmon')} title="deployed but no shards">∅</td>
+                    return <td key={s} style={cellStyle('center', 'salmon')} title="deployed but no shards">∅</td>
                   }
                   return (
-                    <td key={c} style={cellStyle('center')} title={cell.latestKey ?? ''}>
+                    <td key={s} style={cellStyle('center')} title={cell.latestKey ?? ''}>
                       {cell.shardCount}
                     </td>
                   )

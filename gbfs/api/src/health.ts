@@ -57,6 +57,28 @@ export interface CascadeHealth {
 	expectedCells: Array<{ agg: string; cons: string; deployed: boolean }>;
 }
 
+/** Per-(tier, shard_dur) status for a unified-shard-ladder pyramid
+ *  (avail-v3, rides-v3). One row per declared ladder rung. */
+export interface PyramidShardStatus {
+	tier: string;
+	shardDur: string;        // e.g. '5min', '1d', '4320d'
+	shardCount: number;      // # shards recorded in ShardIndex
+	earliestPeriodStart: string | null;   // ISO ms
+	latestPeriodEnd: string | null;       // ISO ms
+	watermarkEnd: string | null;          // pyramid_watermarks.latest_period_end
+}
+
+export interface PyramidStatus {
+	name: string;            // 'avail' / 'rides' etc.
+	tiers: Array<{
+		tier: string;
+		bin: string;
+		shards: PyramidShardStatus[];     // one per declared rung
+	}>;
+}
+
+export type PyramidsHealth = PyramidStatus[];
+
 /** Recency of `s3://tripdata` — the upstream Citi Bike monthly publish.
  *  Sourced from `tripdata/latest.json` in R2, refreshed every `tripdata.yml`
  *  run (independent of whether new files were imported). */
@@ -73,6 +95,7 @@ export interface HealthSnapshot {
 	feed: FeedHealth;
 	compactions: CompactionHealth;
 	cascade: CascadeHealth;
+	pyramids: PyramidsHealth;
 	tripdata: TripdataHealth | null;
 }
 
@@ -290,6 +313,88 @@ interface RawTripdataSummary {
 	total_zips: number;
 }
 
+/** Snapshot per-(tier, shard_dur) status for unified-shard-ladder
+ *  pyramids. Reads D1 directly (`pyramid_shards` for counts/extents,
+ *  `pyramid_watermarks` for watermarks). Tier declarations come from
+ *  `avail_geo.ts`'s `TIERS`; tracks the same ladders the api worker
+ *  serves queries from.
+ *
+ *  D1 column compatibility: pre-P3 the column is `cadence`; post-P3
+ *  it's `shard_dur`. Probe schema once and substitute. */
+export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth> {
+	// Probe which column name the D1 schema uses (P3 transition).
+	let shardCol = 'shard_dur';
+	try {
+		const cols = await db.prepare("PRAGMA table_info(pyramid_shards)").all<{ name: string }>();
+		const names = new Set((cols.results ?? []).map((r) => r.name));
+		if (names.has('shard_dur')) shardCol = 'shard_dur';
+		else if (names.has('cadence')) shardCol = 'cadence';
+	} catch {
+		// Fall through with default.
+	}
+
+	const PYRAMID = 'avail';
+	const { TIERS } = await import('./avail_geo');
+	const largestPerTier: Record<string, string> = Object.fromEntries(
+		TIERS.map((t) => [t.name, t.shards[t.shards.length - 1]!])
+	);
+
+	// One query for all shards of this pyramid; one for watermarks.
+	type ShardRow = { tier: string; sd: string; n: number; earliest: number; latest: number };
+	type WmRow = { tier: string; sd: string; latest_period_end: number };
+	const shardSql = `SELECT tier, ${shardCol} AS sd, COUNT(*) AS n, ` +
+		`MIN(period_start) AS earliest, MAX(period_end) AS latest ` +
+		`FROM pyramid_shards WHERE pyramid = ? GROUP BY tier, ${shardCol}`;
+	const wmSql = `SELECT tier, ${shardCol} AS sd, latest_period_end ` +
+		`FROM pyramid_watermarks WHERE pyramid = ?`;
+
+	let shardRows: ShardRow[] = [];
+	let wmRows: WmRow[] = [];
+	try {
+		const [s, w] = await Promise.all([
+			db.prepare(shardSql).bind(PYRAMID).all<ShardRow>(),
+			db.prepare(wmSql).bind(PYRAMID).all<WmRow>(),
+		]);
+		shardRows = s.results ?? [];
+		wmRows = w.results ?? [];
+	} catch {
+		// D1 unavailable — return empty.
+		return [];
+	}
+
+	// Translate legacy canonical sentinel rows: '' → tier's largest shard.
+	const norm = (tier: string, sd: string): string =>
+		sd === '' ? (largestPerTier[tier] ?? sd) : sd;
+
+	const shardsByKey = new Map<string, ShardRow>();
+	for (const r of shardRows) shardsByKey.set(`${r.tier}@${norm(r.tier, r.sd)}`, r);
+	const wmByKey = new Map<string, WmRow>();
+	for (const r of wmRows) wmByKey.set(`${r.tier}@${norm(r.tier, r.sd)}`, r);
+
+	const isoMs = (ms: number | null): string | null =>
+		ms === null || ms === undefined ? null : new Date(ms).toISOString();
+
+	const tiers = TIERS.map((t) => ({
+		tier: t.name,
+		bin: String(t.bin),
+		shards: t.shards.map((sd) => {
+			const key = `${t.name}@${sd}`;
+			const s = shardsByKey.get(key);
+			const w = wmByKey.get(key);
+			return {
+				tier: t.name,
+				shardDur: String(sd),
+				shardCount: s ? s.n : 0,
+				earliestPeriodStart: s ? isoMs(s.earliest) : null,
+				latestPeriodEnd: s ? isoMs(s.latest) : null,
+				watermarkEnd: w ? isoMs(w.latest_period_end) : null,
+			};
+		}),
+	}));
+
+	return [{ name: PYRAMID, tiers }];
+}
+
 export async function getTripdataHealth(r2: HealthR2): Promise<TripdataHealth | null> {
 	const obj = await r2.get('tripdata/latest.json');
 	if (!obj) return null;
@@ -303,11 +408,15 @@ export async function getTripdataHealth(r2: HealthR2): Promise<TripdataHealth | 
 	};
 }
 
-export async function getHealthSnapshot(r2: HealthR2): Promise<HealthSnapshot> {
-	const [feed, compactions, cascade, tripdata] = await Promise.all([
+export async function getHealthSnapshot(
+	r2: HealthR2,
+	db?: D1Database,
+): Promise<HealthSnapshot> {
+	const [feed, compactions, cascade, pyramids, tripdata] = await Promise.all([
 		getFeedHealth(r2),
 		getCompactionHealth(r2),
 		getCascadeHealth(r2),
+		db ? getPyramidsHealth(db) : Promise.resolve<PyramidsHealth>([]),
 		getTripdataHealth(r2),
 	]);
 	return {
@@ -315,6 +424,7 @@ export async function getHealthSnapshot(r2: HealthR2): Promise<HealthSnapshot> {
 		feed,
 		compactions,
 		cascade,
+		pyramids,
 		tripdata,
 	};
 }

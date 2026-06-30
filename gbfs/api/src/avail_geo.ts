@@ -71,7 +71,7 @@ const DEFAULT_REDUCER: Reducer = 'mean';
  *  #135 / `specs/per-cadence-earliest.md`), so /1m partials are trusted
  *  only for windows after cascade-start; coarser tiers' canonical
  *  coverage is preserved for older windows. */
-const TIERS: Tier[] = [
+export const TIERS: Tier[] = [
 	{ name: '1m',  bin: '1min',  shards: ['5min', '10min', '30min', '1h', '3h', '12h', '1d'] },
 	{ name: '2m',  bin: '2min',  shards: ['10min', '30min', '1h', '3h', '12h', '1d', '2d'] },
 	{ name: '3m',  bin: '3min',  shards: ['15min', '30min', '1h', '3h', '12h', '1d', '3d'] },

@@ -1128,7 +1128,7 @@ export default {
 		// cascade tier coverage). See specs/gbfs-health-page.md.
 		if (url.pathname === '/api/health') {
 			try {
-				const snapshot = await getHealthSnapshot(env.R2);
+				const snapshot = await getHealthSnapshot(env.R2, env.DB);
 				return jsonResponse(snapshot, env);
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'health snapshot failed', 500, env);
