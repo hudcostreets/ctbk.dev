@@ -139,54 +139,39 @@ def source_long_for_gap(
     gap: ExpectedShard,
 ) -> tuple[pl.DataFrame, int, int]:
     """Return (long_df, inputs_present, inputs_expected) for the source
-    reads of `gap`. Inputs-missing means some prior tier hasn't filled
-    yet — caller decides whether to error / skip / partial-write."""
-    shard_min = dur_min(gap.shard_dur)
-    tier = pyramid.tier(gap.tier)
-    tier_shards = list(tier.shards)
-    smallest_dur = tier_shards[0]
+    reads of `gap`.
 
-    # Case 1: /1m smallest rung → read raw GBFS minutes.
-    if gap.tier == '1m' and gap.shard_dur == smallest_dur:
+    The cover semantics emit only the max-shard per tier for historical
+    periods (plus a few trailing-window smaller rungs near `to`), so the
+    cascade.ts-style prev-rung chain doesn't exist on R2 for backfill.
+    Two cases:
+
+    - `tier == '1m'`: read raw GBFS minutes for the full period. The
+      `avail_ingest_1m` lazy pipeline parallelizes the minute-key fetches.
+    - `tier != '1m'`: read N × `/1m@source_rung` shards, where
+      `source_rung` is the largest /1m rung dividing the target shard
+      duration (mirrors `cascade.ts:pickOneMSourceRung`). The /1m gaps
+      sort before non-/1m by `fsck.sort_by_dependency`, so the /1m
+      shards needed here exist by the time we get here.
+    """
+    if gap.tier == '1m':
         from .avail_ingester import avail_ingest_1m
-        # avail_ingest_1m enumerates minute keys [from, to); fetches in
-        # parallel; returns lazy long-form. Treat result as the source.
         long_lf = avail_ingest_1m(gap.period_start, gap.period_end)
         long = long_lf.collect(engine='streaming')
-        # We don't know exact inputsPresent here without re-counting raw
-        # reads; use the row-count as a coarse proxy for "got data."
+        # `inputs_present` is a coarse proxy: data found ⇒ at least one
+        # raw minute hit. The avail_ingester swallows per-minute 404s,
+        # so granular inputs_expected isn't accessible here.
         return long, (1 if not long.is_empty() else 0), 1
 
-    # Cases 2-4: read from existing shards.
-    # Determine (source_tier, source_shard_dur, N inputs).
-    if gap.tier == '1m':
-        # /1m coarser: read N × /1m@prev_rung from this tier.
-        idx = tier_shards.index(gap.shard_dur)
-        prev_dur = tier_shards[idx - 1]
-        prev_min = dur_min(prev_dur)
-        n_inputs = shard_min // prev_min
-        source_tier = '1m'
-        source_dur = prev_dur
-    elif gap.shard_dur == smallest_dur:
-        # Non-/1m smallest rung: read N × /1m@source from /1m.
-        source_dur, source_min = pick_one_m_source_rung(pyramid, shard_min)
-        n_inputs = shard_min // source_min
-        source_tier = '1m'
-    else:
-        # Non-/1m coarser: read N × same-tier prev rung.
-        idx = tier_shards.index(gap.shard_dur)
-        prev_dur = tier_shards[idx - 1]
-        prev_min = dur_min(prev_dur)
-        n_inputs = shard_min // prev_min
-        source_tier = gap.tier
-        source_dur = prev_dur
+    shard_min = dur_min(gap.shard_dur)
+    source_dur, source_min = pick_one_m_source_rung(pyramid, shard_min)
+    n_inputs = shard_min // source_min
 
-    source_min = dur_min(source_dur)
     longs: list[pl.DataFrame] = []
     inputs_present = 0
     for i in range(n_inputs):
         source_start = gap.period_start + timedelta(minutes=i * source_min)
-        source_key = _shard_key(pyramid, source_tier, source_dur, source_start)
+        source_key = _shard_key(pyramid, '1m', source_dur, source_start)
         sub = shard_to_long(r2, source_key)
         if sub is None:
             continue
