@@ -146,11 +146,12 @@ def pyramid_cascade_cmd(
         err(f"  tiers:     {len(pyramid.tiers)}: {[t.name for t in pyramid.tiers]}")
         if fill_limit is not None:
             err(f"  limit:     {fill_limit} gaps")
-        missing = discover_gaps(pyramid, range_tuple)
+        missing, existing_keys = discover_gaps(pyramid, range_tuple)
         report_gaps(missing)
         if fill and missing:
             err("")
-            fill_gaps(pyramid, missing, limit=fill_limit)
+            fill_gaps(pyramid, missing, limit=fill_limit,
+                      existing_keys=existing_keys)
         return
 
     err(f"pyramid-cascade")

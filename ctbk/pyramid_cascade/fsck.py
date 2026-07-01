@@ -114,11 +114,14 @@ def discover_gaps(
     pyramid: Pyramid,
     time_range: tuple[datetime, datetime],
     filter: dict | None = None,
-) -> list[ExpectedShard]:
+) -> tuple[list[ExpectedShard], set[str]]:
     """End-to-end discovery: enumerate expected → list R2 → diff → sort.
 
-    Returns the gap list in dependency-fill order. Caller decides
-    whether to dry-run-print or materialize."""
+    Returns `(gaps_in_fill_order, existing_key_set)`. The key set is a
+    snapshot of what was on R2 at discovery time — `fill_gaps` extends
+    it as each shard is written so prev-rung source lookups see freshly
+    materialized inputs without re-listing R2.
+    """
     err(f"fsck: discovering gaps in {pyramid.keyTemplate.split('{')[0]} "
         f"over [{time_range[0].date()}, {time_range[1].date()})...")
     expected = list_expected_shards(pyramid, time_range, filter=filter)
@@ -127,7 +130,7 @@ def discover_gaps(
     err(f"  existing: {len(existing)} keys on storage")
     missing = diff_with_existing(expected, existing)
     err(f"  missing:  {len(missing)} shards to fill")
-    return sort_by_dependency(pyramid, missing)
+    return sort_by_dependency(pyramid, missing), existing
 
 
 def report_gaps(missing: list[ExpectedShard], limit_per_rung: int = 3) -> None:
@@ -147,6 +150,23 @@ def report_gaps(missing: list[ExpectedShard], limit_per_rung: int = 3) -> None:
 # ─── Phase B: fill driver ────────────────────────────────────────────
 
 
+def _group_by_rung(
+    gaps: list[ExpectedShard],
+) -> list[tuple[str, str, list[ExpectedShard]]]:
+    """Consecutive-run grouping by (tier, shard_dur). Since `gaps` is
+    already dependency-sorted (tier index, shard_dur asc, period),
+    consecutive entries with the same (tier, shard_dur) form a rung
+    batch — all shards in a batch are independent (no cross-shard
+    dependency), so the batch can fan out in parallel."""
+    out: list[tuple[str, str, list[ExpectedShard]]] = []
+    for g in gaps:
+        if out and out[-1][0] == g.tier and out[-1][1] == g.shard_dur:
+            out[-1][2].append(g)
+        else:
+            out.append((g.tier, g.shard_dur, [g]))
+    return out
+
+
 def fill_gaps(
     pyramid: Pyramid,
     gaps: list[ExpectedShard],
@@ -155,29 +175,66 @@ def fill_gaps(
     d1_sql_path: str = 'tmp/fsck-d1-record.sql',
     limit: int | None = None,
     skip_existing: bool = True,
+    existing_keys: set[str] | None = None,
+    max_workers: int = 3,
 ) -> list:
-    """Materialize each gap in dependency order. Returns a list of
-    `MaterializeResult` for the driver to summarize / emit D1 SQL from.
+    """Materialize gaps in dependency order. Shards within a (tier,
+    shard_dur) batch fan out to a `max_workers`-sized threadpool
+    (bounded by the per-shard memory footprint — /2m@2d peaked at
+    ~17 GB, so 3 workers × 20 GB ≈ 60 GB RAM ceiling).
 
-    Reuses the existing R2 client (`ctbk.avail_v3.r2_client`)."""
+    `existing_keys` is a snapshot of R2 keys from discovery; the fill
+    loop extends it as each shard is written so downstream prev-rung
+    lookups see fresh inputs without new HEAD round trips.
+
+    Returns a list of `MaterializeResult` for the driver to summarize /
+    emit D1 SQL from.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from threading import Lock
     from .materialize import emit_d1_insert_sql, materialize_shard
     from ctbk.avail_v3 import r2_client
     r2 = r2_client()
+    key_set: set[str] = set(existing_keys) if existing_keys is not None else set()
+    key_set_lock = Lock()
     results: list = []
     by_status: dict[str, int] = {}
-    for i, gap in enumerate(gaps):
-        if limit is not None and i >= limit:
-            err(f"  hit --limit {limit}; stopping after {i} gaps")
+    processed = 0
+
+    def process(gap: ExpectedShard):
+        return materialize_shard(
+            r2, pyramid, gap,
+            skip_existing=skip_existing,
+            key_set=key_set,
+        )
+
+    rung_batches = _group_by_rung(gaps)
+    for tier, shard_dur, batch in rung_batches:
+        if limit is not None and processed >= limit:
+            err(f"  hit --limit {limit}; stopping after {processed} gaps")
             break
-        res = materialize_shard(r2, pyramid, gap, skip_existing=skip_existing)
-        results.append(res)
-        by_status[res.status] = by_status.get(res.status, 0) + 1
-        # Progress every 20 (or on errors / unusual statuses)
-        if res.status == 'error':
-            err(f"  ERR /{gap.tier}@{gap.shard_dur} {gap.period_start.date()}: {res.error}")
-        elif (i + 1) % 20 == 0 or res.status in ('no_inputs', 'empty'):
-            err(f"  [{i+1}/{len(gaps)}] /{gap.tier}@{gap.shard_dur} {gap.period_start.date()} → {res.status}"
-                + (f" ({res.rows}r, {res.bytes_written}b)" if res.status == 'wrote' else ''))
+        batch_slice = batch
+        if limit is not None:
+            batch_slice = batch[:max(0, limit - processed)]
+        n_par = min(max_workers, len(batch_slice))
+        with ThreadPoolExecutor(max_workers=n_par) as pool:
+            futs = {pool.submit(process, g): g for g in batch_slice}
+            for fut in as_completed(futs):
+                gap = futs[fut]
+                res = fut.result()
+                results.append(res)
+                by_status[res.status] = by_status.get(res.status, 0) + 1
+                processed += 1
+                if res.status == 'wrote':
+                    with key_set_lock:
+                        key_set.add(gap.key)
+                if res.status == 'error':
+                    err(f"  ERR /{gap.tier}@{gap.shard_dur} {gap.period_start.date()}: {res.error}")
+                else:
+                    tag = f" ({res.source_desc}, {res.rows}r, {res.bytes_written}b)" if res.status == 'wrote' \
+                        else f" ({res.source_desc})" if res.source_desc else ""
+                    err(f"  [{processed}/{len(gaps)}] /{gap.tier}@{gap.shard_dur} "
+                        f"{gap.period_start.date()} → {res.status}{tag}")
     err(f"fill summary: " + ", ".join(f"{k}={v}" for k, v in sorted(by_status.items())))
 
     if any(r.status == 'wrote' for r in results):

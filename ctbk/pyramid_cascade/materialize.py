@@ -1,24 +1,24 @@
 """fsck Phase B: per-shard materialization.
 
 Given a single `ExpectedShard` (tier, shard_dur, period_start,
-period_end, key), produce that parquet on R2. Dispatches by case:
+period_end, key), produce that parquet on R2. Source selection walks
+this priority chain (each candidate is checked for R2 existence and
+the first one where ALL N shards exist is used):
 
-- `(tier='1m', shard_dur=smallest)`: read raw GBFS minute parquets via
-  the existing avail ingester; output long-form rows; build wide shard
-  via `engine._build_tier_shard`; write.
-- `(tier='1m', shard_dur=coarser)`: read N × `/1m@prev_rung` shards
-  from R2; un-pivot to long; build wide shard at the same /1m bin;
-  write.
-- `(tier!='1m', shard_dur=smallest)`: read N × `/1m@<source_rung>` shards
-  where source_rung is the largest /1m rung dividing the target
-  shard_dur (mirrors `cascade.ts`'s `pickOneMSourceRung`); un-pivot to
-  long; build wide shard at the tier's coarser bin; write.
-- `(tier!='1m', shard_dur=coarser)`: read N × same-tier prev-rung
-  shards from R2; un-pivot to long; build wide shard at the tier's
-  bin; write.
+1. **Within-tier prev-rung**: for `/1h@60d`, try `/1h@30d ×2`, then
+   `/1h@10d ×6`, etc. Cheapest — source dt is already at target-tier
+   bin granularity, so pre-aggregate is a no-op sum.
+2. **Prev-tier max divisor rung**: for `/1h@60d`, `/30m@30d ×2` (bin
+   requires re-flooring to 1h). Falls through prev-tier rungs
+   largest-first, then prev-prev-tier, etc.
+3. **`/1m` fallback**: read N × `/1m@X` (largest divisor rung of `/1m`).
+   The historic naive path — many small reads, expensive.
 
-Mirrors `gbfs/cascade/src/avail3/cascade.ts`'s `writeShard` but on
-`e` (Python, ProcessPool-friendly, no CFW CPU budget).
+Mirrors the SPIRIT of `gbfs/cascade/src/avail3/cascade.ts`'s
+`writeShard`, but fsck's fill sees ladder gaps at multiple rungs and
+must handle missing prev-rungs by falling back — the CFW's steady-state
+tick can always assume the immediately-prev rung was written on the
+same tick.
 
 D1 recording: this module emits R2 writes only. The driver
 (`fsck.fill_gaps`) collects (tier, shard_dur, period_start, period_end,
@@ -59,6 +59,104 @@ def pick_one_m_source_rung(pyramid: Pyramid, shard_dur_min: int) -> tuple[str, i
         if rung_min <= shard_dur_min and shard_dur_min % rung_min == 0:
             return rung_dur, rung_min
     raise ValueError(f"no /1m rung divides {shard_dur_min}min")
+
+
+@dataclass
+class SourceCandidate:
+    """A concrete source-shard set that could feed a materialize job."""
+    tier: str
+    shard_dur: str
+    shard_dur_min: int
+    keys: list[str]  # N absolute R2 keys (partitions of gap.period_start..period_end)
+    source_starts: list[datetime]
+
+    @property
+    def n_inputs(self) -> int:
+        return len(self.keys)
+
+
+def enumerate_source_candidates(
+    pyramid: Pyramid,
+    gap: ExpectedShard,
+) -> list[SourceCandidate]:
+    """Priority-ordered list of source-shard candidates for `gap`. See
+    module docstring. Only strictly-smaller rungs that cleanly divide
+    the gap's shard duration are eligible. The caller HEAD-checks each
+    candidate and picks the first one where every key is present on R2.
+
+    Candidates within a tier are largest-rung-first (cheapest reads);
+    tier order is target-tier first (finest chain), then previous tiers
+    largest-first, ending at `/1m`.
+    """
+    gap_min = dur_min(gap.shard_dur)
+    gap_tier = pyramid.tier(gap.tier)
+    tier_idx = next(i for i, t in enumerate(pyramid.tiers) if t.name == gap.tier)
+
+    def rungs_for_tier(tier, allow_equal: bool) -> list[tuple[str, int]]:
+        """Rungs of `tier` that divide gap_min. Largest first. When
+        allow_equal=False (within-target-tier), require strictly smaller
+        so we don't infinite-loop pulling a copy of ourselves."""
+        out = []
+        for rd in reversed(tier.shards):
+            rm = dur_min(rd)
+            if (rm >= gap_min) if not allow_equal else (rm > gap_min):
+                continue
+            if gap_min % rm != 0:
+                continue
+            out.append((rd, rm))
+        return out
+
+    def build_candidate(tier_name: str, rd: str, rm: int) -> SourceCandidate:
+        n = gap_min // rm
+        starts = [gap.period_start + timedelta(minutes=i * rm) for i in range(n)]
+        keys = [_shard_key(pyramid, tier_name, rd, s) for s in starts]
+        return SourceCandidate(tier=tier_name, shard_dur=rd,
+                               shard_dur_min=rm, keys=keys, source_starts=starts)
+
+    out: list[SourceCandidate] = []
+    # 1. Within-target-tier prev rungs (strictly smaller)
+    for rd, rm in rungs_for_tier(gap_tier, allow_equal=False):
+        out.append(build_candidate(gap_tier.name, rd, rm))
+    # 2. Previous tiers, coarsest-to-finest (i.e. /30m before /15m before /10m
+    #    when target is /1h) — coarser previous tiers mean fewer/larger reads.
+    for prev_idx in range(tier_idx - 1, -1, -1):
+        prev_tier = pyramid.tiers[prev_idx]
+        for rd, rm in rungs_for_tier(prev_tier, allow_equal=True):
+            out.append(build_candidate(prev_tier.name, rd, rm))
+    return out
+
+
+def _all_keys_exist(r2, keys: list[str], key_set: set[str] | None = None) -> tuple[bool, int]:
+    """Check `keys` for existence; return (all_present, present_count).
+
+    If `key_set` (a pre-fetched snapshot of R2 keys) is provided, checks
+    are pure in-memory (O(1) per key). Otherwise falls back to a
+    threadpooled HEAD-per-key round-trip.
+
+    In-memory checks against the fsck-time R2 listing are safe as
+    long as the fill loop updates `key_set` whenever a new shard is
+    written — see `fill_gaps` for the update pattern."""
+    if key_set is not None:
+        present = sum(1 for k in keys if k in key_set)
+        return present == len(keys), present
+    from concurrent.futures import ThreadPoolExecutor
+    def check(k: str) -> bool:
+        try:
+            r2.head_object(Bucket=R2_BUCKET, Key=k)
+            return True
+        except r2.exceptions.ClientError:
+            return False
+    with ThreadPoolExecutor(max_workers=min(32, max(4, len(keys)))) as pool:
+        results = list(pool.map(check, keys))
+    present = sum(1 for r in results if r)
+    return present == len(keys), present
+
+
+# Maximum N-inputs to accept for a prev-rung/prev-tier candidate. Bigger
+# candidates (e.g. /1h@3h × 480) are pathological — even if they were
+# fully populated, the download cost would beat the /1m fallback. This
+# also bounds the HEAD-check fanout when candidates aren't populated.
+MAX_CANDIDATE_INPUTS = 60
 
 
 # ─── Wide → long ───────────────────────────────────────────────────────
@@ -181,48 +279,65 @@ def source_long_for_gap(
     r2,
     pyramid: Pyramid,
     gap: ExpectedShard,
-) -> tuple[pl.DataFrame, int, int]:
-    """Return (long_df, inputs_present, inputs_expected) for the source
-    reads of `gap`.
+    *,
+    key_set: set[str] | None = None,
+) -> tuple[pl.DataFrame, int, int, str]:
+    """Return `(long_df, inputs_present, inputs_expected, source_desc)`
+    for the source reads of `gap`.
 
-    The cover semantics emit only the max-shard per tier for historical
-    periods (plus a few trailing-window smaller rungs near `to`), so the
-    cascade.ts-style prev-rung chain doesn't exist on R2 for backfill.
-    Two cases:
+    Walks `enumerate_source_candidates(gap)` and picks the first
+    candidate whose keys are all present on R2. Falls all the way
+    through to `/1m` if no coarser prev-rung is populated. `/1m` gaps
+    themselves read raw GBFS minutes via `avail_ingest_1m` (there's no
+    coarser tier to pull from).
 
-    - `tier == '1m'`: read raw GBFS minutes for the full period. The
-      `avail_ingest_1m` lazy pipeline parallelizes the minute-key fetches.
-    - `tier != '1m'`: read N × `/1m@source_rung` shards, where
-      `source_rung` is the largest /1m rung dividing the target shard
-      duration (mirrors `cascade.ts:pickOneMSourceRung`). The /1m gaps
-      sort before non-/1m by `fsck.sort_by_dependency`, so the /1m
-      shards needed here exist by the time we get here.
-
-    For non-/1m tiers we pre-aggregate each source shard to the target
-    tier's bin before concatenation — bounds peak memory to O(target
-    bins × cells × metrics × states) rather than O(N × source rows), so
-    a 60-day fill stays feasible instead of scaling to billions of rows.
+    Each source shard is pre-aggregated to the target tier's bin
+    before concatenation — bounds peak memory to O(target-bins × cells
+    × metrics × states) rather than O(N × source rows). For within-tier
+    sources this is a no-op sum; for coarser-bin targets it collapses
+    the finer source rows to the target bin.
     """
     if gap.tier == '1m':
         from .avail_ingester import avail_ingest_1m
         long_lf = avail_ingest_1m(gap.period_start, gap.period_end)
         long = long_lf.collect(engine='streaming')
         # `inputs_present` is a coarse proxy: data found ⇒ at least one
-        # raw minute hit. The avail_ingester swallows per-minute 404s,
-        # so granular inputs_expected isn't accessible here.
-        return long, (1 if not long.is_empty() else 0), 1
+        # raw minute hit. The avail_ingester swallows per-minute 404s.
+        return long, (1 if not long.is_empty() else 0), 1, 'raw'
 
     target_bin = pyramid.tier(gap.tier).bin
-    shard_min = dur_min(gap.shard_dur)
-    source_dur, source_min = pick_one_m_source_rung(pyramid, shard_min)
-    n_inputs = shard_min // source_min
+    candidates = [c for c in enumerate_source_candidates(pyramid, gap)
+                  if c.n_inputs <= MAX_CANDIDATE_INPUTS]
+
+    chosen: SourceCandidate | None = None
+    for cand in candidates:
+        ok, _ = _all_keys_exist(r2, cand.keys, key_set=key_set)
+        if ok:
+            chosen = cand
+            break
+
+    # No fully-populated coarse-tier candidate — fall back to /1m root.
+    # The fallback reads N /1m@X shards where X is the largest /1m rung
+    # dividing gap.shard_dur (matches the old naive path).
+    if chosen is None:
+        one_m_shards = pyramid.tier('1m').shards
+        gap_min = dur_min(gap.shard_dur)
+        for rd in reversed(one_m_shards):
+            rm = dur_min(rd)
+            if rm <= gap_min and gap_min % rm == 0:
+                n = gap_min // rm
+                starts = [gap.period_start + timedelta(minutes=i * rm) for i in range(n)]
+                keys = [_shard_key(pyramid, '1m', rd, s) for s in starts]
+                chosen = SourceCandidate(tier='1m', shard_dur=rd,
+                                         shard_dur_min=rm, keys=keys,
+                                         source_starts=starts)
+                break
+        assert chosen is not None, f"no /1m rung divides {gap_min}min"
 
     longs: list[pl.DataFrame] = []
     inputs_present = 0
-    for i in range(n_inputs):
-        source_start = gap.period_start + timedelta(minutes=i * source_min)
-        source_key = _shard_key(pyramid, '1m', source_dur, source_start)
-        sub = shard_to_long(r2, source_key)
+    for key in chosen.keys:
+        sub = shard_to_long(r2, key)
         if sub is None:
             continue
         if sub.is_empty():
@@ -230,13 +345,14 @@ def source_long_for_gap(
             continue
         inputs_present += 1
         longs.append(_preaggregate_to_tier_bin(sub, target_bin))
+    source_desc = f"/{chosen.tier}@{chosen.shard_dur}×{chosen.n_inputs}"
     if not longs:
         empty = pl.DataFrame(
             schema={'s2_cell': pl.Utf8, 'dt': pl.Int64, 'metric': pl.Utf8,
                     'state': pl.Int64, 'count': pl.Int64},
         )
-        return empty, inputs_present, n_inputs
-    return pl.concat(longs, how='vertical'), inputs_present, n_inputs
+        return empty, inputs_present, chosen.n_inputs, source_desc
+    return pl.concat(longs, how='vertical'), inputs_present, chosen.n_inputs, source_desc
 
 
 def _shard_key(pyramid: Pyramid, tier: str, shard_dur: str, period_start: datetime) -> str:
@@ -262,6 +378,7 @@ class MaterializeResult:
     rows: int = 0
     inputs_present: int = 0
     inputs_expected: int = 0
+    source_desc: str = ''  # e.g. '/1h@30d×2', '/1m@1d×60', 'raw'
     error: str | None = None
 
 
@@ -272,18 +389,26 @@ def materialize_shard(
     *,
     rg_size: int = 2048,
     skip_existing: bool = True,
+    key_set: set[str] | None = None,
 ) -> MaterializeResult:
     """Build + write `gap`'s parquet. Idempotent: skips if the dst key
-    already exists (HEAD check) when `skip_existing` is True (default)."""
+    already exists (checked in `key_set` if provided, else via HEAD)
+    when `skip_existing` is True (default)."""
     if skip_existing:
-        try:
-            r2.head_object(Bucket=R2_BUCKET, Key=gap.key)
-            return MaterializeResult(gap=gap, status='exists')
-        except r2.exceptions.ClientError:
-            pass
+        if key_set is not None:
+            if gap.key in key_set:
+                return MaterializeResult(gap=gap, status='exists')
+        else:
+            try:
+                r2.head_object(Bucket=R2_BUCKET, Key=gap.key)
+                return MaterializeResult(gap=gap, status='exists')
+            except r2.exceptions.ClientError:
+                pass
 
     try:
-        long, inputs_present, inputs_expected = source_long_for_gap(r2, pyramid, gap)
+        long, inputs_present, inputs_expected, source_desc = source_long_for_gap(
+            r2, pyramid, gap, key_set=key_set,
+        )
     except Exception as e:
         return MaterializeResult(gap=gap, status='error', error=f"source: {e!r}")
 
@@ -291,11 +416,13 @@ def materialize_shard(
         return MaterializeResult(
             gap=gap, status='no_inputs',
             inputs_present=0, inputs_expected=inputs_expected,
+            source_desc=source_desc,
         )
     if long.is_empty():
         return MaterializeResult(
             gap=gap, status='empty',
             inputs_present=inputs_present, inputs_expected=inputs_expected,
+            source_desc=source_desc,
         )
 
     # Build the wide shard via the existing engine primitive.
@@ -316,12 +443,14 @@ def materialize_shard(
         return MaterializeResult(gap=gap, status='error',
                                  inputs_present=inputs_present,
                                  inputs_expected=inputs_expected,
+                                 source_desc=source_desc,
                                  error=f"build: {e!r}")
 
     if wide.is_empty():
         return MaterializeResult(
             gap=gap, status='empty',
             inputs_present=inputs_present, inputs_expected=inputs_expected,
+            source_desc=source_desc,
         )
 
     # Sort by (s2_cell, dt) for RG-prune-friendly layout (matches the
@@ -341,6 +470,7 @@ def materialize_shard(
         rows=wide.height,
         inputs_present=inputs_present,
         inputs_expected=inputs_expected,
+        source_desc=source_desc,
     )
 
 
