@@ -165,6 +165,166 @@ MAX_CANDIDATE_INPUTS = 60
 MAX_RECURSION_DEPTH = 15
 
 
+# ─── Heterogeneous cover planning ──────────────────────────────────────
+
+
+@dataclass
+class SourcePick:
+    """A single R2 shard contributing to a heterogeneous source cover.
+    Multiple picks with different (tier, shard_dur) can compose a gap's
+    source cover — see `plan_source_cover`."""
+    tier: str
+    shard_dur: str
+    shard_dur_min: int
+    period_start: datetime
+    period_end: datetime  # exclusive
+    key: str
+
+
+def _priority_rung_pairs(
+    pyramid: Pyramid, gap: ExpectedShard,
+) -> list[tuple[str, str, int]]:
+    """(tier, rung, rung_min) tuples in preference order:
+      1. Within-target-tier smaller rungs, largest→smallest
+      2. Previous tiers (coarsest→finest), each rung largest→smallest
+    Only rungs strictly smaller than gap.shard_dur are considered."""
+    gap_min = dur_min(gap.shard_dur)
+    gap_tier_obj = pyramid.tier(gap.tier)
+    tier_idx = next(i for i, t in enumerate(pyramid.tiers) if t.name == gap.tier)
+    out: list[tuple[str, str, int]] = []
+    for rd in reversed(gap_tier_obj.shards):
+        rm = dur_min(rd)
+        if rm >= gap_min:
+            continue
+        out.append((gap_tier_obj.name, rd, rm))
+    for prev_idx in range(tier_idx - 1, -1, -1):
+        prev_tier = pyramid.tiers[prev_idx]
+        for rd in reversed(prev_tier.shards):
+            rm = dur_min(rd)
+            if rm > gap_min:
+                continue
+            out.append((prev_tier.name, rd, rm))
+    return out
+
+
+def plan_source_cover(
+    pyramid: Pyramid,
+    gap: ExpectedShard,
+    key_set: set[str],
+) -> tuple[list[SourcePick], list[tuple[datetime, datetime]]]:
+    """Heterogeneous cover of `gap.period_start..gap.period_end` using
+    only shards present in `key_set`. Returns (picks, uncovered_segments).
+
+    Algorithm:
+      1. Iterate (tier, rung) pairs in priority order (coarser-tier
+         largest-rung first).
+      2. For each pair, sweep rung-aligned positions inside the gap
+         period. When a shard exists AND doesn't overlap prior picks,
+         claim it.
+      3. After all pairs, compute uncovered segments as the gaps
+         between consecutive claimed picks.
+
+    Not applicable to `/1m` gaps — those use the raw ingester directly.
+    """
+    from pyrmts.axis import add_span, floor_to_span
+    assert gap.tier != '1m', "plan_source_cover doesn't apply to /1m gaps"
+
+    priority_pairs = _priority_rung_pairs(pyramid, gap)
+    picks: list[SourcePick] = []
+    # Sorted list of (period_start, period_end) tuples for claimed picks.
+    covered: list[tuple[datetime, datetime]] = []
+
+    def _overlaps(a: datetime, b: datetime) -> bool:
+        # Binary search would be faster but len(covered) stays small (< N shards).
+        for (ca, cb) in covered:
+            if ca < b and cb > a:
+                return True
+        return False
+
+    for tier_name, rung, rung_min in priority_pairs:
+        span = parse_duration(rung)
+        cur = floor_to_span(gap.period_start, span)
+        while cur < gap.period_end:
+            nxt = add_span(cur, span)
+            if cur >= gap.period_start and nxt <= gap.period_end and not _overlaps(cur, nxt):
+                key = _shard_key(pyramid, tier_name, rung, cur)
+                if key in key_set:
+                    picks.append(SourcePick(
+                        tier=tier_name, shard_dur=rung, shard_dur_min=rung_min,
+                        period_start=cur, period_end=nxt, key=key,
+                    ))
+                    covered.append((cur, nxt))
+                    covered.sort(key=lambda x: x[0])
+            cur = nxt
+
+    picks.sort(key=lambda p: p.period_start)
+    uncovered: list[tuple[datetime, datetime]] = []
+    cur = gap.period_start
+    for p in picks:
+        if p.period_start > cur:
+            uncovered.append((cur, p.period_start))
+        cur = max(cur, p.period_end)
+    if cur < gap.period_end:
+        uncovered.append((cur, gap.period_end))
+    return picks, uncovered
+
+
+def _one_m_picks_for_segment(
+    pyramid: Pyramid,
+    seg_from: datetime,
+    seg_to: datetime,
+) -> list[SourcePick]:
+    """Emit `/1m@X` picks covering [seg_from, seg_to). Uses the largest
+    `/1m` rung that divides the segment and aligns to seg_from; falls
+    back to the smallest `/1m` rung tiled sequentially if nothing fits
+    cleanly."""
+    from pyrmts.axis import floor_to_span
+    one_m_shards = pyramid.tier('1m').shards
+    seg_min = int((seg_to - seg_from).total_seconds() / 60)
+    for rd in reversed(one_m_shards):
+        rm = dur_min(rd)
+        if rm > seg_min or seg_min % rm != 0:
+            continue
+        span = parse_duration(rd)
+        if floor_to_span(seg_from, span) != seg_from:
+            continue
+        n = seg_min // rm
+        picks = []
+        for i in range(n):
+            start = seg_from + timedelta(minutes=i * rm)
+            end = start + timedelta(minutes=rm)
+            key = _shard_key(pyramid, '1m', rd, start)
+            picks.append(SourcePick(
+                tier='1m', shard_dur=rd, shard_dur_min=rm,
+                period_start=start, period_end=end, key=key,
+            ))
+        return picks
+    # No clean divisor — tile with smallest /1m rung, letting the last
+    # bin overhang past seg_to (harmless: filter clamps to seg range).
+    smallest = one_m_shards[0]
+    rm = dur_min(smallest)
+    picks = []
+    cur = seg_from
+    while cur < seg_to:
+        end = min(cur + timedelta(minutes=rm), seg_to)
+        key = _shard_key(pyramid, '1m', smallest, cur)
+        picks.append(SourcePick(
+            tier='1m', shard_dur=smallest, shard_dur_min=rm,
+            period_start=cur, period_end=end, key=key,
+        ))
+        cur = end
+    return picks
+
+
+def _summarize_picks(picks: list[SourcePick]) -> str:
+    """Compact human string of a heterogeneous pick list.
+    E.g. `/30m@30d×1+/1m@1d×110` for a straddling-cutoff cover."""
+    from collections import Counter
+    counts = Counter((p.tier, p.shard_dur) for p in picks)
+    parts = [f"/{t}@{s}×{n}" for (t, s), n in counts.most_common()]
+    return "+".join(parts) if parts else "no-source"
+
+
 # ─── Wide → long ───────────────────────────────────────────────────────
 
 
@@ -293,22 +453,21 @@ def source_long_for_gap(
     """Return `(long_df, inputs_present, inputs_expected, source_desc)`
     for the source reads of `gap`.
 
-    Walks `enumerate_source_candidates(gap)` and picks the first
-    candidate whose keys are all present on R2. If no candidate is
-    fully populated, RECURSIVELY MATERIALIZES the smallest-N candidate's
-    missing shards (bounded by `MAX_RECURSION_DEPTH`) before retrying.
-    Falls all the way through to `/1m` if recursion exhausts. `/1m` gaps
-    themselves read raw GBFS minutes via `avail_ingest_1m`.
+    Uses `plan_source_cover` to build a heterogeneous cover of the gap
+    period using existing R2 shards (largest-rung-first). Uncovered
+    sub-segments are:
+      1. Recursively materialized (bounded by `MAX_RECURSION_DEPTH`) —
+         each uncovered segment becomes a sub-gap whose own
+         `materialize_shard` figures out its sources.
+      2. Failing that, filled with `/1m@X` picks.
 
-    Recursive intermediates get their own MaterializeResult appended to
-    `sub_results` so they participate in D1 emit; their R2 keys are
-    added to `key_set` (whatever their terminal status — even
-    `no_inputs`/`empty` intermediates count as "handled" so the parent's
-    read loop can proceed and just skip the missing keys naturally).
+    Both `wrote`/`exists`/`empty`/`no_inputs` intermediates get their key
+    marked in `key_set` — the parent read loop tolerates keys that don't
+    actually exist on R2 (returns None → skipped).
 
-    Each source shard is pre-aggregated to the target tier's bin
-    before concatenation — bounds peak memory to O(target-bins × cells
-    × metrics × states) rather than O(N × source rows).
+    Each source shard is pre-aggregated to the target tier's bin before
+    concatenation — bounds peak memory to O(target-bins × cells × metrics
+    × states) rather than O(N × source rows).
     """
     if gap.tier == '1m':
         from .avail_ingester import avail_ingest_1m
@@ -319,28 +478,48 @@ def source_long_for_gap(
         return long, (1 if not long.is_empty() else 0), 1, 'raw'
 
     target_bin = pyramid.tier(gap.tier).bin
-    candidates = [c for c in enumerate_source_candidates(pyramid, gap)
-                  if c.n_inputs <= MAX_CANDIDATE_INPUTS]
+    ks: set[str] = key_set if key_set is not None else set()
 
-    chosen: SourceCandidate | None = None
-    for cand in candidates:
-        ok, _ = _all_keys_exist(r2, cand.keys, key_set=key_set)
-        if ok:
-            chosen = cand
-            break
+    # Step 1: heterogeneous cover from existing shards
+    picks, uncovered = plan_source_cover(pyramid, gap, ks)
 
-    # No existing candidate — recursively materialize the smallest-N
-    # candidate's missing shards. Each recursive call moves to strictly
-    # smaller shards, so depth is bounded.
-    if chosen is None and recursion_depth < MAX_RECURSION_DEPTH:
-        ks = key_set if key_set is not None else set()
-        for cand in candidates:
-            for key, start in zip(cand.keys, cand.source_starts):
+    # Step 2: recursively materialize uncovered segments (if depth budget).
+    # For each uncovered segment we try each priority (tier, rung) pair
+    # that DIVIDES the segment; if one aligns, we recursively materialize
+    # each sub-shard, then re-plan the cover for that segment.
+    if uncovered and recursion_depth < MAX_RECURSION_DEPTH:
+        from pyrmts.axis import floor_to_span
+        new_uncovered: list[tuple[datetime, datetime]] = []
+        priority_pairs = _priority_rung_pairs(pyramid, gap)
+        for (seg_from, seg_to) in uncovered:
+            seg_min = int((seg_to - seg_from).total_seconds() / 60)
+            fit_pair: tuple[str, str, int] | None = None
+            for tier_name, rung, rung_min in priority_pairs:
+                if rung_min > seg_min or seg_min % rung_min != 0:
+                    continue
+                if rung_min > MAX_CANDIDATE_INPUTS * dur_min(pyramid.tier(tier_name).bin):
+                    continue  # Coarser than a sane recursion target
+                span = parse_duration(rung)
+                if floor_to_span(seg_from, span) != seg_from:
+                    continue
+                n = seg_min // rung_min
+                if n > MAX_CANDIDATE_INPUTS:
+                    continue
+                fit_pair = (tier_name, rung, rung_min)
+                break
+            if fit_pair is None:
+                new_uncovered.append((seg_from, seg_to))
+                continue
+            tier_name, rung, rung_min = fit_pair
+            n = seg_min // rung_min
+            for i in range(n):
+                start = seg_from + timedelta(minutes=i * rung_min)
+                end = start + timedelta(minutes=rung_min)
+                key = _shard_key(pyramid, tier_name, rung, start)
                 if key in ks:
                     continue
-                end = start + timedelta(minutes=cand.shard_dur_min)
                 sub_gap = ExpectedShard(
-                    tier=cand.tier, shard_dur=cand.shard_dur,
+                    tier=tier_name, shard_dur=rung,
                     period_start=start, period_end=end, key=key,
                 )
                 sub_result = materialize_shard(
@@ -351,41 +530,21 @@ def source_long_for_gap(
                 )
                 if sub_results is not None:
                     sub_results.append(sub_result)
-                # Mark handled regardless of terminal status. `wrote`/`exists`
-                # put a real parquet on R2; `no_inputs`/`empty` don't, but
-                # the parent read loop skips missing keys gracefully. We
-                # only skip marking on `error` so we don't wedge on genuine
-                # failures.
                 if sub_result.status in ('wrote', 'exists', 'empty', 'no_inputs'):
                     ks.add(key)
-            # Retry — the candidate may now be usable
-            ok, _ = _all_keys_exist(r2, cand.keys, key_set=key_set)
-            if ok:
-                chosen = cand
-                break
+        # Re-plan cover after recursive fills
+        picks2, uncovered2 = plan_source_cover(pyramid, gap, ks)
+        picks = picks2
+        uncovered = uncovered2 + new_uncovered
 
-    # No fully-populated coarse-tier candidate — fall back to /1m root.
-    # The fallback reads N /1m@X shards where X is the largest /1m rung
-    # dividing gap.shard_dur (matches the old naive path).
-    if chosen is None:
-        one_m_shards = pyramid.tier('1m').shards
-        gap_min = dur_min(gap.shard_dur)
-        for rd in reversed(one_m_shards):
-            rm = dur_min(rd)
-            if rm <= gap_min and gap_min % rm == 0:
-                n = gap_min // rm
-                starts = [gap.period_start + timedelta(minutes=i * rm) for i in range(n)]
-                keys = [_shard_key(pyramid, '1m', rd, s) for s in starts]
-                chosen = SourceCandidate(tier='1m', shard_dur=rd,
-                                         shard_dur_min=rm, keys=keys,
-                                         source_starts=starts)
-                break
-        assert chosen is not None, f"no /1m rung divides {gap_min}min"
+    # Step 3: /1m fallback for anything still uncovered
+    for (seg_from, seg_to) in uncovered:
+        picks.extend(_one_m_picks_for_segment(pyramid, seg_from, seg_to))
 
     longs: list[pl.DataFrame] = []
     inputs_present = 0
-    for key in chosen.keys:
-        sub = shard_to_long(r2, key)
+    for pick in picks:
+        sub = shard_to_long(r2, pick.key)
         if sub is None:
             continue
         if sub.is_empty():
@@ -393,14 +552,14 @@ def source_long_for_gap(
             continue
         inputs_present += 1
         longs.append(_preaggregate_to_tier_bin(sub, target_bin))
-    source_desc = f"/{chosen.tier}@{chosen.shard_dur}×{chosen.n_inputs}"
+    source_desc = _summarize_picks(picks)
     if not longs:
         empty = pl.DataFrame(
             schema={'s2_cell': pl.Utf8, 'dt': pl.Int64, 'metric': pl.Utf8,
                     'state': pl.Int64, 'count': pl.Int64},
         )
-        return empty, inputs_present, chosen.n_inputs, source_desc
-    return pl.concat(longs, how='vertical'), inputs_present, chosen.n_inputs, source_desc
+        return empty, inputs_present, len(picks), source_desc
+    return pl.concat(longs, how='vertical'), inputs_present, len(picks), source_desc
 
 
 def _shard_key(pyramid: Pyramid, tier: str, shard_dur: str, period_start: datetime) -> str:
