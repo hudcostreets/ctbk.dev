@@ -169,35 +169,70 @@ async function readShard(r2: R2Bucket, key: string): Promise<AvailV3Row[] | null
 	}));
 }
 
+/** Wrap an R2 object as an AsyncBuffer that hyparquet can `slice()`.
+ *  Each slice becomes a ranged R2 get — we never call `.arrayBuffer()`
+ *  on the whole body, so peak heap is O(largest single-slice size) not
+ *  O(shard size). Slices are memoized by `[start, end)` so hyparquet's
+ *  planner (which may re-request the footer during read setup) doesn't
+ *  double-fetch.
+ *
+ *  Requires the object's `byteLength`, which we get from a lightweight
+ *  `r2.head()`. */
+function r2SlicedBuffer(r2: R2Bucket, key: string, byteLength: number) {
+	// Small cache: hyparquet's parquetPlan issues a handful of coalesced
+	// ranges (footer + per-row-group column chunks). Total slices per
+	// shard is ~O(nRowGroups × nCols) after coalescing — well under 1000
+	// even for /1m@1d.
+	const cache = new Map<string, Promise<ArrayBuffer>>();
+	return {
+		byteLength,
+		slice(start: number, end: number = byteLength): Promise<ArrayBuffer> {
+			const k = `${start}\x00${end}`;
+			let p = cache.get(k);
+			if (!p) {
+				p = r2.get(key, { range: { offset: start, length: end - start } })
+					.then((obj) => {
+						if (!obj) throw new Error(`r2 range read returned null: ${key} [${start}, ${end})`);
+						return obj.arrayBuffer();
+					});
+				cache.set(k, p);
+			}
+			return p;
+		},
+	};
+}
+
 /** Streaming reader: iterate `key`'s parquet row-groups and feed each
- *  batch into `merger`. Peak heap is one row-group's worth of rows
- *  (~2K rows @ default RG size), not the full shard.
+ *  batch into `merger`. Peak heap is one row-group's decoded rows
+ *  (~2K rows @ default RG size) plus a handful of buffered byte ranges
+ *  from R2 — never the full shard.
  *
- *  Uses hyparquet's `parquetReadAsync` which prefetches byte ranges for
- *  all row groups in parallel (pipelined R2 reads) — so we get the
- *  network parallelism of a batch read with the memory profile of a
- *  streaming one. The metadata footer is read once via
- *  `parquetMetadataAsync` and cached in the plan.
+ *  Byte pipeline:
+ *    1. `r2.head()` for `byteLength`.
+ *    2. Wrap R2 as a sliceable AsyncBuffer via `r2SlicedBuffer`.
+ *    3. `parquetMetadataAsync` reads the footer via a small ranged get.
+ *    4. `parquetReadAsync` issues `prefetchAsyncBuffer` — one ranged R2
+ *       get per column-chunk (coalesced by the parquet planner). All
+ *       fire in parallel.
+ *    5. Iterate row groups; each `asyncGroupToRows` awaits its own
+ *       byte fetches to complete before decoding. Earlier groups are
+ *       already prefetching while we drain the current one.
+ *    6. Rows for the current row-group only are held in JS heap;
+ *       previous groups' buffers + rows are GC-eligible.
  *
- *  Returns 'ok' if the shard existed and rows were streamed (possibly
- *  zero); 'not_found' on 404. */
+ *  Returns 'ok' if the shard existed; 'not_found' on 404. */
 async function streamShardToMerger(
 	r2: R2Bucket,
 	key: string,
 	merger: StreamingMerger,
 ): Promise<'ok' | 'not_found'> {
-	const obj = await r2.get(key);
-	if (!obj) return 'not_found';
-	const buf = await obj.arrayBuffer();
-	const file = { byteLength: buf.byteLength, slice: (s: number, e?: number) => buf.slice(s, e) };
+	const head = await r2.head(key);
+	if (!head) return 'not_found';
+	const file = r2SlicedBuffer(r2, key, head.size);
 	const metadata = await parquetMetadataAsync(file);
 	const asyncGroups = parquetReadAsync({ file, metadata });
 	const schemaTree = parquetSchema(metadata);
 	const assembled = asyncGroups.map((arg) => assembleAsync(arg, schemaTree));
-	// Iterate row groups in order. Each `await asyncGroupToRows` resolves
-	// once THAT group's column pages are decoded — earlier groups are
-	// already prefetched + decoding in parallel, later ones start as we
-	// process the current one.
 	for (const rg of assembled) {
 		const rows = (await asyncGroupToRows(rg, 0, rg.groupRows, undefined, 'object')) as Record<string, unknown>[];
 		for (const r of rows) {
