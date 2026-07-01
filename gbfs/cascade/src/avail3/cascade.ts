@@ -24,7 +24,9 @@
  * v1 scope: /1m tier only. Coarser tiers (/2m..7d) get their own
  * ladders in v2 — same loop, different rungs.
  */
-import { parquetReadObjects } from 'hyparquet';
+import { parquetMetadataAsync, parquetReadObjects, parquetSchema } from 'hyparquet';
+import { parquetReadAsync } from 'hyparquet/src/read.js';
+import { assembleAsync, asyncGroupToRows } from 'hyparquet/src/rowgroup.js';
 import { D1ShardIndex } from 'pyrmts-cfw';
 import type { Duration } from 'pyrmts';
 import { getLucIndex } from './luc';
@@ -33,6 +35,7 @@ import {
 	mergeRows,
 	sortRows,
 	rowsToColumns,
+	StreamingMerger,
 	type AvailV3Row,
 } from './transform';
 
@@ -166,6 +169,136 @@ async function readShard(r2: R2Bucket, key: string): Promise<AvailV3Row[] | null
 	}));
 }
 
+/** Streaming reader: iterate `key`'s parquet row-groups and feed each
+ *  batch into `merger`. Peak heap is one row-group's worth of rows
+ *  (~2K rows @ default RG size), not the full shard.
+ *
+ *  Uses hyparquet's `parquetReadAsync` which prefetches byte ranges for
+ *  all row groups in parallel (pipelined R2 reads) — so we get the
+ *  network parallelism of a batch read with the memory profile of a
+ *  streaming one. The metadata footer is read once via
+ *  `parquetMetadataAsync` and cached in the plan.
+ *
+ *  Returns 'ok' if the shard existed and rows were streamed (possibly
+ *  zero); 'not_found' on 404. */
+async function streamShardToMerger(
+	r2: R2Bucket,
+	key: string,
+	merger: StreamingMerger,
+): Promise<'ok' | 'not_found'> {
+	const obj = await r2.get(key);
+	if (!obj) return 'not_found';
+	const buf = await obj.arrayBuffer();
+	const file = { byteLength: buf.byteLength, slice: (s: number, e?: number) => buf.slice(s, e) };
+	const metadata = await parquetMetadataAsync(file);
+	const asyncGroups = parquetReadAsync({ file, metadata });
+	const schemaTree = parquetSchema(metadata);
+	const assembled = asyncGroups.map((arg) => assembleAsync(arg, schemaTree));
+	// Iterate row groups in order. Each `await asyncGroupToRows` resolves
+	// once THAT group's column pages are decoded — earlier groups are
+	// already prefetched + decoding in parallel, later ones start as we
+	// process the current one.
+	for (const rg of assembled) {
+		const rows = (await asyncGroupToRows(rg, 0, rg.groupRows, undefined, 'object')) as Record<string, unknown>[];
+		for (const r of rows) {
+			merger.addRow({
+				s2_cell: r.s2_cell as string,
+				dt: r.dt as bigint,
+				bikes: r.bikes as string,
+				ebikes: r.ebikes as string,
+				docks: r.docks as string,
+				disabled: r.disabled as string,
+				pending: r.pending as string,
+			});
+		}
+	}
+	return 'ok';
+}
+
+/** Priority-ordered `(sourceTier, sourceRungDur, sourceRungMin, n)`
+ *  candidates for building a shard at `(targetTier, shardDurMin)`.
+ *  Mirrors `ctbk/pyramid_cascade/materialize.py:enumerate_source_candidates`
+ *  — the Python planner already proven on the fsck fill.
+ *
+ *  Order:
+ *    1. Within-target-tier smaller rungs, largest-first (strictly smaller
+ *       than target). Skipped for the smallest rung of the target tier.
+ *    2. Previous tiers (coarsest-bin-first, i.e. tier-index descending),
+ *       each tier's rungs largest-first. Only rungs whose duration
+ *       divides `shardDurMin` are eligible.
+ *
+ *  Caller checks each candidate's shard-existence (D1 or R2 HEAD) and
+ *  picks the first fully-populated one. */
+function priorityRungPairs(
+	targetTier: string,
+	shardDurMin: number,
+): Array<{ tier: string; rungDur: Duration; rungMin: number }> {
+	const out: Array<{ tier: string; rungDur: Duration; rungMin: number }> = [];
+	const targetRungs = LADDERS[targetTier];
+	if (!targetRungs) throw new Error(`unknown tier ${targetTier}`);
+	const tierNames = Object.keys(LADDERS);
+	const targetIdx = tierNames.indexOf(targetTier);
+
+	// 1. Within-target-tier smaller rungs, largest-first
+	for (let i = targetRungs.length - 1; i >= 0; i--) {
+		const r = targetRungs[i]!;
+		const rm = durationToMin(r);
+		if (rm >= shardDurMin) continue;
+		if (shardDurMin % rm !== 0) continue;
+		out.push({ tier: targetTier, rungDur: r, rungMin: rm });
+	}
+	// 2. Previous tiers (coarsest first), each rung largest-first
+	for (let prev = targetIdx - 1; prev >= 0; prev--) {
+		const prevTier = tierNames[prev]!;
+		const prevRungs = LADDERS[prevTier]!;
+		for (let j = prevRungs.length - 1; j >= 0; j--) {
+			const r = prevRungs[j]!;
+			const rm = durationToMin(r);
+			if (rm > shardDurMin) continue;
+			if (shardDurMin % rm !== 0) continue;
+			out.push({ tier: prevTier, rungDur: r, rungMin: rm });
+		}
+	}
+	return out;
+}
+
+/** For a target `(tier, shardDurMin, periodStart)`, walk priority pairs
+ *  and pick the first candidate where every source-shard key is present
+ *  on R2. Falls through to `/1m` fallback only if nothing coarser works —
+ *  matches fsck's heterogeneous planner behavior.
+ *
+ *  Returns the picked candidate as (sourceTier, sourceRungDur, keys[]).
+ *  HEAD-checks are done in parallel per candidate to bound latency. */
+async function pickSourceForShard(
+	r2: R2Bucket,
+	targetTier: string,
+	shardDurMin: number,
+	periodStart: Date,
+): Promise<{ sourceTier: string; sourceRungDur: Duration; sourceRungMin: number; keys: string[] }> {
+	for (const cand of priorityRungPairs(targetTier, shardDurMin)) {
+		const n = shardDurMin / cand.rungMin;
+		const keys: string[] = [];
+		for (let i = 0; i < n; i++) {
+			const start = new Date(periodStart.getTime() + i * cand.rungMin * 60_000);
+			keys.push(shardKey(cand.tier, cand.rungDur, start));
+		}
+		const heads = await Promise.all(keys.map((k) => r2.head(k)));
+		if (heads.every((h) => h !== null)) {
+			return { sourceTier: cand.tier, sourceRungDur: cand.rungDur, sourceRungMin: cand.rungMin, keys };
+		}
+	}
+	// Fallback: /1m@X — largest /1m rung that divides. Matches the historic
+	// naive path; keys may 404 (pre-data or unwritten), read loop tolerates.
+	const { sourceRungMin, sourceRungDur } = pickOneMSourceRung(shardDurMin);
+	const n = shardDurMin / sourceRungMin;
+	const keys: string[] = [];
+	for (let i = 0; i < n; i++) {
+		const start = new Date(periodStart.getTime() + i * sourceRungMin * 60_000);
+		keys.push(shardKey('1m', sourceRungDur, start));
+	}
+	return { sourceTier: '1m', sourceRungDur, sourceRungMin, keys };
+}
+
 async function writeParquet(r2: R2Bucket, key: string, rows: AvailV3Row[]): Promise<number> {
 	if (rows.length === 0) return 0;
 	const sorted = sortRows(rows);
@@ -227,48 +360,45 @@ async function writeShard(
 			const bytes = await writeParquet(r2, key, rows);
 			return { status: 'wrote', key, bytes, rows: rows.length, inputsPresent, inputsExpected };
 		}
-		// Non-/1m tier, smallest rung: source from /1m shards.
-		// Pick the largest /1m rung L that divides shardDurMin and read
-		// shardDurMin/L of them, re-binning from 1-min to tier_bin.
-		const { sourceRungMin, sourceRungDur } = pickOneMSourceRung(shardDurMin);
-		const inputsExpected = shardDurMin / sourceRungMin;
+		// Non-/1m tier, smallest rung: pick the coarsest available source
+		// (heterogeneous cover chain via `pickSourceForShard`), then stream
+		// each source shard's row groups into an incremental merger. Peak
+		// heap = one row-group's rows + the output aggregator Map (small:
+		// O(target-bins × cells × metrics × states)) — regardless of how
+		// many source shards or rows.
+		const picked = await pickSourceForShard(r2, tier, shardDurMin, periodStart);
+		const inputsExpected = picked.keys.length;
 		const tierBinMin = TIER_BIN_MIN[tier]!;
-		const inputRowSets: AvailV3Row[][] = [];
+		const binMs = BigInt(tierBinMin * 60_000);
+		const merger = new StreamingMerger(binMs);
 		let inputsPresent = 0;
-		for (let i = 0; i < inputsExpected; i++) {
-			const sourceStart = new Date(periodStart.getTime() + i * sourceRungMin * 60_000);
-			const sourceKey = shardKey('1m', sourceRungDur, sourceStart);
-			const rows = await readShard(r2, sourceKey);
-			if (rows === null) continue;
-			inputsPresent++;
-			inputRowSets.push(rows);
+		for (const sourceKey of picked.keys) {
+			const status = await streamShardToMerger(r2, sourceKey, merger);
+			if (status === 'ok') inputsPresent++;
 		}
 		if (inputsPresent === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
-		// Re-bin /1m rows (dt at 1-min granularity) to this tier's bin.
-		// `mergeRows` accepts a binMs param that floors dt before grouping
-		// (existing /p3h path uses it). Same monoid combine, just on a
-		// coarser dt-bucket.
-		const binMs = BigInt(tierBinMin * 60_000);
-		const merged = mergeRows(inputRowSets, binMs);
+		const merged = merger.finalize();
 		if (merged.length === 0) return { status: 'empty', key, inputsPresent, inputsExpected };
 		const bytes = await writeParquet(r2, key, merged);
 		return { status: 'wrote', key, bytes, rows: merged.length, inputsPresent, inputsExpected };
 	}
 
 	// Coarser rung: read N× smaller-rung shards from this tier, merge.
+	// Sources are same-tier prev-rung — small (coarse-tier prev-rungs are
+	// pre-aggregated at this tier's bin), so streaming isn't strictly
+	// needed, but keeps peak heap uniform across code paths.
 	const prevShardDurMin = durationToMin(prevShardDur);
 	const inputsExpected = shardDurMin / prevShardDurMin;
-	const inputRowSets: AvailV3Row[][] = [];
+	const merger = new StreamingMerger();
+	let inputsPresent = 0;
 	for (let i = 0; i < inputsExpected; i++) {
 		const inputStart = new Date(periodStart.getTime() + i * prevShardDurMin * 60_000);
 		const inputKey = shardKey(tier, prevShardDur, inputStart);
-		const rows = await readShard(r2, inputKey);
-		if (rows === null) continue;
-		inputRowSets.push(rows);
+		const status = await streamShardToMerger(r2, inputKey, merger);
+		if (status === 'ok') inputsPresent++;
 	}
-	const inputsPresent = inputRowSets.length;
 	if (inputsPresent === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
-	const merged = mergeRows(inputRowSets);
+	const merged = merger.finalize();
 	if (merged.length === 0) return { status: 'empty', key, inputsPresent, inputsExpected };
 	const bytes = await writeParquet(r2, key, merged);
 	return { status: 'wrote', key, bytes, rows: merged.length, inputsPresent, inputsExpected };

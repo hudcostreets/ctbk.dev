@@ -149,95 +149,123 @@ export function transformMinuteRows(
 	return out;
 }
 
-/** Merge multiple avail-v3 row sets (typically one per minute) into a
- *  single set, summing histograms per `(s2_cell, dt)`. Handles the
- *  "concat N partials of finer cadence" cascade step.
+/** Incremental (s2_cell, dt) histogram accumulator. Feed rows via
+ *  `addRow`/`addRows` as they stream in from a source shard; call
+ *  `finalize()` at the end to emit the aggregated row set.
+ *
+ *  Memory footprint: O(output rows), NOT O(input rows). For a target
+ *  shard with K unique (s2_cell, bin_dt) buckets, peak state is K entries
+ *  regardless of how many input rows contributed. Coarse-tier targets
+ *  have small K (e.g. /7d@35d = 5 dt values × ~3800 cells = ~19K rows) —
+ *  even summing 191M input rows costs ~19K accumulator slots.
+ *
+ *  Fast/slow paths mirror the batch `mergeRows` below: verbatim reference
+ *  storage on first contribution, promote to bucket accumulator on the
+ *  second. Works whether input rows arrive one at a time or in row-group
+ *  batches. */
+export class StreamingMerger {
+	private single = new Map<string, AvailV3Row>();
+	private merged = new Map<string, CellBucket>();
+	private readonly binMs?: bigint;
+
+	constructor(binMs?: bigint) {
+		this.binMs = binMs;
+	}
+
+	addRow(row: AvailV3Row): void {
+		const dt = this.binMs ? row.dt - (row.dt % this.binMs) : row.dt;
+		const key = `${row.s2_cell}\x00${dt.toString()}`;
+
+		const slow = this.merged.get(key);
+		if (slow !== undefined) {
+			addRowToBucket(slow, row);
+			return;
+		}
+		const fast = this.single.get(key);
+		if (fast === undefined) {
+			// First contributor. If binMs floored `dt`, clone to carry the
+			// bin-aligned dt; otherwise keep the original reference for
+			// true zero-copy.
+			this.single.set(key, this.binMs && dt !== row.dt ? { ...row, dt } : row);
+		} else {
+			// Second contributor — promote this bucket to slow path.
+			this.single.delete(key);
+			const bucket = rowToBucket(fast);
+			addRowToBucket(bucket, row);
+			this.merged.set(key, bucket);
+		}
+	}
+
+	addRows(rows: AvailV3Row[]): void {
+		for (const row of rows) this.addRow(row);
+	}
+
+	/** Emit the merged row set. Consumes the merger's internal state —
+	 *  after calling, the merger is empty. */
+	finalize(): AvailV3Row[] {
+		const out: AvailV3Row[] = [];
+		for (const row of this.single.values()) out.push(row);
+		for (const [key, bucket] of this.merged) {
+			const sepIdx = key.indexOf('\x00');
+			const s2_cell = key.slice(0, sepIdx);
+			const dt = BigInt(key.slice(sepIdx + 1));
+			out.push({
+				s2_cell,
+				dt,
+				bikes:    histToJson(bucket.bikes),
+				ebikes:   histToJson(bucket.ebikes),
+				docks:    histToJson(bucket.docks),
+				disabled: histToJson(bucket.disabled),
+				pending:  histToJson(bucket.pending),
+			});
+		}
+		this.single.clear();
+		this.merged.clear();
+		return out;
+	}
+}
+
+const parseHist = (s: string): Histogram => {
+	const h: Histogram = new Map();
+	const obj = JSON.parse(s) as Record<string, number>;
+	for (const [k, v] of Object.entries(obj)) h.set(Number(k), v);
+	return h;
+};
+const rowToBucket = (row: AvailV3Row): CellBucket => ({
+	bikes:    parseHist(row.bikes),
+	ebikes:   parseHist(row.ebikes),
+	docks:    parseHist(row.docks),
+	disabled: parseHist(row.disabled),
+	pending:  parseHist(row.pending),
+});
+const addRowToBucket = (b: CellBucket, row: AvailV3Row): void => {
+	for (const m of AVAIL_METRICS) {
+		const incoming = parseHist(row[m]);
+		for (const [k, v] of incoming) b[m].set(k, (b[m].get(k) ?? 0) + v);
+	}
+};
+
+
+/** Batch API — merges multiple avail-v3 row sets (typically one per
+ *  minute) into a single set, summing histograms per `(s2_cell, dt)`.
+ *  Preserved as a thin wrapper over `StreamingMerger` for existing
+ *  callers whose input already fits in memory.
  *
  *  Optionally rebin dt: if `binMs` is provided, dt values get floored to
  *  the bin boundary before grouping.
  *
  *  Performance: in cadence cascades (e.g. /p3h reading 3× /p1h covering
  *  disjoint hours), every `(cell, dt)` bucket has exactly one
- *  contributor. The fast path returns those rows verbatim — no
- *  JSON.parse / Map accumulate / JSON.stringify round-trip. /p3h
- *  merging ~700k rows had been CPU-bound at ~10s on the slow path,
- *  silently timing out the CF Worker (only 1 of 11 expected /p3h
- *  shards landed since CFW deploy 2026-06-27 until this fix). The slow
- *  path remains exact for re-binning and any genuine multi-contributor
- *  buckets (Phase 3+ derived-tier partials). */
+ *  contributor — the fast path returns those rows verbatim (no
+ *  JSON.parse / accumulate / stringify round-trip). Slow path remains
+ *  exact for re-binning and multi-contributor buckets. */
 export function mergeRows(
 	rowSets: AvailV3Row[][],
 	binMs?: bigint,
 ): AvailV3Row[] {
-	// (cell, dt) → row, kept verbatim while each bucket has one contributor.
-	const single = new Map<string, AvailV3Row>();
-	// (cell, dt) → accumulating bucket. Populated only on the 2nd
-	// contribution to a bucket; mutually exclusive with `single`.
-	const merged = new Map<string, CellBucket>();
-
-	const parseHist = (s: string): Histogram => {
-		const h: Histogram = new Map();
-		const obj = JSON.parse(s) as Record<string, number>;
-		for (const [k, v] of Object.entries(obj)) h.set(Number(k), v);
-		return h;
-	};
-	const rowToBucket = (row: AvailV3Row): CellBucket => ({
-		bikes:    parseHist(row.bikes),
-		ebikes:   parseHist(row.ebikes),
-		docks:    parseHist(row.docks),
-		disabled: parseHist(row.disabled),
-		pending:  parseHist(row.pending),
-	});
-	const addRowToBucket = (b: CellBucket, row: AvailV3Row): void => {
-		for (const m of AVAIL_METRICS) {
-			const incoming = parseHist(row[m]);
-			for (const [k, v] of incoming) b[m].set(k, (b[m].get(k) ?? 0) + v);
-		}
-	};
-
-	for (const rows of rowSets) {
-		for (const row of rows) {
-			const dt = binMs ? row.dt - (row.dt % binMs) : row.dt;
-			const key = `${row.s2_cell}\x00${dt.toString()}`;
-
-			const slow = merged.get(key);
-			if (slow !== undefined) {
-				addRowToBucket(slow, row);
-				continue;
-			}
-			const fast = single.get(key);
-			if (fast === undefined) {
-				// First contributor. If binMs floored `dt`, store a
-				// new row carrying the bin-aligned dt; else keep the
-				// original reference for true zero-copy.
-				single.set(key, binMs && dt !== row.dt ? { ...row, dt } : row);
-			} else {
-				// Second contributor — promote this bucket to slow path.
-				single.delete(key);
-				const bucket = rowToBucket(fast);
-				addRowToBucket(bucket, row);
-				merged.set(key, bucket);
-			}
-		}
-	}
-
-	const out: AvailV3Row[] = [];
-	for (const row of single.values()) out.push(row);
-	for (const [key, bucket] of merged) {
-		const sepIdx = key.indexOf('\x00');
-		const s2_cell = key.slice(0, sepIdx);
-		const dt = BigInt(key.slice(sepIdx + 1));
-		out.push({
-			s2_cell,
-			dt,
-			bikes:    histToJson(bucket.bikes),
-			ebikes:   histToJson(bucket.ebikes),
-			docks:    histToJson(bucket.docks),
-			disabled: histToJson(bucket.disabled),
-			pending:  histToJson(bucket.pending),
-		});
-	}
-	return out;
+	const merger = new StreamingMerger(binMs);
+	for (const rows of rowSets) merger.addRows(rows);
+	return merger.finalize();
 }
 
 /** Sort wide rows by `(s2_cell, dt)` for stable, predicate-friendly
