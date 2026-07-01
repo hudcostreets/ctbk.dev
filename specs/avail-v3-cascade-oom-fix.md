@@ -5,6 +5,9 @@ That commit made every tier's ladder walked per-tick, but its
 smallest-non-/1m-rung path sources from `/1m@X` shards, which OOMs the
 Worker on coarse tiers.
 
+**Status**: implemented across `cefb66f7` (streaming + prev-tier picker)
+and `bd08ef64` (R2 body streaming). Pre-deploy checklist below.
+
 ## Problem
 
 `writeShard`'s non-/1m smallest-rung branch calls `pickOneMSourceRung`
@@ -148,8 +151,41 @@ follow-on if any real shard still OOMs.
 
 ## Deployment sequence
 
-1. Land this fix as a follow-on commit on top of `dbebb0b7`.
-2. Push both together — GHA runs `wrangler deploy`.
-3. First-day monitoring: `wrangler tail ctbk-gbfs-cascade` for any
-   `Error: Exceeded memory limit` messages.
-4. Fsck re-run after 24h to confirm all boundaries filled cleanly.
+1. ~~Land this fix as a follow-on commit on top of `dbebb0b7`~~ — done
+   in `cefb66f7` (streaming reader + prev-tier picker) and `bd08ef64`
+   (R2 body streaming via ranged gets, drop arrayBuffer).
+2. **Macbook-side pre-push decision**: pin `hyparquet` to the
+   `runsascoded/hyparquet` fork's dist-branch SHA if we want the
+   `columnChunkAggregation` opt-in (commit `42624b6` on the fork) —
+   coalesces per-column-chunk ranges under a `columns:` projection,
+   reduces sub-request count on R2 reads. Bump
+   `gbfs/cascade/package.json` `hyparquet: ^1.25.6` → git+SHA of the
+   fork's most recent dist commit.
+3. Push both commits (plus the 27 other unpushed ones) — GHA runs
+   `wrangler deploy` for ctbk-gbfs-cascade.
+4. First-hour monitoring: `wrangler tail ctbk-gbfs-cascade` for any
+   `Error: Exceeded memory limit` / `Error: Too many subrequests`
+   messages.
+5. First-day check: rerun `ctbk pyramid-cascade --fsck` on EC2 —
+   expect 0 new missing shards (post the 6 known-no-data ones).
+6. Weekly cadence: fsck as a safety net for anything the CFW cron
+   dropped.
+
+## As-built peak heap (post `bd08ef64`)
+
+Coarse-tier smallest rungs, sourced via `pickSourceForShard`
+(picks coarsest available prev-tier rung):
+
+| Rung target | Picked source (typical) | Peak decoded rows | Peak heap |
+|---|---|---|---|
+| `/6h@1d` | `/3h@12h × 2` | ~30K rows | ~5 MB |
+| `/12h@2d` | `/6h@1d × 2` | ~4K rows | ~1 MB |
+| `/1d@3d` | `/6h@1d × 3` | ~4K rows | ~1 MB |
+| `/3d@15d` | `/1d@15d × 1` | ~57K rows | ~10 MB |
+| `/7d@35d` | `/6h@5d × 7` | ~76K rows | ~15 MB |
+
+`/1m@X` fallback (when no coarser prev-tier rung is populated on R2)
+still exists for edge cases — its peak is bounded by streaming
+row-group decode (~400 KB per row group in memory at a time) plus
+buffered R2 byte ranges (<1 MB per column-chunk fetch). Well under
+128 MB even for the worst case.
