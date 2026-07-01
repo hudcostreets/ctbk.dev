@@ -202,11 +202,19 @@ def fill_gaps(
     processed = 0
 
     def process(gap: ExpectedShard):
-        return materialize_shard(
+        # Recursive intermediates accumulate into `sub_results` and get
+        # merged into the top-level `results` list before D1 emit runs.
+        subs: list = []
+        top = materialize_shard(
             r2, pyramid, gap,
             skip_existing=skip_existing,
             key_set=key_set,
+            sub_results=subs,
         )
+        return top, subs
+
+    from pathlib import Path
+    Path(d1_sql_path).parent.mkdir(parents=True, exist_ok=True)
 
     rung_batches = _group_by_rung(gaps)
     for tier, shard_dur, batch in rung_batches:
@@ -221,7 +229,19 @@ def fill_gaps(
             futs = {pool.submit(process, g): g for g in batch_slice}
             for fut in as_completed(futs):
                 gap = futs[fut]
-                res = fut.result()
+                res, subs = fut.result()
+                # Recursive intermediates come first (in materialize order) so
+                # D1 emit sees them as prerequisites of the top-level shard.
+                for sr in subs:
+                    results.append(sr)
+                    by_status[sr.status] = by_status.get(sr.status, 0) + 1
+                    if sr.status == 'wrote':
+                        err(f"    ↳ intermediate /{sr.gap.tier}@{sr.gap.shard_dur} "
+                            f"{sr.gap.period_start.date()} → wrote "
+                            f"({sr.source_desc}, {sr.rows}r, {sr.bytes_written}b)")
+                    elif sr.status in ('empty', 'no_inputs'):
+                        err(f"    ↳ intermediate /{sr.gap.tier}@{sr.gap.shard_dur} "
+                            f"{sr.gap.period_start.date()} → {sr.status} ({sr.source_desc})")
                 results.append(res)
                 by_status[res.status] = by_status.get(res.status, 0) + 1
                 processed += 1
@@ -235,11 +255,9 @@ def fill_gaps(
                         else f" ({res.source_desc})" if res.source_desc else ""
                     err(f"  [{processed}/{len(gaps)}] /{gap.tier}@{gap.shard_dur} "
                         f"{gap.period_start.date()} → {res.status}{tag}")
+        # Checkpoint D1 SQL after each rung — safe to kill fill any time.
+        if any(r.status == 'wrote' for r in results):
+            emit_d1_insert_sql(pyramid_name, results, d1_sql_path)
     err(f"fill summary: " + ", ".join(f"{k}={v}" for k, v in sorted(by_status.items())))
-
-    if any(r.status == 'wrote' for r in results):
-        from pathlib import Path
-        Path(d1_sql_path).parent.mkdir(parents=True, exist_ok=True)
-        emit_d1_insert_sql(pyramid_name, results, d1_sql_path)
 
     return results

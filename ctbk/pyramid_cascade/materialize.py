@@ -158,6 +158,12 @@ def _all_keys_exist(r2, keys: list[str], key_set: set[str] | None = None) -> tup
 # also bounds the HEAD-check fanout when candidates aren't populated.
 MAX_CANDIDATE_INPUTS = 60
 
+# Recursion cap when materializing missing prev-rung intermediates.
+# Practical depth for the 15-tier avail-v3 ladder is <= 8 (each recursion
+# moves to a strictly smaller shard, and there are ~7 rungs per tier); 15
+# leaves headroom. See specs/avail-v3-fsck-recursive-intermediates.md.
+MAX_RECURSION_DEPTH = 15
+
 
 # ─── Wide → long ───────────────────────────────────────────────────────
 
@@ -281,21 +287,28 @@ def source_long_for_gap(
     gap: ExpectedShard,
     *,
     key_set: set[str] | None = None,
+    recursion_depth: int = 0,
+    sub_results: list | None = None,
 ) -> tuple[pl.DataFrame, int, int, str]:
     """Return `(long_df, inputs_present, inputs_expected, source_desc)`
     for the source reads of `gap`.
 
     Walks `enumerate_source_candidates(gap)` and picks the first
-    candidate whose keys are all present on R2. Falls all the way
-    through to `/1m` if no coarser prev-rung is populated. `/1m` gaps
-    themselves read raw GBFS minutes via `avail_ingest_1m` (there's no
-    coarser tier to pull from).
+    candidate whose keys are all present on R2. If no candidate is
+    fully populated, RECURSIVELY MATERIALIZES the smallest-N candidate's
+    missing shards (bounded by `MAX_RECURSION_DEPTH`) before retrying.
+    Falls all the way through to `/1m` if recursion exhausts. `/1m` gaps
+    themselves read raw GBFS minutes via `avail_ingest_1m`.
+
+    Recursive intermediates get their own MaterializeResult appended to
+    `sub_results` so they participate in D1 emit; their R2 keys are
+    added to `key_set` (whatever their terminal status — even
+    `no_inputs`/`empty` intermediates count as "handled" so the parent's
+    read loop can proceed and just skip the missing keys naturally).
 
     Each source shard is pre-aggregated to the target tier's bin
     before concatenation — bounds peak memory to O(target-bins × cells
-    × metrics × states) rather than O(N × source rows). For within-tier
-    sources this is a no-op sum; for coarser-bin targets it collapses
-    the finer source rows to the target bin.
+    × metrics × states) rather than O(N × source rows).
     """
     if gap.tier == '1m':
         from .avail_ingester import avail_ingest_1m
@@ -315,6 +328,41 @@ def source_long_for_gap(
         if ok:
             chosen = cand
             break
+
+    # No existing candidate — recursively materialize the smallest-N
+    # candidate's missing shards. Each recursive call moves to strictly
+    # smaller shards, so depth is bounded.
+    if chosen is None and recursion_depth < MAX_RECURSION_DEPTH:
+        ks = key_set if key_set is not None else set()
+        for cand in candidates:
+            for key, start in zip(cand.keys, cand.source_starts):
+                if key in ks:
+                    continue
+                end = start + timedelta(minutes=cand.shard_dur_min)
+                sub_gap = ExpectedShard(
+                    tier=cand.tier, shard_dur=cand.shard_dur,
+                    period_start=start, period_end=end, key=key,
+                )
+                sub_result = materialize_shard(
+                    r2, pyramid, sub_gap,
+                    key_set=key_set,
+                    recursion_depth=recursion_depth + 1,
+                    sub_results=sub_results,
+                )
+                if sub_results is not None:
+                    sub_results.append(sub_result)
+                # Mark handled regardless of terminal status. `wrote`/`exists`
+                # put a real parquet on R2; `no_inputs`/`empty` don't, but
+                # the parent read loop skips missing keys gracefully. We
+                # only skip marking on `error` so we don't wedge on genuine
+                # failures.
+                if sub_result.status in ('wrote', 'exists', 'empty', 'no_inputs'):
+                    ks.add(key)
+            # Retry — the candidate may now be usable
+            ok, _ = _all_keys_exist(r2, cand.keys, key_set=key_set)
+            if ok:
+                chosen = cand
+                break
 
     # No fully-populated coarse-tier candidate — fall back to /1m root.
     # The fallback reads N /1m@X shards where X is the largest /1m rung
@@ -390,10 +438,15 @@ def materialize_shard(
     rg_size: int = 2048,
     skip_existing: bool = True,
     key_set: set[str] | None = None,
+    recursion_depth: int = 0,
+    sub_results: list | None = None,
 ) -> MaterializeResult:
     """Build + write `gap`'s parquet. Idempotent: skips if the dst key
     already exists (checked in `key_set` if provided, else via HEAD)
-    when `skip_existing` is True (default)."""
+    when `skip_existing` is True (default).
+
+    `recursion_depth` / `sub_results` support recursive intermediate
+    materialization — see `source_long_for_gap`."""
     if skip_existing:
         if key_set is not None:
             if gap.key in key_set:
@@ -408,6 +461,8 @@ def materialize_shard(
     try:
         long, inputs_present, inputs_expected, source_desc = source_long_for_gap(
             r2, pyramid, gap, key_set=key_set,
+            recursion_depth=recursion_depth,
+            sub_results=sub_results,
         )
     except Exception as e:
         return MaterializeResult(gap=gap, status='error', error=f"source: {e!r}")
