@@ -20,6 +20,19 @@ from pyrmts import ExpectedShard, Pyramid, list_expected_shards
 from utz import err
 
 
+def _hr_bytes(n: int) -> str:
+    """Format byte count as SI (kB/MB/GB, base-1000). 3 sig figs."""
+    if n < 1000:
+        return f"{n}B"
+    units = ('kB', 'MB', 'GB', 'TB')
+    v = float(n) / 1000
+    for u in units:
+        if v < 1000:
+            return f"{v:.2f}{u}" if v < 10 else f"{v:.1f}{u}" if v < 100 else f"{v:.0f}{u}"
+        v /= 1000
+    return f"{v:.0f}PB"
+
+
 def list_existing_keys(
     pyramid: Pyramid,
     storage,
@@ -238,7 +251,7 @@ def fill_gaps(
                     if sr.status == 'wrote':
                         err(f"    ↳ intermediate /{sr.gap.tier}@{sr.gap.shard_dur} "
                             f"{sr.gap.period_start.date()} → wrote "
-                            f"({sr.source_desc}, {sr.rows}r, {sr.bytes_written}b)")
+                            f"({sr.source_desc}, {sr.rows:,}r, {_hr_bytes(sr.bytes_written)})")
                     elif sr.status in ('empty', 'no_inputs'):
                         err(f"    ↳ intermediate /{sr.gap.tier}@{sr.gap.shard_dur} "
                             f"{sr.gap.period_start.date()} → {sr.status} ({sr.source_desc})")
@@ -251,7 +264,7 @@ def fill_gaps(
                 if res.status == 'error':
                     err(f"  ERR /{gap.tier}@{gap.shard_dur} {gap.period_start.date()}: {res.error}")
                 else:
-                    tag = f" ({res.source_desc}, {res.rows}r, {res.bytes_written}b)" if res.status == 'wrote' \
+                    tag = f" ({res.source_desc}, {res.rows:,}r, {_hr_bytes(res.bytes_written)})" if res.status == 'wrote' \
                         else f" ({res.source_desc})" if res.source_desc else ""
                     err(f"  [{processed}/{len(gaps)}] /{gap.tier}@{gap.shard_dur} "
                         f"{gap.period_start.date()} → {res.status}{tag}")
