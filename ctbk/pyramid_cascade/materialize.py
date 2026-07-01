@@ -64,14 +64,34 @@ def pick_one_m_source_rung(pyramid: Pyramid, shard_dur_min: int) -> tuple[str, i
 # ─── Wide → long ───────────────────────────────────────────────────────
 
 
+# State-key cap for the explicit Struct schema passed to json_decode.
+# Polars json_decode needs the full struct shape upfront; we materialize
+# fields '0'..MAX_STATE_KEY and rely on null-filtering after unpivot to
+# drop the unused ones. Empirical max state key observed across all
+# avail-v3 histograms is 117 (large valet stations); 200 leaves headroom
+# without much pivot overhead (200 nullable Int64 cols per metric).
+MAX_STATE_KEY = 200
+_HIST_STRUCT_SCHEMA = pl.Struct([
+    pl.Field(str(i), pl.Int64) for i in range(MAX_STATE_KEY + 1)
+])
+_STATE_COL_NAMES = [str(i) for i in range(MAX_STATE_KEY + 1)]
+
+# Chunk the wide→long conversion by an s2_cell hash bucket so json_decode +
+# unnest + unpivot run on ~1/N of the rows at a time. The unchunked path
+# OOM'd on /1m@1d shards (5.4M rows × 5 metrics × 201-field struct).
+UNPIVOT_CHUNKS = 16
+
+
 def shard_to_long(r2, key: str) -> pl.DataFrame | None:
     """Read a wide avail-v3 parquet → long-form
     `(s2_cell, dt, metric, state, count)` Polars DataFrame.
 
     Inverse of `_build_tier_shard`'s output: each (s2_cell, dt, metric)
-    row has a JSON histogram `{state: count}`; we explode that to one
-    row per (state, count). Empty histograms (`{}`) and null cells
-    skipped.
+    row has a JSON histogram `{state: count}`; we parse with an explicit
+    Struct schema (`pl.Struct` without fields silently produces empty
+    structs and drops every state key) and unpivot to long. Histogram
+    keys above `MAX_STATE_KEY` are silently dropped — bump the cap if
+    that ever fires in real data (empirical max: 117 for valet stations).
 
     Returns None if the key doesn't exist (404)."""
     try:
@@ -84,43 +104,37 @@ def shard_to_long(r2, key: str) -> pl.DataFrame | None:
     tab = pq.read_table(io.BytesIO(obj['Body'].read()))
     df = pl.from_arrow(tab)
 
-    # Un-pivot each metric column → long rows. Each cell value is a
-    # JSON histogram; parse + explode.
     long_chunks: list[pl.DataFrame] = []
-    for m in AVAIL_METRICS:
-        if m not in df.columns:
-            continue
-        sub = df.select(['s2_cell', 'dt', m]).rename({m: 'hist_json'}).filter(
-            pl.col('hist_json').is_not_null() & (pl.col('hist_json') != '{}')
-        )
-        if sub.is_empty():
-            continue
-        # Parse JSON: returns Map[String, Int64]; convert to list of structs.
-        parsed = sub.with_columns(
-            pl.col('hist_json').str.json_decode(
-                dtype=pl.Struct,  # let polars infer
-                infer_schema_length=100,
-            ).alias('hist_struct')
-        ).drop('hist_json')
-        # Polars struct of {state_str: count}. To go long, melt the
-        # struct fields. struct.unnest then unpivot.
-        unnested = parsed.unnest('hist_struct')
-        state_cols = [c for c in unnested.columns if c not in ('s2_cell', 'dt')]
-        if not state_cols:
-            continue
-        melted = unnested.unpivot(
-            on=state_cols,
-            index=['s2_cell', 'dt'],
-            variable_name='state_str',
-            value_name='count',
-        ).filter(pl.col('count').is_not_null() & (pl.col('count') > 0))
-        if melted.is_empty():
-            continue
-        long = melted.with_columns([
-            pl.lit(m).alias('metric'),
-            pl.col('state_str').cast(pl.Int64).alias('state'),
-        ]).select(['s2_cell', 'dt', 'metric', 'state', 'count'])
-        long_chunks.append(long)
+    df = df.with_columns(
+        (pl.col('s2_cell').hash(seed=0) % UNPIVOT_CHUNKS).alias('_chunk')
+    )
+    for chunk in df.partition_by('_chunk', maintain_order=False):
+        chunk = chunk.drop('_chunk')
+        for m in AVAIL_METRICS:
+            if m not in chunk.columns:
+                continue
+            sub = chunk.select(['s2_cell', 'dt', m]).rename({m: 'hist_json'}).filter(
+                pl.col('hist_json').is_not_null() & (pl.col('hist_json') != '{}')
+            )
+            if sub.is_empty():
+                continue
+            parsed = sub.with_columns(
+                pl.col('hist_json').str.json_decode(dtype=_HIST_STRUCT_SCHEMA).alias('hist_struct')
+            ).drop('hist_json')
+            unnested = parsed.unnest('hist_struct')
+            melted = unnested.unpivot(
+                on=_STATE_COL_NAMES,
+                index=['s2_cell', 'dt'],
+                variable_name='state_str',
+                value_name='count',
+            ).filter(pl.col('count').is_not_null() & (pl.col('count') > 0))
+            if melted.is_empty():
+                continue
+            long = melted.with_columns([
+                pl.lit(m).alias('metric'),
+                pl.col('state_str').cast(pl.Int64).alias('state'),
+            ]).select(['s2_cell', 'dt', 'metric', 'state', 'count'])
+            long_chunks.append(long)
 
     if not long_chunks:
         return pl.DataFrame(
@@ -131,6 +145,36 @@ def shard_to_long(r2, key: str) -> pl.DataFrame | None:
 
 
 # ─── Sources ───────────────────────────────────────────────────────────
+
+
+def _preaggregate_to_tier_bin(long: pl.DataFrame, target_bin: str) -> pl.DataFrame:
+    """Sum `long`'s rows into the target tier's coarser bin. Reduces per-
+    source-shard row count before the outer concat so large N-input
+    fills (e.g. /1h@60d = 60 × /1m@1d) don't OOM on concatenation.
+
+    Reduces (s2_cell, dt_min, metric, state) → (s2_cell, dt_target,
+    metric, state) with counts summed. Each source shard's rows sum
+    into a disjoint set of target bins (since source_dur divides
+    target-shard boundaries), so cross-source dedup happens in
+    `_build_tier_shard`."""
+    from pyrmts.axis import floor_to_span
+    bin_span = parse_duration(target_bin)
+    if bin_span.unit in ('mo', 'y'):
+        def _floor_calendar(dt_ms: int) -> int:
+            ts = datetime.fromtimestamp(dt_ms / 1000, tz=timezone.utc)
+            return int(floor_to_span(ts, bin_span).timestamp() * 1000)
+        bucketed = long.with_columns(
+            pl.col('dt').map_elements(_floor_calendar, return_dtype=pl.Int64).alias('dt')
+        )
+    else:
+        unit_ms = UNIT_MIN[bin_span.unit] * 60_000
+        bin_ms = bin_span.count * unit_ms
+        bucketed = long.with_columns(
+            (pl.col('dt') // bin_ms * bin_ms).alias('dt')
+        )
+    return bucketed.group_by(['s2_cell', 'dt', 'metric', 'state']).agg(
+        pl.col('count').sum()
+    )
 
 
 def source_long_for_gap(
@@ -153,6 +197,11 @@ def source_long_for_gap(
       duration (mirrors `cascade.ts:pickOneMSourceRung`). The /1m gaps
       sort before non-/1m by `fsck.sort_by_dependency`, so the /1m
       shards needed here exist by the time we get here.
+
+    For non-/1m tiers we pre-aggregate each source shard to the target
+    tier's bin before concatenation — bounds peak memory to O(target
+    bins × cells × metrics × states) rather than O(N × source rows), so
+    a 60-day fill stays feasible instead of scaling to billions of rows.
     """
     if gap.tier == '1m':
         from .avail_ingester import avail_ingest_1m
@@ -163,6 +212,7 @@ def source_long_for_gap(
         # so granular inputs_expected isn't accessible here.
         return long, (1 if not long.is_empty() else 0), 1
 
+    target_bin = pyramid.tier(gap.tier).bin
     shard_min = dur_min(gap.shard_dur)
     source_dur, source_min = pick_one_m_source_rung(pyramid, shard_min)
     n_inputs = shard_min // source_min
@@ -179,7 +229,7 @@ def source_long_for_gap(
             inputs_present += 1
             continue
         inputs_present += 1
-        longs.append(sub)
+        longs.append(_preaggregate_to_tier_bin(sub, target_bin))
     if not longs:
         empty = pl.DataFrame(
             schema={'s2_cell': pl.Utf8, 'dt': pl.Int64, 'metric': pl.Utf8,
