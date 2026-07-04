@@ -7,6 +7,7 @@ on:
       - 'gbfs/loader/**'
       - 'gbfs/api/**'
       - 'gbfs/compactor/**'
+      - 'gbfs/cascade/**'
       - '.github/workflows/gbfs.yml'
   workflow_dispatch:
     inputs:
@@ -14,7 +15,7 @@ on:
         description: 'Worker to deploy (default: all)'
         required: false
         type: choice
-        options: [all, worker, loader, api, compactor]
+        options: [all, worker, loader, api, compactor, cascade]
         default: all
 
 jobs:
@@ -25,6 +26,7 @@ jobs:
       loader: ${{ steps.filter.outputs.loader }}
       api: ${{ steps.filter.outputs.api }}
       compactor: ${{ steps.filter.outputs.compactor }}
+      cascade: ${{ steps.filter.outputs.cascade }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -39,6 +41,8 @@ jobs:
               - 'gbfs/api/**'
             compactor:
               - 'gbfs/compactor/**'
+            cascade:
+              - 'gbfs/cascade/**'
 
   deploy:
     needs: detect-changes
@@ -46,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        worker: [worker, loader, api, compactor]
+        worker: [worker, loader, api, compactor, cascade]
     steps:
       - name: Check if this worker should deploy
         id: should
@@ -58,6 +62,7 @@ jobs:
               loader)    deploy="${{ needs.detect-changes.outputs.loader }}";;
               api)       deploy="${{ needs.detect-changes.outputs.api }}";;
               compactor) deploy="${{ needs.detect-changes.outputs.compactor }}";;
+              cascade)   deploy="${{ needs.detect-changes.outputs.cascade }}";;
             esac
           elif [ "$want" = "${{ matrix.worker }}" ]; then
             deploy=true
