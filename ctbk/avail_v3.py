@@ -50,6 +50,14 @@ INFO_PREFIX = 'gbfs/info'                     # daily station info JSON
 
 AVAIL_METRICS: tuple[str, ...] = ('bikes', 'ebikes', 'docks', 'disabled', 'pending')
 
+# Earliest UTC timestamp for which raw /1m WAL data exists. Trailing
+# max-shards emitted by `list_expected_shards` may cover pre-genesis
+# periods (its docstring: "the shard's notional period contains
+# pre-genesis time the materializer just leaves empty"); the materializer
+# clips ingester ranges to this and short-circuits shards whose entire
+# period lies before it.
+AVAIL_GENESIS = datetime(2026, 4, 7, tzinfo=timezone.utc)
+
 # Coarsest S2 level we materialize. Every station contributes at every
 # level from L10 down to its LUC (finest unique level). Matches the
 # `coarsestLevel` arg the FE passes to `s2Index.minimalCover`.

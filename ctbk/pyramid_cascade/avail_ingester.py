@@ -27,6 +27,7 @@ import polars as pl
 import s2cell
 
 from ctbk.avail_v3 import (
+    AVAIL_GENESIS,
     AVAIL_METRICS,
     COARSEST_LEVEL,
     SRC_PREFIX,
@@ -53,6 +54,11 @@ def avail_ingest_1m(
     """
     import time
     t0 = time.time()
+
+    if block_from < AVAIL_GENESIS:
+        block_from = AVAIL_GENESIS
+    if block_from >= block_to:
+        return _empty_long_lf()
 
     cli = r2_client()
     luc = load_station_luc()

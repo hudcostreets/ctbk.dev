@@ -37,7 +37,7 @@ import pyarrow.parquet as pq
 from pyrmts import ExpectedShard, Pyramid
 from pyrmts.axis import parse_duration
 
-from ctbk.avail_v3 import AVAIL_METRICS, R2_BUCKET, r2_client
+from ctbk.avail_v3 import AVAIL_GENESIS, AVAIL_METRICS, R2_BUCKET, r2_client
 from utz import err
 
 
@@ -480,8 +480,19 @@ def source_long_for_gap(
     target_bin = pyramid.tier(gap.tier).bin
     ks: set[str] = key_set if key_set is not None else set()
 
+    # Clip the effective sourcing range to genesis. The gap's notional
+    # period may extend arbitrarily far into the past for coarse trailing
+    # max-shards (per `pyrmts.gap_discovery` docstring); the raw WAL only
+    # exists from AVAIL_GENESIS forward, so scanning the pre-genesis
+    # segment produces no data at astronomical wall-clock cost.
+    if gap.period_start < AVAIL_GENESIS:
+        from dataclasses import replace
+        eff_gap = replace(gap, period_start=AVAIL_GENESIS)
+    else:
+        eff_gap = gap
+
     # Step 1: heterogeneous cover from existing shards
-    picks, uncovered = plan_source_cover(pyramid, gap, ks)
+    picks, uncovered = plan_source_cover(pyramid, eff_gap, ks)
 
     # Step 2: recursively materialize uncovered segments (if depth budget).
     # For each uncovered segment we try each priority (tier, rung) pair
@@ -490,7 +501,7 @@ def source_long_for_gap(
     if uncovered and recursion_depth < MAX_RECURSION_DEPTH:
         from pyrmts.axis import floor_to_span
         new_uncovered: list[tuple[datetime, datetime]] = []
-        priority_pairs = _priority_rung_pairs(pyramid, gap)
+        priority_pairs = _priority_rung_pairs(pyramid, eff_gap)
         for (seg_from, seg_to) in uncovered:
             seg_min = int((seg_to - seg_from).total_seconds() / 60)
             fit_pair: tuple[str, str, int] | None = None
@@ -533,7 +544,7 @@ def source_long_for_gap(
                 if sub_result.status in ('wrote', 'exists', 'empty', 'no_inputs'):
                     ks.add(key)
         # Re-plan cover after recursive fills
-        picks2, uncovered2 = plan_source_cover(pyramid, gap, ks)
+        picks2, uncovered2 = plan_source_cover(pyramid, eff_gap, ks)
         picks = picks2
         uncovered = uncovered2 + new_uncovered
 
@@ -616,6 +627,13 @@ def materialize_shard(
                 return MaterializeResult(gap=gap, status='exists')
             except r2.exceptions.ClientError:
                 pass
+
+    if gap.period_end <= AVAIL_GENESIS:
+        return MaterializeResult(
+            gap=gap, status='no_inputs',
+            inputs_present=0, inputs_expected=0,
+            source_desc='pre-genesis',
+        )
 
     try:
         long, inputs_present, inputs_expected, source_desc = source_long_for_gap(
