@@ -4,6 +4,16 @@ What `e` does as part of the avail-v3 unified-shard-ladder cutover.
 Laptop already ran steps 1-5 (D1 ALTER, cascade + api deploy, D1
 canonical-row DELETE, push). This spec covers what `e` does next.
 
+**Live-cascade status (2026-07-04 12:07 UTC):** cascade OOM fix
+(`cefb66f7` + `bd08ef64`) is now deployed via manual
+`wrangler deploy` (version `883c6e27`). Also on top: workflow patch
+`cfcc641f` wires `cascade` into `.github/workflows/gbfs.yml` so future
+edits auto-deploy. Steady-state /5m cron is writing all rungs from
+that timestamp forward. **`e`'s fsck fills only 2026-04-08 → 07-04
+12:07** — post-deploy periods already exist on R2 and `fsck --fill`
+will HEAD-skip them (`status: exists`, no rewrite). Fsck will
+re-register those `exists` shards in D1 idempotently.
+
 ## Where this fits
 
 The avail-v3 cutover migrates the pyramid from the prior
@@ -30,10 +40,9 @@ their pre-unified-ladder framing was actively misleading post-cutover.
 ## Pre-flight (verify)
 
 ```bash
-# Should be at c387d60e or later. (Spec-cleanup commits 051f054f, 3150e9c3
-# land on top in the macbook push.)
+# Should be at cfcc641f or later.
 grhh                                # align WT to pushed HEAD
-git merge-base --is-ancestor c387d60e HEAD || echo 'OUT OF DATE - pull from macbook'
+git merge-base --is-ancestor cfcc641f HEAD || echo 'OUT OF DATE - pull from macbook'
 git log --oneline -3                # most-recent commits, exact set may evolve
 
 uv sync                             # refresh pyrmts dep + ctbk install
