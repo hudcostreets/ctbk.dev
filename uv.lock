@@ -730,8 +730,8 @@ requires-dist = [
     { name = "plotly", specifier = ">=6.1.2" },
     { name = "polars", specifier = ">=1.41.0" },
     { name = "pyarrow", specifier = "==22.0.0" },
-    { name = "pyrmts", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=6b1779f" },
-    { name = "pyrmts-geo", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_geo&rev=6b1779f" },
+    { name = "pyrmts", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=9d16761" },
+    { name = "pyrmts-geo", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_geo&rev=9d16761" },
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
     { name = "s2cell", specifier = ">=1.8.0" },
     { name = "s3fs", specifier = ">=2025.5.1" },
@@ -2590,7 +2590,7 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "cffi" },
+    { name = "cffi", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/2e/ea/762d00f6f518423cd889e39b12028844cc95f91a6413cf7136e184864821/pygit2-1.18.2.tar.gz", hash = "sha256:eca87e0662c965715b7f13491d5e858df2c0908341dee9bde2bc03268e460f55", size = 797200, upload-time = "2025-08-16T13:52:36.853Z" }
 wheels = [
@@ -2641,7 +2641,7 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "cffi" },
+    { name = "cffi", marker = "python_full_version >= '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6c/4b/da6f1a1a48a4095e3c12c5fa1f2784f4423db3e16159e08740cc5c6ee639/pygit2-1.19.0.tar.gz", hash = "sha256:ca5db6f395a74166a019d777895f96bcb211ee60ce0be4132b139603e0066d83", size = 799757, upload-time = "2025-10-23T12:34:35.783Z" }
 wheels = [
@@ -2725,7 +2725,7 @@ wheels = [
 [[package]]
 name = "pyrmts"
 version = "0.0.0"
-source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=6b1779f#6b1779feb4a6262fa18817a1bdda1dcb5abbf2cf" }
+source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=9d16761#9d16761b704b66accdf7cb51c811201f5dc5c47c" }
 dependencies = [
     { name = "pyarrow" },
     { name = "pyyaml" },
@@ -2734,7 +2734,7 @@ dependencies = [
 [[package]]
 name = "pyrmts-geo"
 version = "0.0.0"
-source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_geo&rev=6b1779f#6b1779feb4a6262fa18817a1bdda1dcb5abbf2cf" }
+source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_geo&rev=9d16761#9d16761b704b66accdf7cb51c811201f5dc5c47c" }
 dependencies = [
     { name = "h3" },
     { name = "pyrmts" },
