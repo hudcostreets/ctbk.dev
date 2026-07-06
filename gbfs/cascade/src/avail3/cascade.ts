@@ -240,7 +240,7 @@ async function pickSourceForShard(
 // ─── Per-shard writer ───────────────────────────────────────────────────
 
 export interface WriteResult {
-	status: 'wrote' | 'exists' | 'no_inputs' | 'empty';
+	status: 'wrote' | 'exists' | 'no_inputs' | 'empty' | 'too_large';
 	key: string;
 	bytes?: number;
 	rows?: number;
@@ -251,7 +251,34 @@ export interface WriteResult {
 	// `recordShard` on `inputsPresent === inputsExpected`.
 	inputsPresent?: number;
 	inputsExpected?: number;
+	// For `too_large`: estimated output cells×bins so operators can see
+	// which rungs got skipped and why.
+	estimatedRows?: number;
 }
+
+/** Cell-count in the LUC index (stations × mean-chain-length after dedup).
+ *  Empirically ~9k for avail-v3. Used to bound output-row estimates. */
+let _cellCountCache: number | null = null;
+function lucCellCount(luc: import('./luc').LucIndex): number {
+	if (_cellCountCache !== null) return _cellCountCache;
+	const uniq = new Set<string>();
+	for (const chain of luc.chains.values()) for (const c of chain) uniq.add(c);
+	_cellCountCache = uniq.size;
+	return _cellCountCache;
+}
+
+/** Maximum output rows a CFW isolate can build in one writeShard call
+ *  without OOM. Empirically ~1M rows is the tight ceiling for the 128 MB
+ *  isolate — individual `/2m@12h`-scale writes fit, but a full 15-tier
+ *  boundary tick that lands MULTIPLE ≥1M-row writes back-to-back doesn't
+ *  (V8 GC doesn't reliably reclaim between rungs, so retained garbage
+ *  accumulates until later rungs starve). Conservative 500k threshold
+ *  keeps per-rung writes small enough that even a boundary tick with
+ *  10+ writing rungs stays under the limit. Rungs whose estimated
+ *  output exceeds this get skipped with `too_large` — the next tier's
+ *  rungs still fire, and the offline `converge()` on `e` fills the
+ *  skipped shards. */
+const MAX_OUTPUT_ROWS = 500_000;
 
 /** HEAD-check N candidate keys in parallel. Returns the subset that
  *  exists, preserving order. */
@@ -328,6 +355,17 @@ async function writeShard(
 	const present = await existingKeys(r2, sourceKeys);
 	const inputsPresent = present.length;
 	if (inputsPresent === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
+
+	// Pre-flight OOM guard. Output row count is bounded by
+	// `unique_cells × bins_per_shard`. Rungs above the empirical CFW
+	// threshold get skipped so subsequent tier rungs at this tick still
+	// fire (an OOM would terminate the isolate, killing them all).
+	// Offline `converge()` on `e`/laptop picks up the skipped shards.
+	const tierBinMin = TIER_BIN_MIN[tier]!;
+	const estimatedRows = lucCellCount(luc) * (shardDurMin / tierBinMin);
+	if (estimatedRows > MAX_OUTPUT_ROWS) {
+		return { status: 'too_large', key, inputsPresent, inputsExpected, estimatedRows };
+	}
 
 	const iters = present.map((k) => streamShardRows(r2, k));
 	const merged = kwayMerge(iters, targetBinMs);

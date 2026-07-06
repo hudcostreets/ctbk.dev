@@ -327,10 +327,164 @@ function availV3Schema() {
 	return cachedSchema as ReturnType<typeof schemaFromColumnData>;
 }
 
-/** Stream rows through `ParquetWriter` in row-group-sized batches.
- *  Peak heap: `ROW_GROUP_SIZE`-row columnar batch + accumulated
- *  ByteWriter buffer (bounded by output shard bytes, tens of MB even
- *  for `/1m@1d`). Fits paid-tier 512 MB isolate with headroom.
+// ─── Multipart streaming R2 writer ─────────────────────────────────
+
+/** Multipart part size. R2 requires:
+ *   1. Non-terminal parts ≥ 5 MB.
+ *   2. **All non-terminal parts MUST have identical size** (stricter
+ *      than S3's protocol; enforced by CF's `completeMultipartUpload`
+ *      with error 10048).
+ *  We flush in EXACT `PART_SIZE`-byte chunks so every non-terminal
+ *  upload has the same length. The trailing part (from `commit()`)
+ *  has no size constraint. */
+const PART_SIZE = 8 * 1024 * 1024;
+
+/** Wraps `hyparquet-writer`'s `ByteWriter` interface but transparently
+ *  uploads accumulated bytes to R2 as multipart parts once the buffer
+ *  crosses a size threshold. `ParquetWriter` writes to this the same
+ *  way it would to a raw `ByteWriter` — all `append*` / `ensure`
+ *  methods delegate to an inner `ByteWriter` — but `offset` reports
+ *  the TOTAL bytes written (including already-uploaded parts), which
+ *  is what `ParquetWriter` uses for row-group `file_offset` metadata.
+ *
+ *  Peak memory: one part (~5-10 MB) plus one row-group's encode state.
+ *  Bounded regardless of total output size — writes multi-GB shards
+ *  in a 128 MB isolate without OOM.
+ *
+ *  Lifecycle:
+ *
+ *    const mw = new MultipartR2Writer(r2, key);
+ *    const pq = new ParquetWriter({ writer: mw, schema, codec });
+ *    for await (const row of rows) {
+ *      // ... push to batch ...
+ *      if (batch full) {
+ *        pq.write({ columnData });
+ *        await mw.flushIfLarge();   // <-- async, natural await point
+ *      }
+ *    }
+ *    pq.finish();                    // writes footer to mw.inner
+ *    const bytes = await mw.commit(); // finalizes multipart (or single put)
+ */
+export class MultipartR2Writer {
+	private inner: ByteWriter;
+	private readonly r2: R2Bucket;
+	private readonly key: string;
+	private upload: R2MultipartUpload | null = null;
+	private parts: R2UploadedPart[] = [];
+	private uploadedBytes = 0;
+
+	constructor(r2: R2Bucket, key: string, initialSize = 1024) {
+		this.r2 = r2;
+		this.key = key;
+		this.inner = new ByteWriter(initialSize);
+	}
+
+	// Writer interface — delegate to inner.
+	// `buffer` / `view` / `index` are read as getters so any consumer that
+	// caches them across a flush picks up the fresh inner buffer.
+	get buffer(): ArrayBuffer { return this.inner.buffer; }
+	get view(): DataView { return this.inner.view; }
+	get index(): number { return this.inner.index; }
+
+	/** Total bytes written across all parts + current buffer. This is
+	 *  what `ParquetWriter` records as row-group `file_offset` metadata,
+	 *  so it MUST monotonically increase across flushes. */
+	get offset(): number { return this.uploadedBytes + this.inner.index; }
+
+	ensure(size: number): void { this.inner.ensure(size); }
+	getBuffer(): ArrayBuffer { return this.inner.getBuffer(); }
+	getBytes(): Uint8Array { return this.inner.getBytes(); }
+	finish(): void { /* sync no-op; async commit() below */ }
+
+	appendUint8(v: number):    void { this.inner.appendUint8(v); }
+	appendUint32(v: number):   void { this.inner.appendUint32(v); }
+	appendInt32(v: number):    void { this.inner.appendInt32(v); }
+	appendInt64(v: bigint):    void { this.inner.appendInt64(v); }
+	appendFloat32(v: number):  void { this.inner.appendFloat32(v); }
+	appendFloat64(v: number):  void { this.inner.appendFloat64(v); }
+	appendBuffer(v: ArrayBuffer): void { this.inner.appendBuffer(v); }
+	appendBytes(v: Uint8Array):   void { this.inner.appendBytes(v); }
+	appendVarInt(v: number):    void { this.inner.appendVarInt(v); }
+	appendVarBigInt(v: bigint): void { this.inner.appendVarBigInt(v); }
+	appendZigZag(v: number | bigint): void { this.inner.appendZigZag(v); }
+
+	/** Extract exactly `PART_SIZE` bytes off the front of the buffer,
+	 *  upload as one part, and re-buffer the remainder. Idempotent while
+	 *  below `PART_SIZE`. Called repeatedly by `flushIfLarge` so a
+	 *  single row-group write producing > 2× `PART_SIZE` still produces
+	 *  same-size parts. */
+	private async flushOnePart(): Promise<void> {
+		if (this.inner.index < PART_SIZE) return;
+		if (this.upload === null) {
+			this.upload = await this.r2.createMultipartUpload(this.key, {
+				httpMetadata: { contentType: 'application/octet-stream' },
+			});
+		}
+		const partNumber = this.parts.length + 1;
+		// Copy exactly `PART_SIZE` bytes for the part (R2 enforces
+		// same-size non-terminal parts).
+		const partBytes = new Uint8Array(PART_SIZE);
+		partBytes.set(new Uint8Array(this.inner.buffer, 0, PART_SIZE));
+		const part = await this.upload.uploadPart(partNumber, partBytes);
+		this.parts.push(part);
+		this.uploadedBytes += PART_SIZE;
+		// Shift the remainder (this.inner.index - PART_SIZE bytes) to
+		// the front of a fresh inner buffer.
+		const remainderSize = this.inner.index - PART_SIZE;
+		const newInner = new ByteWriter(Math.max(PART_SIZE, remainderSize || 1024));
+		if (remainderSize > 0) {
+			newInner.appendBytes(new Uint8Array(this.inner.buffer, PART_SIZE, remainderSize));
+		}
+		this.inner = newInner;
+	}
+
+	/** Upload the current buffer as multipart parts as long as it holds
+	 *  at least `PART_SIZE` bytes. Cheap no-op below the threshold.
+	 *  Loops because a single ParquetWriter.write() call can push more
+	 *  than one `PART_SIZE` of bytes into the buffer. */
+	async flushIfLarge(): Promise<void> {
+		while (this.inner.index >= PART_SIZE) {
+			await this.flushOnePart();
+		}
+	}
+
+	/** Finalize: either single `r2.put` (if no multipart was ever
+	 *  started) or upload remainder as final part + `complete()`. */
+	async commit(): Promise<number> {
+		if (this.upload === null) {
+			// Total output stayed under the flush threshold — single put.
+			const bytes = this.inner.getBytes();
+			const byteLength = bytes.byteLength;
+			if (byteLength === 0) return 0;
+			await this.r2.put(this.key, bytes, {
+				httpMetadata: { contentType: 'application/octet-stream' },
+			});
+			return byteLength;
+		}
+		// Flush any remainder as the final part. Final part has no min-size.
+		if (this.inner.index > 0) {
+			const partNumber = this.parts.length + 1;
+			const partBytes = new Uint8Array(this.inner.index);
+			partBytes.set(new Uint8Array(this.inner.buffer, 0, this.inner.index));
+			const part = await this.upload.uploadPart(partNumber, partBytes);
+			this.parts.push(part);
+			this.uploadedBytes += this.inner.index;
+		}
+		await this.upload.complete(this.parts);
+		return this.uploadedBytes;
+	}
+
+	/** Abort an in-flight multipart upload. Call in error paths so R2
+	 *  doesn't keep partial uploads around indefinitely. */
+	async abort(): Promise<void> {
+		if (this.upload !== null) await this.upload.abort();
+	}
+}
+
+/** Stream rows through `ParquetWriter` + `MultipartR2Writer`. Peak
+ *  memory is bounded by one row-group's encoded bytes + one multipart
+ *  part (~5 MB) regardless of total output size — writes `/1m@1d`
+ *  (~55 MB) in a 128 MB isolate without OOM.
  *
  *  Returns bytes written and row count. Zero-row streams return
  *  { bytes: 0, rows: 0 } WITHOUT touching R2 — caller decides how to
@@ -341,35 +495,43 @@ export async function writeShardStreaming(
 	rows: AsyncGenerator<AvailV3Row>,
 	rowGroupSize: number = 2048,
 ): Promise<{ bytes: number; rows: number }> {
-	const bw = new ByteWriter();
+	const mw = new MultipartR2Writer(r2, key);
 	const w = new ParquetWriter({
-		writer: bw,
+		writer: mw,
 		schema: availV3Schema(),
 		codec: 'SNAPPY',
-		statistics: true,
+		// Statistics allocate min/max value copies + null counts per
+		// column-chunk; disabling saves per-RG transient state at the cost
+		// of no min/max predicate push-down at read time. For avail-v3
+		// queries (dt-range, s2_cell equality) push-down doesn't help
+		// meaningfully — row-groups are sort-ordered by (s2_cell, dt) so
+		// callers use offset-index-driven scans, not stats.
+		statistics: false,
 	});
 	let batch = emptyBatch();
 	let totalRows = 0;
-	for await (const row of rows) {
-		pushRow(batch, row);
-		totalRows++;
-		if (batchLen(batch) >= rowGroupSize) {
-			w.write({ columnData: batchToColumns(batch), rowGroupSize });
-			batch = emptyBatch();
+	try {
+		for await (const row of rows) {
+			pushRow(batch, row);
+			totalRows++;
+			if (batchLen(batch) >= rowGroupSize) {
+				w.write({ columnData: batchToColumns(batch), rowGroupSize });
+				batch = emptyBatch();
+				// Natural await point between row-groups — flush accumulated
+				// bytes to R2 if the current part has crossed the threshold.
+				await mw.flushIfLarge();
+			}
 		}
+		if (batchLen(batch) > 0) {
+			w.write({ columnData: batchToColumns(batch), rowGroupSize });
+		}
+		w.finish();
+	} catch (err) {
+		await mw.abort();
+		throw err;
 	}
-	if (batchLen(batch) > 0) {
-		w.write({ columnData: batchToColumns(batch), rowGroupSize });
-	}
-	w.finish();
 	if (totalRows === 0) return { bytes: 0, rows: 0 };
-	// `getBytes()` returns a Uint8Array VIEW over the internal buffer (no
-	// copy); `getBuffer()` would `.slice()` which briefly holds 2× the
-	// output size. Save the byteLength before upload so we can release the
-	// ParquetWriter/ByteWriter refs immediately after.
-	const bytes = bw.getBytes();
-	const byteLength = bytes.byteLength;
-	await r2.put(key, bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
+	const byteLength = await mw.commit();
 	return { bytes: byteLength, rows: totalRows };
 }
 

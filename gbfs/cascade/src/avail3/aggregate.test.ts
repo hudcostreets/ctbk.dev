@@ -1,6 +1,6 @@
 import { describe, test, expect, vi } from 'vitest';
 import { parquetReadObjects } from 'hyparquet';
-import { kwayMerge, aggregateStream, streamShardRows, writeShardStreaming } from './aggregate';
+import { kwayMerge, aggregateStream, streamShardRows, writeShardStreaming, MultipartR2Writer } from './aggregate';
 import { sortRows, type AvailV3Row } from './transform';
 
 // Convenience: build a wide row with per-metric histograms.
@@ -162,8 +162,13 @@ describe('aggregateStream', () => {
 // r2SlicedBuffer wrapper. Real R2 always returns an ArrayBuffer from
 // R2Object.arrayBuffer(); normalize on put+get so callers can put
 // either ArrayBuffer or a Uint8Array view (e.g., ByteWriter.getBytes()).
+// Also implements minimal `createMultipartUpload` API used by
+// `MultipartR2Writer` — uploaded parts accumulate in-memory and are
+// concatenated in `complete()`.
 function makeR2() {
 	const store = new Map<string, ArrayBuffer>();
+	const multiparts = new Map<string, { key: string; parts: Map<number, Uint8Array>; aborted: boolean }>();
+	let uploadCounter = 0;
 	return {
 		head: vi.fn(async (key: string) => (store.has(key) ? { key, size: store.get(key)!.byteLength } : null)),
 		get: vi.fn(async (key: string, opts?: { range?: { offset: number; length: number } }) => {
@@ -185,7 +190,58 @@ function makeR2() {
 				store.set(key, body);
 			}
 		}),
+		createMultipartUpload: vi.fn(async (key: string) => {
+			const uploadId = `upload-${++uploadCounter}`;
+			const state = { key, parts: new Map<number, Uint8Array>(), aborted: false };
+			multiparts.set(uploadId, state);
+			return {
+				uploadId,
+				key,
+				uploadPart: vi.fn(async (partNumber: number, body: Uint8Array) => {
+					if (state.aborted) throw new Error(`upload ${uploadId} aborted`);
+					// Copy — caller may recycle its buffer immediately.
+					const copy = new Uint8Array(body.byteLength);
+					copy.set(body);
+					state.parts.set(partNumber, copy);
+					return { partNumber, etag: `etag-${uploadId}-${partNumber}` };
+				}),
+				complete: vi.fn(async (parts: Array<{ partNumber: number; etag: string }>) => {
+					if (state.aborted) throw new Error(`upload ${uploadId} aborted`);
+					// Concatenate parts in order.
+					const sortedPartNums = parts.map((p) => p.partNumber).sort((a, b) => a - b);
+					// Enforce R2's non-terminal-parts-must-be-same-size constraint
+					// (error 10048 in real R2). Catches regressions in flush logic.
+					if (sortedPartNums.length >= 2) {
+						const sizes = sortedPartNums.map((pn) => state.parts.get(pn)!.byteLength);
+						const nonTerminalSizes = sizes.slice(0, -1);
+						const first = nonTerminalSizes[0]!;
+						for (const s of nonTerminalSizes) {
+							if (s !== first) {
+								throw new Error(`completeMultipartUpload: All non-trailing parts must have the same length. (10048) — got sizes ${sizes.join(', ')}`);
+							}
+						}
+					}
+					const total = sortedPartNums.reduce((n, pn) => n + state.parts.get(pn)!.byteLength, 0);
+					const assembled = new Uint8Array(total);
+					let off = 0;
+					for (const pn of sortedPartNums) {
+						const part = state.parts.get(pn)!;
+						assembled.set(part, off);
+						off += part.byteLength;
+					}
+					const buf = new ArrayBuffer(total);
+					new Uint8Array(buf).set(assembled);
+					store.set(state.key, buf);
+					multiparts.delete(uploadId);
+				}),
+				abort: vi.fn(async () => {
+					state.aborted = true;
+					multiparts.delete(uploadId);
+				}),
+			};
+		}),
 		_store: store,
+		_multiparts: multiparts,
 	};
 }
 
@@ -256,6 +312,148 @@ describe('writeShardStreaming → streamShardRows round-trip', () => {
 		expect(rows.length).toBe(2);
 		expect(rows[0]!.s2_cell).toBe('c1');
 		expect(rows[1]!.s2_cell).toBe('c2');
+	});
+});
+
+describe('MultipartR2Writer (via writeShardStreaming)', () => {
+	test('small output → single put, no multipart used', async () => {
+		const r2 = makeR2();
+		const src = sortRows([
+			row('c1', 100n, { bikes: { 5: 1 } }),
+			row('c2', 200n, { ebikes: { 3: 1 } }),
+		]);
+		async function* gen(): AsyncGenerator<AvailV3Row> { for (const r of src) yield r; }
+		await writeShardStreaming(r2 as unknown as R2Bucket, 'small.parquet', gen());
+		expect(r2.put).toHaveBeenCalledTimes(1);
+		expect(r2.createMultipartUpload).not.toHaveBeenCalled();
+		expect(r2._store.has('small.parquet')).toBe(true);
+	});
+
+	test('large output crosses part-size threshold → multipart upload', async () => {
+		const r2 = makeR2();
+		// Generate enough rows to exceed the 5MB flush threshold. Each row
+		// with a decently-sized JSON histogram value is ~150 bytes uncompressed.
+		// Aim for ~10-12MB output (compressed ~7-8MB after SNAPPY).
+		const NUM_ROWS = 1_500_000;
+		const src: AvailV3Row[] = [];
+		for (let i = 0; i < NUM_ROWS; i++) {
+			// Vary content per row to defeat dictionary encoding at small sizes.
+			const cell = `s2cell${String(i).padStart(6, '0')}`;
+			src.push(row(cell, BigInt(i * 60_000), {
+				bikes:    { [i % 20]: 2, [(i + 1) % 20]: 1 },
+				ebikes:   { [i % 15]: 1 },
+				docks:    { [(i + 5) % 12]: 3 },
+				disabled: { [i % 3]: 1 },
+				pending:  { [i % 7]: 1 },
+			}));
+		}
+		async function* gen(): AsyncGenerator<AvailV3Row> { for (const r of src) yield r; }
+		const { bytes, rows } = await writeShardStreaming(r2 as unknown as R2Bucket, 'big.parquet', gen());
+		expect(rows).toBe(NUM_ROWS);
+		expect(bytes).toBeGreaterThan(8 * 1024 * 1024);  // crossed part-size threshold
+		expect(r2.createMultipartUpload).toHaveBeenCalledTimes(1);
+		expect(r2.put).not.toHaveBeenCalled();  // multipart path only
+		// Round-trip: readable via streamShardRows.
+		const readBack: AvailV3Row[] = [];
+		for await (const r of streamShardRows(r2 as unknown as R2Bucket, 'big.parquet')) {
+			readBack.push(r);
+		}
+		expect(readBack.length).toBe(NUM_ROWS);
+		// Spot-check preservation.
+		expect(readBack[0]).toEqual(src[0]);
+		expect(readBack[NUM_ROWS - 1]).toEqual(src[NUM_ROWS - 1]);
+		expect(readBack[NUM_ROWS / 2]).toEqual(src[NUM_ROWS / 2]);
+	});
+
+	test('parity: multipart-assembled bytes readable by parquetReadObjects', async () => {
+		const r2 = makeR2();
+		const NUM_ROWS = 1_500_000;
+		const src: AvailV3Row[] = [];
+		for (let i = 0; i < NUM_ROWS; i++) {
+			src.push(row(`c${String(i).padStart(6, '0')}`, BigInt(i * 60_000), { bikes: { 5: 1 } }));
+		}
+		async function* gen(): AsyncGenerator<AvailV3Row> { for (const r of src) yield r; }
+		await writeShardStreaming(r2 as unknown as R2Bucket, 'mp.parquet', gen());
+		expect(r2.createMultipartUpload).toHaveBeenCalled();
+		const buf = r2._store.get('mp.parquet')!;
+		const file = { byteLength: buf.byteLength, slice: (s: number, e?: number) => buf.slice(s, e) };
+		const rows = (await parquetReadObjects({ file })) as Record<string, unknown>[];
+		expect(rows.length).toBe(NUM_ROWS);
+		expect(rows[0]!.s2_cell).toBe('c000000');
+		expect(rows[NUM_ROWS - 1]!.s2_cell).toBe(`c${String(NUM_ROWS - 1).padStart(6, '0')}`);
+	});
+
+	test('empty stream: no multipart, no put', async () => {
+		const r2 = makeR2();
+		async function* gen(): AsyncGenerator<AvailV3Row> { /* empty */ }
+		const { bytes, rows } = await writeShardStreaming(r2 as unknown as R2Bucket, 'e.parquet', gen());
+		expect(bytes).toBe(0);
+		expect(rows).toBe(0);
+		expect(r2.put).not.toHaveBeenCalled();
+		expect(r2.createMultipartUpload).not.toHaveBeenCalled();
+	});
+
+	test('all non-trailing parts are exactly PART_SIZE bytes (R2 constraint 10048)', async () => {
+		// R2's completeMultipartUpload rejects with error 10048 if any
+		// non-terminal part has a different size than the others. Regression
+		// canary for the fix where flushIfLarge was uploading variable-sized
+		// parts (flushing whenever inner.index >= threshold).
+		const r2 = makeR2();
+		const mw = new MultipartR2Writer(r2 as unknown as R2Bucket, 'partsize.bin');
+		// Write ~30MB — should produce 3 full 8MB parts + a smaller trailing.
+		const chunk = new Uint8Array(1024 * 1024);  // 1MB
+		for (let i = 0; i < 30; i++) {
+			mw.appendBytes(chunk);
+			await mw.flushIfLarge();
+		}
+		await mw.commit();
+		const upload = Array.from(r2._multiparts.values())[0];
+		// Multipart upload should have been complete()'d, removing it from _multiparts.
+		// So we need to check by looking at what was uploaded via the R2 store.
+		expect(upload).toBeUndefined();  // completed, removed
+		// Verify the assembled file has the expected total bytes.
+		expect(r2._store.get('partsize.bin')!.byteLength).toBe(30 * 1024 * 1024);
+	});
+
+	test('flushOnePart handles > PART_SIZE writes correctly (loop)', async () => {
+		// Simulate a single write that pushes > 2× PART_SIZE at once.
+		// flushIfLarge must loop and produce multiple same-size parts.
+		const r2 = makeR2();
+		const mw = new MultipartR2Writer(r2 as unknown as R2Bucket, 'big.bin');
+		const bigChunk = new Uint8Array(20 * 1024 * 1024);  // 20MB single append
+		// Fill with a distinguishable pattern to verify correct reassembly.
+		for (let i = 0; i < bigChunk.length; i++) bigChunk[i] = i & 0xff;
+		mw.appendBytes(bigChunk);
+		await mw.flushIfLarge();
+		// After flushIfLarge, inner should hold < PART_SIZE (the remainder).
+		expect(mw.index).toBeLessThan(8 * 1024 * 1024);
+		await mw.commit();
+		// Full data readable from the store, matching the pattern.
+		const stored = new Uint8Array(r2._store.get('big.bin')!);
+		expect(stored.byteLength).toBe(20 * 1024 * 1024);
+		for (let i = 0; i < stored.length; i++) {
+			if (stored[i] !== (i & 0xff)) {
+				throw new Error(`mismatch at byte ${i}: got ${stored[i]}, expected ${i & 0xff}`);
+			}
+		}
+	});
+
+	test('offset counter monotonically increases across flushes', async () => {
+		// Directly exercise the MultipartR2Writer to verify offset semantics.
+		const r2 = makeR2();
+		const mw = new MultipartR2Writer(r2 as unknown as R2Bucket, 'off.bin');
+		expect(mw.offset).toBe(0);
+		// Write ~6MB of data — should cross threshold once.
+		const chunk = new Uint8Array(1024 * 1024);  // 1MB
+		for (let i = 0; i < 6; i++) {
+			mw.appendBytes(chunk);
+			// After each append, offset must equal total bytes written so far.
+			expect(mw.offset).toBe((i + 1) * chunk.byteLength);
+			if ((i + 1) % 3 === 0) await mw.flushIfLarge();
+		}
+		// offset stays consistent after flush (uploadedBytes + inner.index)
+		expect(mw.offset).toBe(6 * 1024 * 1024);
+		await mw.commit();
 	});
 });
 
