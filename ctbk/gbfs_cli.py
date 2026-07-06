@@ -229,7 +229,16 @@ def gbfs_cascade_tick(
 	results = obj.get('results', [])
 	counts = Counter(r['status'] for r in results)
 	total = len(results)
-	print(f'tick={obj.get("tickTime", tick_time)}  ({env_name})  rungs={total}')
+	# Post-Phase-C: report includes `totalMissing` (min-cover gap count)
+	# and `stoppedReason` ('time' | 'ops') when the tick bailed early.
+	tm = obj.get('totalMissing')
+	stopped = obj.get('stoppedReason')
+	extra = ''
+	if tm is not None and tm > total:
+		extra += f'  (missing={tm})'
+	if stopped:
+		extra += f'  (stopped={stopped})'
+	print(f'tick={obj.get("tickTime", tick_time)}  ({env_name})  rungs={total}{extra}')
 	# Order: canonical → surprising last.
 	preferred_order = ['wrote', 'exists', 'too_large', 'no_inputs', 'empty']
 	seen: set[str] = set()

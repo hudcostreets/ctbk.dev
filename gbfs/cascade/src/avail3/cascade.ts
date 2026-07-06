@@ -25,8 +25,15 @@
  * ladders in v2 — same loop, different rungs.
  */
 import { parquetReadObjects } from 'hyparquet';
-import { D1ShardIndex } from 'pyrmts-cfw';
-import type { Duration } from 'pyrmts';
+import { D1ShardIndex, r2Storage } from 'pyrmts-cfw';
+import {
+	listMissingShards,
+	parquetBackend,
+	pyramidFromConfig,
+	type Duration,
+	type ExpectedShard,
+	type PyramidConfig,
+} from 'pyrmts';
 import { getLucIndex } from './luc';
 import {
 	transformMinuteRows,
@@ -400,31 +407,103 @@ export interface ConvergeOpts {
 
 export interface ConvergeReport {
 	now: Date;
-	/** True if `now` was /5m-aligned (a real cascade tick), else false
-	 *  (an ad-hoc convergence call — no writes attempted for now, since
-	 *  the current implementation still uses boundary-fire semantics.
-	 *  Phase C replaces this with a diff-loop that fires regardless of
-	 *  tick alignment). */
-	tickAligned: boolean;
+	/** Total missing shards in the [genesis, now] range (before this
+	 *  call). `results.length ≤ totalMissing` — anything the call didn't
+	 *  attempt (budget hit / filter) contributes to a subsequent call's
+	 *  totalMissing. */
+	totalMissing: number;
 	results: WriteResult[];
 	stats: Record<string, number>;
 	/** Non-null if we bailed early. */
 	stoppedReason?: 'time' | 'ops';
 }
 
-const TICK_MS = 5 * 60_000;
+/** avail-v3 genesis: earliest UTC timestamp for which raw /1m WAL data
+ *  exists (per `ctbk/avail_v3.py`'s `AVAIL_GENESIS`). Range floor for
+ *  gap-discovery — anything before this is trivially `no_inputs`. */
+const AVAIL_GENESIS = new Date('2026-04-07T00:00:00Z');
 
-/** Runtime-agnostic cascade primitive. Walks the ladder for a given
- *  `now`, writing any rung whose boundary just closed (until Phase C
- *  swaps in the min-cover diff loop). Same function is called from:
+/** avail-v3 pyramid config. Kept in sync with `configs/pyramids/avail.yaml`
+ *  by hand (the YAML remains the source of truth for the Python fsck and
+ *  the api worker; ideally the CFW bundles it too, but vitest/wrangler
+ *  disagree on YAML import loaders — inlining is the least-bad workaround
+ *  until we standardize on a plugin). If you edit the YAML, edit this. */
+const AVAIL_PYRAMID_CONFIG: PyramidConfig = {
+	storage: { type: 's3', bucket: 'ctbk', key: 'avail-v3/{tier}/{shard}/{period}.parquet' },
+	keyTemplate: 'avail-v3/{tier}/{shard}/{period}.parquet',
+	axis: 'time',
+	binCol: 'dt',
+	dims: [{ name: 's2_cell', type: 'string' }],
+	metrics: [
+		{ name: 'bikes',    monoid: 'histogram' },
+		{ name: 'ebikes',   monoid: 'histogram' },
+		{ name: 'docks',    monoid: 'histogram' },
+		{ name: 'disabled', monoid: 'histogram' },
+		{ name: 'pending',  monoid: 'histogram' },
+	],
+	tiers: [
+		{ name: '1m',  bin: '1min',  shards: ['5min', '10min', '30min', '1h', '3h', '12h', '1d'] },
+		{ name: '2m',  bin: '2min',  shards: ['10min', '30min', '1h', '3h', '12h', '1d', '2d'] },
+		{ name: '3m',  bin: '3min',  shards: ['15min', '30min', '1h', '3h', '12h', '1d', '3d'] },
+		{ name: '5m',  bin: '5min',  shards: ['15min', '30min', '1h', '3h', '12h', '1d', '5d'] },
+		{ name: '10m', bin: '10min', shards: ['30min', '1h', '3h', '12h', '1d', '5d', '10d'] },
+		{ name: '15m', bin: '15min', shards: ['1h', '3h', '12h', '1d', '5d', '15d'] },
+		{ name: '30m', bin: '30min', shards: ['2h', '6h', '1d', '5d', '15d', '30d'] },
+		{ name: '1h',  bin: '1h',    shards: ['3h', '12h', '2d', '10d', '30d', '60d'] },
+		{ name: '2h',  bin: '2h',    shards: ['6h', '1d', '5d', '20d', '60d', '120d'] },
+		{ name: '3h',  bin: '3h',    shards: ['12h', '2d', '10d', '30d', '90d', '180d'] },
+		{ name: '6h',  bin: '6h',    shards: ['1d', '5d', '20d', '60d', '180d', '360d'] },
+		{ name: '12h', bin: '12h',   shards: ['2d', '10d', '30d', '90d', '360d', '720d'] },
+		{ name: '1d',  bin: '1d',    shards: ['3d', '15d', '30d', '90d', '360d', '1440d'] },
+		{ name: '3d',  bin: '3d',    shards: ['15d', '30d', '60d', '120d', '360d', '720d', '1440d', '4320d'] },
+		{ name: '7d',  bin: '7d',    shards: ['35d', '70d', '140d', '280d', '840d', '1680d', '3360d', '10080d'] },
+	],
+	geo: { cellCol: 's2_cell', resolutions: [15, 14, 13, 12, 11, 10] },
+};
+
+/** Look up prev-rung shard_dur from the ladder for a given (tier, shardDur).
+ *  Returns null if `shardDur` is the smallest rung of `tier` (in which
+ *  case `writeShard` uses raw ingest for `/1m` or the heterogeneous
+ *  cover chain for non-/1m). */
+function prevShardDurOf(tier: string, shardDur: Duration): Duration | null {
+	const ladder = LADDERS[tier];
+	if (!ladder) throw new Error(`unknown tier: ${tier}`);
+	const i = ladder.indexOf(shardDur);
+	if (i < 0) throw new Error(`shardDur ${shardDur} not in ${tier} ladder`);
+	return i === 0 ? null : ladder[i - 1]!;
+}
+
+/** Dependency sort for missing shards. Writes are safe iff every input
+ *  a shard reads is either (a) already on R2 or (b) written earlier in
+ *  the same pass. Smallest shard_dur first (within a tier, coarser rungs
+ *  read finer rungs); across tiers, /1m first (raw-ingest sources); then
+ *  by period_start ascending so a same-tier coarser rung's finer
+ *  siblings land first when both are missing. */
+function sortMissing(a: ExpectedShard, b: ExpectedShard): number {
+	const tiers = Object.keys(LADDERS);
+	const ta = tiers.indexOf(a.tier);
+	const tb = tiers.indexOf(b.tier);
+	const da = durationToMin(a.shardDur as Duration);
+	const db = durationToMin(b.shardDur as Duration);
+	if (da !== db) return da - db;
+	if (ta !== tb) return ta - tb;
+	return a.periodStart.getTime() - b.periodStart.getTime();
+}
+
+/** Runtime-agnostic cascade primitive. Diff-loop semantics: for every
+ *  tick (or CLI invocation), compute the min-cover expected shards over
+ *  [genesis, now], subtract what's registered in D1, and write the
+ *  delta smallest-rung-first until the budget's spent. Missed ticks
+ *  self-heal on the next call — same primitive, larger `to Write` set.
  *
+ *  Adapters:
  *  - CFW cron (`avail3Tick`): `converge(r2, db, {now: tickTime, timeBudgetMs: 25_000})`
- *  - `/avail3?t=…` debug endpoint: as above + optional tier/shardDur filters
- *  - (Phase B follow-on) Node CLI: `converge(r2, db, {parallelism: 16})` in a loop
+ *  - `/avail3?t=…` debug endpoint: as above + optional tier/shardDur / dryRun
+ *  - Node CLI (follow-on): `converge(r2, db, {timeBudgetMs: Infinity})` loop
  *
  *  Never throws for individual rung failures — those land in `results[]`
  *  with a non-`wrote` status. Throws only for hard errors (LUC load, D1
- *  binding invalid, etc.). */
+ *  binding invalid, YAML parse, etc.). */
 export async function converge(
 	r2: R2Bucket,
 	db: D1Database,
@@ -434,24 +513,32 @@ export async function converge(
 	const startedAt = Date.now();
 	const results: WriteResult[] = [];
 	const stats: Record<string, number> = {};
-	const tickMinMs = Math.floor(now.getTime() / 60_000) * 60_000;
-	const tickAligned = tickMinMs % TICK_MS === 0;
 
-	if (!tickAligned) {
-		// Phase-B semantics: still boundary-fire, so a non-aligned `now`
-		// has nothing to do. Phase C's diff loop will make this
-		// meaningful (fire whatever's missing regardless of alignment).
-		return { now, tickAligned: false, results, stats };
-	}
-
-	const tickMs = tickMinMs;
-	const luc = await getLucIndex(r2);
-	const shardIndex = new D1ShardIndex(db);
 	const tierFilter = opts.tiers ? new Set(opts.tiers) : null;
 	const shardDurFilter = opts.shardDurs ? new Set(opts.shardDurs) : null;
 	const dryRun = opts.dryRun ?? false;
 	const maxOps = opts.maxOps ?? Infinity;
 	const timeBudgetMs = opts.timeBudgetMs ?? Infinity;
+
+	// Build Pyramid from YAML + R2 binding. `pyramidFromConfig` needs a
+	// StorageBackend; gap-discovery only touches `pyramid.tiers` and
+	// `pyramid.keyTemplate`, so the storage is unused here — same
+	// `parquetBackend(r2Storage(r2))` the api worker uses keeps the
+	// type happy without pulling in more machinery.
+	const pyramid = pyramidFromConfig(AVAIL_PYRAMID_CONFIG, parquetBackend(r2Storage(r2)));
+	const shardIndex = new D1ShardIndex(db);
+
+	// Diff: what does the min-cover ladder declare over [genesis, now],
+	// minus what's already in D1?
+	const range = { from: AVAIL_GENESIS, to: now };
+	let missing = await listMissingShards(pyramid, PYRAMID_NAME, shardIndex, range);
+	// Apply user filters.
+	if (tierFilter) missing = missing.filter((m) => tierFilter.has(m.tier));
+	if (shardDurFilter) missing = missing.filter((m) => shardDurFilter.has(m.shardDur));
+	// Dependency-sort so finer rungs get written before their coarser
+	// consumers (see `sortMissing`).
+	missing.sort(sortMissing);
+	const totalMissing = missing.length;
 
 	const outOfBudget = (): 'time' | 'ops' | null => {
 		if (results.length >= maxOps) return 'ops';
@@ -459,53 +546,55 @@ export async function converge(
 		return null;
 	};
 
-	// Record a watermark ONLY when input coverage was complete. A wrote
-	// result with partial coverage means we shipped a parquet with holes
-	// (e.g. the loader missed a minute); recording its periodEnd as
-	// authoritative would mislead the planner into trusting the gaps.
+	// Watermark integrity: only record when input coverage was complete
+	// (partial coverage → shard has holes, watermark would mislead
+	// the planner into trusting them).
 	const fullyCovered = (r: WriteResult) =>
 		r.status === 'wrote' &&
 		r.inputsPresent !== undefined &&
 		r.inputsExpected !== undefined &&
 		r.inputsPresent === r.inputsExpected;
 
+	// LUC needed only for /1m raw-ingest writes; lazy-load on first use
+	// so a dry-run (or a run that only touches non-/1m tiers) skips it.
+	let luc: import('./luc').LucIndex | null = null;
+	const getLuc = async () => luc ?? (luc = await getLucIndex(r2));
+
 	let stopped: 'time' | 'ops' | undefined;
-	outer: for (const [tier, ladder] of Object.entries(LADDERS)) {
-		if (tierFilter && !tierFilter.has(tier)) continue;
-		for (let i = 0; i < ladder.length; i++) {
-			const shardDur = ladder[i]!;
-			if (shardDurFilter && !shardDurFilter.has(shardDur)) continue;
-			const shardDurMin = durationToMin(shardDur);
-			if (tickMs % (shardDurMin * 60_000) !== 0) continue;
+	for (const shard of missing) {
+		const budgetHit = outOfBudget();
+		if (budgetHit) { stopped = budgetHit; break; }
 
-			const budgetHit = outOfBudget();
-			if (budgetHit) { stopped = budgetHit; break outer; }
-
-			const periodStart = new Date(tickMs - shardDurMin * 60_000);
-			const prevShardDur = i === 0 ? null : ladder[i - 1]!;
-
-			if (dryRun) {
-				const key = shardKey(tier, shardDur, periodStart);
-				const r: WriteResult = { status: (await r2.head(key)) ? 'exists' : 'no_inputs', key };
-				results.push(r);
-				stats[r.status] = (stats[r.status] ?? 0) + 1;
-				continue;
-			}
-
-			const r = await writeShard(r2, luc, tier, shardDur, prevShardDur, periodStart);
+		if (dryRun) {
+			// HEAD-only sweep — cheap classification for planning /
+			// /health alerting. No sources read, no writes.
+			const r: WriteResult = {
+				status: (await r2.head(shard.key)) ? 'exists' : 'no_inputs',
+				key: shard.key,
+			};
 			results.push(r);
 			stats[r.status] = (stats[r.status] ?? 0) + 1;
+			continue;
+		}
 
-			if (fullyCovered(r)) {
-				await shardIndex.recordShard({
-					pyramidName: PYRAMID_NAME, tier, shardDur,
-					periodStart, periodEnd: new Date(tickMs), key: r.key,
-				});
-			}
+		const prevShardDur = prevShardDurOf(shard.tier, shard.shardDur as Duration);
+		const r = await writeShard(r2, await getLuc(), shard.tier, shard.shardDur as Duration, prevShardDur, shard.periodStart);
+		results.push(r);
+		stats[r.status] = (stats[r.status] ?? 0) + 1;
+
+		if (fullyCovered(r)) {
+			await shardIndex.recordShard({
+				pyramidName: PYRAMID_NAME,
+				tier: shard.tier,
+				shardDur: shard.shardDur as Duration,
+				periodStart: shard.periodStart,
+				periodEnd: shard.periodEnd,
+				key: r.key,
+			});
 		}
 	}
 
-	return { now, tickAligned: true, results, stats, stoppedReason: stopped };
+	return { now, totalMissing, results, stats, stoppedReason: stopped };
 }
 
 /** CFW cron adapter. Preserves the historical (r2, db, tickTime) surface

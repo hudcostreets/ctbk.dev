@@ -54,7 +54,7 @@ import {
 	rowsToCols,
 } from '../../lib/cascade';
 import { AVAIL_1M_ROW_GROUP_SIZE } from '../../lib/avail-monoid';
-import { avail3Tick } from './avail3/cascade';
+import { avail3Tick, converge } from './avail3/cascade';
 
 interface Env {
 	R2: R2Bucket;
@@ -328,8 +328,23 @@ export default {
 			const tiers = url.searchParams.get('tiers')?.split(',');
 			const shardDurs = url.searchParams.get('shardDurs')?.split(',');
 			const dryRun = ['1', 'true', 'yes'].includes(url.searchParams.get('dryRun') ?? '');
-			const results = await avail3Tick(env.R2, env.DB, tickTime, { tiers, shardDurs, dryRun });
-			return new Response(JSON.stringify({ tickTime: tickTime.toISOString(), tiers, shardDurs, dryRun, results }, null, 2) + '\n', {
+			// Use converge() directly (not avail3Tick) so we can return
+			// the full ConvergeReport (totalMissing, stoppedReason, stats).
+			const report = await converge(env.R2, env.DB, {
+				now: tickTime,
+				timeBudgetMs: 25_000,
+				tiers,
+				shardDurs,
+				dryRun,
+			});
+			return new Response(JSON.stringify({
+				tickTime: tickTime.toISOString(),
+				tiers, shardDurs, dryRun,
+				totalMissing: report.totalMissing,
+				stoppedReason: report.stoppedReason,
+				stats: report.stats,
+				results: report.results,
+			}, null, 2) + '\n', {
 				headers: { 'content-type': 'application/json' },
 			});
 		}
