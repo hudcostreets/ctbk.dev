@@ -325,8 +325,10 @@ export default {
 			if (Number.isNaN(tickTime.getTime())) {
 				return new Response(`invalid t: ${tParam}\n`, { status: 400 });
 			}
-			const results = await avail3Tick(env.R2, env.DB, tickTime);
-			return new Response(JSON.stringify({ tickTime: tickTime.toISOString(), results }, null, 2) + '\n', {
+			const tiers = url.searchParams.get('tiers')?.split(',');
+			const shardDurs = url.searchParams.get('shardDurs')?.split(',');
+			const results = await avail3Tick(env.R2, env.DB, tickTime, { tiers, shardDurs });
+			return new Response(JSON.stringify({ tickTime: tickTime.toISOString(), tiers, shardDurs, results }, null, 2) + '\n', {
 				headers: { 'content-type': 'application/json' },
 			});
 		}
