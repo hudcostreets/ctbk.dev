@@ -262,3 +262,72 @@ def gbfs_cascade_tick(
 			parts = r['key'].split('/')
 			tag = f'{parts[1]}@{parts[2]}' if len(parts) >= 3 else r['key']
 			print(f'  too_large /{tag}  est_rows={r.get("estimatedRows", "?")}  inputs={r.get("inputsPresent", "?")}/{r.get("inputsExpected", "?")}')
+
+
+@gbfs_cascade.command('gc', help='GC sweep: delete registered shards superseded by a min-cover parent past the grace window.')
+@option('-t', '--now', 'now_ts', default=None, help='Reference time (ISO); default = wall clock now.')
+@option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='dev', show_default=True)
+@option('-T', '--tier', 'tiers', multiple=True, help='Restrict to a tier (repeatable / comma-separated).')
+@option('-g', '--grace-minutes', 'grace_minutes', type=int, default=None, help='Skip shards whose period_end + this > now. Default 15.')
+@option('-u', '--url', 'base_url', default=None, help='Override the worker URL.')
+@option('-n', '--dry-run', 'dry_run', is_flag=True, help='Report eligible + would-delete, no R2/D1 mutations.')
+@option('-d', '--deleted-detail', 'deleted_detail', is_flag=True, help='Print one line per deleted shard.')
+def gbfs_cascade_gc(
+	now_ts: str | None,
+	env_name: str,
+	tiers: tuple[str, ...],
+	grace_minutes: int | None,
+	base_url: str | None,
+	dry_run: bool,
+	deleted_detail: bool,
+) -> None:
+	secret = os.environ.get('COMPACTOR_SECRET')
+	if not secret:
+		raise click.ClickException('COMPACTOR_SECRET not set in env.')
+	url_base = base_url or ENV_URLS[env_name]
+	def _flat(vs: tuple[str, ...]) -> list[str]:
+		out: list[str] = []
+		for v in vs:
+			out.extend(x.strip() for x in v.split(',') if x.strip())
+		return out
+	params: list[str] = []
+	if now_ts:
+		params.append(f't={now_ts}')
+	tier_list = _flat(tiers)
+	if tier_list:
+		params.append('tiers=' + ','.join(tier_list))
+	if grace_minutes is not None:
+		params.append(f'graceMinutes={grace_minutes}')
+	if dry_run:
+		params.append('dryRun=1')
+	url = f'{url_base}/avail3-gc?{"&".join(params)}' if params else f'{url_base}/avail3-gc'
+	req = _urlrequest.Request(url, headers={
+		'x-compactor-secret': secret,
+		'user-agent': 'ctbk-gbfs-cli/1.0',
+	})
+	try:
+		with _urlrequest.urlopen(req, timeout=180) as resp:
+			body = resp.read().decode()
+	except HTTPError as e:
+		body = e.read().decode(errors='replace')
+		raise click.ClickException(f'HTTP {e.code}: {body[:200]}')
+	except URLError as e:
+		raise click.ClickException(f'network error: {e}')
+	try:
+		obj = json.loads(body)
+	except json.JSONDecodeError:
+		raise click.ClickException(f'non-JSON response (worker died?): {body.strip()[:300]}')
+	total = obj.get('totalEligible', 0)
+	deleted = obj.get('deleted', [])
+	skipped = obj.get('skipped', [])
+	stopped = obj.get('stoppedReason')
+	stats = obj.get('stats', {})
+	extra = ''
+	if stopped:
+		extra += f'  (stopped={stopped})'
+	print(f'gc t={obj.get("now")}  ({env_name})  eligible={total}  deleted={len(deleted)}  skipped={len(skipped)}{extra}')
+	for k, v in sorted(stats.items()):
+		print(f'  {k:>18}: {v}')
+	if deleted_detail:
+		for d in deleted:
+			print(f'  deleted /{d["tier"]}@{d["shardDur"]}  key={d["key"]}')

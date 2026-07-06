@@ -54,7 +54,7 @@ import {
 	rowsToCols,
 } from '../../lib/cascade';
 import { AVAIL_1M_ROW_GROUP_SIZE } from '../../lib/avail-monoid';
-import { avail3Tick, converge } from './avail3/cascade';
+import { avail3Tick, converge, gcSweep } from './avail3/cascade';
 
 interface Env {
 	R2: R2Bucket;
@@ -348,10 +348,48 @@ export default {
 				headers: { 'content-type': 'application/json' },
 			});
 		}
+		// avail-v3 GC sweep. `?t=` optional (defaults to `now`). Deletes
+		// registered shards superseded by a min-cover parent past grace.
+		// Secret-gated. Dry-run via `?dryRun=1`.
+		if (url.pathname === '/avail3-gc') {
+			if (!env.COMPACTOR_SECRET) {
+				return new Response('cascade secret not configured\n', { status: 503 });
+			}
+			if (request.headers.get('x-compactor-secret') !== env.COMPACTOR_SECRET) {
+				return new Response('unauthorized\n', { status: 401 });
+			}
+			const tParam = url.searchParams.get('t');
+			const now = tParam ? new Date(tParam) : new Date();
+			if (Number.isNaN(now.getTime())) {
+				return new Response(`invalid t: ${tParam}\n`, { status: 400 });
+			}
+			const tiers = url.searchParams.get('tiers')?.split(',');
+			const graceMinutes = url.searchParams.get('graceMinutes');
+			const dryRun = ['1', 'true', 'yes'].includes(url.searchParams.get('dryRun') ?? '');
+			const report = await gcSweep(env.R2, env.DB, {
+				now,
+				timeBudgetMs: 25_000,
+				tiers,
+				graceMinutes: graceMinutes ? Number(graceMinutes) : undefined,
+				dryRun,
+			});
+			return new Response(JSON.stringify({
+				now: now.toISOString(),
+				tiers, dryRun,
+				totalEligible: report.totalEligible,
+				stoppedReason: report.stoppedReason,
+				stats: report.stats,
+				deleted: report.deleted,
+				skipped: report.skipped,
+			}, null, 2) + '\n', {
+				headers: { 'content-type': 'application/json' },
+			});
+		}
 		return new Response(
 			'GBFS cascade compactor.\n' +
 			'  GET /backfill?date=YYYY-MM-DD&{cons|agg}=<level> (secret-gated)\n' +
-			'  GET /avail3?t=<iso-ts>                            (secret-gated)\n',
+			'  GET /avail3?t=<iso-ts>[&tiers=&shardDurs=&dryRun=1]  (secret-gated)\n' +
+			'  GET /avail3-gc[?t=&tiers=&graceMinutes=&dryRun=1]    (secret-gated)\n',
 		);
 	},
 } satisfies ExportedHandler<Env>;

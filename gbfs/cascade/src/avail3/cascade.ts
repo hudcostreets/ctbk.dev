@@ -27,12 +27,14 @@
 import { parquetReadObjects } from 'hyparquet';
 import { D1ShardIndex, r2Storage } from 'pyrmts-cfw';
 import {
+	listExpectedShards,
 	listMissingShards,
 	parquetBackend,
 	pyramidFromConfig,
 	type Duration,
 	type ExpectedShard,
 	type PyramidConfig,
+	type RecordedShard,
 } from 'pyrmts';
 import { getLucIndex } from './luc';
 import {
@@ -80,16 +82,21 @@ function formatPeriod(periodStart: Date, shardDurMin: number): string {
 	return iso.slice(0, 10);
 }
 
-/** Convert a Duration ("5min", "1h", "1d") to minutes. Avoids pulling
- *  pyrmts's full parser into the CFW. */
-function durationToMin(d: Duration): number {
-	const m = /^(\d+)(min|h|d)$/.exec(d);
+/** Convert a Duration ("5min", "1h", "1d", or legacy "1mo"/"1y"/"Nd")
+ *  to minutes. Legacy calendar units (`mo`, `y`) are approximations —
+ *  used only for sort ordering / covering-parent checks in `gcSweep()`
+ *  against pre-cutover D1 rows. Current-ladder writes never emit
+ *  `mo`/`y` durations, so the approximation is inertial-only. */
+function durationToMin(d: string): number {
+	const m = /^(\d+)(min|h|d|mo|y)$/.exec(d);
 	if (!m) throw new Error(`unsupported Duration in cascade ladder: ${d}`);
 	const n = Number(m[1]);
 	const unit = m[2];
 	if (unit === 'min') return n;
-	if (unit === 'h') return n * 60;
-	if (unit === 'd') return n * 60 * 24;
+	if (unit === 'h')   return n * 60;
+	if (unit === 'd')   return n * 60 * 24;
+	if (unit === 'mo')  return n * 60 * 24 * 30;
+	if (unit === 'y')   return n * 60 * 24 * 365;
 	throw new Error(`unreachable: ${d}`);
 }
 
@@ -615,4 +622,185 @@ export async function avail3Tick(
 		dryRun: opts?.dryRun,
 	});
 	return report.results;
+}
+
+// ─── gcSweep(): the GC companion to converge() ──────────────────────
+
+export interface GcSweepOpts {
+	now?: Date;
+	tiers?: string[];
+	/** Skip GC of shards whose `period_end + graceMinutes > now`. Buys
+	 *  read-repair time for in-flight queries reading the sub-max shard
+	 *  before the max-rung replacement lands. Default 15 min. */
+	graceMinutes?: number;
+	dryRun?: boolean;
+	maxOps?: number;
+	timeBudgetMs?: number;
+}
+
+export interface GcSweepReport {
+	now: Date;
+	/** Count of registered-but-not-in-min-cover shards found at call start. */
+	totalEligible: number;
+	deleted: RecordedShard[];
+	/** Registered-but-not-in-min-cover shards NOT deleted this call, with
+	 *  reason (no covering parent on R2, past grace window, etc.). */
+	skipped: Array<{ shard: RecordedShard; reason: string }>;
+	stats: Record<string, number>;
+	stoppedReason?: 'time' | 'ops';
+}
+
+/** GC companion to `converge()`. Deletes registered shards that are
+ *  superseded by a min-cover shard covering the same period (and past
+ *  the grace window). Kept as a SEPARATE primitive from `converge()` —
+ *  the writer stays monotone-additive; GC is a distinct, opt-in
+ *  operation. Turning it off (skip the cron / don't invoke) just
+ *  leaves R2/D1 fat but functionally correct.
+ *
+ *  Safety: only deletes when the covering min-cover parent is
+ *  demonstrably on R2 (r2.head returns non-null). No parent → skip.
+ *  Prevents deleting a shard before its replacement lands.
+ *
+ *  Adapters: dedicated cron (e.g. `0 6 * * *`) or CLI subcommand.
+ *  Same shape as `converge()` for symmetry. */
+export async function gcSweep(
+	r2: R2Bucket,
+	db: D1Database,
+	opts: GcSweepOpts = {},
+): Promise<GcSweepReport> {
+	const now = opts.now ?? new Date();
+	const startedAt = Date.now();
+	const deleted: RecordedShard[] = [];
+	const skipped: Array<{ shard: RecordedShard; reason: string }> = [];
+	const stats: Record<string, number> = {};
+
+	const tierFilter = opts.tiers ? new Set(opts.tiers) : null;
+	const graceMs = (opts.graceMinutes ?? 15) * 60_000;
+	const dryRun = opts.dryRun ?? false;
+	const maxOps = opts.maxOps ?? Infinity;
+	const timeBudgetMs = opts.timeBudgetMs ?? Infinity;
+
+	const pyramid = pyramidFromConfig(AVAIL_PYRAMID_CONFIG, parquetBackend(r2Storage(r2)));
+	const shardIndex = new D1ShardIndex(db);
+
+	// Compute the min-cover expected set for [genesis, now]. Index by
+	// (tier, shardDur, periodStart-ms) so we can quickly answer
+	// "is this recorded shard in min-cover?"
+	const expected = listExpectedShards(pyramid, { from: AVAIL_GENESIS, to: now });
+	const expectedIds = new Set<string>();
+	// Also bucket by tier so we can find covering parents efficiently.
+	const expectedByTier = new Map<string, ExpectedShard[]>();
+	for (const e of expected) {
+		expectedIds.add(`${e.tier}\x00${e.shardDur}\x00${e.periodStart.getTime()}`);
+		let bucket = expectedByTier.get(e.tier);
+		if (!bucket) { bucket = []; expectedByTier.set(e.tier, bucket); }
+		bucket.push(e);
+	}
+
+	const recorded = await shardIndex.listShards(PYRAMID_NAME);
+	// Eligible: registered but NOT in current min-cover.
+	let eligible = recorded.filter((r) => {
+		if (tierFilter && !tierFilter.has(r.tier)) return false;
+		const id = `${r.tier}\x00${r.shardDur}\x00${r.periodStart.getTime()}`;
+		return !expectedIds.has(id);
+	});
+	const totalEligible = eligible.length;
+
+	// Sort deterministically for reproducible reports: by (tier, shardDur, periodStart).
+	eligible.sort((a, b) => {
+		if (a.tier !== b.tier) return a.tier < b.tier ? -1 : 1;
+		const da = durationToMin(a.shardDur as Duration);
+		const dbb = durationToMin(b.shardDur as Duration);
+		if (da !== dbb) return da - dbb;
+		return a.periodStart.getTime() - b.periodStart.getTime();
+	});
+
+	const outOfBudget = (): 'time' | 'ops' | null => {
+		if (deleted.length + skipped.length >= maxOps) return 'ops';
+		if (Date.now() - startedAt >= timeBudgetMs) return 'time';
+		return null;
+	};
+
+	/** Find a min-cover expected shard within `r.tier` whose period
+	 *  fully contains `r`'s period AND has a strictly larger shardDur.
+	 *  Returns the smallest such shard (tightest parent). null if none. */
+	const findCoveringParent = (r: RecordedShard): ExpectedShard | null => {
+		const bucket = expectedByTier.get(r.tier);
+		if (!bucket) return null;
+		const rDur = durationToMin(r.shardDur as Duration);
+		const rStart = r.periodStart.getTime();
+		const rEnd = r.periodEnd.getTime();
+		let best: ExpectedShard | null = null;
+		let bestDur = Infinity;
+		for (const e of bucket) {
+			const eDur = durationToMin(e.shardDur as Duration);
+			if (eDur <= rDur) continue;
+			if (e.periodStart.getTime() > rStart) continue;
+			if (e.periodEnd.getTime() < rEnd) continue;
+			if (eDur < bestDur) { best = e; bestDur = eDur; }
+		}
+		return best;
+	};
+
+	let stopped: 'time' | 'ops' | undefined;
+	for (const r of eligible) {
+		const budgetHit = outOfBudget();
+		if (budgetHit) { stopped = budgetHit; break; }
+
+		// Grace: shard.period_end + graceMinutes must be ≤ now.
+		if (r.periodEnd.getTime() + graceMs > now.getTime()) {
+			skipped.push({ shard: r, reason: 'within-grace' });
+			stats['within-grace'] = (stats['within-grace'] ?? 0) + 1;
+			continue;
+		}
+
+		const parent = findCoveringParent(r);
+		if (!parent) {
+			skipped.push({ shard: r, reason: 'no-covering-parent' });
+			stats['no-covering-parent'] = (stats['no-covering-parent'] ?? 0) + 1;
+			continue;
+		}
+		// Parent must be on R2 — else deleting `r` would leave a gap.
+		const parentHead = await r2.head(parent.key);
+		if (!parentHead) {
+			skipped.push({ shard: r, reason: 'parent-not-on-r2' });
+			stats['parent-not-on-r2'] = (stats['parent-not-on-r2'] ?? 0) + 1;
+			continue;
+		}
+
+		if (dryRun) {
+			// Report what WOULD be deleted; don't touch R2/D1.
+			deleted.push(r);
+			stats['dry-run'] = (stats['dry-run'] ?? 0) + 1;
+			continue;
+		}
+
+		// Delete R2 object, then D1 row. R2 first so a mid-op crash
+		// leaves D1 pointing at a missing key (which the api planner
+		// handles) instead of an orphaned R2 object.
+		try {
+			await r2.delete(r.key);
+		} catch (err) {
+			skipped.push({ shard: r, reason: `r2-delete-failed: ${err}` });
+			stats['r2-delete-failed'] = (stats['r2-delete-failed'] ?? 0) + 1;
+			continue;
+		}
+		try {
+			await db.prepare(
+				`DELETE FROM pyramid_shards WHERE pyramid = ? AND tier = ? AND shard_dur = ? AND period_start = ?`,
+			).bind(PYRAMID_NAME, r.tier, r.shardDur, r.periodStart.getTime()).run();
+		} catch (err) {
+			// R2 delete succeeded but D1 didn't. Next sweep will re-see
+			// the shard as recorded (since D1 still has the row) but
+			// r.key HEAD will return null. Should probably retry the
+			// D1 delete then; for now, record the skip.
+			skipped.push({ shard: r, reason: `d1-delete-failed: ${err}` });
+			stats['d1-delete-failed'] = (stats['d1-delete-failed'] ?? 0) + 1;
+			continue;
+		}
+		deleted.push(r);
+		stats['deleted'] = (stats['deleted'] ?? 0) + 1;
+	}
+
+	return { now, totalEligible, deleted, skipped, stats, stoppedReason: stopped };
 }
