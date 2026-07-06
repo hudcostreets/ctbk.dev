@@ -2,20 +2,35 @@
   "name": "ctbk-gbfs-cascade",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "cli": "tsx src/cli.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241218.0",
+    "@types/node": "^26.1.0",
     "hyparquet": "^1.25.6",
+    "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^2.1.8",
     "wrangler": "^4.0.0"
   },
+  "pnpm": {
+    "packageExtensions": {
+      "hyparquet": {
+        "exports": {
+          "./src/*": "./src/*"
+        }
+      }
+    }
+  },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.700.0",
+    "@smithy/node-http-handler": "^4.9.3",
     "hyparquet-writer": "^0.13.0",
     "pyrmts": "https://github.com/runsascoded/pyrmts#c3caaf88eefcd29875606da0e47894744b8796d1&path:/js/packages/pyrmts",
     "pyrmts-cfw": "https://github.com/runsascoded/pyrmts#c3caaf88eefcd29875606da0e47894744b8796d1&path:/js/packages/pyrmts-cfw",
