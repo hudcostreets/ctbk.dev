@@ -377,31 +377,87 @@ async function writeShard(
 
 // ─── Per-tick orchestration ─────────────────────────────────────────────
 
-/** Per-/5m tick handler. Loops every tier's ladder, writes rungs whose
- *  boundary closed at this tick. Returns the list of attempted writes
- *  for logging.
+// ─── converge(): the runtime-agnostic tick primitive ────────────────
+
+/** Options for `converge()`. Per `specs/avail-v3-cascade-streaming.md`.
+ *  The CFW cron adapter passes `{now: tickTime, timeBudgetMs: 25_000}`;
+ *  a laptop / e adapter would pass `{parallelism: 16, timeBudgetMs: Infinity}`
+ *  and loop until `report.results` is stable. */
+export interface ConvergeOpts {
+	/** Reference time — defaults to `new Date()`. */
+	now?: Date;
+	/** Restrict to a subset of tiers. Default: all tiers in `LADDERS`. */
+	tiers?: string[];
+	/** Restrict to a subset of shard-durations. Default: all in the tier. */
+	shardDurs?: string[];
+	/** Stop before wall-clock exceeds this (ms). Default: no limit. */
+	timeBudgetMs?: number;
+	/** Hard cap on operations this call. Default: no limit. */
+	maxOps?: number;
+	/** Compute results but don't write — for planning / diff monitoring. */
+	dryRun?: boolean;
+}
+
+export interface ConvergeReport {
+	now: Date;
+	/** True if `now` was /5m-aligned (a real cascade tick), else false
+	 *  (an ad-hoc convergence call — no writes attempted for now, since
+	 *  the current implementation still uses boundary-fire semantics.
+	 *  Phase C replaces this with a diff-loop that fires regardless of
+	 *  tick alignment). */
+	tickAligned: boolean;
+	results: WriteResult[];
+	stats: Record<string, number>;
+	/** Non-null if we bailed early. */
+	stoppedReason?: 'time' | 'ops';
+}
+
+const TICK_MS = 5 * 60_000;
+
+/** Runtime-agnostic cascade primitive. Walks the ladder for a given
+ *  `now`, writing any rung whose boundary just closed (until Phase C
+ *  swaps in the min-cover diff loop). Same function is called from:
  *
- *  `opts.tiers` optionally restricts the walk to a subset of tiers (for
- *  debugging / isolation tests); default = all tiers.
- *  `opts.shardDurs` optionally restricts to a subset of shard-durations. */
-export async function avail3Tick(
+ *  - CFW cron (`avail3Tick`): `converge(r2, db, {now: tickTime, timeBudgetMs: 25_000})`
+ *  - `/avail3?t=…` debug endpoint: as above + optional tier/shardDur filters
+ *  - (Phase B follow-on) Node CLI: `converge(r2, db, {parallelism: 16})` in a loop
+ *
+ *  Never throws for individual rung failures — those land in `results[]`
+ *  with a non-`wrote` status. Throws only for hard errors (LUC load, D1
+ *  binding invalid, etc.). */
+export async function converge(
 	r2: R2Bucket,
 	db: D1Database,
-	tickTime: Date,
-	opts?: { tiers?: string[]; shardDurs?: string[] },
-): Promise<WriteResult[]> {
-	// Floor to the minute before /5m alignment check. Cloudflare's cron
-	// `scheduledTime` carries seconds-of-the-minute offset (~53s observed
-	// in prod tail) — the gate must operate on the rounded minute, not
-	// the actual fire time.
-	const tickMinMs = Math.floor(tickTime.getTime() / 60_000) * 60_000;
-	if (tickMinMs % (5 * 60_000) !== 0) return [];
+	opts: ConvergeOpts = {},
+): Promise<ConvergeReport> {
+	const now = opts.now ?? new Date();
+	const startedAt = Date.now();
+	const results: WriteResult[] = [];
+	const stats: Record<string, number> = {};
+	const tickMinMs = Math.floor(now.getTime() / 60_000) * 60_000;
+	const tickAligned = tickMinMs % TICK_MS === 0;
+
+	if (!tickAligned) {
+		// Phase-B semantics: still boundary-fire, so a non-aligned `now`
+		// has nothing to do. Phase C's diff loop will make this
+		// meaningful (fire whatever's missing regardless of alignment).
+		return { now, tickAligned: false, results, stats };
+	}
+
 	const tickMs = tickMinMs;
 	const luc = await getLucIndex(r2);
 	const shardIndex = new D1ShardIndex(db);
-	const results: WriteResult[] = [];
-	const tierFilter = opts?.tiers ? new Set(opts.tiers) : null;
-	const shardDurFilter = opts?.shardDurs ? new Set(opts.shardDurs) : null;
+	const tierFilter = opts.tiers ? new Set(opts.tiers) : null;
+	const shardDurFilter = opts.shardDurs ? new Set(opts.shardDurs) : null;
+	const dryRun = opts.dryRun ?? false;
+	const maxOps = opts.maxOps ?? Infinity;
+	const timeBudgetMs = opts.timeBudgetMs ?? Infinity;
+
+	const outOfBudget = (): 'time' | 'ops' | null => {
+		if (results.length >= maxOps) return 'ops';
+		if (Date.now() - startedAt >= timeBudgetMs) return 'time';
+		return null;
+	};
 
 	// Record a watermark ONLY when input coverage was complete. A wrote
 	// result with partial coverage means we shipped a parquet with holes
@@ -413,7 +469,8 @@ export async function avail3Tick(
 		r.inputsExpected !== undefined &&
 		r.inputsPresent === r.inputsExpected;
 
-	for (const [tier, ladder] of Object.entries(LADDERS)) {
+	let stopped: 'time' | 'ops' | undefined;
+	outer: for (const [tier, ladder] of Object.entries(LADDERS)) {
 		if (tierFilter && !tierFilter.has(tier)) continue;
 		for (let i = 0; i < ladder.length; i++) {
 			const shardDur = ladder[i]!;
@@ -421,10 +478,23 @@ export async function avail3Tick(
 			const shardDurMin = durationToMin(shardDur);
 			if (tickMs % (shardDurMin * 60_000) !== 0) continue;
 
+			const budgetHit = outOfBudget();
+			if (budgetHit) { stopped = budgetHit; break outer; }
+
 			const periodStart = new Date(tickMs - shardDurMin * 60_000);
 			const prevShardDur = i === 0 ? null : ladder[i - 1]!;
+
+			if (dryRun) {
+				const key = shardKey(tier, shardDur, periodStart);
+				const r: WriteResult = { status: (await r2.head(key)) ? 'exists' : 'no_inputs', key };
+				results.push(r);
+				stats[r.status] = (stats[r.status] ?? 0) + 1;
+				continue;
+			}
+
 			const r = await writeShard(r2, luc, tier, shardDur, prevShardDur, periodStart);
 			results.push(r);
+			stats[r.status] = (stats[r.status] ?? 0) + 1;
 
 			if (fullyCovered(r)) {
 				await shardIndex.recordShard({
@@ -435,5 +505,25 @@ export async function avail3Tick(
 		}
 	}
 
-	return results;
+	return { now, tickAligned: true, results, stats, stoppedReason: stopped };
+}
+
+/** CFW cron adapter. Preserves the historical (r2, db, tickTime) surface
+ *  used by `worker.scheduled` + the `/avail3` debug endpoint. Thin wrapper
+ *  over `converge()`; kept as a stable name so consumers don't have to
+ *  update on each Phase B/C refactor. */
+export async function avail3Tick(
+	r2: R2Bucket,
+	db: D1Database,
+	tickTime: Date,
+	opts?: { tiers?: string[]; shardDurs?: string[]; dryRun?: boolean; timeBudgetMs?: number },
+): Promise<WriteResult[]> {
+	const report = await converge(r2, db, {
+		now: tickTime,
+		timeBudgetMs: opts?.timeBudgetMs ?? 25_000,
+		tiers: opts?.tiers,
+		shardDurs: opts?.shardDurs,
+		dryRun: opts?.dryRun,
+	});
+	return report.results;
 }

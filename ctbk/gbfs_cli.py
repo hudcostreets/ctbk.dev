@@ -176,6 +176,7 @@ def gbfs_cascade() -> None:
 @option('-d', '--shard-dur', 'shard_durs', multiple=True, help='Restrict to one or more shard_durs (repeatable, or comma-separated).')
 @option('-u', '--url', 'base_url', default=None, help='Override the worker URL (default: per --env).')
 @option('-w', '--wrote-detail', is_flag=True, help='Show one line per `wrote` rung (default: only status counts).')
+@option('-n', '--dry-run', 'dry_run', is_flag=True, help='Compute rungs + HEAD-check keys, but do not write. Useful for measuring what a tick WOULD do.')
 def gbfs_cascade_tick(
 	tick_time: str,
 	env_name: str,
@@ -183,6 +184,7 @@ def gbfs_cascade_tick(
 	shard_durs: tuple[str, ...],
 	base_url: str | None,
 	wrote_detail: bool,
+	dry_run: bool,
 ) -> None:
 	secret = os.environ.get('COMPACTOR_SECRET')
 	if not secret:
@@ -201,6 +203,8 @@ def gbfs_cascade_tick(
 	sd_list = _flat(shard_durs)
 	if sd_list:
 		params.append('shardDurs=' + ','.join(sd_list))
+	if dry_run:
+		params.append('dryRun=1')
 	url = f'{url_base}/avail3?{"&".join(params)}'
 	# Cloudflare edge rejects the default Python-urllib UA with error 1010;
 	# a plain browser-ish UA passes.

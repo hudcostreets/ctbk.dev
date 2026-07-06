@@ -327,8 +327,9 @@ export default {
 			}
 			const tiers = url.searchParams.get('tiers')?.split(',');
 			const shardDurs = url.searchParams.get('shardDurs')?.split(',');
-			const results = await avail3Tick(env.R2, env.DB, tickTime, { tiers, shardDurs });
-			return new Response(JSON.stringify({ tickTime: tickTime.toISOString(), tiers, shardDurs, results }, null, 2) + '\n', {
+			const dryRun = ['1', 'true', 'yes'].includes(url.searchParams.get('dryRun') ?? '');
+			const results = await avail3Tick(env.R2, env.DB, tickTime, { tiers, shardDurs, dryRun });
+			return new Response(JSON.stringify({ tickTime: tickTime.toISOString(), tiers, shardDurs, dryRun, results }, null, 2) + '\n', {
 				headers: { 'content-type': 'application/json' },
 			});
 		}
