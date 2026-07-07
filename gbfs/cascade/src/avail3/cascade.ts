@@ -282,17 +282,13 @@ function lucCellCount(luc: import('./luc').LucIndex): number {
 }
 
 /** Maximum output rows a CFW isolate can build in one writeShard call
- *  without OOM. Empirically ~1M rows is the tight ceiling for the 128 MB
- *  isolate — individual `/2m@12h`-scale writes fit, but a full 15-tier
- *  boundary tick that lands MULTIPLE ≥1M-row writes back-to-back doesn't
- *  (V8 GC doesn't reliably reclaim between rungs, so retained garbage
- *  accumulates until later rungs starve). Conservative 500k threshold
- *  keeps per-rung writes small enough that even a boundary tick with
- *  10+ writing rungs stays under the limit. Rungs whose estimated
- *  output exceeds this get skipped with `too_large` — the next tier's
- *  rungs still fire, and the offline `converge()` on `e` fills the
- *  skipped shards. */
-const MAX_OUTPUT_ROWS = 500_000;
+ *  without OOM. Under the multipart R2 writer, peak per-write memory
+ *  is bounded (~8 MB part + one row-group's encode state + streaming
+ *  inputs) regardless of shard size, so the ceiling is CPU, not
+ *  memory: 5.5M rows × ~5 µs/row for parquet encode ≈ 27 s, close to
+ *  the paid tier 30 s cap. Set to 10M as a safety net — anything
+ *  legitimately over should get filled offline via the Node CLI. */
+const MAX_OUTPUT_ROWS = 10_000_000;
 
 /** HEAD-check N candidate keys in parallel. Returns the subset that
  *  exists, preserving order. */
@@ -341,29 +337,46 @@ async function writeShard(
 	// Streaming source read: HEAD-check candidates, open one iterator per
 	// present key, k-way heap-merge into a sorted stream, single-bucket
 	// aggregate, write incrementally.
-	let sourceKeys: string[];
-	let inputsExpected: number;
-	let targetBinMs: bigint;
+	let sourceKeys: string[] = [];
+	let inputsExpected = 0;
+	let targetBinMs: bigint = 0n;
 
-	if (prevShardDur === null) {
-		// Non-/1m smallest rung: pick coarsest-available prev-tier source
-		// via the heterogeneous cover chain. Rebin to this tier's bin.
+	// Try same-tier prev-rung first (fast path when it's populated —
+	// no rebinning needed, and under the boundary-fire regime that
+	// was the common case). If the prev-rung isn't on R2 (typical
+	// under min-cover, where trailing rungs aren't materialized for
+	// historical periods), fall through to `pickSourceForShard`'s
+	// heterogeneous cover chain, which walks priority-ordered
+	// candidates (within-tier smaller rungs → prev tiers → /1m
+	// fallback) and picks the first fully-populated set.
+	let usedSameTierPrev = false;
+	if (prevShardDur !== null) {
+		const prevShardDurMin = durationToMin(prevShardDur);
+		const expected = shardDurMin / prevShardDurMin;
+		const candidateKeys: string[] = [];
+		for (let i = 0; i < expected; i++) {
+			const inputStart = new Date(periodStart.getTime() + i * prevShardDurMin * 60_000);
+			candidateKeys.push(shardKey(tier, prevShardDur, inputStart));
+		}
+		const heads = await Promise.all(candidateKeys.map((k) => r2.head(k)));
+		if (heads.every((h) => h !== null)) {
+			sourceKeys = candidateKeys;
+			inputsExpected = expected;
+			targetBinMs = 0n;
+			usedSameTierPrev = true;
+		}
+	}
+
+	if (!usedSameTierPrev) {
+		// Fall back to heterogeneous cover (used by non-/1m smallest
+		// rungs and coarser rungs whose prev-rung isn't materialized).
+		// Rebin to this tier's bin — sources may come from a different
+		// tier with a finer bin.
 		const picked = await pickSourceForShard(r2, tier, shardDurMin, periodStart);
 		sourceKeys = picked.keys;
 		inputsExpected = picked.keys.length;
 		const tierBinMin = TIER_BIN_MIN[tier]!;
 		targetBinMs = BigInt(tierBinMin * 60_000);
-	} else {
-		// Coarser same-tier rung: read N × prev-rung shards. Sources are
-		// already at this tier's bin — no rebin needed.
-		const prevShardDurMin = durationToMin(prevShardDur);
-		inputsExpected = shardDurMin / prevShardDurMin;
-		sourceKeys = [];
-		for (let i = 0; i < inputsExpected; i++) {
-			const inputStart = new Date(periodStart.getTime() + i * prevShardDurMin * 60_000);
-			sourceKeys.push(shardKey(tier, prevShardDur, inputStart));
-		}
-		targetBinMs = 0n;
 	}
 
 	const present = await existingKeys(r2, sourceKeys);

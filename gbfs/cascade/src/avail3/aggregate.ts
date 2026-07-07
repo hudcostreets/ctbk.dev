@@ -15,8 +15,8 @@ import {
 	parquetMetadataAsync,
 	parquetSchema,
 } from 'hyparquet';
-import { parquetReadAsync } from 'hyparquet/src/read.js';
-import { assembleAsync, asyncGroupToRows } from 'hyparquet/src/rowgroup.js';
+import { parquetPlan } from 'hyparquet/src/plan.js';
+import { readRowGroup, assembleAsync, asyncGroupToRows } from 'hyparquet/src/rowgroup.js';
 import { ByteWriter, ParquetWriter, schemaFromColumnData } from 'hyparquet-writer';
 import {
 	AVAIL_METRICS,
@@ -26,24 +26,31 @@ import {
 
 // ─── Streaming reader ──────────────────────────────────────────────
 
-/** Same sliced-buffer wrapper as `cascade.ts:r2SlicedBuffer` — exposed
- *  here so callers of the streaming path can share the memoization. */
+/** Sliced-buffer wrapper backed by a single whole-file R2 GET. The CFW
+ *  1000-subrequest cap dominates over memory for cascade sources: a
+ *  /1m@3h shard has ~100 row-groups, so serving each row-group's column
+ *  chunks as individual range reads would issue several hundred
+ *  subrequests per source — /1m@1d (8 sources × ~100 groups) blows the
+ *  cap. Fetching the whole file once (typical /1m@3h ≈ 3 MB, /1m@1d
+ *  ≈ 60 MB, well within isolate memory when only a handful are in
+ *  flight) costs one subrequest per source; hyparquet then slices
+ *  synchronously in-process. */
 export function r2SlicedBuffer(r2: R2Bucket, key: string, byteLength: number) {
-	const cache = new Map<string, Promise<ArrayBuffer>>();
+	let whole: Promise<ArrayBuffer> | null = null;
+	const getWhole = () => {
+		if (!whole) {
+			whole = r2.get(key).then((obj) => {
+				if (!obj) throw new Error(`r2 get returned null: ${key}`);
+				return obj.arrayBuffer();
+			});
+		}
+		return whole;
+	};
 	return {
 		byteLength,
-		slice(start: number, end: number = byteLength): Promise<ArrayBuffer> {
-			const k = `${start}\x00${end}`;
-			let p = cache.get(k);
-			if (!p) {
-				p = r2.get(key, { range: { offset: start, length: end - start } })
-					.then((obj) => {
-						if (!obj) throw new Error(`r2 range read returned null: ${key} [${start}, ${end})`);
-						return obj.arrayBuffer();
-					});
-				cache.set(k, p);
-			}
-			return p;
+		async slice(start: number, end: number = byteLength): Promise<ArrayBuffer> {
+			const buf = await getWhole();
+			return buf.slice(start, end);
 		},
 	};
 }
@@ -63,10 +70,21 @@ export async function* streamShardRows(
 	if (!head) return;
 	const file = r2SlicedBuffer(r2, key, head.size);
 	const metadata = await parquetMetadataAsync(file);
-	const asyncGroups = parquetReadAsync({ file, metadata });
 	const schemaTree = parquetSchema(metadata);
-	const assembled = asyncGroups.map((arg) => assembleAsync(arg, schemaTree));
-	for (const rg of assembled) {
+	// Build the plan (byte ranges per row-group), but DON'T eagerly
+	// prefetch all row-group bytes. `parquetReadAsync` does exactly
+	// that (calls `prefetchAsyncBuffer` on the full plan), which
+	// materializes the whole file in memory upfront — the reason
+	// `/1m@12h` (4 × 24 MB sources = ~100 MB) OOMs the 128 MB isolate.
+	// Instead: iterate row-groups sequentially, calling `readRowGroup`
+	// against the sliced-buffer wrapper. `r2SlicedBuffer` memoizes
+	// ranges as a per-shard cache; the reader issues its own
+	// coalesced fetches per row-group. Peak in-flight: one row-group's
+	// column chunks, not the whole shard.
+	const plan = parquetPlan({ file, metadata } as never);
+	for (const groupPlan of plan.groups) {
+		const arg = readRowGroup({ file } as never, plan, groupPlan);
+		const rg = assembleAsync(arg, schemaTree);
 		const rows = (await asyncGroupToRows(rg, 0, rg.groupRows, undefined, 'object')) as Record<string, unknown>[];
 		for (const r of rows) {
 			yield {
