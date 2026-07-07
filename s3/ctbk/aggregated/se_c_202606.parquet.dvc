@@ -1,0 +1,5 @@
+outs:
+- md5: b48a8e5d96fd92665741e4d573bef3c7
+  size: 1660766
+  hash: md5
+  path: se_c_202606.parquet
