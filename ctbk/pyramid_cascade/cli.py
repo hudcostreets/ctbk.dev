@@ -98,6 +98,7 @@ def _resolve_stream_source(name: str) -> tuple:
 
 @ctbk.command('pyramid-cascade', help="Build a cascading pyramid: read base-tier source, emit all derived tiers.")
 @option('-c', '--config', 'config_path', required=True, help='Path to pyramid YAML config.')
+@option('-D', '--shard-dur', 'shard_dur_filter', multiple=True, help='With --fsck: only consider gaps in this shard duration (e.g. `1d`, `32d`). Repeatable.')
 @option('-E', '--engine', 'engine_name', type=click.Choice(['block', 'streaming']), default='block', show_default=True, help='Cascade engine. `block` = ProcessPool over time-aligned blocks (vectorized Polars per block). `streaming` = single-process source iterator + per-(tier,period) dict accumulators (matches the prior `cascade-from-1m` design).')
 @option('-i', '--ingester', default=None, help='Built-in ingester / source name (e.g. `avail`). Required unless --fsck.')
 @option('-j', '--workers', type=int, default=1, show_default=True, help='ProcessPool worker count. Ignored for `--engine streaming` (single-process by design).')
@@ -106,12 +107,14 @@ def _resolve_stream_source(name: str) -> tuple:
 @option('-p', '--prefix', default=None, help='Override the YAML `storage.key` prefix (everything before `{tier}`). Use to redirect output, e.g. `-p avail-v3-test` for a staging build that shares the prod YAML.')
 @option('-r', '--range', 'range_', required=True, help='UTC range `YYYY-MM-DD/YYYY-MM-DD` (half-open).')
 @option('-s', '--staging', 'staging_uri', default=None, help='Staging URI for partial shards (default: `file:///tmp/pyramid-cascade-<pid>/`). Block engine only.')
+@option('-T', '--tier', 'tier_filter', multiple=True, help='With --fsck: only consider gaps in this tier (e.g. `1m`, `3d`). Repeatable.')
 @option('-t', '--task-size', 'task_size', default='1d', show_default=True, help='Block duration (pyrmts Duration, e.g. `1d`, `1mo`). Block engine only.')
 @option('-f', '--fsck', is_flag=True, help='Discover + report missing (tier, shard_dur, period) gaps vs the YAML ladder. Add --fill to materialize the gaps (Phase B).')
 @option('-F', '--fill', is_flag=True, help='With --fsck: materialize each missing shard. Idempotent (HEAD-skip), writes D1 INSERT SQL batch to tmp/fsck-d1-record.sql for the api worker to ingest.')
 @option('-L', '--fill-limit', type=int, default=None, help='With --fill: stop after this many gaps (for staged smoke tests).')
 def pyramid_cascade_cmd(
     config_path: str,
+    shard_dur_filter: tuple[str, ...],
     engine_name: str,
     ingester: str | None,
     workers: int,
@@ -120,6 +123,7 @@ def pyramid_cascade_cmd(
     prefix: str | None,
     range_: str,
     staging_uri: str | None,
+    tier_filter: tuple[str, ...],
     task_size: str,
     fsck: bool,
     fill: bool,
@@ -129,6 +133,8 @@ def pyramid_cascade_cmd(
         raise BadParameter("--ingester is required unless --fsck is set")
     if fill and not fsck:
         raise BadParameter("--fill requires --fsck")
+    if (tier_filter or shard_dur_filter) and not fsck:
+        raise BadParameter("--tier/--shard-dur require --fsck")
     config_yaml = Path(config_path).read_text()
     if prefix is not None:
         config_yaml = _override_key_prefix(config_yaml, prefix)
@@ -144,9 +150,21 @@ def pyramid_cascade_cmd(
         err(f"  config:    {config_path}")
         err(f"  range:     {range_tuple[0].isoformat()} → {range_tuple[1].isoformat()}")
         err(f"  tiers:     {len(pyramid.tiers)}: {[t.name for t in pyramid.tiers]}")
+        if tier_filter:
+            err(f"  tier filter: {sorted(tier_filter)}")
+        if shard_dur_filter:
+            err(f"  shard filter: {sorted(shard_dur_filter)}")
         if fill_limit is not None:
             err(f"  limit:     {fill_limit} gaps")
         missing, existing_keys = discover_gaps(pyramid, range_tuple)
+        if tier_filter or shard_dur_filter:
+            tf = set(tier_filter)
+            sf = set(shard_dur_filter)
+            before = len(missing)
+            missing = [g for g in missing
+                       if (not tf or g.tier in tf)
+                       and (not sf or g.shard_dur in sf)]
+            err(f"  filtered:  {before} → {len(missing)} gaps after --tier/--shard-dur")
         report_gaps(missing)
         if fill and missing:
             err("")

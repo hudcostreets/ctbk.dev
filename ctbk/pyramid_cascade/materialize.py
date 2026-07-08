@@ -38,7 +38,11 @@ from pyrmts import ExpectedShard, Pyramid
 from pyrmts.axis import parse_duration
 
 from ctbk.avail_v3 import AVAIL_GENESIS, AVAIL_METRICS, R2_BUCKET, r2_client
-from utz import err
+from time import time
+from utz import err as _err
+from functools import partial
+
+err = partial(_err, flush=True)
 
 
 UNIT_MIN = {'min': 1, 'h': 60, 'd': 1440, 'mo': 1440 * 30, 'y': 1440 * 365}
@@ -187,9 +191,18 @@ def _priority_rung_pairs(
     """(tier, rung, rung_min) tuples in preference order:
       1. Within-target-tier smaller rungs, largest→smallest
       2. Previous tiers (coarsest→finest), each rung largest→smallest
-    Only rungs strictly smaller than gap.shard_dur are considered."""
+    Only rungs strictly smaller than gap.shard_dur are considered.
+
+    Cross-tier candidates additionally require `source_bin | target_bin`
+    (source tier's bin evenly divides the target tier's bin). Without
+    this, `_preaggregate_to_tier_bin`'s floor-then-groupby produces
+    misaligned counts (e.g. /2m bin doesn't tile /3m bin — half of the
+    /2m@0:02 bucket belongs in /3m@[0:00,0:03), the other half in
+    /3m@[0:03,0:06), but floor(dt,3min) sends the whole bucket to the
+    former). Same-tier candidates share bins so this doesn't apply."""
     gap_min = dur_min(gap.shard_dur)
     gap_tier_obj = pyramid.tier(gap.tier)
+    target_bin_min = dur_min(gap_tier_obj.bin)
     tier_idx = next(i for i, t in enumerate(pyramid.tiers) if t.name == gap.tier)
     out: list[tuple[str, str, int]] = []
     for rd in reversed(gap_tier_obj.shards):
@@ -199,6 +212,9 @@ def _priority_rung_pairs(
         out.append((gap_tier_obj.name, rd, rm))
     for prev_idx in range(tier_idx - 1, -1, -1):
         prev_tier = pyramid.tiers[prev_idx]
+        prev_bin_min = dur_min(prev_tier.bin)
+        if target_bin_min % prev_bin_min != 0:
+            continue  # non-divisible bin — silent-corruption trap
         for rd in reversed(prev_tier.shards):
             rm = dur_min(rd)
             if rm > gap_min:
@@ -491,8 +507,13 @@ def source_long_for_gap(
     else:
         eff_gap = gap
 
+    src_indent = '    ' * recursion_depth
+    src_tag = f"/{gap.tier}@{gap.shard_dur} {gap.period_start.date()}"
+
     # Step 1: heterogeneous cover from existing shards
+    t_step = time()
     picks, uncovered = plan_source_cover(pyramid, eff_gap, ks)
+    err(f"  {src_indent}  {src_tag} step1 plan_source_cover: {len(picks)} picks, {len(uncovered)} uncovered ({time()-t_step:.1f}s)")
 
     # Step 2: recursively materialize uncovered segments (if depth budget).
     # For each uncovered segment we try each priority (tier, rung) pair
@@ -544,25 +565,40 @@ def source_long_for_gap(
                 if sub_result.status in ('wrote', 'exists', 'empty', 'no_inputs'):
                     ks.add(key)
         # Re-plan cover after recursive fills
+        t_step = time()
         picks2, uncovered2 = plan_source_cover(pyramid, eff_gap, ks)
+        err(f"  {src_indent}  {src_tag} step2 re-plan: {len(picks2)} picks, {len(uncovered2)} uncovered, {len(new_uncovered)} left-uncovered ({time()-t_step:.1f}s)")
         picks = picks2
         uncovered = uncovered2 + new_uncovered
 
     # Step 3: /1m fallback for anything still uncovered
-    for (seg_from, seg_to) in uncovered:
-        picks.extend(_one_m_picks_for_segment(pyramid, seg_from, seg_to))
+    if uncovered:
+        t_step = time()
+        pre = len(picks)
+        for (seg_from, seg_to) in uncovered:
+            picks.extend(_one_m_picks_for_segment(pyramid, seg_from, seg_to))
+        err(f"  {src_indent}  {src_tag} step3 /1m fallback: {len(picks) - pre} extra picks for {len(uncovered)} uncovered segs ({time()-t_step:.1f}s)")
 
     longs: list[pl.DataFrame] = []
     inputs_present = 0
-    for pick in picks:
+    t_reads = time()
+    err(f"  {src_indent}  {src_tag} reading {len(picks)} picks...")
+    for i, pick in enumerate(picks):
+        t_pick = time()
         sub = shard_to_long(r2, pick.key)
         if sub is None:
+            err(f"  {src_indent}    [{i+1}/{len(picks)}] {pick.key} → missing ({time()-t_pick:.1f}s)")
             continue
         if sub.is_empty():
             inputs_present += 1
+            err(f"  {src_indent}    [{i+1}/{len(picks)}] {pick.key} → empty ({time()-t_pick:.1f}s)")
             continue
         inputs_present += 1
-        longs.append(_preaggregate_to_tier_bin(sub, target_bin))
+        pre_rows = sub.height
+        agg = _preaggregate_to_tier_bin(sub, target_bin)
+        longs.append(agg)
+        err(f"  {src_indent}    [{i+1}/{len(picks)}] {pick.key} → {pre_rows:,}→{agg.height:,} rows ({time()-t_pick:.1f}s)")
+    err(f"  {src_indent}  {src_tag} reads done: {inputs_present}/{len(picks)} present ({time()-t_reads:.1f}s)")
     source_desc = _summarize_picks(picks)
     if not longs:
         empty = pl.DataFrame(
@@ -617,24 +653,31 @@ def materialize_shard(
 
     `recursion_depth` / `sub_results` support recursive intermediate
     materialization — see `source_long_for_gap`."""
+    indent = '    ' * recursion_depth
+    tag = f"/{gap.tier}@{gap.shard_dur} {gap.period_start.date()}"
+    t0 = time()
     if skip_existing:
         if key_set is not None:
             if gap.key in key_set:
+                err(f"  {indent}⟶ {tag} → exists (cached)")
                 return MaterializeResult(gap=gap, status='exists')
         else:
             try:
                 r2.head_object(Bucket=R2_BUCKET, Key=gap.key)
+                err(f"  {indent}⟶ {tag} → exists (HEAD)")
                 return MaterializeResult(gap=gap, status='exists')
             except r2.exceptions.ClientError:
                 pass
 
     if gap.period_end <= AVAIL_GENESIS:
+        err(f"  {indent}⟶ {tag} → no_inputs (pre-genesis)")
         return MaterializeResult(
             gap=gap, status='no_inputs',
             inputs_present=0, inputs_expected=0,
             source_desc='pre-genesis',
         )
 
+    err(f"  {indent}⟶ {tag} → START (depth={recursion_depth})")
     try:
         long, inputs_present, inputs_expected, source_desc = source_long_for_gap(
             r2, pyramid, gap, key_set=key_set,
@@ -642,15 +685,19 @@ def materialize_shard(
             sub_results=sub_results,
         )
     except Exception as e:
+        err(f"  {indent}⟵ {tag} → ERROR source: {e!r} ({time()-t0:.1f}s)")
         return MaterializeResult(gap=gap, status='error', error=f"source: {e!r}")
 
+    err(f"  {indent}  {tag} sourced ({source_desc}; inputs {inputs_present}/{inputs_expected}, {long.height:,} rows, {time()-t0:.1f}s)")
     if inputs_present == 0:
+        err(f"  {indent}⟵ {tag} → no_inputs ({source_desc}, {time()-t0:.1f}s)")
         return MaterializeResult(
             gap=gap, status='no_inputs',
             inputs_present=0, inputs_expected=inputs_expected,
             source_desc=source_desc,
         )
     if long.is_empty():
+        err(f"  {indent}⟵ {tag} → empty ({source_desc}, {time()-t0:.1f}s)")
         return MaterializeResult(
             gap=gap, status='empty',
             inputs_present=inputs_present, inputs_expected=inputs_expected,
@@ -661,6 +708,7 @@ def materialize_shard(
     from .engine import _build_tier_shard
     from pyrmts import Tier
     tier_obj: Tier = pyramid.tier(gap.tier)
+    t_build = time()
     try:
         wide = _build_tier_shard(
             long,
@@ -672,13 +720,16 @@ def materialize_shard(
             seg_to=gap.period_end,
         )
     except Exception as e:
+        err(f"  {indent}⟵ {tag} → ERROR build: {e!r} ({time()-t0:.1f}s)")
         return MaterializeResult(gap=gap, status='error',
                                  inputs_present=inputs_present,
                                  inputs_expected=inputs_expected,
                                  source_desc=source_desc,
                                  error=f"build: {e!r}")
+    err(f"  {indent}  {tag} built ({wide.height:,} rows, {time()-t_build:.1f}s)")
 
     if wide.is_empty():
+        err(f"  {indent}⟵ {tag} → empty (post-build, {time()-t0:.1f}s)")
         return MaterializeResult(
             gap=gap, status='empty',
             inputs_present=inputs_present, inputs_expected=inputs_expected,
@@ -694,7 +745,9 @@ def materialize_shard(
     buf = io.BytesIO()
     pq.write_table(table, buf, row_group_size=rg_size, compression='snappy')
     blob = buf.getvalue()
+    t_put = time()
     r2.put_object(Bucket=R2_BUCKET, Key=gap.key, Body=blob)
+    err(f"  {indent}⟵ {tag} → wrote ({wide.height:,} rows, {len(blob)/1e6:.1f}MB, put {time()-t_put:.1f}s, total {time()-t0:.1f}s)")
 
     return MaterializeResult(
         gap=gap, status='wrote',
