@@ -60,6 +60,24 @@ def update(
     err(f"--- Station pair JSONs ---")
     ctbk_run('spj', 'create', ym)
 
+    # Rebuild rides pyramids (v1/v2/v3) that back /api/rides-{v1,v2,v3}.
+    # Range = prev-month → current: rebuilding prev month's /1h start-anchored
+    # shard picks up rides that started in prev but ended in current (dropped
+    # previously because the current month's normalized parquet didn't exist).
+    # Derived tiers span multi-month or all-time, so `-O` (overwrite) is
+    # required to fold in the new /1h data.
+    err(f"--- Rides pyramids (v1/v2/v3) ---")
+    yyyy, mm = ym[:4], ym[4:]
+    ym_new = f"{yyyy}-{mm}"
+    if mm == '01':
+        ym_prev = f"{int(yyyy) - 1}-12"
+    else:
+        ym_prev = f"{yyyy}-{int(mm) - 1:02d}"
+    for v in ('v1', 'v2', 'v3'):
+        ctbk_run('rides-v1-build', '-v', v, '-f', ym_prev, '-T', ym_new)
+        for t in ('3h', '6h', '12h', '1d', '3d', '7d', '14d', '1mo', '3mo', '1y'):
+            ctbk_run('rides-v1-build', '-v', v, '-f', ym_prev, '-T', ym_new, '-t', t, '-O')
+
     if not no_www:
         err(f"--- WWW assets ---")
         run('node', 'www/scripts/gen-station-urls.js', dry_run=dry_run)
