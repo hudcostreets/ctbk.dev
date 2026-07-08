@@ -156,7 +156,7 @@ def pyramid_cascade_cmd(
             err(f"  shard filter: {sorted(shard_dur_filter)}")
         if fill_limit is not None:
             err(f"  limit:     {fill_limit} gaps")
-        missing, existing_keys = discover_gaps(pyramid, range_tuple)
+        missing, existing_keys, expected_by_tier = discover_gaps(pyramid, range_tuple)
         if tier_filter or shard_dur_filter:
             tf = set(tier_filter)
             sf = set(shard_dur_filter)
@@ -169,7 +169,8 @@ def pyramid_cascade_cmd(
         if fill and missing:
             err("")
             fill_gaps(pyramid, missing, limit=fill_limit,
-                      existing_keys=existing_keys)
+                      existing_keys=existing_keys,
+                      expected_by_tier=expected_by_tier)
         return
 
     err(f"pyramid-cascade")

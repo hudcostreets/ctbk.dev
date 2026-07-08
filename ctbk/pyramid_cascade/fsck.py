@@ -127,13 +127,20 @@ def discover_gaps(
     pyramid: Pyramid,
     time_range: tuple[datetime, datetime],
     filter: dict | None = None,
-) -> tuple[list[ExpectedShard], set[str]]:
+) -> tuple[list[ExpectedShard], set[str], dict[str, list[ExpectedShard]]]:
     """End-to-end discovery: enumerate expected → list R2 → diff → sort.
 
-    Returns `(gaps_in_fill_order, existing_key_set)`. The key set is a
-    snapshot of what was on R2 at discovery time — `fill_gaps` extends
-    it as each shard is written so prev-rung source lookups see freshly
-    materialized inputs without re-listing R2.
+    Returns `(gaps_in_fill_order, existing_key_set, expected_by_tier)`.
+    - `gaps_in_fill_order`: missing shards, sorted for tier-by-tier fill.
+    - `existing_key_set`: R2 snapshot at discovery time; the fill loop
+      extends it as each shard is written so downstream source lookups
+      see fresh inputs without new HEAD round trips.
+    - `expected_by_tier`: outer-cover expected shards grouped by tier
+      name. Threaded through the fill loop → `source_long_for_gap` so
+      each target-tier gap's source picks are drawn from tier N-1's
+      outer expected set intersecting eff_gap (rather than a fresh
+      eff_gap-only cover, which can request shards that weren't part
+      of the outer fill).
     """
     err(f"fsck: discovering gaps in {pyramid.keyTemplate.split('{')[0]} "
         f"over [{time_range[0].date()}, {time_range[1].date()})...")
@@ -143,7 +150,10 @@ def discover_gaps(
     err(f"  existing: {len(existing)} keys on storage")
     missing = diff_with_existing(expected, existing)
     err(f"  missing:  {len(missing)} shards to fill")
-    return sort_by_dependency(pyramid, missing), existing
+    expected_by_tier: dict[str, list[ExpectedShard]] = {}
+    for e in expected:
+        expected_by_tier.setdefault(e.tier, []).append(e)
+    return sort_by_dependency(pyramid, missing), existing, expected_by_tier
 
 
 def report_gaps(missing: list[ExpectedShard], limit_per_rung: int = 3) -> None:
@@ -189,6 +199,7 @@ def fill_gaps(
     limit: int | None = None,
     skip_existing: bool = True,
     existing_keys: set[str] | None = None,
+    expected_by_tier: dict[str, list[ExpectedShard]] | None = None,
     max_workers: int = 3,
 ) -> list:
     """Materialize gaps in dependency order. Shards within a (tier,
@@ -215,16 +226,12 @@ def fill_gaps(
     processed = 0
 
     def process(gap: ExpectedShard):
-        # Recursive intermediates accumulate into `sub_results` and get
-        # merged into the top-level `results` list before D1 emit runs.
-        subs: list = []
-        top = materialize_shard(
+        return materialize_shard(
             r2, pyramid, gap,
             skip_existing=skip_existing,
             key_set=key_set,
-            sub_results=subs,
+            expected_by_tier=expected_by_tier,
         )
-        return top, subs
 
     from pathlib import Path
     Path(d1_sql_path).parent.mkdir(parents=True, exist_ok=True)
@@ -242,19 +249,7 @@ def fill_gaps(
             futs = {pool.submit(process, g): g for g in batch_slice}
             for fut in as_completed(futs):
                 gap = futs[fut]
-                res, subs = fut.result()
-                # Recursive intermediates come first (in materialize order) so
-                # D1 emit sees them as prerequisites of the top-level shard.
-                for sr in subs:
-                    results.append(sr)
-                    by_status[sr.status] = by_status.get(sr.status, 0) + 1
-                    if sr.status == 'wrote':
-                        err(f"    ↳ intermediate /{sr.gap.tier}@{sr.gap.shard_dur} "
-                            f"{sr.gap.period_start.date()} → wrote "
-                            f"({sr.source_desc}, {sr.rows:,}r, {_hr_bytes(sr.bytes_written)})")
-                    elif sr.status in ('empty', 'no_inputs'):
-                        err(f"    ↳ intermediate /{sr.gap.tier}@{sr.gap.shard_dur} "
-                            f"{sr.gap.period_start.date()} → {sr.status} ({sr.source_desc})")
+                res = fut.result()
                 results.append(res)
                 by_status[res.status] = by_status.get(res.status, 0) + 1
                 processed += 1

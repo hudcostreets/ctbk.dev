@@ -1,24 +1,25 @@
 """fsck Phase B: per-shard materialization.
 
-Given a single `ExpectedShard` (tier, shard_dur, period_start,
-period_end, key), produce that parquet on R2. Source selection walks
-this priority chain (each candidate is checked for R2 existence and
-the first one where ALL N shards exist is used):
+Strict tier-by-tier cascade. A gap at tier N sources ONLY from tier
+N-1's min-cover intersecting the gap's period. Tier N-1 is
+`source_tier_for(pyramid, N)` — the largest tier T with `bin(T) <
+bin(N)` AND `bin(N) % bin(T) == 0`. Divisibility guarantees the
+per-source pre-aggregate to the target's bin is exact.
 
-1. **Within-tier prev-rung**: for `/1h@60d`, try `/1h@30d ×2`, then
-   `/1h@10d ×6`, etc. Cheapest — source dt is already at target-tier
-   bin granularity, so pre-aggregate is a no-op sum.
-2. **Prev-tier max divisor rung**: for `/1h@60d`, `/30m@30d ×2` (bin
-   requires re-flooring to 1h). Falls through prev-tier rungs
-   largest-first, then prev-prev-tier, etc.
-3. **`/1m` fallback**: read N × `/1m@X` (largest divisor rung of `/1m`).
-   The historic naive path — many small reads, expensive.
+Tier N-1 must be complete-in-range before we materialize gaps in tier
+N; enforced by `fsck.fill_gaps` sorting missing shards by (tier_idx,
+shard_dur, period_start) ascending and processing tier layers
+finest-first.
 
-Mirrors the SPIRIT of `gbfs/cascade/src/avail3/cascade.ts`'s
-`writeShard`, but fsck's fill sees ladder gaps at multiple rungs and
-must handle missing prev-rungs by falling back — the CFW's steady-state
-tick can always assume the immediately-prev rung was written on the
-same tick.
+Tier `/1m` sources from raw WAL via `avail_ingester.avail_ingest_1m` —
+that's the only place raw ingestion happens.
+
+Prior versions did heterogeneous multi-tier covers with `/1m` fallback
+picks that could be emitted without checking R2 existence, silently
+under-populating tail segments of coarse pre-genesis-notional shards
+(see specs/avail-v3-strict-cascade.md for the incident). The strict
+cascade eliminates that class of bug: any uncovered segment in the
+source tier is a strict-cascade invariant violation and raises.
 
 D1 recording: this module emits R2 writes only. The driver
 (`fsck.fill_gaps`) collects (tier, shard_dur, period_start, period_end,
@@ -54,129 +55,48 @@ def dur_min(d: str) -> int:
     return p.count * UNIT_MIN[p.unit]
 
 
-def pick_one_m_source_rung(pyramid: Pyramid, shard_dur_min: int) -> tuple[str, int]:
-    """Mirror of `cascade.ts:pickOneMSourceRung`. Returns (`Duration`,
-    minutes) of the largest /1m rung that divides `shard_dur_min`."""
-    one_m_shards = pyramid.tier('1m').shards
-    for rung_dur in reversed(one_m_shards):
-        rung_min = dur_min(rung_dur)
-        if rung_min <= shard_dur_min and shard_dur_min % rung_min == 0:
-            return rung_dur, rung_min
-    raise ValueError(f"no /1m rung divides {shard_dur_min}min")
+def source_tier_for(pyramid: Pyramid, tier_name: str):
+    """Strict-cascade source tier: the largest tier T' with
+    `bin(T') < bin(tier_name)` AND `bin(tier_name) % bin(T') == 0`.
 
+    Bin divisibility is required so `_preaggregate_to_tier_bin`'s
+    floor-then-groupby produces exact aggregates (misaligned bins send
+    half a source bucket into the wrong target bucket).
 
-@dataclass
-class SourceCandidate:
-    """A concrete source-shard set that could feed a materialize job."""
-    tier: str
-    shard_dur: str
-    shard_dur_min: int
-    keys: list[str]  # N absolute R2 keys (partitions of gap.period_start..period_end)
-    source_starts: list[datetime]
-
-    @property
-    def n_inputs(self) -> int:
-        return len(self.keys)
-
-
-def enumerate_source_candidates(
-    pyramid: Pyramid,
-    gap: ExpectedShard,
-) -> list[SourceCandidate]:
-    """Priority-ordered list of source-shard candidates for `gap`. See
-    module docstring. Only strictly-smaller rungs that cleanly divide
-    the gap's shard duration are eligible. The caller HEAD-checks each
-    candidate and picks the first one where every key is present on R2.
-
-    Candidates within a tier are largest-rung-first (cheapest reads);
-    tier order is target-tier first (finest chain), then previous tiers
-    largest-first, ending at `/1m`.
+    Ties (multiple candidates with the same bin) never occur — each
+    tier has a unique bin. Returns `None` for `/1m` (raw-ingest source).
+    Raises for any other tier without a divisor (should never happen
+    in a well-formed pyramid — `/1m` must be the finest and its bin
+    divides everything).
     """
-    gap_min = dur_min(gap.shard_dur)
-    gap_tier = pyramid.tier(gap.tier)
-    tier_idx = next(i for i, t in enumerate(pyramid.tiers) if t.name == gap.tier)
-
-    def rungs_for_tier(tier, allow_equal: bool) -> list[tuple[str, int]]:
-        """Rungs of `tier` that divide gap_min. Largest first. When
-        allow_equal=False (within-target-tier), require strictly smaller
-        so we don't infinite-loop pulling a copy of ourselves."""
-        out = []
-        for rd in reversed(tier.shards):
-            rm = dur_min(rd)
-            if (rm >= gap_min) if not allow_equal else (rm > gap_min):
-                continue
-            if gap_min % rm != 0:
-                continue
-            out.append((rd, rm))
-        return out
-
-    def build_candidate(tier_name: str, rd: str, rm: int) -> SourceCandidate:
-        n = gap_min // rm
-        starts = [gap.period_start + timedelta(minutes=i * rm) for i in range(n)]
-        keys = [_shard_key(pyramid, tier_name, rd, s) for s in starts]
-        return SourceCandidate(tier=tier_name, shard_dur=rd,
-                               shard_dur_min=rm, keys=keys, source_starts=starts)
-
-    out: list[SourceCandidate] = []
-    # 1. Within-target-tier prev rungs (strictly smaller)
-    for rd, rm in rungs_for_tier(gap_tier, allow_equal=False):
-        out.append(build_candidate(gap_tier.name, rd, rm))
-    # 2. Previous tiers, coarsest-to-finest (i.e. /30m before /15m before /10m
-    #    when target is /1h) — coarser previous tiers mean fewer/larger reads.
-    for prev_idx in range(tier_idx - 1, -1, -1):
-        prev_tier = pyramid.tiers[prev_idx]
-        for rd, rm in rungs_for_tier(prev_tier, allow_equal=True):
-            out.append(build_candidate(prev_tier.name, rd, rm))
-    return out
+    if tier_name == '1m':
+        return None
+    target_bin_min = dur_min(pyramid.tier(tier_name).bin)
+    tier_idx = next(i for i, t in enumerate(pyramid.tiers) if t.name == tier_name)
+    best = None
+    best_bin_min = 0
+    for i in range(tier_idx):
+        cand = pyramid.tiers[i]
+        cand_bin_min = dur_min(cand.bin)
+        if cand_bin_min >= target_bin_min or target_bin_min % cand_bin_min != 0:
+            continue
+        if cand_bin_min > best_bin_min:
+            best = cand
+            best_bin_min = cand_bin_min
+    if best is None:
+        raise AssertionError(f"no source tier for /{tier_name} — pyramid ladder is malformed")
+    return best
 
 
-def _all_keys_exist(r2, keys: list[str], key_set: set[str] | None = None) -> tuple[bool, int]:
-    """Check `keys` for existence; return (all_present, present_count).
-
-    If `key_set` (a pre-fetched snapshot of R2 keys) is provided, checks
-    are pure in-memory (O(1) per key). Otherwise falls back to a
-    threadpooled HEAD-per-key round-trip.
-
-    In-memory checks against the fsck-time R2 listing are safe as
-    long as the fill loop updates `key_set` whenever a new shard is
-    written — see `fill_gaps` for the update pattern."""
-    if key_set is not None:
-        present = sum(1 for k in keys if k in key_set)
-        return present == len(keys), present
-    from concurrent.futures import ThreadPoolExecutor
-    def check(k: str) -> bool:
-        try:
-            r2.head_object(Bucket=R2_BUCKET, Key=k)
-            return True
-        except r2.exceptions.ClientError:
-            return False
-    with ThreadPoolExecutor(max_workers=min(32, max(4, len(keys)))) as pool:
-        results = list(pool.map(check, keys))
-    present = sum(1 for r in results if r)
-    return present == len(keys), present
-
-
-# Maximum N-inputs to accept for a prev-rung/prev-tier candidate. Bigger
-# candidates (e.g. /1h@3h × 480) are pathological — even if they were
-# fully populated, the download cost would beat the /1m fallback. This
-# also bounds the HEAD-check fanout when candidates aren't populated.
-MAX_CANDIDATE_INPUTS = 60
-
-# Recursion cap when materializing missing prev-rung intermediates.
-# Practical depth for the 15-tier avail-v3 ladder is <= 8 (each recursion
-# moves to a strictly smaller shard, and there are ~7 rungs per tier); 15
-# leaves headroom. See specs/avail-v3-fsck-recursive-intermediates.md.
-MAX_RECURSION_DEPTH = 15
-
-
-# ─── Heterogeneous cover planning ──────────────────────────────────────
+# ─── Single-tier cover planning ────────────────────────────────────────
 
 
 @dataclass
 class SourcePick:
-    """A single R2 shard contributing to a heterogeneous source cover.
-    Multiple picks with different (tier, shard_dur) can compose a gap's
-    source cover — see `plan_source_cover`."""
+    """A single source shard contributing to a gap's source cover.
+    In strict cascade all picks share the same `tier` (the gap's
+    source_tier); `shard_dur` may vary as `plan_source_cover_single_tier`
+    picks the largest fitting rung per position."""
     tier: str
     shard_dur: str
     shard_dur_min: int
@@ -185,156 +105,73 @@ class SourcePick:
     key: str
 
 
-def _priority_rung_pairs(
-    pyramid: Pyramid, gap: ExpectedShard,
-) -> list[tuple[str, str, int]]:
-    """(tier, rung, rung_min) tuples in preference order:
-      1. Within-target-tier smaller rungs, largest→smallest
-      2. Previous tiers (coarsest→finest), each rung largest→smallest
-    Only rungs strictly smaller than gap.shard_dur are considered.
-
-    Cross-tier candidates additionally require `source_bin | target_bin`
-    (source tier's bin evenly divides the target tier's bin). Without
-    this, `_preaggregate_to_tier_bin`'s floor-then-groupby produces
-    misaligned counts (e.g. /2m bin doesn't tile /3m bin — half of the
-    /2m@0:02 bucket belongs in /3m@[0:00,0:03), the other half in
-    /3m@[0:03,0:06), but floor(dt,3min) sends the whole bucket to the
-    former). Same-tier candidates share bins so this doesn't apply."""
-    gap_min = dur_min(gap.shard_dur)
-    gap_tier_obj = pyramid.tier(gap.tier)
-    target_bin_min = dur_min(gap_tier_obj.bin)
-    tier_idx = next(i for i, t in enumerate(pyramid.tiers) if t.name == gap.tier)
-    out: list[tuple[str, str, int]] = []
-    for rd in reversed(gap_tier_obj.shards):
-        rm = dur_min(rd)
-        if rm >= gap_min:
-            continue
-        out.append((gap_tier_obj.name, rd, rm))
-    for prev_idx in range(tier_idx - 1, -1, -1):
-        prev_tier = pyramid.tiers[prev_idx]
-        prev_bin_min = dur_min(prev_tier.bin)
-        if target_bin_min % prev_bin_min != 0:
-            continue  # non-divisible bin — silent-corruption trap
-        for rd in reversed(prev_tier.shards):
-            rm = dur_min(rd)
-            if rm > gap_min:
-                continue
-            out.append((prev_tier.name, rd, rm))
-    return out
-
-
-def plan_source_cover(
-    pyramid: Pyramid,
+def plan_source_cover_single_tier(
     gap: ExpectedShard,
+    source_expected: list,
     key_set: set[str],
 ) -> tuple[list[SourcePick], list[tuple[datetime, datetime]]]:
-    """Heterogeneous cover of `gap.period_start..gap.period_end` using
-    only shards present in `key_set`. Returns (picks, uncovered_segments).
+    """Filter `source_expected` (the outer fsck's expected shards for
+    source_tier over the full fsck range) to those intersecting
+    `[gap.period_start, gap.period_end)`, and return picks + uncovered.
 
-    Algorithm:
-      1. Iterate (tier, rung) pairs in priority order (coarser-tier
-         largest-rung first).
-      2. For each pair, sweep rung-aligned positions inside the gap
-         period. When a shard exists AND doesn't overlap prior picks,
-         claim it.
-      3. After all pairs, compute uncovered segments as the gaps
-         between consecutive claimed picks.
+    Why not compute a fresh cover for eff_gap? Because pyrmts's
+    `_cover_for_tier` picks tiles that fit strictly inside its
+    (from, to) range. For a target shard whose eff_gap doesn't align
+    with source_tier's outer-cover boundaries (e.g. /7d@28d wanting
+    /1d for 28d but /1d's outer cover picks /1d@32d), a fresh eff_gap
+    cover would ask for smaller /1d shards that were never built.
 
-    Not applicable to `/1m` gaps — those use the raw ingester directly.
-    """
-    from pyrmts.axis import add_span, floor_to_span
-    assert gap.tier != '1m', "plan_source_cover doesn't apply to /1m gaps"
+    Reading a source shard that overshoots eff_gap.period_end is safe:
+    `_preaggregate_to_tier_bin` floors dt to the target's bin, and
+    `_build_tier_shard`'s `dt < seg_to` filter drops the overshoot.
+    Same applies to pre-eff_gap overshoot (empty pre-genesis rows).
 
-    priority_pairs = _priority_rung_pairs(pyramid, gap)
+    Uncovered segments are parts of eff_gap not touched by any
+    intersecting expected shard. In the strict-cascade regime the
+    caller treats uncovered as an invariant violation."""
     picks: list[SourcePick] = []
-    # Sorted list of (period_start, period_end) tuples for claimed picks.
-    covered: list[tuple[datetime, datetime]] = []
+    intersecting = []
+    for e in source_expected:
+        # Half-open intersection: shard [ps, pe) overlaps gap [gs, ge) iff
+        # ps < ge AND pe > gs.
+        if e.period_start < gap.period_end and e.period_end > gap.period_start:
+            intersecting.append(e)
+    intersecting.sort(key=lambda e: e.period_start)
 
-    def _overlaps(a: datetime, b: datetime) -> bool:
-        # Binary search would be faster but len(covered) stays small (< N shards).
-        for (ca, cb) in covered:
-            if ca < b and cb > a:
-                return True
-        return False
+    for e in intersecting:
+        if e.key in key_set:
+            picks.append(SourcePick(
+                tier=e.tier, shard_dur=e.shard_dur, shard_dur_min=dur_min(e.shard_dur),
+                period_start=e.period_start, period_end=e.period_end, key=e.key,
+            ))
 
-    for tier_name, rung, rung_min in priority_pairs:
-        span = parse_duration(rung)
-        cur = floor_to_span(gap.period_start, span)
-        while cur < gap.period_end:
-            nxt = add_span(cur, span)
-            if cur >= gap.period_start and nxt <= gap.period_end and not _overlaps(cur, nxt):
-                key = _shard_key(pyramid, tier_name, rung, cur)
-                if key in key_set:
-                    picks.append(SourcePick(
-                        tier=tier_name, shard_dur=rung, shard_dur_min=rung_min,
-                        period_start=cur, period_end=nxt, key=key,
-                    ))
-                    covered.append((cur, nxt))
-                    covered.sort(key=lambda x: x[0])
-            cur = nxt
-
-    picks.sort(key=lambda p: p.period_start)
+    # Uncovered = parts of eff_gap not touched by any *present* intersecting
+    # expected shard.
     uncovered: list[tuple[datetime, datetime]] = []
     cur = gap.period_start
-    for p in picks:
-        if p.period_start > cur:
-            uncovered.append((cur, p.period_start))
-        cur = max(cur, p.period_end)
+    present = [e for e in intersecting if e.key in key_set]
+    for e in present:
+        seg_start = max(e.period_start, gap.period_start)
+        if seg_start > cur:
+            uncovered.append((cur, seg_start))
+        cur = max(cur, min(e.period_end, gap.period_end))
     if cur < gap.period_end:
         uncovered.append((cur, gap.period_end))
+
+    # Also treat expected-but-missing shards as uncovered (they'd have
+    # matched the gap's eff_gap but the source shard doesn't exist).
+    missing_expected = [e for e in intersecting if e.key not in key_set]
+    for e in missing_expected:
+        seg_from = max(e.period_start, gap.period_start)
+        seg_to = min(e.period_end, gap.period_end)
+        if seg_to > seg_from:
+            uncovered.append((seg_from, seg_to))
+
     return picks, uncovered
 
 
-def _one_m_picks_for_segment(
-    pyramid: Pyramid,
-    seg_from: datetime,
-    seg_to: datetime,
-) -> list[SourcePick]:
-    """Emit `/1m@X` picks covering [seg_from, seg_to). Uses the largest
-    `/1m` rung that divides the segment and aligns to seg_from; falls
-    back to the smallest `/1m` rung tiled sequentially if nothing fits
-    cleanly."""
-    from pyrmts.axis import floor_to_span
-    one_m_shards = pyramid.tier('1m').shards
-    seg_min = int((seg_to - seg_from).total_seconds() / 60)
-    for rd in reversed(one_m_shards):
-        rm = dur_min(rd)
-        if rm > seg_min or seg_min % rm != 0:
-            continue
-        span = parse_duration(rd)
-        if floor_to_span(seg_from, span) != seg_from:
-            continue
-        n = seg_min // rm
-        picks = []
-        for i in range(n):
-            start = seg_from + timedelta(minutes=i * rm)
-            end = start + timedelta(minutes=rm)
-            key = _shard_key(pyramid, '1m', rd, start)
-            picks.append(SourcePick(
-                tier='1m', shard_dur=rd, shard_dur_min=rm,
-                period_start=start, period_end=end, key=key,
-            ))
-        return picks
-    # No clean divisor — tile with smallest /1m rung, letting the last
-    # bin overhang past seg_to (harmless: filter clamps to seg range).
-    smallest = one_m_shards[0]
-    rm = dur_min(smallest)
-    picks = []
-    cur = seg_from
-    while cur < seg_to:
-        end = min(cur + timedelta(minutes=rm), seg_to)
-        key = _shard_key(pyramid, '1m', smallest, cur)
-        picks.append(SourcePick(
-            tier='1m', shard_dur=smallest, shard_dur_min=rm,
-            period_start=cur, period_end=end, key=key,
-        ))
-        cur = end
-    return picks
-
-
 def _summarize_picks(picks: list[SourcePick]) -> str:
-    """Compact human string of a heterogeneous pick list.
-    E.g. `/30m@30d×1+/1m@1d×110` for a straddling-cutoff cover."""
+    """Compact human string of a pick list, e.g. `/3h@32d×1+/3h@1d×26`."""
     from collections import Counter
     counts = Counter((p.tier, p.shard_dur) for p in picks)
     parts = [f"/{t}@{s}×{n}" for (t, s), n in counts.most_common()]
@@ -463,23 +300,26 @@ def source_long_for_gap(
     gap: ExpectedShard,
     *,
     key_set: set[str] | None = None,
-    recursion_depth: int = 0,
-    sub_results: list | None = None,
+    expected_by_tier: dict | None = None,
 ) -> tuple[pl.DataFrame, int, int, str]:
     """Return `(long_df, inputs_present, inputs_expected, source_desc)`
     for the source reads of `gap`.
 
-    Uses `plan_source_cover` to build a heterogeneous cover of the gap
-    period using existing R2 shards (largest-rung-first). Uncovered
-    sub-segments are:
-      1. Recursively materialized (bounded by `MAX_RECURSION_DEPTH`) —
-         each uncovered segment becomes a sub-gap whose own
-         `materialize_shard` figures out its sources.
-      2. Failing that, filled with `/1m@X` picks.
+    Strict tier-by-tier cascade: gap at tier N reads ONLY from tier N-1's
+    outer-fsck expected set (intersecting eff_gap). Tier N-1 is
+    `source_tier_for(pyramid, gap.tier)`. Any uncovered segment after
+    the plan raises — tier N-1 must be complete-in-range before N is
+    materialized (fill ordering invariant).
 
-    Both `wrote`/`exists`/`empty`/`no_inputs` intermediates get their key
-    marked in `key_set` — the parent read loop tolerates keys that don't
-    actually exist on R2 (returns None → skipped).
+    `expected_by_tier` is the outer fsck's `list_expected_shards` result
+    grouped by tier name. Threading it in (vs. re-computing per-gap)
+    ensures the source picks are exactly the shards the outer fill order
+    materializes at tier N-1, and lets us handle N-1's outer cover using
+    tiles that overshoot gap.eff_gap.period_end (safely — the target
+    build filters `dt < seg_to`).
+
+    Tier `/1m` sources from raw WAL via `avail_ingest_1m` — this is the
+    only place raw ingestion happens.
 
     Each source shard is pre-aggregated to the target tier's bin before
     concatenation — bounds peak memory to O(target-bins × cells × metrics
@@ -507,98 +347,65 @@ def source_long_for_gap(
     else:
         eff_gap = gap
 
-    src_indent = '    ' * recursion_depth
     src_tag = f"/{gap.tier}@{gap.shard_dur} {gap.period_start.date()}"
+    src_tier = source_tier_for(pyramid, gap.tier)  # not None: /1m handled above
 
-    # Step 1: heterogeneous cover from existing shards
+    if expected_by_tier is None:
+        # Fall-back: use pyrmts's cover of just eff_gap. Sufficient when
+        # the caller isn't running full fsck (single-shard smoke tests).
+        from pyrmts.gap_discovery import _cover_for_tier
+        source_expected = _cover_for_tier(
+            pyramid, src_tier, eff_gap.period_start, eff_gap.period_end, filter={},
+        )
+    else:
+        source_expected = expected_by_tier.get(src_tier.name, [])
+
     t_step = time()
-    picks, uncovered = plan_source_cover(pyramid, eff_gap, ks)
-    err(f"  {src_indent}  {src_tag} step1 plan_source_cover: {len(picks)} picks, {len(uncovered)} uncovered ({time()-t_step:.1f}s)")
+    picks, uncovered = plan_source_cover_single_tier(eff_gap, source_expected, ks)
+    err(f"    {src_tag} source_plan: {len(picks)} picks from /{src_tier.name}, "
+        f"{len(uncovered)} uncovered ({time()-t_step:.1f}s)")
 
-    # Step 2: recursively materialize uncovered segments (if depth budget).
-    # For each uncovered segment we try each priority (tier, rung) pair
-    # that DIVIDES the segment; if one aligns, we recursively materialize
-    # each sub-shard, then re-plan the cover for that segment.
-    if uncovered and recursion_depth < MAX_RECURSION_DEPTH:
-        from pyrmts.axis import floor_to_span
-        new_uncovered: list[tuple[datetime, datetime]] = []
-        priority_pairs = _priority_rung_pairs(pyramid, eff_gap)
-        for (seg_from, seg_to) in uncovered:
-            seg_min = int((seg_to - seg_from).total_seconds() / 60)
-            fit_pair: tuple[str, str, int] | None = None
-            for tier_name, rung, rung_min in priority_pairs:
-                if rung_min > seg_min or seg_min % rung_min != 0:
-                    continue
-                if rung_min > MAX_CANDIDATE_INPUTS * dur_min(pyramid.tier(tier_name).bin):
-                    continue  # Coarser than a sane recursion target
-                span = parse_duration(rung)
-                if floor_to_span(seg_from, span) != seg_from:
-                    continue
-                n = seg_min // rung_min
-                if n > MAX_CANDIDATE_INPUTS:
-                    continue
-                fit_pair = (tier_name, rung, rung_min)
-                break
-            if fit_pair is None:
-                new_uncovered.append((seg_from, seg_to))
-                continue
-            tier_name, rung, rung_min = fit_pair
-            n = seg_min // rung_min
-            for i in range(n):
-                start = seg_from + timedelta(minutes=i * rung_min)
-                end = start + timedelta(minutes=rung_min)
-                key = _shard_key(pyramid, tier_name, rung, start)
-                if key in ks:
-                    continue
-                sub_gap = ExpectedShard(
-                    tier=tier_name, shard_dur=rung,
-                    period_start=start, period_end=end, key=key,
-                )
-                sub_result = materialize_shard(
-                    r2, pyramid, sub_gap,
-                    key_set=key_set,
-                    recursion_depth=recursion_depth + 1,
-                    sub_results=sub_results,
-                )
-                if sub_results is not None:
-                    sub_results.append(sub_result)
-                if sub_result.status in ('wrote', 'exists', 'empty', 'no_inputs'):
-                    ks.add(key)
-        # Re-plan cover after recursive fills
-        t_step = time()
-        picks2, uncovered2 = plan_source_cover(pyramid, eff_gap, ks)
-        err(f"  {src_indent}  {src_tag} step2 re-plan: {len(picks2)} picks, {len(uncovered2)} uncovered, {len(new_uncovered)} left-uncovered ({time()-t_step:.1f}s)")
-        picks = picks2
-        uncovered = uncovered2 + new_uncovered
-
-    # Step 3: /1m fallback for anything still uncovered
     if uncovered:
-        t_step = time()
-        pre = len(picks)
-        for (seg_from, seg_to) in uncovered:
-            picks.extend(_one_m_picks_for_segment(pyramid, seg_from, seg_to))
-        err(f"  {src_indent}  {src_tag} step3 /1m fallback: {len(picks) - pre} extra picks for {len(uncovered)} uncovered segs ({time()-t_step:.1f}s)")
+        # Strict-cascade invariant violation: /{src_tier.name} must be
+        # fully materialized in [eff_gap.period_start, eff_gap.period_end)
+        # before this gap is scheduled. The fill loop's finest-first tier
+        # ordering (`sort_by_dependency`) is the mechanism.
+        sample = ', '.join(f"[{s.isoformat()}, {e.isoformat()})" for s, e in uncovered[:3])
+        more = f" +{len(uncovered) - 3} more" if len(uncovered) > 3 else ""
+        raise RuntimeError(
+            f"strict-cascade invariant violation for {src_tag}: "
+            f"source tier /{src_tier.name} has {len(uncovered)} uncovered segment(s): "
+            f"{sample}{more}. Ensure all /{src_tier.name} shards in the range are "
+            f"materialized before /{gap.tier} shards are scheduled."
+        )
 
     longs: list[pl.DataFrame] = []
     inputs_present = 0
     t_reads = time()
-    err(f"  {src_indent}  {src_tag} reading {len(picks)} picks...")
+    err(f"    {src_tag} reading {len(picks)} picks from /{src_tier.name}...")
     for i, pick in enumerate(picks):
         t_pick = time()
         sub = shard_to_long(r2, pick.key)
         if sub is None:
-            err(f"  {src_indent}    [{i+1}/{len(picks)}] {pick.key} → missing ({time()-t_pick:.1f}s)")
-            continue
+            # Should not happen — plan_source_cover_single_tier only picks
+            # keys in ks. If we get here, ks lied about R2 state (write
+            # was recorded but object is missing).
+            err(f"      [{i+1}/{len(picks)}] {pick.key} → MISSING (ks/R2 mismatch, {time()-t_pick:.1f}s)")
+            raise RuntimeError(
+                f"strict-cascade read failure for {src_tag}: source pick "
+                f"{pick.key} was in key_set but R2 returned 404. Either the "
+                f"key_set is stale or the source shard was deleted concurrently."
+            )
         if sub.is_empty():
             inputs_present += 1
-            err(f"  {src_indent}    [{i+1}/{len(picks)}] {pick.key} → empty ({time()-t_pick:.1f}s)")
+            err(f"      [{i+1}/{len(picks)}] {pick.key} → empty ({time()-t_pick:.1f}s)")
             continue
         inputs_present += 1
         pre_rows = sub.height
         agg = _preaggregate_to_tier_bin(sub, target_bin)
         longs.append(agg)
-        err(f"  {src_indent}    [{i+1}/{len(picks)}] {pick.key} → {pre_rows:,}→{agg.height:,} rows ({time()-t_pick:.1f}s)")
-    err(f"  {src_indent}  {src_tag} reads done: {inputs_present}/{len(picks)} present ({time()-t_reads:.1f}s)")
+        err(f"      [{i+1}/{len(picks)}] {pick.key} → {pre_rows:,}→{agg.height:,} rows ({time()-t_pick:.1f}s)")
+    err(f"    {src_tag} reads done: {inputs_present}/{len(picks)} present ({time()-t_reads:.1f}s)")
     source_desc = _summarize_picks(picks)
     if not longs:
         empty = pl.DataFrame(
@@ -644,60 +451,53 @@ def materialize_shard(
     rg_size: int = 2048,
     skip_existing: bool = True,
     key_set: set[str] | None = None,
-    recursion_depth: int = 0,
-    sub_results: list | None = None,
+    expected_by_tier: dict | None = None,
 ) -> MaterializeResult:
     """Build + write `gap`'s parquet. Idempotent: skips if the dst key
     already exists (checked in `key_set` if provided, else via HEAD)
-    when `skip_existing` is True (default).
-
-    `recursion_depth` / `sub_results` support recursive intermediate
-    materialization — see `source_long_for_gap`."""
-    indent = '    ' * recursion_depth
+    when `skip_existing` is True (default)."""
     tag = f"/{gap.tier}@{gap.shard_dur} {gap.period_start.date()}"
     t0 = time()
     if skip_existing:
         if key_set is not None:
             if gap.key in key_set:
-                err(f"  {indent}⟶ {tag} → exists (cached)")
+                err(f"  ⟶ {tag} → exists (cached)")
                 return MaterializeResult(gap=gap, status='exists')
         else:
             try:
                 r2.head_object(Bucket=R2_BUCKET, Key=gap.key)
-                err(f"  {indent}⟶ {tag} → exists (HEAD)")
+                err(f"  ⟶ {tag} → exists (HEAD)")
                 return MaterializeResult(gap=gap, status='exists')
             except r2.exceptions.ClientError:
                 pass
 
     if gap.period_end <= AVAIL_GENESIS:
-        err(f"  {indent}⟶ {tag} → no_inputs (pre-genesis)")
+        err(f"  ⟶ {tag} → no_inputs (pre-genesis)")
         return MaterializeResult(
             gap=gap, status='no_inputs',
             inputs_present=0, inputs_expected=0,
             source_desc='pre-genesis',
         )
 
-    err(f"  {indent}⟶ {tag} → START (depth={recursion_depth})")
+    err(f"  ⟶ {tag} → START")
     try:
         long, inputs_present, inputs_expected, source_desc = source_long_for_gap(
-            r2, pyramid, gap, key_set=key_set,
-            recursion_depth=recursion_depth,
-            sub_results=sub_results,
+            r2, pyramid, gap, key_set=key_set, expected_by_tier=expected_by_tier,
         )
     except Exception as e:
-        err(f"  {indent}⟵ {tag} → ERROR source: {e!r} ({time()-t0:.1f}s)")
+        err(f"  ⟵ {tag} → ERROR source: {e!r} ({time()-t0:.1f}s)")
         return MaterializeResult(gap=gap, status='error', error=f"source: {e!r}")
 
-    err(f"  {indent}  {tag} sourced ({source_desc}; inputs {inputs_present}/{inputs_expected}, {long.height:,} rows, {time()-t0:.1f}s)")
+    err(f"    {tag} sourced ({source_desc}; inputs {inputs_present}/{inputs_expected}, {long.height:,} rows, {time()-t0:.1f}s)")
     if inputs_present == 0:
-        err(f"  {indent}⟵ {tag} → no_inputs ({source_desc}, {time()-t0:.1f}s)")
+        err(f"  ⟵ {tag} → no_inputs ({source_desc}, {time()-t0:.1f}s)")
         return MaterializeResult(
             gap=gap, status='no_inputs',
             inputs_present=0, inputs_expected=inputs_expected,
             source_desc=source_desc,
         )
     if long.is_empty():
-        err(f"  {indent}⟵ {tag} → empty ({source_desc}, {time()-t0:.1f}s)")
+        err(f"  ⟵ {tag} → empty ({source_desc}, {time()-t0:.1f}s)")
         return MaterializeResult(
             gap=gap, status='empty',
             inputs_present=inputs_present, inputs_expected=inputs_expected,
@@ -720,16 +520,16 @@ def materialize_shard(
             seg_to=gap.period_end,
         )
     except Exception as e:
-        err(f"  {indent}⟵ {tag} → ERROR build: {e!r} ({time()-t0:.1f}s)")
+        err(f"  ⟵ {tag} → ERROR build: {e!r} ({time()-t0:.1f}s)")
         return MaterializeResult(gap=gap, status='error',
                                  inputs_present=inputs_present,
                                  inputs_expected=inputs_expected,
                                  source_desc=source_desc,
                                  error=f"build: {e!r}")
-    err(f"  {indent}  {tag} built ({wide.height:,} rows, {time()-t_build:.1f}s)")
+    err(f"    {tag} built ({wide.height:,} rows, {time()-t_build:.1f}s)")
 
     if wide.is_empty():
-        err(f"  {indent}⟵ {tag} → empty (post-build, {time()-t0:.1f}s)")
+        err(f"  ⟵ {tag} → empty (post-build, {time()-t0:.1f}s)")
         return MaterializeResult(
             gap=gap, status='empty',
             inputs_present=inputs_present, inputs_expected=inputs_expected,
@@ -747,7 +547,7 @@ def materialize_shard(
     blob = buf.getvalue()
     t_put = time()
     r2.put_object(Bucket=R2_BUCKET, Key=gap.key, Body=blob)
-    err(f"  {indent}⟵ {tag} → wrote ({wide.height:,} rows, {len(blob)/1e6:.1f}MB, put {time()-t_put:.1f}s, total {time()-t0:.1f}s)")
+    err(f"  ⟵ {tag} → wrote ({wide.height:,} rows, {len(blob)/1e6:.1f}MB, put {time()-t_put:.1f}s, total {time()-t0:.1f}s)")
 
     return MaterializeResult(
         gap=gap, status='wrote',
