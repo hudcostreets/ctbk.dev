@@ -28,11 +28,11 @@
 !public/assets/region-cells.json
 !public/assets/s3.png
 !public/assets/station-births.json
+!public/assets/station-luc.json
 !public/assets/station-urls.json
 !public/assets/stations-regional.json
 !public/assets/twitter.png
 !public/assets/warning.png
-!public/assets/ymrgtb_cd.json
 !public/data/annualized_pcts.json
 !public/favicon.ico
 !public/img/ride_durations_202303_10s.png
@@ -107,6 +107,7 @@
 !src/components/BinSelect.tsx
 !src/components/Checkbox.tsx
 !src/components/Checklist.tsx
+!src/components/FlagsPanel.tsx
 !src/components/Footer.module.css
 !src/components/Footer.tsx
 !src/components/Heading.module.css
@@ -143,6 +144,7 @@
 !src/components/icons/S3.tsx
 !src/components/icons/Shift.tsx
 !src/components/icons/index.ts
+!src/contexts/FlagsContext.tsx
 !src/contexts/ThemeContext.tsx
 !src/controls.module.css
 !src/data.ts
@@ -162,7 +164,6 @@
 !src/pages/Files.tsx
 !src/pages/Health.tsx
 !src/pages/Home.tsx
-!src/pages/HomeV2.tsx
 !src/pages/Pipeline.mdx
 !src/pages/StationDetail.tsx
 !src/pages/Stations.tsx
