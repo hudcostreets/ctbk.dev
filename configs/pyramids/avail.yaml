@@ -52,38 +52,42 @@ metrics:
 # - All fixed-duration (no calendar `mo`/`y` units, even at the
 #   largest rung). Sidesteps month-length variance, keeps every rung's
 #   duration a clean multiple of the tier's bin.
-# - Largest rung ≈ N × bin where N=1440 — same N every tier (matches
-#   the row-count target inherited from the prior canonical layout).
-# - Adjacent rungs within a tier have ratio ≤ 5×. Smaller jumps so
-#   the cron writer can keep coarser rungs fresh without large
-#   compaction cliffs.
-# - Smallest rung K = bins-per-shard at the finest rung: 2-5 depending
-#   on tier (smaller K acceptable when it keeps the ladder cleaner;
-#   per-tier-bin K-=5 doesn't fit past /15m without ugly anchors).
-# - Within-tier rungs DON'T need divisibility (a /10m@5d can be built
-#   from 2 × /10m@2d + half a third). The compactor sub-selects bins
-#   when N+1's duration isn't an exact multiple of N's.
+# - Adjacent rungs within a tier have ratio ≤ 3×. Smaller jumps bound
+#   the CFW cascade CPU cost — each rung's write reads at most 2-3
+#   feeder shards from the rung below.
+# - Sub-day rungs follow the base-60 chain (5m, 10m, 30m, 1h, 3h, 6h,
+#   12h, 1d). Day-and-above rungs follow powers-of-2 (1d, 2d, 4d, 8d,
+#   16d, 32d, 64d, 128d, 256d, 512d, 1024d, 2048d). Powers-of-2 gives
+#   uniform SUF=2 without the arbitrary "why 30d not 32d" of the prior
+#   ladder. Both chains satisfy pyrmts's integer-divisibility
+#   requirement for `gap-discovery.largestFittingRung`.
+# - Smallest rung K = bins-per-shard at the finest rung: 3-5 depending
+#   on tier (smaller K acceptable when it keeps the ladder cleaner).
+# - Boundaries are UTC-anchored (`epoch + k × shard_dur`), DST-immune.
+#   Multi-day shards land at UTC midnight; day-of-week alignment isn't
+#   preserved except for 7d-multiples (which stay Thursday-aligned
+#   since epoch is a Thursday).
 #
 # Note: pyrmts duration format uses `min` (not `m`) for minutes — `m`
 # is reserved for months. Tier `name` keeps the short `m` (e.g. `1m`,
 # `2m`) for readability; `bin`/`shards` use canonical
 # `min`/`h`/`d`/`y`.
 tiers:
-  - { name: 1m,  bin: 1min,  shards: [5min, 10min, 30min, 1h, 3h, 12h, 1d] }
-  - { name: 2m,  bin: 2min,  shards: [10min, 30min, 1h, 3h, 12h, 1d, 2d] }
-  - { name: 3m,  bin: 3min,  shards: [15min, 30min, 1h, 3h, 12h, 1d, 3d] }
-  - { name: 5m,  bin: 5min,  shards: [15min, 30min, 1h, 3h, 12h, 1d, 5d] }
-  - { name: 10m, bin: 10min, shards: [30min, 1h, 3h, 12h, 1d, 5d, 10d] }
-  - { name: 15m, bin: 15min, shards: [1h, 3h, 12h, 1d, 5d, 15d] }
-  - { name: 30m, bin: 30min, shards: [2h, 6h, 1d, 5d, 15d, 30d] }
-  - { name: 1h,  bin: 1h,    shards: [3h, 12h, 2d, 10d, 30d, 60d] }
-  - { name: 2h,  bin: 2h,    shards: [6h, 1d, 5d, 20d, 60d, 120d] }
-  - { name: 3h,  bin: 3h,    shards: [12h, 2d, 10d, 30d, 90d, 180d] }
-  - { name: 6h,  bin: 6h,    shards: [1d, 5d, 20d, 60d, 180d, 360d] }
-  - { name: 12h, bin: 12h,   shards: [2d, 10d, 30d, 90d, 360d, 720d] }
-  - { name: 1d,  bin: 1d,    shards: [3d, 15d, 30d, 90d, 360d, 1440d] }
-  - { name: 3d,  bin: 3d,    shards: [15d, 30d, 60d, 120d, 360d, 720d, 1440d, 4320d] }
-  - { name: 7d,  bin: 7d,    shards: [35d, 70d, 140d, 280d, 840d, 1680d, 3360d, 10080d] }
+  - { name: 1m,  bin: 1min,  shards: [5min, 10min, 30min, 1h, 3h, 6h, 12h, 1d] }
+  - { name: 2m,  bin: 2min,  shards: [10min, 30min, 1h, 3h, 6h, 12h, 1d, 2d] }
+  - { name: 3m,  bin: 3min,  shards: [15min, 30min, 1h, 3h, 6h, 12h, 1d, 2d, 4d] }
+  - { name: 5m,  bin: 5min,  shards: [15min, 30min, 1h, 3h, 6h, 12h, 1d, 2d, 4d, 8d] }
+  - { name: 10m, bin: 10min, shards: [30min, 1h, 3h, 6h, 12h, 1d, 2d, 4d, 8d, 16d] }
+  - { name: 15m, bin: 15min, shards: [1h, 3h, 6h, 12h, 1d, 2d, 4d, 8d, 16d] }
+  - { name: 30m, bin: 30min, shards: [2h, 6h, 12h, 1d, 2d, 4d, 8d, 16d, 32d] }
+  - { name: 1h,  bin: 1h,    shards: [3h, 6h, 12h, 1d, 2d, 4d, 8d, 16d, 32d, 64d] }
+  - { name: 2h,  bin: 2h,    shards: [6h, 12h, 1d, 2d, 4d, 8d, 16d, 32d, 64d, 128d] }
+  - { name: 3h,  bin: 3h,    shards: [12h, 1d, 2d, 4d, 8d, 16d, 32d, 64d, 128d, 256d] }
+  - { name: 6h,  bin: 6h,    shards: [1d, 2d, 4d, 8d, 16d, 32d, 64d, 128d, 256d, 512d] }
+  - { name: 12h, bin: 12h,   shards: [2d, 4d, 8d, 16d, 32d, 64d, 128d, 256d, 512d, 1024d] }
+  - { name: 1d,  bin: 1d,    shards: [4d, 8d, 16d, 32d, 64d, 128d, 256d, 512d, 1024d, 2048d] }
+  - { name: 3d,  bin: 3d,    shards: [12d, 24d, 48d, 96d, 192d, 384d, 768d, 1536d, 3072d] }
+  - { name: 7d,  bin: 7d,    shards: [28d, 56d, 112d, 224d, 448d, 896d, 1792d, 3584d, 7168d, 14336d] }
 
 geo:
   cellCol: s2_cell

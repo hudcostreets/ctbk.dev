@@ -175,6 +175,7 @@ def gbfs_cascade() -> None:
 @option('-t', '--tier', 'tiers', multiple=True, help='Restrict to one or more tiers (repeatable, or comma-separated).')
 @option('-d', '--shard-dur', 'shard_durs', multiple=True, help='Restrict to one or more shard_durs (repeatable, or comma-separated).')
 @option('-u', '--url', 'base_url', default=None, help='Override the worker URL (default: per --env).')
+@option('-l', '--list-all', 'list_all', is_flag=True, help='Show every result line-by-line (status, key, inputs). Supersedes -w.')
 @option('-w', '--wrote-detail', is_flag=True, help='Show one line per `wrote` rung (default: only status counts).')
 @option('-n', '--dry-run', 'dry_run', is_flag=True, help='Compute rungs + HEAD-check keys, but do not write. Useful for measuring what a tick WOULD do.')
 def gbfs_cascade_tick(
@@ -183,6 +184,7 @@ def gbfs_cascade_tick(
 	tiers: tuple[str, ...],
 	shard_durs: tuple[str, ...],
 	base_url: str | None,
+	list_all: bool,
 	wrote_detail: bool,
 	dry_run: bool,
 ) -> None:
@@ -250,18 +252,33 @@ def gbfs_cascade_tick(
 		if k not in seen:
 			print(f'  {k:>10}: {counts[k]}')
 	# Detail rows
-	if wrote_detail:
+	def _tag(r: dict) -> str:
+		parts = r['key'].split('/')
+		return f'{parts[1]}@{parts[2]}/{parts[3].removesuffix(".parquet")}' if len(parts) >= 4 else r['key']
+	if list_all:
+		# Show every result with inputs + payload (rows/bytes on `wrote`,
+		# est on `too_large`, plain for `exists`/`no_inputs`/`empty`).
 		for r in results:
-			if r['status'] == 'wrote':
-				parts = r['key'].split('/')
-				tag = f'{parts[1]}@{parts[2]}' if len(parts) >= 3 else r['key']
-				print(f'  wrote /{tag}  rows={r.get("rows", "?")}  bytes={r.get("bytes", "?")}')
-	# Always show too_large + no_inputs details (they're diagnostic-relevant).
-	for r in results:
-		if r['status'] == 'too_large':
-			parts = r['key'].split('/')
-			tag = f'{parts[1]}@{parts[2]}' if len(parts) >= 3 else r['key']
-			print(f'  too_large /{tag}  est_rows={r.get("estimatedRows", "?")}  inputs={r.get("inputsPresent", "?")}/{r.get("inputsExpected", "?")}')
+			extras = []
+			if r.get('inputsPresent') is not None or r.get('inputsExpected') is not None:
+				extras.append(f"inputs={r.get('inputsPresent', '?')}/{r.get('inputsExpected', '?')}")
+			if r.get('rows') is not None:
+				extras.append(f"rows={r['rows']}")
+			if r.get('bytes') is not None:
+				extras.append(f"bytes={r['bytes']}")
+			if r.get('estimatedRows') is not None:
+				extras.append(f"est={r['estimatedRows']}")
+			suffix = ('  ' + ' '.join(extras)) if extras else ''
+			print(f"  {r['status']:>10} /{_tag(r)}{suffix}")
+	else:
+		if wrote_detail:
+			for r in results:
+				if r['status'] == 'wrote':
+					print(f'  wrote /{_tag(r)}  rows={r.get("rows", "?")}  bytes={r.get("bytes", "?")}')
+		# Always show too_large + no_inputs details (diagnostic-relevant).
+		for r in results:
+			if r['status'] == 'too_large':
+				print(f'  too_large /{_tag(r)}  est={r.get("estimatedRows", "?")}  inputs={r.get("inputsPresent", "?")}/{r.get("inputsExpected", "?")}')
 
 
 @gbfs_cascade.command('gc', help='GC sweep: delete registered shards superseded by a min-cover parent past the grace window.')
@@ -331,3 +348,71 @@ def gbfs_cascade_gc(
 	if deleted_detail:
 		for d in deleted:
 			print(f'  deleted /{d["tier"]}@{d["shardDur"]}  key={d["key"]}')
+
+
+# ─── R2 subgroup ────────────────────────────────────────────────────────
+#
+# Wraps the recurring `aws s3 ls --endpoint-url https://<acct>.r2...`
+# pattern with .envrc-sourced creds. Avoids re-typing the AWS env vars
+# and endpoint construction every time we poke at R2 during cascade
+# debugging. Uses boto3 directly rather than shelling to `aws` so we can
+# format / filter output without spawning a subprocess per call.
+
+
+@gbfs.group('r2', help='R2 (S3-compat) queries against the ctbk bucket.')
+def gbfs_r2() -> None:
+	pass
+
+
+def _r2_client() -> tuple[object, str]:
+	"""Build a boto3 S3 client pointed at the ctbk R2 endpoint. Reads
+	`CLOUDFLARE_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`
+	from the environment (typically sourced from `.envrc`). Returns
+	(client, bucket_name)."""
+	try:
+		import boto3  # type: ignore[import-untyped]
+	except ImportError as e:
+		raise click.ClickException('boto3 not installed. `uv sync` or `pip install boto3`.') from e
+	acct = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
+	akid = os.environ.get('R2_ACCESS_KEY_ID')
+	sk = os.environ.get('R2_SECRET_ACCESS_KEY')
+	if not (acct and akid and sk):
+		raise click.ClickException('CLOUDFLARE_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY not set. `source .envrc`.')
+	bucket = os.environ.get('R2_BUCKET', 'ctbk')
+	client = boto3.client(
+		's3',
+		endpoint_url=f'https://{acct}.r2.cloudflarestorage.com',
+		aws_access_key_id=akid,
+		aws_secret_access_key=sk,
+		region_name='auto',
+	)
+	return client, bucket
+
+
+@gbfs_r2.command('ls', help='List R2 keys under a prefix (default bucket: ctbk).')
+@argument('prefix', metavar='PREFIX')
+@option('-n', '--max', 'max_keys', type=int, default=1000, show_default=True, help='Max keys to return.')
+@option('-c', '--count', 'count_only', is_flag=True, help='Print only the count, not each key.')
+@option('-s', '--size', 'show_size', is_flag=True, help='Print size (bytes) alongside each key.')
+@option('-g', '--grep', 'grep_pat', default=None, help='Filter keys by substring (client-side after fetch).')
+def gbfs_r2_ls(
+	prefix: str,
+	max_keys: int,
+	count_only: bool,
+	show_size: bool,
+	grep_pat: str | None,
+) -> None:
+	client, bucket = _r2_client()
+	keys: list[tuple[str, int]] = []
+	paginator = client.get_paginator('list_objects_v2')  # type: ignore[attr-defined]
+	for page in paginator.paginate(Bucket=bucket, Prefix=prefix, PaginationConfig={'MaxItems': max_keys}):
+		for c in page.get('Contents') or []:
+			k = c['Key']
+			if grep_pat and grep_pat not in k:
+				continue
+			keys.append((k, int(c.get('Size', 0))))
+	if count_only:
+		print(len(keys))
+		return
+	for k, sz in keys:
+		print(f'{sz:>12}  {k}' if show_size else k)

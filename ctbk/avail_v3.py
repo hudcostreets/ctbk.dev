@@ -56,7 +56,11 @@ AVAIL_METRICS: tuple[str, ...] = ('bikes', 'ebikes', 'docks', 'disabled', 'pendi
 # pre-genesis time the materializer just leaves empty"); the materializer
 # clips ingester ranges to this and short-circuits shards whose entire
 # period lies before it.
-AVAIL_GENESIS = datetime(2026, 4, 7, tzinfo=timezone.utc)
+# Actual first raw poll on R2 is `gbfs/avail/agg=1m/cons=1m/2026-04-07/0116.parquet`;
+# the containing `/1m@5min` shard covers `T01:15-T01:20` (partial: 4/5 minutes).
+# Coarser tiers align at wider boundaries; their first fully-covered shard
+# starts 5-45 min later, with min-cover stepping down rungs to fit.
+AVAIL_GENESIS = datetime(2026, 4, 7, 1, 15, tzinfo=timezone.utc)
 
 # Coarsest S2 level we materialize. Every station contributes at every
 # level from L10 down to its LUC (finest unique level). Matches the

@@ -72,21 +72,21 @@ const DEFAULT_REDUCER: Reducer = 'mean';
  *  only for windows after cascade-start; coarser tiers' canonical
  *  coverage is preserved for older windows. */
 export const TIERS: Tier[] = [
-	{ name: '1m',  bin: '1min',  shards: ['5min', '10min', '30min', '1h', '3h', '12h', '1d'] },
-	{ name: '2m',  bin: '2min',  shards: ['10min', '30min', '1h', '3h', '12h', '1d', '2d'] },
-	{ name: '3m',  bin: '3min',  shards: ['15min', '30min', '1h', '3h', '12h', '1d', '3d'] },
-	{ name: '5m',  bin: '5min',  shards: ['15min', '30min', '1h', '3h', '12h', '1d', '5d'] },
-	{ name: '10m', bin: '10min', shards: ['30min', '1h', '3h', '12h', '1d', '5d', '10d'] },
-	{ name: '15m', bin: '15min', shards: ['1h', '3h', '12h', '1d', '5d', '15d'] },
-	{ name: '30m', bin: '30min', shards: ['2h', '6h', '1d', '5d', '15d', '30d'] },
-	{ name: '1h',  bin: '1h',    shards: ['3h', '12h', '2d', '10d', '30d', '60d'] },
-	{ name: '2h',  bin: '2h',    shards: ['6h', '1d', '5d', '20d', '60d', '120d'] },
-	{ name: '3h',  bin: '3h',    shards: ['12h', '2d', '10d', '30d', '90d', '180d'] },
-	{ name: '6h',  bin: '6h',    shards: ['1d', '5d', '20d', '60d', '180d', '360d'] },
-	{ name: '12h', bin: '12h',   shards: ['2d', '10d', '30d', '90d', '360d', '720d'] },
-	{ name: '1d',  bin: '1d',    shards: ['3d', '15d', '30d', '90d', '360d', '1440d'] },
-	{ name: '3d',  bin: '3d',    shards: ['15d', '30d', '60d', '120d', '360d', '720d', '1440d', '4320d'] },
-	{ name: '7d',  bin: '7d',    shards: ['35d', '70d', '140d', '280d', '840d', '1680d', '3360d', '10080d'] },
+	{ name: '1m',  bin: '1min',  shards: ['5min', '10min', '30min', '1h', '3h', '6h', '12h', '1d'] },
+	{ name: '2m',  bin: '2min',  shards: ['10min', '30min', '1h', '3h', '6h', '12h', '1d', '2d'] },
+	{ name: '3m',  bin: '3min',  shards: ['15min', '30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d'] },
+	{ name: '5m',  bin: '5min',  shards: ['15min', '30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d'] },
+	{ name: '10m', bin: '10min', shards: ['30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d', '16d'] },
+	{ name: '15m', bin: '15min', shards: ['1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d', '16d'] },
+	{ name: '30m', bin: '30min', shards: ['2h', '6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d'] },
+	{ name: '1h',  bin: '1h',    shards: ['3h', '6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d'] },
+	{ name: '2h',  bin: '2h',    shards: ['6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d'] },
+	{ name: '3h',  bin: '3h',    shards: ['12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d'] },
+	{ name: '6h',  bin: '6h',    shards: ['1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d'] },
+	{ name: '12h', bin: '12h',   shards: ['2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d', '1024d'] },
+	{ name: '1d',  bin: '1d',    shards: ['4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d', '1024d', '2048d'] },
+	{ name: '3d',  bin: '3d',    shards: ['12d', '24d', '48d', '96d', '192d', '384d', '768d', '1536d', '3072d'] },
+	{ name: '7d',  bin: '7d',    shards: ['28d', '56d', '112d', '224d', '448d', '896d', '1792d', '3584d', '7168d', '14336d'] },
 ];
 
 const KEY_TEMPLATE = 'avail-v3/{tier}/{shard}/{period}.parquet';

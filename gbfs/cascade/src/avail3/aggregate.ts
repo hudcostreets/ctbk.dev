@@ -26,31 +26,71 @@ import {
 
 // ─── Streaming reader ──────────────────────────────────────────────
 
-/** Sliced-buffer wrapper backed by a single whole-file R2 GET. The CFW
- *  1000-subrequest cap dominates over memory for cascade sources: a
- *  /1m@3h shard has ~100 row-groups, so serving each row-group's column
- *  chunks as individual range reads would issue several hundred
- *  subrequests per source — /1m@1d (8 sources × ~100 groups) blows the
- *  cap. Fetching the whole file once (typical /1m@3h ≈ 3 MB, /1m@1d
- *  ≈ 60 MB, well within isolate memory when only a handful are in
- *  flight) costs one subrequest per source; hyparquet then slices
- *  synchronously in-process. */
+/** Chunked R2 buffer. Serves `slice(start, end)` by fetching an 8 MB
+ *  range at `start` (or the exact requested range if larger) and caching
+ *  it in a small LRU. Streams hyparquet's row-group reads without
+ *  either extreme:
+ *
+ *  - **whole-file GET** kept N × file_size in memory concurrently across
+ *    N sources — fine for one 43 MB source, OOM for many-source targets
+ *    like `/30m@30d` reading `/15m@15d` × 2 (300 MB).
+ *  - **per-row-group range reads** used <1 MB active memory per source
+ *    but issued a range GET per RG; sources with a 2048-row RG size
+ *    (e.g. `/1m@1d` at ~2700 RGs) blew the 1000-subrequest cap.
+ *
+ *  Chunked reads sit between: each 8 MB range covers ~500 RGs for
+ *  small-RG sources, so a 43 MB source resolves in ~6 fetches. Memory
+ *  active per source ≤ CHUNK_CAP × chunk_size (small).
+ *
+ *  Access pattern from `parquetPlan` + sequential `readRowGroup`:
+ *  monotone-increasing byte offsets. Cache keeps the last few chunks
+ *  so backtracks within a chunk are free; older chunks drop naturally.
+ */
+const CHUNK_SIZE = 8 * 1024 * 1024;  // 8 MB per fetch
+const CHUNK_CAP = 3;                  // Retain last N chunks per source
+
 export function r2SlicedBuffer(r2: R2Bucket, key: string, byteLength: number) {
-	let whole: Promise<ArrayBuffer> | null = null;
-	const getWhole = () => {
-		if (!whole) {
-			whole = r2.get(key).then((obj) => {
-				if (!obj) throw new Error(`r2 get returned null: ${key}`);
-				return obj.arrayBuffer();
-			});
+	// Ordered oldest→newest; evict from front when > CHUNK_CAP.
+	const chunks: Array<{ start: number; end: number; buf: ArrayBuffer }> = [];
+
+	const findCached = (start: number, end: number): ArrayBuffer | null => {
+		for (let i = chunks.length - 1; i >= 0; i--) {
+			const c = chunks[i]!;
+			if (c.start <= start && c.end >= end) {
+				// Touch: move to newest end (LRU).
+				if (i !== chunks.length - 1) {
+					chunks.splice(i, 1);
+					chunks.push(c);
+				}
+				return c.buf.slice(start - c.start, end - c.start);
+			}
 		}
-		return whole;
+		return null;
 	};
+
+	const fetchChunk = async (start: number, needEnd: number): Promise<ArrayBuffer> => {
+		const chunkEnd = Math.min(byteLength, Math.max(needEnd, start + CHUNK_SIZE));
+		const length = chunkEnd - start;
+		const obj = await r2.get(key, { range: { offset: start, length } });
+		if (!obj) throw new Error(`r2 range read returned null: ${key} [${start}, ${chunkEnd})`);
+		const buf = await obj.arrayBuffer();
+		chunks.push({ start, end: chunkEnd, buf });
+		while (chunks.length > CHUNK_CAP) chunks.shift();
+		return buf.slice(needEnd - start > buf.byteLength ? 0 : 0, needEnd - start);
+	};
+
 	return {
 		byteLength,
 		async slice(start: number, end: number = byteLength): Promise<ArrayBuffer> {
-			const buf = await getWhole();
-			return buf.slice(start, end);
+			const cached = findCached(start, end);
+			if (cached) return cached;
+			await fetchChunk(start, end);
+			const hit = findCached(start, end);
+			if (hit) return hit;
+			// Range straddles chunk boundary; fall back to a targeted fetch.
+			const obj = await r2.get(key, { range: { offset: start, length: end - start } });
+			if (!obj) throw new Error(`r2 range read returned null: ${key} [${start}, ${end})`);
+			return obj.arrayBuffer();
 		},
 	};
 }

@@ -26,12 +26,12 @@ describe('LADDERS', () => {
 		}
 	});
 
-	test('every tier’s adjacent-rung ratio ≤ 5×', () => {
+	test('every tier’s adjacent-rung ratio ≤ 3×', () => {
 		for (const [tier, ladder] of Object.entries(LADDERS)) {
 			for (let i = 1; i < ladder.length; i++) {
 				const ratio = toMin(ladder[i]!) / toMin(ladder[i - 1]!);
 				expect(ratio, `${tier}: ${ladder[i - 1]} → ${ladder[i]} = ${ratio}×`)
-					.toBeLessThanOrEqual(5);
+					.toBeLessThanOrEqual(3);
 			}
 		}
 	});
@@ -41,7 +41,7 @@ describe('LADDERS', () => {
 		// `Tier.shards`. Drift here means the cascade writes paths the api
 		// worker can't find.
 		expect(LADDERS['1m']).toEqual([
-			'5min', '10min', '30min', '1h', '3h', '12h', '1d',
+			'5min', '10min', '30min', '1h', '3h', '6h', '12h', '1d',
 		]);
 	});
 });

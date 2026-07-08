@@ -107,25 +107,26 @@ function durationToMin(d: string): number {
  *  api worker reads what the cascade writes.
  *
  *  Ladder design (see `configs/pyramids/avail.yaml` for the principles):
- *  fixed-duration only, adjacent ratios ≤ 5×, largest ≈ N=1440 × bin.
- *  Within-tier rungs must satisfy pyrmts's parser-enforced divisibility
- *  (each rung divides the next). */
+ *  fixed-duration only, adjacent ratios ≤ 3×. Sub-day rungs follow the
+ *  base-60 chain; day-and-above rungs follow powers-of-2 for uniform
+ *  SUF=2. Within-tier rungs must satisfy pyrmts's parser-enforced
+ *  divisibility (each rung divides the next). */
 export const LADDERS: Record<string, Duration[]> = {
-	'1m':  ['5min', '10min', '30min', '1h', '3h', '12h', '1d'],
-	'2m':  ['10min', '30min', '1h', '3h', '12h', '1d', '2d'],
-	'3m':  ['15min', '30min', '1h', '3h', '12h', '1d', '3d'],
-	'5m':  ['15min', '30min', '1h', '3h', '12h', '1d', '5d'],
-	'10m': ['30min', '1h', '3h', '12h', '1d', '5d', '10d'],
-	'15m': ['1h', '3h', '12h', '1d', '5d', '15d'],
-	'30m': ['2h', '6h', '1d', '5d', '15d', '30d'],
-	'1h':  ['3h', '12h', '2d', '10d', '30d', '60d'],
-	'2h':  ['6h', '1d', '5d', '20d', '60d', '120d'],
-	'3h':  ['12h', '2d', '10d', '30d', '90d', '180d'],
-	'6h':  ['1d', '5d', '20d', '60d', '180d', '360d'],
-	'12h': ['2d', '10d', '30d', '90d', '360d', '720d'],
-	'1d':  ['3d', '15d', '30d', '90d', '360d', '1440d'],
-	'3d':  ['15d', '30d', '60d', '120d', '360d', '720d', '1440d', '4320d'],
-	'7d':  ['35d', '70d', '140d', '280d', '840d', '1680d', '3360d', '10080d'],
+	'1m':  ['5min', '10min', '30min', '1h', '3h', '6h', '12h', '1d'],
+	'2m':  ['10min', '30min', '1h', '3h', '6h', '12h', '1d', '2d'],
+	'3m':  ['15min', '30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d'],
+	'5m':  ['15min', '30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d'],
+	'10m': ['30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d', '16d'],
+	'15m': ['1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d', '16d'],
+	'30m': ['2h', '6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d'],
+	'1h':  ['3h', '6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d'],
+	'2h':  ['6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d'],
+	'3h':  ['12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d'],
+	'6h':  ['1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d'],
+	'12h': ['2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d', '1024d'],
+	'1d':  ['4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d', '1024d', '2048d'],
+	'3d':  ['12d', '24d', '48d', '96d', '192d', '384d', '768d', '1536d', '3072d'],
+	'7d':  ['28d', '56d', '112d', '224d', '448d', '896d', '1792d', '3584d', '7168d', '14336d'],
 };
 
 /** Tier-bin (in minutes), parsed once. Used to re-bin /1m source rows
@@ -143,17 +144,19 @@ const TIER_BIN_MIN: Record<string, number> = Object.fromEntries(
  *  for non-/1m tiers' smallest rungs. */
 const ONE_M_RUNGS_MIN = LADDERS['1m']!.map((d) => durationToMin(d));
 
-/** Pick the largest /1m rung L such that L ≤ shardDurMin AND L divides
+/** Pick the largest /1m rung L such that L < shardDurMin AND L divides
  *  shardDurMin. Reads of `L`-sized shards span exactly `shardDurMin/L`
- *  shards and tile the [periodStart, periodStart+shardDurMin) window. */
+ *  shards and tile the [periodStart, periodStart+shardDurMin) window.
+ *  Strict `<` to avoid the self-loop where target tier `/1m` at its
+ *  largest rung would pick itself as a source. */
 function pickOneMSourceRung(shardDurMin: number): { sourceRungMin: number; sourceRungDur: Duration } {
 	for (let i = ONE_M_RUNGS_MIN.length - 1; i >= 0; i--) {
 		const r = ONE_M_RUNGS_MIN[i]!;
-		if (r <= shardDurMin && shardDurMin % r === 0) {
+		if (r < shardDurMin && shardDurMin % r === 0) {
 			return { sourceRungMin: r, sourceRungDur: LADDERS['1m']![i]! };
 		}
 	}
-	throw new Error(`no /1m rung divides ${shardDurMin}min`);
+	throw new Error(`no /1m rung strictly smaller than ${shardDurMin}min`);
 }
 
 // ─── Source readers ─────────────────────────────────────────────────────
@@ -226,14 +229,23 @@ async function pickSourceForShard(
 	targetTier: string,
 	shardDurMin: number,
 	periodStart: Date,
+	effectiveStart: Date,
+	effectiveEnd: Date,
 ): Promise<{ sourceTier: string; sourceRungDur: Duration; sourceRungMin: number; keys: string[] }> {
+	const effStartMs = effectiveStart.getTime();
+	const effEndMs = effectiveEnd.getTime();
 	for (const cand of priorityRungPairs(targetTier, shardDurMin)) {
 		const n = shardDurMin / cand.rungMin;
 		const keys: string[] = [];
 		for (let i = 0; i < n; i++) {
-			const start = new Date(periodStart.getTime() + i * cand.rungMin * 60_000);
-			keys.push(shardKey(cand.tier, cand.rungDur, start));
+			const startMs = periodStart.getTime() + i * cand.rungMin * 60_000;
+			const endMs = startMs + cand.rungMin * 60_000;
+			// Filter to sub-shards whose period intersects `[effectiveStart,
+			// effectiveEnd)`. For non-straddling targets this is a no-op.
+			if (endMs <= effStartMs || startMs >= effEndMs) continue;
+			keys.push(shardKey(cand.tier, cand.rungDur, new Date(startMs)));
 		}
+		if (keys.length === 0) continue;
 		const heads = await Promise.all(keys.map((k) => r2.head(k)));
 		if (heads.every((h) => h !== null)) {
 			return { sourceTier: cand.tier, sourceRungDur: cand.rungDur, sourceRungMin: cand.rungMin, keys };
@@ -245,8 +257,10 @@ async function pickSourceForShard(
 	const n = shardDurMin / sourceRungMin;
 	const keys: string[] = [];
 	for (let i = 0; i < n; i++) {
-		const start = new Date(periodStart.getTime() + i * sourceRungMin * 60_000);
-		keys.push(shardKey('1m', sourceRungDur, start));
+		const startMs = periodStart.getTime() + i * sourceRungMin * 60_000;
+		const endMs = startMs + sourceRungMin * 60_000;
+		if (endMs <= effStartMs || startMs >= effEndMs) continue;
+		keys.push(shardKey('1m', sourceRungDur, new Date(startMs)));
 	}
 	return { sourceTier: '1m', sourceRungDur, sourceRungMin, keys };
 }
@@ -290,12 +304,32 @@ function lucCellCount(luc: import('./luc').LucIndex): number {
  *  legitimately over should get filled offline via the Node CLI. */
 const MAX_OUTPUT_ROWS = 10_000_000;
 
-/** HEAD-check N candidate keys in parallel. Returns the subset that
- *  exists, preserving order. */
-async function existingKeys(r2: R2Bucket, keys: string[]): Promise<string[]> {
+/** HEAD-check N candidate keys in parallel. Returns the present subset
+ *  paired with `size` (bytes), preserving order. Callers that only need
+ *  the keys can `.map(x => x.key)`. */
+async function existingKeysWithSize(r2: R2Bucket, keys: string[]): Promise<Array<{ key: string; size: number }>> {
 	const heads = await Promise.all(keys.map((k) => r2.head(k)));
-	return keys.filter((_, i) => heads[i] !== null);
+	const out: Array<{ key: string; size: number }> = [];
+	for (let i = 0; i < keys.length; i++) {
+		const h = heads[i];
+		if (h !== null) out.push({ key: keys[i]!, size: h.size });
+	}
+	return out;
 }
+
+/** Sum of source bytes above which CFW writeShard exceeds the paid-tier
+ *  30 s CPU cap. Under chunked streaming, memory isn't the bottleneck —
+ *  hyparquet decode + histogram merge + re-encode is. Empirically a
+ *  5.5 M-row `/1m@1d` write (from 24 MB of `/1m@3h` sources) takes
+ *  ~28 s CPU — right at the cap. A single 43 MB `/1m@1d` source pushes
+ *  a `/Nm@1d` write past 30 s.
+ *
+ *  Threshold set below `/1m@1d`'s 43 MB so `/Nm@1d` targets bounce
+ *  cleanly to offline. Under a healed intermediate-rung pyramid,
+ *  smaller feeders (e.g. `/1m@3h` × 8 = 24 MB) fit the guard and
+ *  build fine — this only skips shards whose only usable feeder is
+ *  a large max-rung of the prev tier. */
+const MAX_SOURCE_BYTES = 30 * 1024 * 1024;
 
 /** Unified writer. Reads from raw 1m@1m (when shardDur is the smallest
  *  rung of /1m) or from previously-written shards (coarser rungs +
@@ -310,20 +344,29 @@ async function writeShard(
 	shardDur: Duration,
 	prevShardDur: Duration | null,
 	periodStart: Date,
+	effectiveStart: Date,
+	effectiveEnd: Date,
 ): Promise<WriteResult> {
 	const shardDurMin = durationToMin(shardDur);
 	const key = shardKey(tier, shardDur, periodStart);
 	if (await r2.head(key)) return { status: 'exists', key };
 
+	const effStartMs = effectiveStart.getTime();
+	const effEndMs = effectiveEnd.getTime();
+
 	if (prevShardDur === null && tier === '1m') {
-		// /1m base case: read shardDurMin raw 1m@1m files, LUC-expand, build
-		// histograms. Bounded input (~5 min × ~19K post-LUC-expansion rows =
+		// /1m base case: read raw 1m@1m files for every minute in
+		// `[effectiveStart, effectiveEnd)`. For fully-in-range shards
+		// this is the whole `[periodStart, periodStart + shardDurMin)`;
+		// for genesis-straddling shards (e.g. `/1m@5min/2026-04-07T01-15`
+		// with genesis T01:16) it's just the intersecting sub-window.
+		// Bounded input (~5 min × ~19K post-LUC-expansion rows =
 		// ~95K rows for /1m@5min) — keep in-memory, stream through the writer.
-		const inputsExpected = shardDurMin;
+		const inputsExpected = Math.floor((effEndMs - effStartMs) / 60_000);
 		let inputsPresent = 0;
 		const rows: AvailV3Row[] = [];
-		for (let i = 0; i < shardDurMin; i++) {
-			const t = new Date(periodStart.getTime() + i * 60_000);
+		for (let ms = effStartMs; ms < effEndMs; ms += 60_000) {
+			const t = new Date(ms);
 			const raw = await readRawMinute(r2, t);
 			if (raw === null) continue;
 			inputsPresent++;
@@ -355,15 +398,22 @@ async function writeShard(
 		const expected = shardDurMin / prevShardDurMin;
 		const candidateKeys: string[] = [];
 		for (let i = 0; i < expected; i++) {
-			const inputStart = new Date(periodStart.getTime() + i * prevShardDurMin * 60_000);
-			candidateKeys.push(shardKey(tier, prevShardDur, inputStart));
+			const inputStartMs = periodStart.getTime() + i * prevShardDurMin * 60_000;
+			const inputEndMs = inputStartMs + prevShardDurMin * 60_000;
+			// Filter to sub-shards intersecting effective range — for
+			// genesis-straddling targets, pre-genesis sub-shards will never
+			// exist and shouldn't count against `inputsExpected`.
+			if (inputEndMs <= effStartMs || inputStartMs >= effEndMs) continue;
+			candidateKeys.push(shardKey(tier, prevShardDur, new Date(inputStartMs)));
 		}
-		const heads = await Promise.all(candidateKeys.map((k) => r2.head(k)));
-		if (heads.every((h) => h !== null)) {
-			sourceKeys = candidateKeys;
-			inputsExpected = expected;
-			targetBinMs = 0n;
-			usedSameTierPrev = true;
+		if (candidateKeys.length > 0) {
+			const heads = await Promise.all(candidateKeys.map((k) => r2.head(k)));
+			if (heads.every((h) => h !== null)) {
+				sourceKeys = candidateKeys;
+				inputsExpected = candidateKeys.length;
+				targetBinMs = 0n;
+				usedSameTierPrev = true;
+			}
 		}
 	}
 
@@ -372,29 +422,38 @@ async function writeShard(
 		// rungs and coarser rungs whose prev-rung isn't materialized).
 		// Rebin to this tier's bin — sources may come from a different
 		// tier with a finer bin.
-		const picked = await pickSourceForShard(r2, tier, shardDurMin, periodStart);
+		const picked = await pickSourceForShard(r2, tier, shardDurMin, periodStart, effectiveStart, effectiveEnd);
 		sourceKeys = picked.keys;
 		inputsExpected = picked.keys.length;
 		const tierBinMin = TIER_BIN_MIN[tier]!;
 		targetBinMs = BigInt(tierBinMin * 60_000);
 	}
 
-	const present = await existingKeys(r2, sourceKeys);
-	const inputsPresent = present.length;
+	const presentWithSize = await existingKeysWithSize(r2, sourceKeys);
+	const inputsPresent = presentWithSize.length;
 	if (inputsPresent === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
 
-	// Pre-flight OOM guard. Output row count is bounded by
+	// Pre-flight OOM guard #1: output row count bounded by
 	// `unique_cells × bins_per_shard`. Rungs above the empirical CFW
 	// threshold get skipped so subsequent tier rungs at this tick still
 	// fire (an OOM would terminate the isolate, killing them all).
-	// Offline `converge()` on `e`/laptop picks up the skipped shards.
 	const tierBinMin = TIER_BIN_MIN[tier]!;
 	const estimatedRows = lucCellCount(luc) * (shardDurMin / tierBinMin);
 	if (estimatedRows > MAX_OUTPUT_ROWS) {
 		return { status: 'too_large', key, inputsPresent, inputsExpected, estimatedRows };
 	}
 
-	const iters = present.map((k) => streamShardRows(r2, k));
+	// Pre-flight OOM guard #2: sum of source bytes. Whole-file R2 GETs
+	// keep all sources resident in isolate memory during k-way merge;
+	// many-source targets (e.g. `/30m@30d` reading 30 × `/1m@1d`
+	// sources @ ~43 MB each) blow the 128 MB isolate cap. Offline
+	// `converge()` on `e`/laptop picks up the skipped shards.
+	const sourceBytes = presentWithSize.reduce((a, b) => a + b.size, 0);
+	if (sourceBytes > MAX_SOURCE_BYTES) {
+		return { status: 'too_large', key, inputsPresent, inputsExpected, estimatedRows: sourceBytes };
+	}
+
+	const iters = presentWithSize.map((p) => streamShardRows(r2, p.key));
 	const merged = kwayMerge(iters, targetBinMs);
 	const aggregated = aggregateStream(merged);
 	const { bytes, rows: written } = await writeShardStreaming(r2, key, aggregated);
@@ -438,10 +497,20 @@ export interface ConvergeReport {
 	stoppedReason?: 'time' | 'ops';
 }
 
-/** avail-v3 genesis: earliest UTC timestamp for which raw /1m WAL data
- *  exists (per `ctbk/avail_v3.py`'s `AVAIL_GENESIS`). Range floor for
- *  gap-discovery — anything before this is trivially `no_inputs`. */
-const AVAIL_GENESIS = new Date('2026-04-07T00:00:00Z');
+/** avail-v3 genesis: earliest 5-min-aligned UTC timestamp intersecting
+ *  real raw poll data. First raw minute parquet on R2 is
+ *  `gbfs/avail/agg=1m/cons=1m/2026-04-07/0116.parquet`; the containing
+ *  `/1m@5min` shard covers `T01:15-T01:20` (partial: 4/5 raw minutes).
+ *  Range floor for min-cover gap-discovery — pyrmts steps down rungs to
+ *  cover `[genesis, now]` cleanly; anything before genesis is trivially
+ *  `no_inputs` and shouldn't be listed.
+ *
+ *  Coarser tiers align at wider boundaries (`/2m@10min` at `:10,:20,...`,
+ *  `/15m@1h` at `:00`, etc.), so their first fully-covered shard starts
+ *  5-45 min after this timestamp — min-cover steps down naturally to
+ *  cover the residual sub-range with smaller rungs, with any gap at
+ *  the very start returning `no_inputs` benignly. */
+const AVAIL_GENESIS = new Date('2026-04-07T01:15:00Z');
 
 /** avail-v3 pyramid config. Kept in sync with `configs/pyramids/avail.yaml`
  *  by hand (the YAML remains the source of truth for the Python fsck and
@@ -462,21 +531,21 @@ const AVAIL_PYRAMID_CONFIG: PyramidConfig = {
 		{ name: 'pending',  monoid: 'histogram' },
 	],
 	tiers: [
-		{ name: '1m',  bin: '1min',  shards: ['5min', '10min', '30min', '1h', '3h', '12h', '1d'] },
-		{ name: '2m',  bin: '2min',  shards: ['10min', '30min', '1h', '3h', '12h', '1d', '2d'] },
-		{ name: '3m',  bin: '3min',  shards: ['15min', '30min', '1h', '3h', '12h', '1d', '3d'] },
-		{ name: '5m',  bin: '5min',  shards: ['15min', '30min', '1h', '3h', '12h', '1d', '5d'] },
-		{ name: '10m', bin: '10min', shards: ['30min', '1h', '3h', '12h', '1d', '5d', '10d'] },
-		{ name: '15m', bin: '15min', shards: ['1h', '3h', '12h', '1d', '5d', '15d'] },
-		{ name: '30m', bin: '30min', shards: ['2h', '6h', '1d', '5d', '15d', '30d'] },
-		{ name: '1h',  bin: '1h',    shards: ['3h', '12h', '2d', '10d', '30d', '60d'] },
-		{ name: '2h',  bin: '2h',    shards: ['6h', '1d', '5d', '20d', '60d', '120d'] },
-		{ name: '3h',  bin: '3h',    shards: ['12h', '2d', '10d', '30d', '90d', '180d'] },
-		{ name: '6h',  bin: '6h',    shards: ['1d', '5d', '20d', '60d', '180d', '360d'] },
-		{ name: '12h', bin: '12h',   shards: ['2d', '10d', '30d', '90d', '360d', '720d'] },
-		{ name: '1d',  bin: '1d',    shards: ['3d', '15d', '30d', '90d', '360d', '1440d'] },
-		{ name: '3d',  bin: '3d',    shards: ['15d', '30d', '60d', '120d', '360d', '720d', '1440d', '4320d'] },
-		{ name: '7d',  bin: '7d',    shards: ['35d', '70d', '140d', '280d', '840d', '1680d', '3360d', '10080d'] },
+		{ name: '1m',  bin: '1min',  shards: ['5min', '10min', '30min', '1h', '3h', '6h', '12h', '1d'] },
+		{ name: '2m',  bin: '2min',  shards: ['10min', '30min', '1h', '3h', '6h', '12h', '1d', '2d'] },
+		{ name: '3m',  bin: '3min',  shards: ['15min', '30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d'] },
+		{ name: '5m',  bin: '5min',  shards: ['15min', '30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d'] },
+		{ name: '10m', bin: '10min', shards: ['30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d', '16d'] },
+		{ name: '15m', bin: '15min', shards: ['1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d', '16d'] },
+		{ name: '30m', bin: '30min', shards: ['2h', '6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d'] },
+		{ name: '1h',  bin: '1h',    shards: ['3h', '6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d'] },
+		{ name: '2h',  bin: '2h',    shards: ['6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d'] },
+		{ name: '3h',  bin: '3h',    shards: ['12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d'] },
+		{ name: '6h',  bin: '6h',    shards: ['1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d'] },
+		{ name: '12h', bin: '12h',   shards: ['2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d', '1024d'] },
+		{ name: '1d',  bin: '1d',    shards: ['4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d', '1024d', '2048d'] },
+		{ name: '3d',  bin: '3d',    shards: ['12d', '24d', '48d', '96d', '192d', '384d', '768d', '1536d', '3072d'] },
+		{ name: '7d',  bin: '7d',    shards: ['28d', '56d', '112d', '224d', '448d', '896d', '1792d', '3584d', '7168d', '14336d'] },
 	],
 	geo: { cellCol: 's2_cell', resolutions: [15, 14, 13, 12, 11, 10] },
 };
@@ -598,7 +667,10 @@ export async function converge(
 		}
 
 		const prevShardDur = prevShardDurOf(shard.tier, shard.shardDur as Duration);
-		const r = await writeShard(r2, await getLuc(), shard.tier, shard.shardDur as Duration, prevShardDur, shard.periodStart);
+		const r = await writeShard(
+			r2, await getLuc(), shard.tier, shard.shardDur as Duration, prevShardDur,
+			shard.periodStart, shard.effectiveStart, shard.effectiveEnd,
+		);
 		results.push(r);
 		stats[r.status] = (stats[r.status] ?? 0) + 1;
 
