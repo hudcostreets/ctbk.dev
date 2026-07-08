@@ -41,15 +41,14 @@
         color: var(--text-primary);
       }
     </style>
-    <script type="module" crossorigin src="/assets/index-DIRKYREI.js"></script>
+    <script type="module" crossorigin src="/assets/index-xK--pvDZ.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-DMXyxu3t.css">
   </head>
   <body>
     <div id="root"></div>
-    <!-- Cloudflare Web Analytics (RUM: page views + Core Web Vitals).
-         Manual mode: ctbk.dev is on GH Pages, not proxied through CF, so
-         the beacon JS reports CWV directly to CF's collector. Privacy:
-         no cookies, no individual-visitor tracking. Free tier. -->
-    <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "4bd00e4ade70447c89813154f57c6260"}'></script>
+    <!-- Cloudflare Web Analytics beacon is loaded conditionally from
+         `src/main.tsx` (prod-only) to avoid CORS noise on `localhost`
+         (Cloudflare's RUM endpoint rejects preflight from origins not
+         in the token's allowed domains). -->
   </body>
 </html>
