@@ -344,6 +344,7 @@ export default {
 			const tiers = url.searchParams.get('tiers')?.split(',');
 			const shardDurs = url.searchParams.get('shardDurs')?.split(',');
 			const dryRun = ['1', 'true', 'yes'].includes(url.searchParams.get('dryRun') ?? '');
+			const trace = ['1', 'true', 'yes'].includes(url.searchParams.get('trace') ?? '');
 			// Use converge() directly (not avail3Tick) so we can return
 			// the full ConvergeReport (totalMissing, stoppedReason, stats).
 			const report = await converge(env.R2, env.DB, {
@@ -352,6 +353,7 @@ export default {
 				tiers,
 				shardDurs,
 				dryRun,
+				trace,
 			});
 			return new Response(JSON.stringify({
 				tickTime: tickTime.toISOString(),

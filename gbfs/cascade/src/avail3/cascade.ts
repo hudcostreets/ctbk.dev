@@ -533,6 +533,10 @@ export interface ConvergeOpts {
 	maxOps?: number;
 	/** Compute results but don't write — for planning / diff monitoring. */
 	dryRun?: boolean;
+	/** Emit `console.log` per phase (enumeration / per-writeShard). Off by
+	 *  default because prod cron doesn't want per-tick spam; enable via
+	 *  `/avail3?trace=1` for diagnostic runs. */
+	trace?: boolean;
 }
 
 export interface ConvergeReport {
@@ -652,19 +656,25 @@ export async function converge(
 	const dryRun = opts.dryRun ?? false;
 	const maxOps = opts.maxOps ?? Infinity;
 	const timeBudgetMs = opts.timeBudgetMs ?? Infinity;
+	const trace = opts.trace ?? false;
+	const t0 = Date.now();
+	const traceLog = (msg: string) => { if (trace) console.log(`[converge +${Date.now() - t0}ms] ${msg}`); };
 
 	// Build Pyramid from YAML + R2 binding. `pyramidFromConfig` needs a
 	// StorageBackend; gap-discovery only touches `pyramid.tiers` and
 	// `pyramid.keyTemplate`, so the storage is unused here — same
 	// `parquetBackend(r2Storage(r2))` the api worker uses keeps the
 	// type happy without pulling in more machinery.
+	traceLog('build pyramid');
 	const pyramid = pyramidFromConfig(AVAIL_PYRAMID_CONFIG, parquetBackend(r2Storage(r2)));
 	const shardIndex = new D1ShardIndex(db);
 
 	// Diff: what does the min-cover ladder declare over [genesis, now],
 	// minus what's already in D1?
 	const range = { from: AVAIL_GENESIS, to: now };
+	traceLog('listMissingShards start');
 	let missing = await listMissingShards(pyramid, PYRAMID_NAME, shardIndex, range);
+	traceLog(`listMissingShards done: ${missing.length} raw missing`);
 	// Apply user filters.
 	if (tierFilter) missing = missing.filter((m) => tierFilter.has(m.tier));
 	if (shardDurFilter) missing = missing.filter((m) => shardDurFilter.has(m.shardDur));
@@ -672,6 +682,7 @@ export async function converge(
 	// consumers (see `sortMissing`).
 	missing.sort(sortMissing);
 	const totalMissing = missing.length;
+	traceLog(`filtered+sorted: ${totalMissing} shards to attempt`);
 
 	// Enumerate the full outer expected set per tier — feeds strict
 	// cascade in `writeShard`: for a target `T`, source picks come from
@@ -681,11 +692,16 @@ export async function converge(
 	// `expected_by_tier` threading in `materialize.py:source_long_for_gap`).
 	const expectedByTier: Map<string, ExpectedShard[]> = new Map();
 	if (!dryRun) {
-		for (const e of listExpectedShards(pyramid, range)) {
+		traceLog('listExpectedShards start');
+		const allExpected = listExpectedShards(pyramid, range);
+		traceLog(`listExpectedShards done: ${allExpected.length} total expected`);
+		for (const e of allExpected) {
 			let bucket = expectedByTier.get(e.tier);
 			if (!bucket) { bucket = []; expectedByTier.set(e.tier, bucket); }
 			bucket.push(e);
 		}
+		const perTier = Array.from(expectedByTier.entries()).map(([t, es]) => `${t}=${es.length}`).join(' ');
+		traceLog(`expectedByTier: ${perTier}`);
 	}
 
 	const outOfBudget = (): 'time' | 'ops' | null => {
@@ -725,11 +741,15 @@ export async function converge(
 			continue;
 		}
 
+		traceLog(`writeShard start: ${shard.key}`);
+		const preWrite = Date.now();
 		const r = await writeShard(
 			r2, await getLuc(), shard.tier, shard.shardDur as Duration,
 			shard.periodStart, shard.effectiveStart, shard.effectiveEnd,
 			expectedByTier,
 		);
+		const writeMs = Date.now() - preWrite;
+		traceLog(`writeShard done: ${shard.key} status=${r.status} in=${r.inputsPresent}/${r.inputsExpected} bytes=${r.bytes ?? 0} rows=${r.rows ?? 0} in ${writeMs}ms`);
 		results.push(r);
 		stats[r.status] = (stats[r.status] ?? 0) + 1;
 
