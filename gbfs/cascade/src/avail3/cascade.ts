@@ -140,23 +140,56 @@ const TIER_BIN_MIN: Record<string, number> = Object.fromEntries(
 	}).map(([k, v]) => [k, durationToMin(v as Duration)])
 );
 
-/** /1m's shard ladder in ascending minutes — used to pick a source rung
- *  for non-/1m tiers' smallest rungs. */
-const ONE_M_RUNGS_MIN = LADDERS['1m']!.map((d) => durationToMin(d));
+// ─── Source tier map (strict cascade) ───────────────────────────────────
 
-/** Pick the largest /1m rung L such that L < shardDurMin AND L divides
- *  shardDurMin. Reads of `L`-sized shards span exactly `shardDurMin/L`
- *  shards and tile the [periodStart, periodStart+shardDurMin) window.
- *  Strict `<` to avoid the self-loop where target tier `/1m` at its
- *  largest rung would pick itself as a source. */
-function pickOneMSourceRung(shardDurMin: number): { sourceRungMin: number; sourceRungDur: Duration } {
-	for (let i = ONE_M_RUNGS_MIN.length - 1; i >= 0; i--) {
-		const r = ONE_M_RUNGS_MIN[i]!;
-		if (r < shardDurMin && shardDurMin % r === 0) {
-			return { sourceRungMin: r, sourceRungDur: LADDERS['1m']![i]! };
+/** Ordered tier names, finest → coarsest, matching LADDERS iteration
+ *  order. */
+const TIER_NAMES = Object.keys(LADDERS);
+
+/** For each target tier, the tier `T'` its cascade sources from — the
+ *  largest `T'` with `bin(T') < bin(T)` AND `bin(T) % bin(T') == 0`.
+ *  Bin-divisibility guarantees the target's floor-then-groupby rebin is
+ *  exact — a source bin that doesn't divide the target's would silently
+ *  smear source buckets across neighboring target bins (the
+ *  silent-corruption bug the strict-cascade rewrite fixed on the Python
+ *  side; see `specs/avail-v3-strict-cascade.md`).
+ *
+ *  `/1m` maps to `null` — it sources from the raw WAL (per-minute
+ *  parquets under `gbfs/avail/agg=1m/cons=1m/`), not from any other
+ *  tier. Note the current ladder yields these mappings:
+ *    /2m → /1m    /3m → /1m    /5m → /1m
+ *    /10m→ /5m    /15m→ /5m    /30m→ /15m
+ *    /1h → /30m   /2h → /1h    /3h → /1h
+ *    /6h → /3h    /12h→ /6h    /1d → /12h
+ *    /3d → /1d    /7d → /1d
+ *
+ *  Note `/7d`'s source is `/1d`, not `/3d` (7d % 3d ≠ 0). Same reason
+ *  `/2h` and `/5m` have no direct descendants in this ladder. */
+const SOURCE_TIER_FOR: Record<string, string | null> = (() => {
+	const out: Record<string, string | null> = {};
+	for (let i = 0; i < TIER_NAMES.length; i++) {
+		const t = TIER_NAMES[i]!;
+		const targetBin = TIER_BIN_MIN[t]!;
+		if (i === 0) { out[t] = null; continue; }
+		let src: string | null = null;
+		for (let j = i - 1; j >= 0; j--) {
+			const cand = TIER_NAMES[j]!;
+			const candBin = TIER_BIN_MIN[cand]!;
+			if (candBin < targetBin && targetBin % candBin === 0) { src = cand; break; }
 		}
+		if (src === null) {
+			throw new Error(`no bin-divisible source tier for ${t} in ladder`);
+		}
+		out[t] = src;
 	}
-	throw new Error(`no /1m rung strictly smaller than ${shardDurMin}min`);
+	return out;
+})();
+
+/** Public accessor. Returns null for `/1m` (raw WAL source), else the
+ *  strict-cascade source tier name. Throws for unknown tiers. */
+export function sourceTierFor(tier: string): string | null {
+	if (!(tier in SOURCE_TIER_FOR)) throw new Error(`unknown tier: ${tier}`);
+	return SOURCE_TIER_FOR[tier]!;
 }
 
 // ─── Source readers ─────────────────────────────────────────────────────
@@ -168,101 +201,6 @@ async function readRawMinute(r2: R2Bucket, t: Date): Promise<Record<string, unkn
 	const buf = await obj.arrayBuffer();
 	const file = { byteLength: buf.byteLength, slice: (s: number, e?: number) => buf.slice(s, e) };
 	return (await parquetReadObjects({ file })) as Record<string, unknown>[];
-}
-
-/** Priority-ordered `(sourceTier, sourceRungDur, sourceRungMin, n)`
- *  candidates for building a shard at `(targetTier, shardDurMin)`.
- *  Mirrors `ctbk/pyramid_cascade/materialize.py:enumerate_source_candidates`
- *  — the Python planner already proven on the fsck fill.
- *
- *  Order:
- *    1. Within-target-tier smaller rungs, largest-first (strictly smaller
- *       than target). Skipped for the smallest rung of the target tier.
- *    2. Previous tiers (coarsest-bin-first, i.e. tier-index descending),
- *       each tier's rungs largest-first. Only rungs whose duration
- *       divides `shardDurMin` are eligible.
- *
- *  Caller checks each candidate's shard-existence (D1 or R2 HEAD) and
- *  picks the first fully-populated one. */
-function priorityRungPairs(
-	targetTier: string,
-	shardDurMin: number,
-): Array<{ tier: string; rungDur: Duration; rungMin: number }> {
-	const out: Array<{ tier: string; rungDur: Duration; rungMin: number }> = [];
-	const targetRungs = LADDERS[targetTier];
-	if (!targetRungs) throw new Error(`unknown tier ${targetTier}`);
-	const tierNames = Object.keys(LADDERS);
-	const targetIdx = tierNames.indexOf(targetTier);
-
-	// 1. Within-target-tier smaller rungs, largest-first
-	for (let i = targetRungs.length - 1; i >= 0; i--) {
-		const r = targetRungs[i]!;
-		const rm = durationToMin(r);
-		if (rm >= shardDurMin) continue;
-		if (shardDurMin % rm !== 0) continue;
-		out.push({ tier: targetTier, rungDur: r, rungMin: rm });
-	}
-	// 2. Previous tiers (coarsest first), each rung largest-first
-	for (let prev = targetIdx - 1; prev >= 0; prev--) {
-		const prevTier = tierNames[prev]!;
-		const prevRungs = LADDERS[prevTier]!;
-		for (let j = prevRungs.length - 1; j >= 0; j--) {
-			const r = prevRungs[j]!;
-			const rm = durationToMin(r);
-			if (rm > shardDurMin) continue;
-			if (shardDurMin % rm !== 0) continue;
-			out.push({ tier: prevTier, rungDur: r, rungMin: rm });
-		}
-	}
-	return out;
-}
-
-/** For a target `(tier, shardDurMin, periodStart)`, walk priority pairs
- *  and pick the first candidate where every source-shard key is present
- *  on R2. Falls through to `/1m` fallback only if nothing coarser works —
- *  matches fsck's heterogeneous planner behavior.
- *
- *  Returns the picked candidate as (sourceTier, sourceRungDur, keys[]).
- *  HEAD-checks are done in parallel per candidate to bound latency. */
-async function pickSourceForShard(
-	r2: R2Bucket,
-	targetTier: string,
-	shardDurMin: number,
-	periodStart: Date,
-	effectiveStart: Date,
-	effectiveEnd: Date,
-): Promise<{ sourceTier: string; sourceRungDur: Duration; sourceRungMin: number; keys: string[] }> {
-	const effStartMs = effectiveStart.getTime();
-	const effEndMs = effectiveEnd.getTime();
-	for (const cand of priorityRungPairs(targetTier, shardDurMin)) {
-		const n = shardDurMin / cand.rungMin;
-		const keys: string[] = [];
-		for (let i = 0; i < n; i++) {
-			const startMs = periodStart.getTime() + i * cand.rungMin * 60_000;
-			const endMs = startMs + cand.rungMin * 60_000;
-			// Filter to sub-shards whose period intersects `[effectiveStart,
-			// effectiveEnd)`. For non-straddling targets this is a no-op.
-			if (endMs <= effStartMs || startMs >= effEndMs) continue;
-			keys.push(shardKey(cand.tier, cand.rungDur, new Date(startMs)));
-		}
-		if (keys.length === 0) continue;
-		const heads = await Promise.all(keys.map((k) => r2.head(k)));
-		if (heads.every((h) => h !== null)) {
-			return { sourceTier: cand.tier, sourceRungDur: cand.rungDur, sourceRungMin: cand.rungMin, keys };
-		}
-	}
-	// Fallback: /1m@X — largest /1m rung that divides. Matches the historic
-	// naive path; keys may 404 (pre-data or unwritten), read loop tolerates.
-	const { sourceRungMin, sourceRungDur } = pickOneMSourceRung(shardDurMin);
-	const n = shardDurMin / sourceRungMin;
-	const keys: string[] = [];
-	for (let i = 0; i < n; i++) {
-		const startMs = periodStart.getTime() + i * sourceRungMin * 60_000;
-		const endMs = startMs + sourceRungMin * 60_000;
-		if (endMs <= effStartMs || startMs >= effEndMs) continue;
-		keys.push(shardKey('1m', sourceRungDur, new Date(startMs)));
-	}
-	return { sourceTier: '1m', sourceRungDur, sourceRungMin, keys };
 }
 
 // ─── Per-shard writer ───────────────────────────────────────────────────
@@ -331,21 +269,156 @@ async function existingKeysWithSize(r2: R2Bucket, keys: string[]): Promise<Array
  *  a large max-rung of the prev tier. */
 const MAX_SOURCE_BYTES = 30 * 1024 * 1024;
 
-/** Unified writer. Reads from raw 1m@1m (when shardDur is the smallest
- *  rung of /1m) or from previously-written shards (coarser rungs +
- *  non-/1m tiers). Streams merged output straight through `ParquetWriter`
- *  — no intermediate `AvailV3Row[]` buffer, no output-cardinality
- *  aggregator; peak heap is bounded by one row-group's rows regardless
- *  of shard size (per specs/avail-v3-cascade-streaming.md Phase A). */
+/** /1m ladder rungs (ascending: 5min → 1d) — walked in `writeOneMShard`
+ *  to find the largest same-tier cover fully populated on R2. */
+const ONE_M_LADDER = LADDERS['1m']!;
+
+/** Raw ingest is only viable up to ~5 min of source rows on CFW —
+ *  post-LUC-expansion is ~15K rows/min × ~280 B/row ≈ 4.2 MB/min of JS
+ *  heap; anything past ~10 min blows the 128 MB isolate cap because the
+ *  ingest path buffers the whole `rows[]` before writing. Above this
+ *  the walk-down through the /1m ladder must find a same-tier cover,
+ *  else we bail with `no_inputs` for the next tick to retry. */
+const RAW_INGEST_MAX_MIN = 5;
+
+/** Cap concurrent stream iterators per writeShard call. Each iterator
+ *  keeps a `r2SlicedBuffer` cache (~24 MB peak) plus row-group state;
+ *  the 128 MB isolate cap forces us to bail on covers with too many
+ *  sources. Empirically survives up to ~30 sources under the small-
+ *  RG (`rg_size: 2048`) shards the pyramid emits. Above this we defer:
+ *  return `no_inputs` and rely on a coarser rung being written first
+ *  (either by an earlier tick, or by the Python fsck offline). */
+const MAX_STREAM_SOURCES = 30;
+
+/** Write a `/1m` shard.
+ *
+ *  Strict cascade prescribes "read raw WAL" for /1m (see Python-side
+ *  `materialize.py:source_long_for_gap`). On CFW's 128 MB isolate this
+ *  only fits for the smallest rung (`/1m@5min` = 5 raw minutes × ~4 MB
+ *  post-LUC = ~20 MB in-memory before write). For anything larger we
+ *  walk the /1m ladder largest-first to find a same-tier cover fully
+ *  populated on R2 — provably correct under monoid-associativity
+ *  because `/1m`'s bin (1 min) equals the source bin (1 min) — the merge
+ *  is a pure fold, not a rebin. Anti-goal-safe: HEAD-check-all-or-try-
+ *  next-rung means an incomplete cover never smuggles in a silently-
+ *  holed shard.
+ *
+ *  This IS the same-tier-smaller-rung reuse the strict-cascade
+ *  anti-goals prohibit for NON-/1m tiers, kept for /1m only because
+ *  (a) bins match so associativity holds, (b) `/1m@1d` from raw would
+ *  need 1440 raw GETs + a ~6 GB `rows[]` buffer — infeasible on CFW.
+ *  Python side reads raw for all /1m rungs (unbounded RAM). */
+async function writeOneMShard(
+	r2: R2Bucket,
+	luc: import('./luc').LucIndex,
+	shardDur: Duration,
+	shardDurMin: number,
+	periodStart: Date,
+	effStartMs: number,
+	effEndMs: number,
+	key: string,
+): Promise<WriteResult> {
+	const ladderIdx = ONE_M_LADDER.indexOf(shardDur);
+	if (ladderIdx < 0) throw new Error(`shardDur ${shardDur} not in /1m ladder`);
+
+	// Walk-down: try each smaller /1m rung largest-first. For each rung,
+	// HEAD-check the full cover; if all present AND under the source-count
+	// cap, source from it. If not, try the next smaller rung. Zero-
+	// allocation until we commit to a present cover.
+	for (let i = ladderIdx - 1; i >= 0; i--) {
+		const srcShardDur = ONE_M_LADDER[i]!;
+		const srcMin = durationToMin(srcShardDur);
+		const n = shardDurMin / srcMin;
+		const candidateKeys: string[] = [];
+		for (let j = 0; j < n; j++) {
+			const inputStartMs = periodStart.getTime() + j * srcMin * 60_000;
+			const inputEndMs = inputStartMs + srcMin * 60_000;
+			// Filter to sub-shards intersecting eff range — pre-genesis
+			// sub-shards will never exist and shouldn't count against
+			// `inputsExpected`.
+			if (inputEndMs <= effStartMs || inputStartMs >= effEndMs) continue;
+			candidateKeys.push(shardKey('1m', srcShardDur, new Date(inputStartMs)));
+		}
+		if (candidateKeys.length === 0) continue;
+		// Skip rungs whose cover would exceed the isolate's concurrent-
+		// iterator memory budget. Bail to next-smaller rung — wait, that's
+		// wrong. Smaller rung has MORE candidates. Bail to next-LARGER
+		// rung (already tried, skipped) means "give up and try raw".
+		// So `continue` here means "next iteration goes to the next
+		// smaller rung, which is worse" — hence break out and let the
+		// raw-ingest path handle it (or `no_inputs` if too big).
+		if (candidateKeys.length > MAX_STREAM_SOURCES) break;
+		const presentWithSize = await existingKeysWithSize(r2, candidateKeys);
+		if (presentWithSize.length !== candidateKeys.length) continue;
+
+		// Full cover found at this rung — commit.
+		const sourceBytes = presentWithSize.reduce((a, b) => a + b.size, 0);
+		if (sourceBytes > MAX_SOURCE_BYTES) {
+			return { status: 'too_large', key, inputsPresent: candidateKeys.length, inputsExpected: candidateKeys.length, estimatedRows: sourceBytes };
+		}
+		const estimatedRows = lucCellCount(luc) * shardDurMin;  // /1m bin=1min → N rows per cell
+		if (estimatedRows > MAX_OUTPUT_ROWS) {
+			return { status: 'too_large', key, inputsPresent: candidateKeys.length, inputsExpected: candidateKeys.length, estimatedRows };
+		}
+		const iters = presentWithSize.map((p) => streamShardRows(r2, p.key));
+		const merged = kwayMerge(iters, 0n);  // no rebin — same 1-min bin
+		const aggregated = aggregateStream(merged);
+		const clipped = clipDtRange(aggregated, BigInt(effStartMs), BigInt(effEndMs));
+		const { bytes, rows: written } = await writeShardStreaming(r2, key, clipped);
+		if (written === 0) return { status: 'empty', key, inputsPresent: candidateKeys.length, inputsExpected: candidateKeys.length };
+		return { status: 'wrote', key, bytes, rows: written, inputsPresent: candidateKeys.length, inputsExpected: candidateKeys.length };
+	}
+
+	// No same-tier cover found — raw ingest. Only viable up to
+	// `RAW_INGEST_MAX_MIN`; larger shards return `no_inputs` and rely
+	// on the next tick to write smaller /1m rungs first, which then
+	// enable walk-down.
+	const rawMinutes = Math.floor((effEndMs - effStartMs) / 60_000);
+	if (rawMinutes > RAW_INGEST_MAX_MIN) {
+		return { status: 'no_inputs', key, inputsPresent: 0, inputsExpected: rawMinutes };
+	}
+	let inputsPresent = 0;
+	const rows: AvailV3Row[] = [];
+	for (let ms = effStartMs; ms < effEndMs; ms += 60_000) {
+		const t = new Date(ms);
+		const raw = await readRawMinute(r2, t);
+		if (raw === null) continue;
+		inputsPresent++;
+		rows.push(...transformMinuteRows(raw, luc));
+	}
+	if (rows.length === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected: rawMinutes };
+	const { bytes, rows: written } = await writeShardRows(r2, key, rows);
+	return { status: 'wrote', key, bytes, rows: written, inputsPresent, inputsExpected: rawMinutes };
+}
+
+/** Unified writer. Strict tier-by-tier cascade (see
+ *  `specs/avail-v3-strict-cascade.md`):
+ *   - `/1m` shards source from the raw WAL (per-minute parquets under
+ *     `gbfs/avail/agg=1m/cons=1m/`). Optionally reuses same-tier
+ *     smaller-rung shards as a fast path — safe because `/1m`'s bin
+ *     equals the source bin (both 1 min), so the monoid-merge is exact.
+ *   - Non-`/1m` shards source EXACTLY from `sourceTierFor(tier)`'s
+ *     outer-fsck expected set (intersecting `[effectiveStart,
+ *     effectiveEnd)`). Bin-divisibility (guaranteed by
+ *     `SOURCE_TIER_FOR` construction) makes the target's floor-then-
+ *     groupby rebin exact.
+ *   - Uncovered ⇒ `no_inputs` with `inputsPresent < inputsExpected`
+ *     (caller's `fullyCovered` gate then skips `recordShard`, so the
+ *     next `converge()` retries once the source tier fills).
+ *
+ *  Streams merged output straight through `ParquetWriter` — no
+ *  intermediate `AvailV3Row[]` buffer, no output-cardinality aggregator;
+ *  peak heap is bounded by one row-group's rows regardless of shard size
+ *  (per specs/avail-v3-cascade-streaming.md Phase A). */
 async function writeShard(
 	r2: R2Bucket,
 	luc: import('./luc').LucIndex,
 	tier: string,
 	shardDur: Duration,
-	prevShardDur: Duration | null,
 	periodStart: Date,
 	effectiveStart: Date,
 	effectiveEnd: Date,
+	expectedByTier: Map<string, ExpectedShard[]>,
 ): Promise<WriteResult> {
 	const shardDurMin = durationToMin(shardDur);
 	const key = shardKey(tier, shardDur, periodStart);
@@ -354,84 +427,42 @@ async function writeShard(
 	const effStartMs = effectiveStart.getTime();
 	const effEndMs = effectiveEnd.getTime();
 
-	if (prevShardDur === null && tier === '1m') {
-		// /1m base case: read raw 1m@1m files for every minute in
-		// `[effectiveStart, effectiveEnd)`. For fully-in-range shards
-		// this is the whole `[periodStart, periodStart + shardDurMin)`;
-		// for genesis-straddling shards (e.g. `/1m@5min/2026-04-07T01-15`
-		// with genesis T01:16) it's just the intersecting sub-window.
-		// Bounded input (~5 min × ~19K post-LUC-expansion rows =
-		// ~95K rows for /1m@5min) — keep in-memory, stream through the writer.
-		const inputsExpected = Math.floor((effEndMs - effStartMs) / 60_000);
-		let inputsPresent = 0;
-		const rows: AvailV3Row[] = [];
-		for (let ms = effStartMs; ms < effEndMs; ms += 60_000) {
-			const t = new Date(ms);
-			const raw = await readRawMinute(r2, t);
-			if (raw === null) continue;
-			inputsPresent++;
-			rows.push(...transformMinuteRows(raw, luc));
-		}
-		if (rows.length === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
-		const { bytes, rows: written } = await writeShardRows(r2, key, rows);
-		return { status: 'wrote', key, bytes, rows: written, inputsPresent, inputsExpected };
+	if (tier === '1m') {
+		return writeOneMShard(r2, luc, shardDur, shardDurMin, periodStart,
+			effStartMs, effEndMs, key);
 	}
 
-	// Streaming source read: HEAD-check candidates, open one iterator per
-	// present key, k-way heap-merge into a sorted stream, single-bucket
-	// aggregate, write incrementally.
-	let sourceKeys: string[] = [];
-	let inputsExpected = 0;
-	let targetBinMs: bigint = 0n;
+	// Non-/1m: strict cascade. Source tier = `sourceTierFor(tier)`. Read
+	// the source tier's outer-fsck expected shards that intersect
+	// `[effectiveStart, effectiveEnd)`. Overshoot-safe: `kwayMerge` floors
+	// dt to the target bin, then downstream buckets outside `[eff*)` are
+	// naturally not requested by any target (and empty buckets don't
+	// stream). Pre-genesis source shards are `no_inputs` upstream so they
+	// won't be listed by `listExpectedShards`.
+	const srcTierName = sourceTierFor(tier);
+	if (srcTierName === null) throw new Error(`unreachable: non-/1m tier ${tier} has no source tier`);
+	const srcExpected = (expectedByTier.get(srcTierName) ?? [])
+		.filter((e) => e.effectiveEnd.getTime() > effStartMs && e.effectiveStart.getTime() < effEndMs);
 
-	// Try same-tier prev-rung first (fast path when it's populated —
-	// no rebinning needed, and under the boundary-fire regime that
-	// was the common case). If the prev-rung isn't on R2 (typical
-	// under min-cover, where trailing rungs aren't materialized for
-	// historical periods), fall through to `pickSourceForShard`'s
-	// heterogeneous cover chain, which walks priority-ordered
-	// candidates (within-tier smaller rungs → prev tiers → /1m
-	// fallback) and picks the first fully-populated set.
-	let usedSameTierPrev = false;
-	if (prevShardDur !== null) {
-		const prevShardDurMin = durationToMin(prevShardDur);
-		const expected = shardDurMin / prevShardDurMin;
-		const candidateKeys: string[] = [];
-		for (let i = 0; i < expected; i++) {
-			const inputStartMs = periodStart.getTime() + i * prevShardDurMin * 60_000;
-			const inputEndMs = inputStartMs + prevShardDurMin * 60_000;
-			// Filter to sub-shards intersecting effective range — for
-			// genesis-straddling targets, pre-genesis sub-shards will never
-			// exist and shouldn't count against `inputsExpected`.
-			if (inputEndMs <= effStartMs || inputStartMs >= effEndMs) continue;
-			candidateKeys.push(shardKey(tier, prevShardDur, new Date(inputStartMs)));
-		}
-		if (candidateKeys.length > 0) {
-			const heads = await Promise.all(candidateKeys.map((k) => r2.head(k)));
-			if (heads.every((h) => h !== null)) {
-				sourceKeys = candidateKeys;
-				inputsExpected = candidateKeys.length;
-				targetBinMs = 0n;
-				usedSameTierPrev = true;
-			}
-		}
+	const sourceKeys = srcExpected.map((e) => e.key);
+	const inputsExpected = sourceKeys.length;
+	if (inputsExpected === 0) {
+		// Nothing to source. Happens for pre-genesis shards whose eff range
+		// is fully clipped away, or when the outer fsck hasn't declared any
+		// source-tier expected shards intersecting our eff range (upstream
+		// bug — surface as `no_inputs` rather than silently building empty).
+		return { status: 'no_inputs', key, inputsPresent: 0, inputsExpected: 0 };
 	}
-
-	if (!usedSameTierPrev) {
-		// Fall back to heterogeneous cover (used by non-/1m smallest
-		// rungs and coarser rungs whose prev-rung isn't materialized).
-		// Rebin to this tier's bin — sources may come from a different
-		// tier with a finer bin.
-		const picked = await pickSourceForShard(r2, tier, shardDurMin, periodStart, effectiveStart, effectiveEnd);
-		sourceKeys = picked.keys;
-		inputsExpected = picked.keys.length;
-		const tierBinMin = TIER_BIN_MIN[tier]!;
-		targetBinMs = BigInt(tierBinMin * 60_000);
-	}
+	const targetBinMs: bigint = BigInt(TIER_BIN_MIN[tier]! * 60_000);
 
 	const presentWithSize = await existingKeysWithSize(r2, sourceKeys);
 	const inputsPresent = presentWithSize.length;
-	if (inputsPresent === 0) return { status: 'no_inputs', key, inputsPresent, inputsExpected };
+	if (inputsPresent < inputsExpected) {
+		// Strict cascade: source tier not complete-in-range yet. Skip this
+		// rung; caller's `fullyCovered` gate keeps D1 unchanged, and the
+		// next `converge()` call retries once source-tier fills.
+		return { status: 'no_inputs', key, inputsPresent, inputsExpected };
+	}
 
 	// Pre-flight OOM guard #1: output row count bounded by
 	// `unique_cells × bins_per_shard`. Rungs above the empirical CFW
@@ -456,9 +487,29 @@ async function writeShard(
 	const iters = presentWithSize.map((p) => streamShardRows(r2, p.key));
 	const merged = kwayMerge(iters, targetBinMs);
 	const aggregated = aggregateStream(merged);
-	const { bytes, rows: written } = await writeShardStreaming(r2, key, aggregated);
+	// Overshoot clip: source shards from the outer expected set may cover
+	// periods larger than our target (e.g. `/2m@10min` sourcing a `/1m@1d`
+	// shard that spans 1440 min instead of 10). Drop output rows outside
+	// `[effectiveStart, effectiveEnd)` before writing so the parquet
+	// contains only bins the shard's period claims to cover — mirrors
+	// Python's `_build_tier_shard`'s `dt < seg_to` (and `dt >= seg_from`)
+	// filter (see `specs/avail-v3-strict-cascade.md` §"Overshoot is safe").
+	const clipped = clipDtRange(aggregated, BigInt(effStartMs), BigInt(effEndMs));
+	const { bytes, rows: written } = await writeShardStreaming(r2, key, clipped);
 	if (written === 0) return { status: 'empty', key, inputsPresent, inputsExpected };
 	return { status: 'wrote', key, bytes, rows: written, inputsPresent, inputsExpected };
+}
+
+/** Drop rows whose `dt` falls outside `[fromMs, toMs)`. Passthrough
+ *  generator — see `writeShard`'s overshoot clip. */
+async function* clipDtRange(
+	rows: AsyncGenerator<AvailV3Row>,
+	fromMs: bigint,
+	toMs: bigint,
+): AsyncGenerator<AvailV3Row> {
+	for await (const row of rows) {
+		if (row.dt >= fromMs && row.dt < toMs) yield row;
+	}
 }
 
 // ─── Per-tick orchestration ─────────────────────────────────────────────
@@ -550,32 +601,25 @@ const AVAIL_PYRAMID_CONFIG: PyramidConfig = {
 	geo: { cellCol: 's2_cell', resolutions: [15, 14, 13, 12, 11, 10] },
 };
 
-/** Look up prev-rung shard_dur from the ladder for a given (tier, shardDur).
- *  Returns null if `shardDur` is the smallest rung of `tier` (in which
- *  case `writeShard` uses raw ingest for `/1m` or the heterogeneous
- *  cover chain for non-/1m). */
-function prevShardDurOf(tier: string, shardDur: Duration): Duration | null {
-	const ladder = LADDERS[tier];
-	if (!ladder) throw new Error(`unknown tier: ${tier}`);
-	const i = ladder.indexOf(shardDur);
-	if (i < 0) throw new Error(`shardDur ${shardDur} not in ${tier} ladder`);
-	return i === 0 ? null : ladder[i - 1]!;
-}
-
-/** Dependency sort for missing shards. Writes are safe iff every input
- *  a shard reads is either (a) already on R2 or (b) written earlier in
- *  the same pass. Smallest shard_dur first (within a tier, coarser rungs
- *  read finer rungs); across tiers, /1m first (raw-ingest sources); then
- *  by period_start ascending so a same-tier coarser rung's finer
- *  siblings land first when both are missing. */
+/** Dependency sort for missing shards under strict cascade. Non-/1m
+ *  shards source from `sourceTierFor(tier)`, so their source-tier
+ *  shards must materialize first — SOURCE TIER FIRST is the invariant.
+ *
+ *  Order:
+ *    1. Tier ascending (finest first). Under `SOURCE_TIER_FOR`, the
+ *       source tier is always finer-binned than the target — TIER_NAMES
+ *       is ordered finest → coarsest, so ascending idx = source before
+ *       consumer. (/1m first, /7d last.)
+ *    2. Within a tier, shard_dur ascending, then period_start ascending
+ *       — cosmetic within-tier ordering; no cross-shard dep within one
+ *       tier under strict cascade. */
 function sortMissing(a: ExpectedShard, b: ExpectedShard): number {
-	const tiers = Object.keys(LADDERS);
-	const ta = tiers.indexOf(a.tier);
-	const tb = tiers.indexOf(b.tier);
+	const ta = TIER_NAMES.indexOf(a.tier);
+	const tb = TIER_NAMES.indexOf(b.tier);
+	if (ta !== tb) return ta - tb;
 	const da = durationToMin(a.shardDur as Duration);
 	const db = durationToMin(b.shardDur as Duration);
 	if (da !== db) return da - db;
-	if (ta !== tb) return ta - tb;
 	return a.periodStart.getTime() - b.periodStart.getTime();
 }
 
@@ -629,6 +673,21 @@ export async function converge(
 	missing.sort(sortMissing);
 	const totalMissing = missing.length;
 
+	// Enumerate the full outer expected set per tier — feeds strict
+	// cascade in `writeShard`: for a target `T`, source picks come from
+	// `sourceTierFor(T)`'s outer expected shards intersecting the target's
+	// eff range. Same set the outer fill order materializes at the source
+	// tier, so we source from tiles that will exist (matching Python's
+	// `expected_by_tier` threading in `materialize.py:source_long_for_gap`).
+	const expectedByTier: Map<string, ExpectedShard[]> = new Map();
+	if (!dryRun) {
+		for (const e of listExpectedShards(pyramid, range)) {
+			let bucket = expectedByTier.get(e.tier);
+			if (!bucket) { bucket = []; expectedByTier.set(e.tier, bucket); }
+			bucket.push(e);
+		}
+	}
+
 	const outOfBudget = (): 'time' | 'ops' | null => {
 		if (results.length >= maxOps) return 'ops';
 		if (Date.now() - startedAt >= timeBudgetMs) return 'time';
@@ -666,10 +725,10 @@ export async function converge(
 			continue;
 		}
 
-		const prevShardDur = prevShardDurOf(shard.tier, shard.shardDur as Duration);
 		const r = await writeShard(
-			r2, await getLuc(), shard.tier, shard.shardDur as Duration, prevShardDur,
+			r2, await getLuc(), shard.tier, shard.shardDur as Duration,
 			shard.periodStart, shard.effectiveStart, shard.effectiveEnd,
+			expectedByTier,
 		);
 		results.push(r);
 		stats[r.status] = (stats[r.status] ?? 0) + 1;

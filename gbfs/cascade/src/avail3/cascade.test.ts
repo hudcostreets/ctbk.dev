@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest';
-import { LADDERS, shardKey } from './cascade';
+import { LADDERS, shardKey, sourceTierFor } from './cascade';
 
 const toMin = (d: string): number => {
 	const m = /^(\d+)(min|h|d)$/.exec(d)!;
@@ -43,6 +43,59 @@ describe('LADDERS', () => {
 		expect(LADDERS['1m']).toEqual([
 			'5min', '10min', '30min', '1h', '3h', '6h', '12h', '1d',
 		]);
+	});
+});
+
+describe('sourceTierFor (strict tier-by-tier cascade)', () => {
+	const TIER_BINS: Record<string, string> = {
+		'1m': '1min', '2m': '2min', '3m': '3min', '5m': '5min',
+		'10m': '10min', '15m': '15min', '30m': '30min',
+		'1h': '1h', '2h': '2h', '3h': '3h', '6h': '6h', '12h': '12h',
+		'1d': '1d', '3d': '3d', '7d': '7d',
+	};
+
+	test('/1m has no source tier (raw WAL)', () => {
+		expect(sourceTierFor('1m')).toBeNull();
+	});
+
+	test('every non-/1m tier has a source tier whose bin divides the target bin', () => {
+		// Bin-divisibility is the silent-corruption trap the strict-cascade
+		// rewrite fixed. `_preaggregate_to_tier_bin`'s floor+groupby misaligns
+		// buckets when source bin does not divide target bin.
+		for (const [tier, binStr] of Object.entries(TIER_BINS)) {
+			if (tier === '1m') continue;
+			const src = sourceTierFor(tier);
+			expect(src, `${tier} needs a source tier`).not.toBeNull();
+			const srcBinStr = TIER_BINS[src!]!;
+			const targetMin = toMin(binStr);
+			const srcMin = toMin(srcBinStr);
+			expect(srcMin, `${tier}(${binStr}) ← ${src}(${srcBinStr}): src bin must be strictly smaller`).toBeLessThan(targetMin);
+			expect(targetMin % srcMin, `${tier}(${binStr}) ← ${src}(${srcBinStr}): src bin must divide target bin`).toBe(0);
+		}
+	});
+
+	test('canonical source-tier map (per spec)', () => {
+		// Explicit map matches specs/avail-v3-strict-cascade.md §Design.
+		// Regression guard: if the ladder gains/loses a tier, this test
+		// forces a deliberate update rather than silent drift.
+		expect(sourceTierFor('2m')).toBe('1m');
+		expect(sourceTierFor('3m')).toBe('1m');
+		expect(sourceTierFor('5m')).toBe('1m');
+		expect(sourceTierFor('10m')).toBe('5m');
+		expect(sourceTierFor('15m')).toBe('5m');
+		expect(sourceTierFor('30m')).toBe('15m');
+		expect(sourceTierFor('1h')).toBe('30m');
+		expect(sourceTierFor('2h')).toBe('1h');
+		expect(sourceTierFor('3h')).toBe('1h');
+		expect(sourceTierFor('6h')).toBe('3h');
+		expect(sourceTierFor('12h')).toBe('6h');
+		expect(sourceTierFor('1d')).toBe('12h');
+		expect(sourceTierFor('3d')).toBe('1d');
+		expect(sourceTierFor('7d')).toBe('1d');  // NOT /3d — 7d % 3d != 0
+	});
+
+	test('unknown tier throws', () => {
+		expect(() => sourceTierFor('bogus')).toThrow(/unknown tier/);
 	});
 });
 
