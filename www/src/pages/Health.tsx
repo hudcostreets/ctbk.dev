@@ -37,23 +37,35 @@ interface TripdataHealth {
   recentMonths: string[]
   totalZips: number
 }
-interface PyramidShardStatus {
-  tier: string
+interface PyramidCoverRung {
   shardDur: string
-  shardCount: number
-  earliestPeriodStart: string | null
-  latestPeriodEnd: string | null
-  watermarkEnd: string | null
+  role: 'max' | 'dust'
+  expected: number
+  present: number
 }
-interface PyramidStatus {
+interface PyramidTierCoverStatus {
+  tier: string
+  bin: string
+  maxRung: string
+  rungs: PyramidCoverRung[]
+  totalExpected: number
+  totalPresent: number
+  complete: boolean
+  firstMissingPeriod: string | null
+  lastMaxBoundary: string
+  dustAgeSec: number
+  staleShardCount: number
+}
+interface PyramidCoverStatus {
   name: string
-  tiers: Array<{
-    tier: string
-    bin: string
-    shards: PyramidShardStatus[]
-  }>
+  genesis: string
+  now: string
+  tiers: PyramidTierCoverStatus[]
+  totalMissing: number
+  totalStale: number
+  allComplete: boolean
 }
-type PyramidsHealth = PyramidStatus[]
+type PyramidsHealth = PyramidCoverStatus[]
 interface HealthSnapshot {
   generatedAt: number
   feed: FeedHealth
@@ -274,7 +286,7 @@ function CompactionsSection({ compactions }: { compactions: CompactionHealth }) 
 function PyramidsSection({ pyramids }: { pyramids: PyramidsHealth | undefined }) {
   if (!pyramids || pyramids.length === 0) {
     return (
-      <Section title="Avail-v3 / Rides-v3 pyramids">
+      <Section title="Pyramid min-cover status">
         <div style={{ opacity: 0.6, fontSize: '0.9em' }}>
           No pyramid data — D1 unreachable or empty.
         </div>
@@ -282,59 +294,64 @@ function PyramidsSection({ pyramids }: { pyramids: PyramidsHealth | undefined })
     )
   }
   return (
-    <Section title="Avail-v3 / Rides-v3 pyramids">
-      {pyramids.map((p) => <PyramidGrid key={p.name} pyramid={p} />)}
-      <div style={{ marginTop: '0.4em', fontSize: '0.8em', opacity: 0.7 }}>
-        n = shard count · <span style={{ color: 'salmon' }}>∅</span> = no shards yet ·
-        <span style={{ color: 'rgba(127,127,127,0.4)' }}> ·</span> = no rung at this column
+    <Section title="Pyramid min-cover status">
+      {pyramids.map((p) => <PyramidCoverGrid key={p.name} pyramid={p} />)}
+      <div style={{ marginTop: '0.6em', fontSize: '0.8em', opacity: 0.7, lineHeight: 1.5 }}>
+        Equilibrium per tier = <em>min-cover</em> of{' '}
+        <code>[genesis, now)</code>: mostly max-rung tiles filling{' '}
+        <code>[genesis, floor(now, max_rung))</code>, plus a small "dust" of
+        finer-rung tiles filling <code>[floor(now, max_rung), now)</code>.
+        Every max-rung boundary, the CFW consolidates the current dust into
+        one new max-rung tile; the finer tiles it replaces become <em>stale</em>{' '}
+        (GC candidates, never re-enter the cover).
       </div>
     </Section>
   )
 }
 
-function PyramidGrid({ pyramid }: { pyramid: PyramidStatus }) {
-  // Union of all shard durs across tiers, ordered by their min duration.
-  const allDurs = new Set<string>()
-  pyramid.tiers.forEach((t) => t.shards.forEach((s) => allDurs.add(s.shardDur)))
-  const durs = Array.from(allDurs).sort((a, b) => durMin(a) - durMin(b))
-
-  const cellMap = new Map<string, PyramidShardStatus>()
-  pyramid.tiers.forEach((t) => t.shards.forEach((s) => cellMap.set(`${t.tier}|${s.shardDur}`, s)))
-
+function PyramidCoverGrid({ pyramid }: { pyramid: PyramidCoverStatus }) {
+  const genesisD = pyramid.genesis.slice(0, 10)
+  const nowD = pyramid.now.slice(0, 16).replace('T', ' ')
   return (
-    <div style={{ marginBottom: '1em' }}>
-      <div style={{ fontWeight: 600, marginBottom: '0.3em' }}>{pyramid.name}</div>
+    <div style={{ marginBottom: '1.2em' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.8em', marginBottom: '0.3em' }}>
+        <span style={{ fontWeight: 600, fontSize: '1.05em' }}>{pyramid.name}</span>
+        <StatusBadge complete={pyramid.allComplete} />
+        {pyramid.allComplete ? (
+          <span style={{ fontSize: '0.85em', opacity: 0.75 }}>
+            CFW is maintaining a full min-cover at every tier.
+          </span>
+        ) : (
+          <span style={{ fontSize: '0.85em', color: 'salmon' }}>
+            {pyramid.totalMissing} missing shards across{' '}
+            {pyramid.tiers.filter((t) => !t.complete).length} of {pyramid.tiers.length} tiers.
+          </span>
+        )}
+        {pyramid.totalStale > 0 && (
+          <span style={{ fontSize: '0.85em', opacity: 0.55 }}>
+            · {pyramid.totalStale} stale (GC)
+          </span>
+        )}
+      </div>
+      <div style={{ fontSize: '0.8em', opacity: 0.6, marginBottom: '0.4em' }}>
+        genesis <code>{genesisD}</code> · now <code>{nowD} UTC</code>
+      </div>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse', fontSize: '0.85em', fontVariantNumeric: 'tabular-nums' }}>
           <thead>
             <tr>
-              <th style={cellStyle('left')}>tier \ shard</th>
-              {durs.map((d) => <th key={d} style={cellStyle('center')}>{d}</th>)}
+              <th style={cellStyle('left')}>tier</th>
+              <th style={cellStyle('center')}>status</th>
+              <th style={cellStyle('right')}>max rung</th>
+              <th style={cellStyle('center')}>max present / expected</th>
+              <th style={cellStyle('left')}>dust (rung × present/expected)</th>
+              <th style={cellStyle('right')}>dust age</th>
+              <th style={cellStyle('right')}>stale</th>
+              <th style={cellStyle('left')}>first missing</th>
             </tr>
           </thead>
           <tbody>
-            {pyramid.tiers.map((t) => (
-              <tr key={t.tier}>
-                <td style={{ ...cellStyle('left'), fontWeight: 600 }}>/{t.tier}</td>
-                {durs.map((d) => {
-                  const s = cellMap.get(`${t.tier}|${d}`)
-                  if (s === undefined) {
-                    return <td key={d} style={cellStyle('center', 'rgba(127,127,127,0.25)')}>·</td>
-                  }
-                  if (s.shardCount === 0) {
-                    return <td key={d} style={cellStyle('center', 'salmon')} title="rung declared but no shards yet">∅</td>
-                  }
-                  const wmHint = s.watermarkEnd ? `watermark ${s.watermarkEnd.slice(0, 16)}` : ''
-                  const latestHint = s.latestPeriodEnd ? `latest ${s.latestPeriodEnd.slice(0, 16)}` : ''
-                  const title = [wmHint, latestHint].filter(Boolean).join(' · ')
-                  return (
-                    <td key={d} style={cellStyle('center')} title={title}>
-                      {s.shardCount}
-                    </td>
-                  )
-                })}
-              </tr>
-            ))}
+            {pyramid.tiers.map((t) => <PyramidTierRow key={t.tier} tier={t} />)}
           </tbody>
         </table>
       </div>
@@ -342,14 +359,70 @@ function PyramidGrid({ pyramid }: { pyramid: PyramidStatus }) {
   )
 }
 
-/** Parse a pyrmts Duration string (`5min`, `1h`, `1d`, `4320d`) to
- *  minutes. Used to sort shard-dur columns. */
-function durMin(d: string): number {
-  const m = /^(\d+)(min|h|d|y)$/.exec(d)
-  if (!m) return Number.MAX_SAFE_INTEGER
-  const n = Number(m[1])
-  const unit = m[2]
-  return unit === 'min' ? n : unit === 'h' ? n * 60 : unit === 'd' ? n * 1440 : n * 1440 * 365
+function PyramidTierRow({ tier }: { tier: PyramidTierCoverStatus }) {
+  const maxRung = tier.rungs.find((r) => r.role === 'max')
+  const dust = tier.rungs.filter((r) => r.role === 'dust')
+  const maxPresent = maxRung?.present ?? 0
+  const maxExpected = maxRung?.expected ?? 0
+  const maxOk = maxPresent === maxExpected
+  return (
+    <tr>
+      <td style={{ ...cellStyle('left'), fontWeight: 600 }}>/{tier.tier}</td>
+      <td style={cellStyle('center')}><StatusBadge complete={tier.complete} compact /></td>
+      <td style={cellStyle('right')}><code>{tier.maxRung}</code></td>
+      <td style={{ ...cellStyle('center'), color: maxOk ? undefined : 'salmon' }}>
+        {maxPresent} / {maxExpected}
+      </td>
+      <td style={cellStyle('left')}>
+        {dust.length === 0 ? (
+          <span style={{ opacity: 0.4 }}>—</span>
+        ) : (
+          dust.map((r, i) => (
+            <span key={r.shardDur} style={{ marginRight: i === dust.length - 1 ? 0 : '0.75em' }}>
+              <code>{r.shardDur}</code>{' '}
+              <span style={{ color: r.present === r.expected ? undefined : 'salmon' }}>
+                {r.present}/{r.expected}
+              </span>
+            </span>
+          ))
+        )}
+      </td>
+      <td style={cellStyle('right')} title={`last max boundary: ${tier.lastMaxBoundary.slice(0, 16).replace('T', ' ')} UTC`}>
+        {fmtDur(tier.dustAgeSec)}
+      </td>
+      <td style={{ ...cellStyle('right'), opacity: tier.staleShardCount === 0 ? 0.4 : 1 }}>
+        {tier.staleShardCount}
+      </td>
+      <td style={{ ...cellStyle('left'), color: tier.firstMissingPeriod ? 'salmon' : undefined, opacity: tier.firstMissingPeriod ? 1 : 0.4 }}>
+        {tier.firstMissingPeriod ? tier.firstMissingPeriod.slice(0, 16).replace('T', ' ') : '—'}
+      </td>
+    </tr>
+  )
+}
+
+function StatusBadge({ complete, compact }: { complete: boolean; compact?: boolean }) {
+  const color = complete ? '#5fbf5f' : 'salmon'
+  const symbol = complete ? '✓' : '✗'
+  return (
+    <span style={{
+      color,
+      fontWeight: 700,
+      fontSize: compact ? '1em' : '1.1em',
+    }}>{symbol}</span>
+  )
+}
+
+/** Format a duration in seconds as "1d 4h", "3h 12m", "42m", "13s". */
+function fmtDur(sec: number): string {
+  if (sec < 60) return `${sec}s`
+  const m = Math.floor(sec / 60)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  const mm = m % 60
+  if (h < 24) return mm > 0 ? `${h}h ${mm}m` : `${h}h`
+  const d = Math.floor(h / 24)
+  const hh = h % 24
+  return hh > 0 ? `${d}d ${hh}h` : `${d}d`
 }
 
 function CascadeSection({ cascade }: { cascade: CascadeHealth }) {

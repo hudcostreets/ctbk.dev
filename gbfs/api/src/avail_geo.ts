@@ -92,6 +92,12 @@ export const TIERS: Tier[] = [
 const KEY_TEMPLATE = 'avail-v3/{tier}/{shard}/{period}.parquet';
 const RESOLUTIONS = [15, 14, 13, 12, 11, 10];
 
+/** avail-v3 genesis: earliest 5-min-aligned UTC timestamp intersecting any
+ *  materialized shard. Used by the /health min-cover computation. Keep in
+ *  sync with `gbfs/cascade/src/avail3/cascade.ts` — same value must hold on
+ *  both workers so cover math agrees on the closed-history region. */
+export const AVAIL_GENESIS = new Date('2026-04-07T01:15:00Z');
+
 function makeBaseProps(bucket: R2Bucket): Omit<GeoPyramid, 'dims'> {
 	return {
 		storage: parquetBackend(r2Storage(bucket)),
