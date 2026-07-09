@@ -39,10 +39,28 @@ describe('LADDERS', () => {
 	test('/1m ladder matches api worker tier config', () => {
 		// Labels MUST match pyrmts Duration strings the api worker uses for
 		// `Tier.shards`. Drift here means the cascade writes paths the api
-		// worker can't find.
+		// worker can't find. Capped at N≤960 (max /1m rung = 12h = 720 min).
 		expect(LADDERS['1m']).toEqual([
-			'5min', '10min', '30min', '1h', '3h', '6h', '12h', '1d',
+			'5min', '10min', '30min', '1h', '3h', '6h', '12h',
 		]);
+	});
+
+	test('every rung has N = shardDur / tierBin ≤ 960', () => {
+		// Cap so each writeShard call fits under CFW's 30s CPU budget.
+		// See specs/avail-v3-strict-cascade.md and configs/pyramids/avail.yaml.
+		const TIER_BINS: Record<string, string> = {
+			'1m': '1min', '2m': '2min', '3m': '3min', '5m': '5min',
+			'10m': '10min', '15m': '15min', '30m': '30min',
+			'1h': '1h', '2h': '2h', '3h': '3h', '6h': '6h', '12h': '12h',
+			'1d': '1d', '3d': '3d', '7d': '7d',
+		};
+		for (const [tier, ladder] of Object.entries(LADDERS)) {
+			const binMin = toMin(TIER_BINS[tier]!);
+			for (const shardDur of ladder) {
+				const n = toMin(shardDur) / binMin;
+				expect(n, `${tier}@${shardDur}: N=${n} > 960`).toBeLessThanOrEqual(960);
+			}
+		}
 	});
 });
 
