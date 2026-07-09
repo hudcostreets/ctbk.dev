@@ -38,6 +38,7 @@ import {
 } from 'pyrmts';
 import { getLucIndex } from './luc';
 import {
+	sortRows,
 	transformMinuteRows,
 	type AvailV3Row,
 } from './transform';
@@ -277,10 +278,12 @@ const MAX_SOURCE_BYTES = 30 * 1024 * 1024;
  *     expected shards intersecting `[effectiveStart, effectiveEnd)`.
  *     Bin-divisibility guaranteed by `SOURCE_TIER_FOR` construction —
  *     the target's floor-then-groupby rebin is exact.
- *   - Every larger rung sources from the same tier's immediately-
- *     previous rung × k (where k = shardDur / prev_shardDur ≤ 3 under
- *     the SUF≤3 ladder). Monoid-associative merge; no rebin (same
- *     tier-bin).
+ *   - Every larger rung consolidates the same tier's dust: a greedy
+ *     largest-first tiling of the period from EXISTING finer same-tier
+ *     shards, with residual holes filled from the tier's upstream
+ *     source (raw WAL for `/1m`, `sourceTierFor` cover shards
+ *     otherwise). See `writeSameTierCascade` for why a rigid
+ *     prev-rung × k source set wedges.
  *
  *  All non-raw paths stream: `streamShardRows` × k → `kwayMerge` →
  *  `aggregateStream` → `clipDtRange` (overshoot-safe) → `writeShardStreaming`.
@@ -295,7 +298,7 @@ const MAX_SOURCE_BYTES = 30 * 1024 * 1024;
  *  no single shard's output exceeds ~17s wall clock — safely under the
  *  CFW 30s CPU cap. Shards above `N=960` don't exist in the ladder;
  *  offline `ctbk pyramid-cascade` on `e` picks up any theoretical need. */
-async function writeShard(
+export async function writeShard(
 	r2: R2Bucket,
 	luc: import('./luc').LucIndex,
 	tier: string,
@@ -325,10 +328,32 @@ async function writeShard(
 			effStartMs, effEndMs, key, expectedByTier);
 	}
 
-	// Larger rung: same-tier immediately-previous rung × k.
-	const prevShardDur = ladder[rungIdx - 1]!;
-	return writeSameTierCascade(r2, luc, tier, shardDur, shardDurMin,
-		prevShardDur, periodStart, effStartMs, effEndMs, key);
+	// Larger rung: consolidate the tier's dust (existing finer shards +
+	// upstream hole-fill).
+	return writeSameTierCascade(r2, luc, tier, shardDurMin,
+		ladder.slice(0, rungIdx), effStartMs, effEndMs, key, expectedByTier);
+}
+
+/** Read + LUC-expand raw per-minute parquets over `[startMs, endMs)`.
+ *  Buffers all rows (~1 MB per raw minute post-LUC) — callers cap the
+ *  range (`MAX_RAW_FILL_MIN` for hole-fill; the smallest /1m rung for
+ *  `writeRawIngest`). */
+async function readRawRows(
+	r2: R2Bucket,
+	luc: import('./luc').LucIndex,
+	startMs: number,
+	endMs: number,
+): Promise<{ rows: AvailV3Row[]; present: number; expected: number }> {
+	const expected = Math.floor((endMs - startMs) / 60_000);
+	let present = 0;
+	const rows: AvailV3Row[] = [];
+	for (let ms = startMs; ms < endMs; ms += 60_000) {
+		const raw = await readRawMinute(r2, new Date(ms));
+		if (raw === null) continue;
+		present++;
+		rows.push(...transformMinuteRows(raw, luc));
+	}
+	return { rows, present, expected };
 }
 
 /** `/1m@<smallest>` from raw per-minute JSON parquets. Bounded to the
@@ -341,20 +366,12 @@ async function writeRawIngest(
 	effEndMs: number,
 	key: string,
 ): Promise<WriteResult> {
-	const rawMinutes = Math.floor((effEndMs - effStartMs) / 60_000);
-	let inputsPresent = 0;
-	const rows: AvailV3Row[] = [];
-	for (let ms = effStartMs; ms < effEndMs; ms += 60_000) {
-		const raw = await readRawMinute(r2, new Date(ms));
-		if (raw === null) continue;
-		inputsPresent++;
-		rows.push(...transformMinuteRows(raw, luc));
-	}
+	const { rows, present, expected } = await readRawRows(r2, luc, effStartMs, effEndMs);
 	if (rows.length === 0) {
-		return { status: 'no_inputs', key, inputsPresent, inputsExpected: rawMinutes };
+		return { status: 'no_inputs', key, inputsPresent: present, inputsExpected: expected };
 	}
 	const { bytes, rows: written } = await writeShardRows(r2, key, rows);
-	return { status: 'wrote', key, bytes, rows: written, inputsPresent, inputsExpected: rawMinutes };
+	return { status: 'wrote', key, bytes, rows: written, inputsPresent: present, inputsExpected: expected };
 }
 
 /** Non-`/1m` smallest rung. Cross-tier cascade from
@@ -386,38 +403,190 @@ async function writeCrossTierSmallest(
 		effStartMs, effEndMs, key);
 }
 
-/** Same-tier immediately-previous-rung cascade. `k = shardDur /
- *  prevShardDur ∈ {2, 3}` under the SUF≤3 ladder. Same-bin merge (no
- *  rebin, targetBinMs=0n). */
+/** Max tiles (existing-shard sources + holes) a single same-tier
+ *  consolidation will attempt. Steady-state consolidations need ≤ ~12
+ *  (one dust shard per ladder step, ×2 for the boundary walk); anything
+ *  bigger means a degraded/holey period that the offline fsck on `e`
+ *  should rebuild instead (unbounded RAM, fused stages). */
+const MAX_TILES = 32;
+
+/** Max raw-WAL minutes a `/1m` consolidation will buffer to fill holes.
+ *  Raw rows are ~1 MB/min post-LUC (buffered + sorted before merge), so
+ *  30 min ≈ 30 MB — safe in the 128 MB isolate. Steady-state holes are
+ *  exactly one finest-rung width (5 min); the cap only matters after an
+ *  outage, where anything beyond it defers to the offline fsck. */
+const MAX_RAW_FILL_MIN = 30;
+
+/** Greedy largest-first tiling of `[effStartMs, effEndMs)` from EXISTING
+ *  same-tier shards at rungs finer than the target. At each position,
+ *  probe rungs largest-first (aligned + fitting) and take the first that
+ *  exists; positions with no existing shard become holes (advanced at
+ *  finest-rung granularity, coalesced).
+ *
+ *  Exported for tests; `probe` abstracts `r2.head(shardKey(...))`. */
+export async function planDustTiling(
+	finerRungs: readonly Duration[],
+	effStartMs: number,
+	effEndMs: number,
+	probe: (rung: Duration, startMs: number) => Promise<{ size: number } | null>,
+): Promise<{ tiles: Array<{ rung: Duration; startMs: number; endMs: number; size: number }>; holes: Array<[number, number]>; aborted: boolean }> {
+	const rungMs = finerRungs.map((r) => durationToMin(r) * 60_000);
+	const finestMs = rungMs[0]!;
+	const tiles: Array<{ rung: Duration; startMs: number; endMs: number; size: number }> = [];
+	const holes: Array<[number, number]> = [];
+	let cur = effStartMs;
+	while (cur < effEndMs) {
+		if (tiles.length + holes.length > MAX_TILES) {
+			return { tiles, holes, aborted: true };
+		}
+		let matched = false;
+		for (let i = finerRungs.length - 1; i >= 0; i--) {
+			const rMs = rungMs[i]!;
+			if (cur % rMs !== 0) continue;
+			if (cur + rMs > effEndMs) continue;
+			const head = await probe(finerRungs[i]!, cur);
+			if (head === null) continue;
+			tiles.push({ rung: finerRungs[i]!, startMs: cur, endMs: cur + rMs, size: head.size });
+			cur += rMs;
+			matched = true;
+			break;
+		}
+		if (!matched) {
+			// Hole: advance to the next finest-rung boundary (or effEnd).
+			const next = Math.min(effEndMs, (Math.floor(cur / finestMs) + 1) * finestMs);
+			const last = holes[holes.length - 1];
+			if (last && last[1] === cur) last[1] = next;
+			else holes.push([cur, next]);
+			cur = next;
+		}
+	}
+	return { tiles, holes, aborted: false };
+}
+
+/** Same-tier consolidation: "produce the max-rung shard from the dust".
+ *
+ *  Sources = greedy largest-first tiling of the period from EXISTING
+ *  finer same-tier shards, holes filled from the tier's upstream source
+ *  (raw WAL for `/1m`, `sourceTierFor`'s cover shards for `/Nm`).
+ *
+ *  Why not prev-rung × k: the min-cover dust never materializes the
+ *  LAST constituent of a closing rung — it closes and is superseded in
+ *  the same tick (e.g. `5min@00:35` for `10min@00:30`, `30min@00:30`
+ *  for `1h@00:00`), so it's never in any tick's missing list and never
+ *  written. A rigid prev-rung × k source set therefore wedges with
+ *  `no_inputs` at every consolidation boundary — the 2026-07-09 prod
+ *  incident (every tier's dust column stuck from midnight on). In
+ *  steady state the tiling leaves exactly ONE hole of finest-rung
+ *  width at the period's tail; hole-fill closes it.
+ *
+ *  Same tier → same bin, so tiled sources merge with no rebin (the
+ *  `targetBinMs` floor is an identity on already-aligned rows); hole
+ *  fills from the source tier rebin exactly (bin-divisibility). */
 async function writeSameTierCascade(
 	r2: R2Bucket,
 	luc: import('./luc').LucIndex,
 	tier: string,
-	shardDur: Duration,
 	shardDurMin: number,
-	prevShardDur: Duration,
-	periodStart: Date,
+	finerRungs: readonly Duration[],
 	effStartMs: number,
 	effEndMs: number,
 	key: string,
+	expectedByTier: Map<string, ExpectedShard[]>,
 ): Promise<WriteResult> {
-	const prevMin = durationToMin(prevShardDur);
-	const k = shardDurMin / prevMin;
-	const sourceKeys: string[] = [];
-	for (let i = 0; i < k; i++) {
-		const inputStartMs = periodStart.getTime() + i * prevMin * 60_000;
-		const inputEndMs = inputStartMs + prevMin * 60_000;
-		if (inputEndMs <= effStartMs || inputStartMs >= effEndMs) continue;
-		sourceKeys.push(shardKey(tier, prevShardDur, new Date(inputStartMs)));
+	let { tiles, holes } = await planDustTiling(
+		finerRungs, effStartMs, effEndMs,
+		(rung, startMs) => r2.head(shardKey(tier, rung, new Date(startMs))),
+	);
+	if (tiles.length + holes.length > MAX_TILES) {
+		// Fragmented dust (outage/wedge scar): a tiling this shredded
+		// costs more than it saves. Fall back to treating the WHOLE
+		// period as one hole — pure upstream fill (fewer, larger
+		// sources); the byte/row guards below still bound the work.
+		// For /1m this defers to the raw cap (offline fsck territory
+		// beyond MAX_RAW_FILL_MIN); for /Nm the source tier's cover is
+		// exactly the right-sized read.
+		tiles = [];
+		holes = [[effStartMs, effEndMs]];
 	}
-	if (sourceKeys.length === 0) {
-		return { status: 'no_inputs', key, inputsPresent: 0, inputsExpected: 0 };
+
+	// Hole-fill sources. `/1m` reads raw WAL (bounded); `/Nm` reads the
+	// source tier's current min-cover shards intersecting each hole,
+	// clipped to the hole so they can't double-count rows the same-tier
+	// tiles already cover.
+	const holeMs = holes.reduce((a, [s, e]) => a + (e - s), 0);
+	let inputsExpected = tiles.length;
+	let inputsPresent = tiles.length;
+	const holeIters: AsyncGenerator<AvailV3Row>[] = [];
+	let holeFillBytes = 0;
+
+	if (holeMs > 0) {
+		if (tier === '1m') {
+			const holeMin = holeMs / 60_000;
+			if (holeMin > MAX_RAW_FILL_MIN) {
+				return { status: 'no_inputs', key, inputsPresent, inputsExpected: inputsExpected + holes.length };
+			}
+			for (const [s, e] of holes) {
+				const { rows, present, expected } = await readRawRows(r2, luc, s, e);
+				inputsExpected += expected;
+				inputsPresent += present;
+				if (present < expected) {
+					return { status: 'no_inputs', key, inputsPresent, inputsExpected };
+				}
+				const sorted = sortRows(rows);
+				holeIters.push((async function* () { for (const r of sorted) yield r; })());
+			}
+		} else {
+			const srcTierName = sourceTierFor(tier);
+			if (srcTierName === null) throw new Error(`unreachable: non-/1m tier ${tier} has no source tier`);
+			const srcExpected = expectedByTier.get(srcTierName) ?? [];
+			for (const [s, e] of holes) {
+				const covering = srcExpected.filter(
+					(x) => x.effectiveEnd.getTime() > s && x.effectiveStart.getTime() < e);
+				inputsExpected += Math.max(1, covering.length);
+				if (covering.length === 0) {
+					return { status: 'no_inputs', key, inputsPresent, inputsExpected };
+				}
+				const present = await existingKeysWithSize(r2, covering.map((x) => x.key));
+				inputsPresent += present.length;
+				if (present.length < covering.length) {
+					return { status: 'no_inputs', key, inputsPresent, inputsExpected };
+				}
+				holeFillBytes += present.reduce((a, b) => a + b.size, 0);
+				for (const p of present) {
+					holeIters.push(clipDtRange(streamShardRows(r2, p.key), BigInt(s), BigInt(e)));
+				}
+			}
+		}
 	}
-	// Same tier → same bin → no rebin needed (targetBinMs=0n; `shardDur`
-	// unused as `_shardDur` here but kept for future symmetry).
-	void shardDur;
-	return streamMerge(r2, luc, tier, shardDurMin, sourceKeys, 0n,
-		effStartMs, effEndMs, key);
+
+	if (tiles.length === 0 && holeIters.length === 0) {
+		return { status: 'no_inputs', key, inputsPresent: 0, inputsExpected };
+	}
+
+	// OOM/CPU guards — same rationale as `streamMerge`.
+	const tierBinMin = TIER_BIN_MIN[tier]!;
+	const estimatedRows = lucCellCount(luc) * (shardDurMin / tierBinMin);
+	if (estimatedRows > MAX_OUTPUT_ROWS) {
+		return { status: 'too_large', key, inputsPresent, inputsExpected, estimatedRows };
+	}
+	const sourceBytes = tiles.reduce((a, t) => a + t.size, 0) + holeFillBytes;
+	if (sourceBytes > MAX_SOURCE_BYTES) {
+		return { status: 'too_large', key, inputsPresent, inputsExpected, estimatedRows: sourceBytes };
+	}
+
+	const iters = [
+		...tiles.map((t) => streamShardRows(r2, shardKey(tier, t.rung, new Date(t.startMs)))),
+		...holeIters,
+	];
+	// Floor to the tier bin: identity for same-tier tiles (already
+	// aligned), exact rebin for cross-tier hole fills.
+	const targetBinMs = BigInt(tierBinMin * 60_000);
+	const merged = kwayMerge(iters, targetBinMs);
+	const aggregated = aggregateStream(merged);
+	const clipped = clipDtRange(aggregated, BigInt(effStartMs), BigInt(effEndMs));
+	const { bytes, rows: written } = await writeShardStreaming(r2, key, clipped);
+	if (written === 0) return { status: 'empty', key, inputsPresent, inputsExpected };
+	return { status: 'wrote', key, bytes, rows: written, inputsPresent, inputsExpected };
 }
 
 /** Shared streaming-merge tail: HEAD-check sources, guard against
