@@ -108,6 +108,30 @@ Expect `totalMissing` to drop to just the trailing edge (single-digit
 shards representing recently-closed rungs the CFW cron will pick up
 on the next tick).
 
+## Outcome (2026-07-09)
+
+Ran `ctbk pyramid-cascade -r 2026-04-07/2026-07-09 --fsck --fill` on
+`e` in ~7h wall clock. Fill summary: **wrote=423, no_inputs=3,
+errors=0**. The three `no_inputs` are pre-genesis notional shards
+(`/3d@192d 2025-09-21`, `/3d@384d 2024-09-02`, `/7d@1792d
+2019-01-24`) — expected; their inputs predate `AVAIL_GENESIS =
+2026-04-07`.
+
+Applied `tmp/fsck-d1-record.sql` (846 statements) to prod D1 via
+`wrangler d1 execute ctbk-gbfs --remote --file …` (31 ms).
+
+Verify against CFW returned `totalMissing = 22`, all
+`status = "no_inputs"`, all at the current /5m tick's trailing edge
+(e.g. `/1m/10min/2026-07-09T13-{00,10}.parquet`, `/1m/1h/T12.parquet`).
+Higher than the spec's "single-digit" estimate but same character —
+`totalMissing` at boundary ticks scales with how many rungs have a
+boundary at that tick, not with how many shards are backfill-missing.
+Zero `error` / `barrier_missing` results — the historical ladder is
+dense.
+
+Independent verification via a second Python `--fsck` after fill:
+same 3 pre-genesis short-circuits, no other gaps.
+
 ## Related
 
 - `specs/avail-v3-strict-cascade.md` — the design bf1db714 landed
