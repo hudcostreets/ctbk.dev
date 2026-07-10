@@ -38,7 +38,7 @@ import { parquetBackend, CachedShardIndex, type ShardIndex } from 'pyrmts';
 import { r2Storage, D1ShardIndex } from 'pyrmts-cfw';
 import {
 	filterCellsAndRes,
-	planGeoQuery,
+	planGeoQueryFromInventory,
 	s2Index,
 	type BBox,
 	type GeoPyramid,
@@ -436,11 +436,25 @@ async function serveGeoReduced(
 		? Math.min(userBinBudget, rangeMinutes - 1)
 		: userBinBudget;
 
+	// Inventory-driven planning (min-cover-aware): reads pick tiles from
+	// the D1 `pyramid_shards` inventory rather than synthesizing keys from
+	// ladder × watermarks — under min-cover maintenance a rung's watermark
+	// advancing does NOT imply older tiles at that rung still exist (they
+	// get consolidated into coarser rungs; "last constituents" never
+	// materialize at all). Watermark-synthesized plans 404'd on phantom
+	// keys like `avail-v3/15m/1h/2026-07-09T23.parquet`. See pyrmts
+	// `specs/done/inventory-driven-read-walk.md`.
+	//
+	// The windowed listShards is a per-request D1 query (pushdown WHERE on
+	// the (pyramid, tier, period_start) index); D1 errors propagate as
+	// 500s — an empty inventory would silently serve empty charts.
+	const registeredShards = await getShardIndex(db).listShards(PYRAMID_NAME, { range: { from, to } });
+
 	// `outputCells: {res, cells}` path bypasses `pickResolution`. See
 	// `pyrmts/specs/done/plan-geo-query-precomputed-cover.md`.
 	const plan = userCells !== null
-		? planGeoQuery(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells }, watermarks, earliestPerShard })
-		: planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox: bbox!, cellBudget, watermarks, earliestPerShard });
+		? planGeoQueryFromInventory(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells }, watermarks, earliestPerShard }, registeredShards)
+		: planGeoQueryFromInventory(pyramid, { range: { from, to }, binBudget, bbox: bbox!, cellBudget, watermarks, earliestPerShard }, registeredShards);
 
 	// Push the cell list down as an RG-prune filter on the cellCol. For
 	// `(cell, dt)`-sorted shards this lets hyparquet skip whole row groups
