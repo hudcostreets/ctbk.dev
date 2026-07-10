@@ -59,6 +59,7 @@
     "dev": "vite",
     "prebuild": "node scripts/gen-ymdgtb-index.js",
     "build": "vite build",
+    "postbuild": "node scripts/gen-station-stubs.js",
     "preview": "vite preview",
     "lint": "eslint .",
     "tc": "tsc",

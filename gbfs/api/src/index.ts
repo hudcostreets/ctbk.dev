@@ -1516,6 +1516,17 @@ export default {
 			}
 		}
 
+		// /api/stations/slugs — all slugged stations, for build-time og:image
+		// stub generation in www (one row per station page to emit).
+		if (url.pathname === '/api/stations/slugs') {
+			const { results } = await env.DB.prepare(
+				`SELECT slug, short_name, name FROM stations WHERE slug IS NOT NULL ORDER BY slug`
+			).all();
+			return jsonResponse({ stations: results }, env, {
+				headers: { 'Cache-Control': 'public, max-age=3600' },
+			});
+		}
+
 		// /api/stations/:id/info — accepts slug, UUID, or short_name
 		const infoMatch = url.pathname.match(/^\/api\/stations\/([^/]+)\/info$/);
 		if (infoMatch) {
