@@ -57,11 +57,20 @@ jobs:
         with:
           name: screenshots
           path: www/public/screenshots/
+      - name: Compose og:image mosaic
+        working-directory: www
+        # Recomposes `ctbk-og-mosaic.jpg` from the just-regenerated
+        # screenshots (map + 2 plots). Excluded from the change-gate below
+        # (like `ctbk-stations`) because the map render varies per run —
+        # gating on it would re-trigger forever. It still ships whenever a
+        # PLOT screenshot changes (monthly data updates), riding the same
+        # commit.
+        run: bash scripts/compose-og.sh
       - name: Push + re-run, if screenshots changed
         if: github.ref == 'refs/heads/www'
         id: screenshots
         run: |
-          if git diff --name-only -- www/public/screenshots | grep -v ctbk-stations; then
+          if git diff --name-only -- www/public/screenshots | grep -v -e ctbk-stations -e ctbk-og-mosaic; then
               git add www/public/screenshots
               git config --global user.name "GitHub Actions"
               git config --global user.email "github@actions"

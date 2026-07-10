@@ -1,8 +1,11 @@
 #!/bin/bash
 # Compose an og:image mosaic: dark stations map (left) + 2 stacked DM plots (right)
 # Layout: map fills left ~70%, 2 near-square plots on right ~30% with gap between.
-# Requires: ImageMagick (magick)
+# Requires: ImageMagick — v7 (`magick`) or v6 (`convert`, e.g. ubuntu GHA runners)
 set -e
+
+MAGICK="$(command -v magick || command -v convert)"
+magick() { "$MAGICK" "$@"; }
 
 cd "$(dirname "$0")/.."
 
