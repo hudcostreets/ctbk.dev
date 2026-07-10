@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>E 2 St &amp; 2 Ave — Citi Bike station | ctbk.dev</title>
+    <meta property="og:title" content="E 2 St &amp; 2 Ave — Citi Bike station | ctbk.dev" />
+    <meta property="og:description" content="Live availability + trip history for the E 2 St &amp; 2 Ave Citi Bike station." />
+    <meta property="og:image" content="https://ctbk-gbfs-api.ryan-0dc.workers.dev/og/s/e-2-st-2-ave.png" />
+    <meta property="og:url" content="https://ctbk.dev/s/e-2-st-2-ave" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <!-- Prevent FOUC: set theme and critical CSS before React loads -->
+    <script>
+      (function() {
+        // Check URL param first (?theme=light or ?theme=dark)
+        var params = new URLSearchParams(window.location.search);
+        var urlTheme = params.get('theme');
+        var theme = (urlTheme === 'light' || urlTheme === 'dark') ? urlTheme : localStorage.getItem('ctbk-theme') || 'system';
+        var actual = theme;
+        if (theme === 'system') {
+          actual = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        document.documentElement.setAttribute('data-theme', actual);
+      })();
+    </script>
+    <style>
+      :root {
+        --bg-primary: #f5f7fa;
+        --text-primary: #333333;
+      }
+      [data-theme="dark"] {
+        --bg-primary: #1a1a1a;
+        --text-primary: #e0e0e0;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background-color: var(--bg-primary);
+        color: var(--text-primary);
+      }
+    </style>
+    <script type="module" crossorigin src="/assets/index-CRwAD9uQ.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DMXyxu3t.css">
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- Cloudflare Web Analytics beacon is loaded conditionally from
+         `src/main.tsx` (prod-only) to avoid CORS noise on `localhost`
+         (Cloudflare's RUM endpoint rejects preflight from origins not
+         in the token's allowed domains). -->
+  </body>
+</html>
