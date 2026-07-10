@@ -159,12 +159,61 @@ describe('writeShard same-tier consolidation', () => {
 		expect(byCell('ab')).toEqual(expected);
 	});
 
-	test('/1m no_inputs when the hole has no raw data', async () => {
+	test('/1m old empty hole → ships tile-only (missed polls are final)', async () => {
+		// Raw minutes past RAW_FINALITY_MS that don't exist were missed
+		// polls and will never arrive — the rung must ship without them
+		// rather than wedge forever (prod: WAL minute 2026-07-10T14:58
+		// was never scraped; the strict present<expected check wedged
+		// `/1m@3h/2026-07-10T12` and every tier downstream of it).
 		const r2 = makeR2();
-		const S = ms('2026-07-09T00:30:00Z');
+		const S = ms('2026-07-09T00:30:00Z');  // historical → past finality
+		const tileRows = [0, 1, 2, 3, 4].map((i) => availRow('aa', S + i * MIN, { 5: 1 }));
+		await writeShardRows(r2 as never, shardKey('1m', '5min', new Date(S)), tileRows);
+		// No raw minutes at all for [00:35, 00:40).
+		const result = await writeShard(
+			r2 as never, lucStub, '1m', '10min',
+			new Date(S), new Date(S), new Date(S + 10 * MIN), new Map());
+		expect(result.status).toBe('wrote');
+		expect(result.inputsPresent).toBe(result.inputsExpected);
+		const written = await collect(streamShardRows(r2 as never, result.key));
+		expect(written.map((r) => [Number(r.dt - BigInt(S)) / MIN, r.bikes])).toEqual(
+			[0, 1, 2, 3, 4].map((m) => [m, '{"5":1}']),
+		);
+	});
+
+	test('/1m old hole with one missing raw minute → ships without it', async () => {
+		const r2 = makeR2();
+		const S = ms('2026-07-09T00:30:00Z');  // historical → past finality
+		const tileRows = [0, 1, 2, 3, 4].map((i) => availRow('aa', S + i * MIN, { 5: 1 }));
+		await writeShardRows(r2 as never, shardKey('1m', '5min', new Date(S)), tileRows);
+		// Raw minutes for [00:35, 00:40) except 00:38 (a missed poll).
+		for (const i of [5, 6, 7, 9]) {
+			putRawMinute(r2, new Date(S + i * MIN).toISOString(), 7);
+		}
+		const result = await writeShard(
+			r2 as never, lucStub, '1m', '10min',
+			new Date(S), new Date(S), new Date(S + 10 * MIN), new Map());
+		expect(result.status).toBe('wrote');
+		// 1 tile + 4 existing raw minutes; the vanished minute isn't counted.
+		expect(result.inputsExpected).toBe(5);
+		expect(result.inputsPresent).toBe(5);
+		const written = await collect(streamShardRows(r2 as never, result.key));
+		expect(written
+			.filter((r) => r.s2_cell === 'aa')
+			.map((r) => [Number(r.dt - BigInt(S)) / MIN, r.bikes])).toEqual([
+			...[0, 1, 2, 3, 4].map((m) => [m, '{"5":1}']),
+			...[5, 6, 7, 9].map((m) => [m, '{"7":1}']),  // no minute 8
+		]);
+	});
+
+	test('/1m recent hole with missing raw minute → no_inputs (poller may catch up)', async () => {
+		const r2 = makeR2();
+		// Period ending "now": the missing minutes are within the finality
+		// window, so the rung retries instead of shipping a holed shard.
+		const S = Math.floor(Date.now() / (10 * MIN)) * 10 * MIN - 10 * MIN;
 		await writeShardRows(r2 as never, shardKey('1m', '5min', new Date(S)),
 			[availRow('aa', S, { 5: 1 })]);
-		// No raw minutes for [00:35, 00:40).
+		// No raw minutes for [S+5min, S+10min).
 		const result = await writeShard(
 			r2 as never, lucStub, '1m', '10min',
 			new Date(S), new Date(S), new Date(S + 10 * MIN), new Map());
