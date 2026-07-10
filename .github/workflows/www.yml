@@ -65,7 +65,11 @@ jobs:
         # gating on it would re-trigger forever. It still ships whenever a
         # PLOT screenshot changes (monthly data updates), riding the same
         # commit.
-        run: bash scripts/compose-og.sh
+        run: |
+          # ubuntu-24.04 runner images dropped ImageMagick.
+          command -v magick >/dev/null || command -v convert >/dev/null \
+            || sudo apt-get install -y -qq imagemagick
+          bash scripts/compose-og.sh
       - name: Push + re-run, if screenshots changed
         if: github.ref == 'refs/heads/www'
         id: screenshots

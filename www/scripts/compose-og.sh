@@ -4,7 +4,11 @@
 # Requires: ImageMagick — v7 (`magick`) or v6 (`convert`, e.g. ubuntu GHA runners)
 set -e
 
-MAGICK="$(command -v magick || command -v convert)"
+MAGICK="$(command -v magick || command -v convert || true)"
+if [ -z "$MAGICK" ]; then
+  echo "compose-og: ImageMagick not found (need \`magick\` or \`convert\`)" >&2
+  exit 1
+fi
 magick() { "$MAGICK" "$@"; }
 
 cd "$(dirname "$0")/.."
