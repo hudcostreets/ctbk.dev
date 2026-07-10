@@ -569,13 +569,14 @@ export async function writeShardStreaming(
 		writer: mw,
 		schema: availV3Schema(),
 		codec: 'SNAPPY',
-		// Statistics allocate min/max value copies + null counts per
-		// column-chunk; disabling saves per-RG transient state at the cost
-		// of no min/max predicate push-down at read time. For avail-v3
-		// queries (dt-range, s2_cell equality) push-down doesn't help
-		// meaningfully — row-groups are sort-ordered by (s2_cell, dt) so
-		// callers use offset-index-driven scans, not stats.
-		statistics: false,
+		// Statistics are REQUIRED for read performance: pyrmts's reader
+		// prunes row groups via column-chunk min/max stats (`fetch.js`),
+		// and with stats absent it conservatively reads EVERY row group —
+		// a full-file scan per shard (observed: 5.4s cold for two small
+		// CFW-written tiles vs 1.2s for one 149 MB Python-written shard).
+		// Memory cost is one min/max value pair per column per row-group —
+		// trivial next to the row-group buffer itself.
+		statistics: true,
 	});
 	let batch = emptyBatch();
 	let totalRows = 0;
