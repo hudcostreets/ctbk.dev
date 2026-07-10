@@ -1,6 +1,8 @@
 name = "ctbk-gbfs-api"
 main = "src/index.ts"
 compatibility_date = "2024-09-23"
+# satori (og:image rendering) references `process.env` at runtime.
+compatibility_flags = ["nodejs_compat"]
 
 # Smart Placement: ask CF to migrate the Worker toward its heaviest
 # binding (D1 `RIDES_V3_COARSE` in IAD, observed via `X-Worker-Colo`
@@ -16,6 +18,19 @@ R2_BUCKET_NAME = "ctbk"
 # r2.dev public URL — anonymous direct reads from R2. Used as a sync
 # `getUrl(path)` fallback when the browser opts out of presigning.
 R2_PUBLIC_BASE_URL = "https://pub-4856603e85b34753b7e6bffb89411803.r2.dev"
+
+# Bundle .ttf font files as raw bytes (satori og:image rendering).
+# NOTE: defining ANY [[rules]] displaces wrangler's defaults, so the
+# wasm rule (normally built-in) must be restated for resvg.
+[[rules]]
+type = "Data"
+globs = ["**/*.ttf"]
+fallthrough = true
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
 
 [[d1_databases]]
 binding = "DB"

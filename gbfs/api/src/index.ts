@@ -1487,6 +1487,35 @@ export default {
 			return jsonResponse(result, env);
 		}
 
+		// /og/s/:slug.png — dynamic per-station og:image (satori-rendered
+		// share card with a live 7d availability sparkline; see `og.ts`).
+		// Referenced from per-station HTML stubs' `og:image` meta. Cached
+		// 1d at the edge — render cost is paid ~once/day per shared station.
+		const ogMatch = url.pathname.match(/^\/og\/s\/([a-z0-9-]+)\.png$/);
+		if (ogMatch) {
+			const cache = caches.default;
+			const cacheKey = new Request(url.toString(), { method: 'GET' });
+			const hit = await cache.match(cacheKey);
+			if (hit) {
+				const headers = new Headers(hit.headers);
+				headers.set('X-Cache', 'HIT');
+				return new Response(hit.body, { status: hit.status, headers });
+			}
+			try {
+				const { serveStationOg } = await import('./og');
+				let resp = await serveStationOg(env.R2, env.DB, ogMatch[1]!);
+				if (resp.ok) {
+					const headers = new Headers(resp.headers);
+					headers.set('Cache-Control', 'public, max-age=86400');
+					resp = new Response(resp.body, { status: resp.status, headers });
+					ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+				}
+				return resp;
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'og render error', 500, env);
+			}
+		}
+
 		// /api/stations/:id/info — accepts slug, UUID, or short_name
 		const infoMatch = url.pathname.match(/^\/api\/stations\/([^/]+)\/info$/);
 		if (infoMatch) {
