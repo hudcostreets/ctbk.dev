@@ -57,8 +57,10 @@ export function makeR2() {
 					if (state.aborted) throw new Error(`upload ${uploadId} aborted`);
 					// Concatenate parts in order.
 					const sortedPartNums = parts.map((p) => p.partNumber).sort((a, b) => a - b);
-					// Enforce R2's non-terminal-parts-must-be-same-size constraint
-					// (error 10048 in real R2). Catches regressions in flush logic.
+					// Enforce R2's part-size constraint (error 10048 in real
+					// R2): all non-trailing parts identical, and the trailing
+					// part no LARGER than them (smaller is fine). Catches
+					// regressions in flush logic.
 					if (sortedPartNums.length >= 2) {
 						const sizes = sortedPartNums.map((pn) => state.parts.get(pn)!.byteLength);
 						const nonTerminalSizes = sizes.slice(0, -1);
@@ -67,6 +69,9 @@ export function makeR2() {
 							if (s !== first) {
 								throw new Error(`completeMultipartUpload: All non-trailing parts must have the same length. (10048) — got sizes ${sizes.join(', ')}`);
 							}
+						}
+						if (sizes[sizes.length - 1]! > first) {
+							throw new Error(`completeMultipartUpload: All non-trailing parts must have the same length. (10048) — trailing part ${sizes[sizes.length - 1]} > uniform ${first}`);
 						}
 					}
 					const total = sortedPartNums.reduce((n, pn) => n + state.parts.get(pn)!.byteLength, 0);

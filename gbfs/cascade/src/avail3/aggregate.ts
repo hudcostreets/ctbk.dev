@@ -430,11 +430,15 @@ export class MultipartR2Writer {
 	private upload: R2MultipartUpload | null = null;
 	private parts: R2UploadedPart[] = [];
 	private uploadedBytes = 0;
+	private readonly partSize: number;
 
-	constructor(r2: R2Bucket, key: string, initialSize = 1024) {
+	// `partSize` is parameterized for tests only; prod always uses
+	// `PART_SIZE`.
+	constructor(r2: R2Bucket, key: string, initialSize = 1024, partSize = PART_SIZE) {
 		this.r2 = r2;
 		this.key = key;
 		this.inner = new ByteWriter(initialSize);
+		this.partSize = partSize;
 	}
 
 	// Writer interface — delegate to inner.
@@ -472,26 +476,26 @@ export class MultipartR2Writer {
 	 *  single row-group write producing > 2× `PART_SIZE` still produces
 	 *  same-size parts. */
 	private async flushOnePart(): Promise<void> {
-		if (this.inner.index < PART_SIZE) return;
+		if (this.inner.index < this.partSize) return;
 		if (this.upload === null) {
 			this.upload = await this.r2.createMultipartUpload(this.key, {
 				httpMetadata: { contentType: 'application/octet-stream' },
 			});
 		}
 		const partNumber = this.parts.length + 1;
-		// Copy exactly `PART_SIZE` bytes for the part (R2 enforces
+		// Copy exactly `partSize` bytes for the part (R2 enforces
 		// same-size non-terminal parts).
-		const partBytes = new Uint8Array(PART_SIZE);
-		partBytes.set(new Uint8Array(this.inner.buffer, 0, PART_SIZE));
+		const partBytes = new Uint8Array(this.partSize);
+		partBytes.set(new Uint8Array(this.inner.buffer, 0, this.partSize));
 		const part = await this.upload.uploadPart(partNumber, partBytes);
 		this.parts.push(part);
-		this.uploadedBytes += PART_SIZE;
-		// Shift the remainder (this.inner.index - PART_SIZE bytes) to
+		this.uploadedBytes += this.partSize;
+		// Shift the remainder (this.inner.index - partSize bytes) to
 		// the front of a fresh inner buffer.
-		const remainderSize = this.inner.index - PART_SIZE;
-		const newInner = new ByteWriter(Math.max(PART_SIZE, remainderSize || 1024));
+		const remainderSize = this.inner.index - this.partSize;
+		const newInner = new ByteWriter(Math.max(this.partSize, remainderSize || 1024));
 		if (remainderSize > 0) {
-			newInner.appendBytes(new Uint8Array(this.inner.buffer, PART_SIZE, remainderSize));
+			newInner.appendBytes(new Uint8Array(this.inner.buffer, this.partSize, remainderSize));
 		}
 		this.inner = newInner;
 	}
@@ -501,7 +505,7 @@ export class MultipartR2Writer {
 	 *  Loops because a single ParquetWriter.write() call can push more
 	 *  than one `PART_SIZE` of bytes into the buffer. */
 	async flushIfLarge(): Promise<void> {
-		while (this.inner.index >= PART_SIZE) {
+		while (this.inner.index >= this.partSize) {
 			await this.flushOnePart();
 		}
 	}
@@ -519,7 +523,14 @@ export class MultipartR2Writer {
 			});
 			return byteLength;
 		}
-		// Flush any remainder as the final part. Final part has no min-size.
+		// The tail batch + footer land after the caller's last
+		// flushIfLarge and can exceed partSize — R2 rejects a trailing
+		// part LARGER than the uniform part size (same 10048 error as
+		// uneven non-trailing parts). Drain full parts first so the
+		// remainder is strictly smaller.
+		await this.flushIfLarge();
+		// Flush any remainder as the final part. Final part has no min-size
+		// (and is now guaranteed < partSize).
 		if (this.inner.index > 0) {
 			const partNumber = this.parts.length + 1;
 			const partBytes = new Uint8Array(this.inner.index);

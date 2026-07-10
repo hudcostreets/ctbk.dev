@@ -328,6 +328,31 @@ describe('MultipartR2Writer (via writeShardStreaming)', () => {
 		expect(r2._store.get('partsize.bin')!.byteLength).toBe(30 * 1024 * 1024);
 	});
 
+	test('commit() drains an oversized tail into uniform parts (R2 10048)', async () => {
+		// The tail batch + parquet footer are written AFTER the last in-loop
+		// flushIfLarge; if they push the buffer past partSize, commit() must
+		// not upload the whole remainder as one final part — R2 rejects a
+		// trailing part LARGER than the uniform part size with error 10048.
+		// (Prod repro: `/1m@12h/2026-07-10T00`, wedged every cascade tick.)
+		// Small partSize (1 KB) keeps the test fast; prod uses 8 MB.
+		const partSize = 1024;
+		const r2 = makeR2();
+		const mw = new MultipartR2Writer(r2 as unknown as R2Bucket, 'tail.bin', 1024, partSize);
+		const pattern = (n: number, seed: number) =>
+			Uint8Array.from({ length: n }, (_, i) => (seed + i) & 0xff);
+		// One exact part → multipart upload starts.
+		mw.appendBytes(pattern(partSize, 0));
+		await mw.flushIfLarge();
+		// Tail 2.5× partSize with NO flushIfLarge before commit.
+		mw.appendBytes(pattern(2560, 7));
+		const bytes = await mw.commit();
+		expect(bytes).toBe(partSize + 2560);
+		const stored = new Uint8Array(r2._store.get('tail.bin')!);
+		expect(stored.byteLength).toBe(partSize + 2560);
+		expect(Array.from(stored.slice(0, partSize))).toEqual(Array.from(pattern(partSize, 0)));
+		expect(Array.from(stored.slice(partSize))).toEqual(Array.from(pattern(2560, 7)));
+	});
+
 	test('flushOnePart handles > PART_SIZE writes correctly (loop)', async () => {
 		// Simulate a single write that pushes > 2× PART_SIZE at once.
 		// flushIfLarge must loop and produce multiple same-size parts.
