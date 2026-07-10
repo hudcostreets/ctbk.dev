@@ -5,7 +5,11 @@ import { createContext, ReactNode, useCallback, useContext, useMemo, useState } 
 // value type from `options`.
 export const FLAGS = {
   availSrc: {
-    default: 'totals' as const,
+    // 'v3' = avail-v3 min-cover pyramid via the inventory-driven planner
+    // (pyrmts `ffc72db`); ~1.3s chart XHR vs ~3-5s on the legacy
+    // 'totals' path. 'totals' remains as the escape hatch
+    // (`?availSrc=totals`) until #108 retires the legacy reader.
+    default: 'v3' as const,
     options: ['totals', 'v3'] as const,
     description: 'Per-station availability backend',
   },
