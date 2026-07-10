@@ -97,6 +97,7 @@
 !scripts/compose-og.sh
 !scripts/docker-screenshots.sh
 !scripts/docker.py
+!scripts/gen-station-stubs.js
 !scripts/gen-station-urls.js
 !scripts/gen-ymdgtb-index.js
 !scrns.config.json
