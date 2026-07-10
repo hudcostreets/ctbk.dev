@@ -16,11 +16,6 @@ R2_BUCKET_NAME = "ctbk"
 # r2.dev public URL — anonymous direct reads from R2. Used as a sync
 # `getUrl(path)` fallback when the browser opts out of presigning.
 R2_PUBLIC_BASE_URL = "https://pub-4856603e85b34753b7e6bffb89411803.r2.dev"
-# Pyrmts avail-shadow flag. `'1'` runs the pyrmts-based reader in parallel
-# with the legacy path on every `/api/totals?kind=availability`, logging
-# a delta for shadow-mode parity validation. See specs/pyrmts-avail-port.md.
-# Remove (or set anything other than '1') when validation is complete.
-AVAIL_PYRMTS_SHADOW = "1"
 
 [[d1_databases]]
 binding = "DB"
@@ -87,7 +82,7 @@ mode = "smart"
 CORS_ORIGIN = "*"
 R2_BUCKET_NAME = "ctbk"
 R2_PUBLIC_BASE_URL = "https://pub-4856603e85b34753b7e6bffb89411803.r2.dev"
-AVAIL_PYRMTS_SHADOW = "1"
+DEV_ROUTES = "1"
 
 [[env.dev.d1_databases]]
 binding = "DB"

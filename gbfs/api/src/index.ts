@@ -47,7 +47,9 @@ interface Env {
 	/** Optional — when `'1'`, `/api/totals?kind=availability` runs the
 	 *  pyrmts-based reader in parallel with the legacy path and logs a
 	 *  delta. Pure observation; client gets the legacy response unchanged. */
-	AVAIL_PYRMTS_SHADOW?: string;
+	/** Optional — when `'1'`, dev-only diagnostic routes (`/api/d1-probe`)
+	 *  are enabled. Set in `[env.dev.vars]` only. */
+	DEV_ROUTES?: string;
 	/** Optional — when bound, `/api/rides-v3?backend=d1` queries this D1
 	 *  database instead of fanning out parquet reads. Holds the COARSE
 	 *  bundle (1d-1y tiers, both anchors; ~6.6 GB). See
@@ -493,7 +495,6 @@ import { R2Store } from '@rdub/file-tree/stores/r2';
 import { createHandlers } from '@rdub/file-tree/server';
 import { computeAndStoreHealthSnapshot, readCachedHealthSnapshot } from './health';
 import { runAlerts } from './alerts';
-import { executeAvailViaPyrmts, shadowDelta } from './avail_pyrmts';
 import { serveAvailV3, serveAvailV3Cells } from './avail_geo';
 import { serveRidesV1, serveRidesV1Cells, serveRidesV2, serveRidesV2Cells, serveRidesV3, serveRidesV3Cells } from './rides_v1';
 
@@ -1148,23 +1149,58 @@ export default {
 		}
 
 		// /api/avail-v3[/cells] — pyrmts-geo serving (avail-v3/<tier> paths,
-		// 18-tier ladder 1m–1y, S2-keyed at levels 10..15). Built by
-		// `ctbk/avail_v3.py`. Supports `cells=`+`cells.exclude=` station-set
+		// unified min-cover ladder, S2-keyed at levels 10..15; inventory-
+		// driven planning). Supports `cells=`+`cells.exclude=` station-set
 		// covers (same contract as `/api/rides-v3`). See
 		// `specs/avail-pyramid-v3-s2.md`.
-		if (url.pathname === '/api/avail-v3') {
-			try {
-				return await serveAvailV3(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*');
-			} catch (err: any) {
-				return errorResponse(err.message ?? 'avail-v3 error', 500, env);
+		//
+		// Edge cache: mirrors the rides-* / totals pattern — past-only
+		// windows are immutable (min-cover consolidation supersedes tiles
+		// but never changes the aggregates they roll up to) → 24h; windows
+		// touching now get 60s (cron write slack). This is the default
+		// station-chart path since the `availSrc=v3` flip, so repeat loads
+		// go from ~1.3 s to ~edge-cache-instant.
+		if (url.pathname === '/api/avail-v3' || url.pathname === '/api/avail-v3/cells') {
+			const cellsRoute = url.pathname.endsWith('/cells');
+			const cache = caches.default;
+			const cacheKey = new Request(url.toString(), { method: 'GET' });
+			const hit = await cache.match(cacheKey);
+			if (hit) {
+				const headers = new Headers(hit.headers);
+				headers.set('X-Cache', 'HIT');
+				return new Response(hit.body, { status: hit.status, headers });
 			}
-		}
-		if (url.pathname === '/api/avail-v3/cells') {
+			const tStart = performance.now();
+			let resp: Response;
 			try {
-				return await serveAvailV3Cells(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*');
+				resp = cellsRoute
+					? await serveAvailV3Cells(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*')
+					: await serveAvailV3(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*');
 			} catch (err: any) {
-				return errorResponse(err.message ?? 'avail-v3/cells error', 500, env);
+				return errorResponse(err.message ?? `avail-v3${cellsRoute ? '/cells' : ''} error`, 500, env);
 			}
+			if (env.PERF) {
+				const workerColo = resp.headers.get('X-Worker-Colo') ?? '';
+				env.PERF.writeDataPoint({
+					blobs: [`/api/avail-v3${cellsRoute ? '/cells' : ''}`, workerColo, String(resp.status)],
+					doubles: [performance.now() - tStart],
+					indexes: ['/api/avail-v3'],
+				});
+			}
+			if (resp.ok) {
+				// `to` exclusive — past-only iff `to` ≤ now − 5min (cron slack).
+				const toRaw = url.searchParams.get('to');
+				const toMs = toRaw ? Date.parse(toRaw) : NaN;
+				const isPast = Number.isFinite(toMs) && toMs <= Date.now() - 300_000;
+				const cacheControl = isPast
+					? 'public, max-age=86400, immutable'
+					: 'public, max-age=60';
+				const headers = new Headers(resp.headers);
+				headers.set('Cache-Control', cacheControl);
+				resp = new Response(resp.body, { status: resp.status, headers });
+				ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+			}
+			return resp;
 		}
 
 		// /api/rides-{v1,v2,v3}[/cells] — pyrmts-geo serving of rides
@@ -1303,31 +1339,13 @@ export default {
 				headers.set('X-Cache', 'HIT');
 				return new Response(hit.body, { status: hit.status, headers });
 			}
+			// NOTE: the availability arm is legacy/zero-traffic since the FE's
+			// `availSrc=v3` default flip (station charts hit `/api/avail-v3`
+			// directly). Kept serving for stale bundles / external callers;
+			// slated for removal in the phase-3 cleanup once traffic is nil.
 			const result = p.kind === 'availability'
 				? await executeAvailTotalsQuery(env.R2, p)
 				: await executeTotalsQuery(env.R2, p);
-
-			// Shadow mode: run pyrmts-based avail reader in parallel, log delta.
-			// Pure observation — no client-visible change. See `avail_pyrmts.ts`
-			// + `specs/pyrmts-avail-port.md`.
-			if (env.AVAIL_PYRMTS_SHADOW === '1' && p.kind === 'availability') {
-				ctx.waitUntil(
-					executeAvailViaPyrmts(env.R2, p)
-						.then((pyrmtsResult) => {
-							const delta = shadowDelta(result, pyrmtsResult, p.availAgg ?? 'mean');
-							console.log('avail-pyrmts-shadow', JSON.stringify({
-								reducer: p.availAgg ?? 'mean',
-								metric: p.metric,
-								fromS: p.fromS,
-								toS: p.toS,
-								...delta,
-							}));
-						})
-						.catch((err) => {
-							console.error('avail-pyrmts-shadow error:', err instanceof Error ? err.message : err);
-						}),
-				);
-			}
 			// Closed-window responses are immutable: underlying parquet shards
 			// for any (from, to) entirely in the past don't change. Cache them
 			// for 24h on both browser and edge — repeat loads / pan-into-window
@@ -1350,7 +1368,7 @@ export default {
 		// `?sql=…` accepts arbitrary SQL (read-only D1 binding, but still
 		// gated on the dev environment to avoid prod surface). Dev-only.
 		if (url.pathname === '/api/d1-probe') {
-			if (env.AVAIL_PYRMTS_SHADOW !== '1') return new Response('not found', { status: 404 });
+			if (env.DEV_ROUTES !== '1') return new Response('not found', { status: 404 });
 			if (!env.RIDES_V3_COARSE) return new Response(JSON.stringify({error: 'no RIDES_V3_COARSE binding'}), {status: 503, headers: {'Content-Type': 'application/json'}});
 			const { d1Backend } = await import('pyrmts-cfw');
 			const { ridesPyramidV3D1 } = await import('./rides_v1');
