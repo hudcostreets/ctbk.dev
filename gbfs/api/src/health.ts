@@ -31,6 +31,7 @@ export interface HealthR2 {
 		limit?: number;
 	}): Promise<R2ListResult>;
 	get(key: string): Promise<{ json<T = unknown>(): Promise<T> } | null>;
+	put?(key: string, value: string): Promise<unknown>;
 }
 
 export interface FeedHealth {
@@ -69,18 +70,33 @@ export interface PyramidCoverRung {
 	role: 'max' | 'dust';
 	expected: number;   // shards the min-cover requires at this rung
 	present: number;    // of those, how many are in D1
+	pending: number;    // missing but only just closed (within grace) — cron will land them
 }
 
-/** Per-tier min-cover status. `complete` iff every rung's `present === expected`. */
+/** One min-cover slot, for the timeline-bar rendering. Slots are emitted
+ *  per-shard (not coalesced) so tile boundaries are visible in the bar. */
+export interface PyramidCoverSegment {
+	start: string;      // ISO
+	end: string;        // ISO (exclusive)
+	shardDur: string;
+	status: 'present' | 'pending' | 'missing';
+}
+
+/** Per-tier min-cover status. `complete` iff no cover slot is MISSING
+ *  (pending slots — just-closed, within the write-lag grace window —
+ *  don't break completeness; they flap red otherwise on every rung
+ *  boundary until the next cron tick writes them). */
 export interface PyramidTierCoverStatus {
 	tier: string;
 	bin: string;
 	maxRung: string;
 	rungs: PyramidCoverRung[];               // ordered oldest → newest
+	segments: PyramidCoverSegment[];         // ordered oldest → newest
 	totalExpected: number;
 	totalPresent: number;
+	totalPending: number;
 	complete: boolean;
-	firstMissingPeriod: string | null;       // ISO of oldest missing cover shard, if any
+	firstMissingPeriod: string | null;       // ISO of oldest MISSING cover shard, if any
 	lastMaxBoundary: string;                 // ISO of floor(now, max_rung) — dust head
 	dustAgeSec: number;                      // now - lastMaxBoundary, in seconds
 	staleShardCount: number;                 // present shards NOT in current min-cover
@@ -92,12 +108,19 @@ export interface PyramidCoverStatus {
 	genesis: string;         // ISO — cover computed over [genesis, now)
 	now: string;             // ISO snapshot time
 	tiers: PyramidTierCoverStatus[];
-	totalMissing: number;    // sum of (expected - present) across tiers
+	totalMissing: number;    // sum of MISSING (not pending) across tiers
+	totalPending: number;
 	totalStale: number;      // sum of staleShardCount across tiers
 	allComplete: boolean;
 }
 
 export type PyramidsHealth = PyramidCoverStatus[];
+
+/** A cover slot whose period closed within this window and hasn't been
+ *  written yet counts as `pending`, not `missing` — the /5m cron writes
+ *  just-closed rungs within a tick or two. Without this grace, every rung
+ *  boundary flaps the tier red for ~1-2 min. */
+const PENDING_GRACE_MS = 10 * 60_000;
 
 /** Recency of `s3://tripdata` — the upstream Citi Bike monthly publish.
  *  Sourced from `tripdata/latest.json` in R2, refreshed every `tripdata.yml`
@@ -415,6 +438,7 @@ export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth>
 
 	const tiers: PyramidTierCoverStatus[] = [];
 	let totalMissing = 0;
+	let totalPending = 0;
 	let totalStale = 0;
 
 	for (const t of TIERS) {
@@ -425,25 +449,44 @@ export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth>
 
 		// Aggregate by rung (preserving order of first appearance in cover).
 		const rungOrder: string[] = [];
-		const rungAgg: Record<string, { expected: number; present: number; role: 'max' | 'dust' }> = {};
+		const rungAgg: Record<string, { expected: number; present: number; pending: number; role: 'max' | 'dust' }> = {};
+		const segments: PyramidCoverSegment[] = [];
 		let firstMissingPeriod: string | null = null;
 		let coverPresent = 0;
+		let coverPending = 0;
 
 		for (const slot of cover) {
 			const role: 'max' | 'dust' = slot.shardDur === maxRung ? 'max' : 'dust';
 			if (!(slot.shardDur in rungAgg)) {
 				rungOrder.push(slot.shardDur);
-				rungAgg[slot.shardDur] = { expected: 0, present: 0, role };
+				rungAgg[slot.shardDur] = { expected: 0, present: 0, pending: 0, role };
 			}
 			const agg = rungAgg[slot.shardDur]!;
 			agg.expected += 1;
 			const key = presentKey(t.name, slot.shardDur, slot.periodStart.getTime());
+			let status: PyramidCoverSegment['status'];
 			if (present.has(key)) {
+				status = 'present';
 				agg.present += 1;
 				coverPresent += 1;
-			} else if (firstMissingPeriod === null) {
-				firstMissingPeriod = slot.periodStart.toISOString();
+			} else if (slot.periodEnd.getTime() > now.getTime() - PENDING_GRACE_MS) {
+				status = 'pending';
+				agg.pending += 1;
+				coverPending += 1;
+			} else {
+				status = 'missing';
+				if (firstMissingPeriod === null) {
+					firstMissingPeriod = slot.periodStart.toISOString();
+				}
 			}
+			// Clip the head tile to genesis so the bar's x-domain is exact.
+			const segStart = slot.effectiveStart > slot.periodStart ? slot.effectiveStart : slot.periodStart;
+			segments.push({
+				start: segStart.toISOString(),
+				end: slot.periodEnd.toISOString(),
+				shardDur: String(slot.shardDur),
+				status,
+			});
 		}
 
 		const rungs: PyramidCoverRung[] = rungOrder.map((sd) => ({
@@ -451,11 +494,14 @@ export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth>
 			role: rungAgg[sd]!.role,
 			expected: rungAgg[sd]!.expected,
 			present: rungAgg[sd]!.present,
+			pending: rungAgg[sd]!.pending,
 		}));
 		const totalExpected = cover.length;
+		const tierMissing = totalExpected - coverPresent - coverPending;
 		const staleShardCount = Math.max(0, (presentByTier[t.name] ?? 0) - coverPresent);
 
-		totalMissing += (totalExpected - coverPresent);
+		totalMissing += tierMissing;
+		totalPending += coverPending;
 		totalStale += staleShardCount;
 
 		tiers.push({
@@ -463,9 +509,11 @@ export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth>
 			bin: String(t.bin),
 			maxRung,
 			rungs,
+			segments,
 			totalExpected,
 			totalPresent: coverPresent,
-			complete: coverPresent === totalExpected,
+			totalPending: coverPending,
+			complete: tierMissing === 0,
 			firstMissingPeriod,
 			lastMaxBoundary: lastMaxBoundary.toISOString(),
 			dustAgeSec: Math.floor((now.getTime() - lastMaxBoundary.getTime()) / 1000),
@@ -479,6 +527,7 @@ export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth>
 		now: now.toISOString(),
 		tiers,
 		totalMissing,
+		totalPending,
 		totalStale,
 		allComplete: totalMissing === 0,
 	}];
@@ -516,4 +565,38 @@ export async function getHealthSnapshot(
 		pyramids,
 		tripdata,
 	};
+}
+
+/** Where the cron-refreshed snapshot lives on R2. The full snapshot takes
+ *  ~7 s to compute (R2 listings across feed/compaction prefixes + the D1
+ *  pyramid scan); serving it live made `/api/health` a 7-second XHR. The
+ *  worker's minute cron recomputes into this key; the route serves the
+ *  cached object (~100 ms) as long as it's fresh. */
+export const HEALTH_SNAPSHOT_KEY = 'health/snapshot.json';
+
+/** Serve-stale threshold: a snapshot older than this falls back to live
+ *  compute (cron dead / first deploy). Comfortably above the 1-min cron
+ *  cadence so a single missed tick doesn't blow the fast path. */
+export const HEALTH_SNAPSHOT_MAX_AGE_S = 300;
+
+/** Compute the snapshot and persist it to R2 (cron path). */
+export async function computeAndStoreHealthSnapshot(
+	r2: HealthR2,
+	db?: D1Database,
+): Promise<HealthSnapshot> {
+	const snapshot = await getHealthSnapshot(r2, db);
+	if (r2.put) await r2.put(HEALTH_SNAPSHOT_KEY, JSON.stringify(snapshot));
+	return snapshot;
+}
+
+/** Read the cron-refreshed snapshot if it's fresh; null → caller computes
+ *  live (and should persist the result for the next request). */
+export async function readCachedHealthSnapshot(
+	r2: HealthR2,
+): Promise<HealthSnapshot | null> {
+	const obj = await r2.get(HEALTH_SNAPSHOT_KEY);
+	if (!obj) return null;
+	const snapshot = await obj.json<HealthSnapshot>();
+	const ageS = Math.floor(Date.now() / 1000) - (snapshot.generatedAt ?? 0);
+	return ageS <= HEALTH_SNAPSHOT_MAX_AGE_S ? snapshot : null;
 }

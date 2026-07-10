@@ -491,7 +491,7 @@ import {
 import { monthsInDashed } from './planQuery';
 import { R2Store } from '@rdub/file-tree/stores/r2';
 import { createHandlers } from '@rdub/file-tree/server';
-import { getHealthSnapshot } from './health';
+import { computeAndStoreHealthSnapshot, readCachedHealthSnapshot } from './health';
 import { runAlerts } from './alerts';
 import { executeAvailViaPyrmts, shadowDelta } from './avail_pyrmts';
 import { serveAvailV3, serveAvailV3Cells } from './avail_geo';
@@ -1126,10 +1126,22 @@ export default {
 
 		// /api/health — pipeline health snapshot (feed + compactions +
 		// cascade tier coverage). See specs/gbfs-health-page.md.
+		//
+		// Served from the cron-refreshed R2 snapshot (~100 ms) — live
+		// compute takes ~7 s of R2 listings + D1 scans. `?live=1` forces a
+		// recompute (which also refreshes the cache). Stale/missing cache
+		// falls back to live compute transparently.
 		if (url.pathname === '/api/health') {
 			try {
-				const snapshot = await getHealthSnapshot(env.R2, env.DB);
-				return jsonResponse(snapshot, env);
+				const live = url.searchParams.get('live') === '1';
+				if (!live) {
+					const cached = await readCachedHealthSnapshot(env.R2);
+					if (cached) {
+						return jsonResponse(cached, env, { headers: { 'X-Health-Cache': 'HIT' } });
+					}
+				}
+				const snapshot = await computeAndStoreHealthSnapshot(env.R2, env.DB);
+				return jsonResponse(snapshot, env, { headers: { 'X-Health-Cache': 'MISS' } });
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'health snapshot failed', 500, env);
 			}
@@ -1640,6 +1652,13 @@ export default {
 	 *  Both phases emit AE data points so we can verify keep-warm latency
 	 *  + correlate with /api/rides-v3 cold-path improvement. */
 	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+		// Refresh the /api/health snapshot cache (~7 s of R2 listings + D1
+		// scans, off the request path). Runs every minute; the route serves
+		// the cached object in ~100 ms.
+		ctx.waitUntil(
+			computeAndStoreHealthSnapshot(env.R2, env.DB)
+				.catch((err) => console.error('health-snapshot cron error:', err?.message ?? err)),
+		);
 		// D1 keep-warm — route through Sessions API so it exercises the
 		// same code path as /api/rides-v3, not just primary.
 		if (env.RIDES_V3_COARSE) {

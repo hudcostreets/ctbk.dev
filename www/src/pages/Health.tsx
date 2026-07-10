@@ -42,14 +42,23 @@ interface PyramidCoverRung {
   role: 'max' | 'dust'
   expected: number
   present: number
+  pending: number
+}
+interface PyramidCoverSegment {
+  start: string
+  end: string
+  shardDur: string
+  status: 'present' | 'pending' | 'missing'
 }
 interface PyramidTierCoverStatus {
   tier: string
   bin: string
   maxRung: string
   rungs: PyramidCoverRung[]
+  segments: PyramidCoverSegment[]
   totalExpected: number
   totalPresent: number
+  totalPending: number
   complete: boolean
   firstMissingPeriod: string | null
   lastMaxBoundary: string
@@ -62,6 +71,7 @@ interface PyramidCoverStatus {
   now: string
   tiers: PyramidTierCoverStatus[]
   totalMissing: number
+  totalPending: number
   totalStale: number
   allComplete: boolean
 }
@@ -336,6 +346,7 @@ function PyramidCoverGrid({ pyramid }: { pyramid: PyramidCoverStatus }) {
       <div style={{ fontSize: '0.8em', opacity: 0.6, marginBottom: '0.4em' }}>
         genesis <code>{genesisD}</code> · now <code>{nowD} UTC</code>
       </div>
+      <CoverBars pyramid={pyramid} />
       <div style={{ overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse', fontSize: '0.85em', fontVariantNumeric: 'tabular-nums' }}>
           <thead>
@@ -359,18 +370,122 @@ function PyramidCoverGrid({ pyramid }: { pyramid: PyramidCoverStatus }) {
   )
 }
 
+const SEGMENT_COLORS: Record<PyramidCoverSegment['status'], string> = {
+  present: '#2e9e44',
+  pending: '#d9a13b',
+  missing: '#e05252',
+}
+
+/** Per-tier horizontal timeline bars over `[genesis, now]`: one bar per
+ *  tier, one box per min-cover slot (so tile boundaries are visible),
+ *  green/grey/red for present/pending/missing, hairline gaps between
+ *  slots, unified month ticks on top. */
+function CoverBars({ pyramid }: { pyramid: PyramidCoverStatus }) {
+  const t0 = Date.parse(pyramid.genesis)
+  const t1 = Date.parse(pyramid.now)
+  const span = t1 - t0
+  if (!(span > 0)) return null
+  const pct = (ms: number) => Math.max(0, Math.min(100, (ms - t0) / span * 100))
+
+  // Month boundaries within (genesis, now] — unified x-ticks.
+  const ticks: Array<{ ms: number; label: string }> = []
+  const d = new Date(t0)
+  d.setUTCDate(1); d.setUTCHours(0, 0, 0, 0)
+  d.setUTCMonth(d.getUTCMonth() + 1)
+  while (d.getTime() < t1) {
+    ticks.push({
+      ms: d.getTime(),
+      label: d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' }),
+    })
+    d.setUTCMonth(d.getUTCMonth() + 1)
+  }
+
+  const LABEL_W = '3.2em'
+  return (
+    <div style={{ margin: '0.5em 0 1em', fontSize: '0.85em' }}>
+      {/* Tick labels + hairlines */}
+      <div style={{ display: 'flex', alignItems: 'center' }}>
+        <div style={{ width: LABEL_W, flexShrink: 0 }} />
+        <div style={{ position: 'relative', flex: 1, height: '1.3em' }}>
+          {ticks.map((tk) => (
+            <span key={tk.ms} style={{
+              position: 'absolute', left: `${pct(tk.ms)}%`,
+              transform: 'translateX(-50%)',
+              fontSize: '0.85em', opacity: 0.6,
+            }}>{tk.label}</span>
+          ))}
+        </div>
+      </div>
+      <div style={{ position: 'relative' }}>
+        {/* Vertical month gridlines behind the bars */}
+        <div style={{ position: 'absolute', left: LABEL_W, right: 0, top: 0, bottom: 0, pointerEvents: 'none' }}>
+          {ticks.map((tk) => (
+            <div key={tk.ms} style={{
+              position: 'absolute', left: `${pct(tk.ms)}%`, top: 0, bottom: 0,
+              width: 1, background: 'rgba(127,127,127,0.3)',
+            }} />
+          ))}
+        </div>
+        {pyramid.tiers.map((t) => (
+          <div key={t.tier} style={{ display: 'flex', alignItems: 'center', marginBottom: 3 }}>
+            <div style={{ width: LABEL_W, flexShrink: 0, fontFamily: 'monospace', fontSize: '0.85em', opacity: 0.8 }}>
+              /{t.tier}
+            </div>
+            <div style={{ position: 'relative', flex: 1, height: 13, background: 'rgba(127,127,127,0.12)', borderRadius: 2, overflow: 'hidden' }}>
+              {t.segments.map((s, i) => {
+                const l = pct(Date.parse(s.start))
+                const r = pct(Date.parse(s.end))
+                return (
+                  <div
+                    key={i}
+                    title={`/${t.tier}@${s.shardDur} ${s.start.slice(0, 16).replace('T', ' ')} → ${s.end.slice(0, 16).replace('T', ' ')} UTC — ${s.status}`}
+                    style={{
+                      position: 'absolute', top: 0, bottom: 0,
+                      left: `${l}%`, width: `${Math.max(0, r - l)}%`,
+                      background: SEGMENT_COLORS[s.status],
+                      boxShadow: 'inset 1px 0 0 rgba(255,255,255,0.85)',
+                    }}
+                  />
+                )
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.2em 1.2em', marginTop: '0.3em', marginLeft: LABEL_W, fontSize: '0.8em', opacity: 0.75 }}>
+        <span><Swatch color={SEGMENT_COLORS.present} /> present</span>
+        <span><Swatch color={SEGMENT_COLORS.pending} /> pending (just closed; cron writes shortly)</span>
+        <span><Swatch color={SEGMENT_COLORS.missing} /> missing</span>
+        <span><Swatch color="rgba(127,127,127,0.12)" /> tail shorter than this tier's smallest rung (finer tiers cover it)</span>
+      </div>
+    </div>
+  )
+}
+
+function Swatch({ color }: { color: string }) {
+  return <span style={{
+    display: 'inline-block', width: 10, height: 10, background: color,
+    borderRadius: 2, marginRight: 4, verticalAlign: 'baseline',
+  }} />
+}
+
 function PyramidTierRow({ tier }: { tier: PyramidTierCoverStatus }) {
   const maxRung = tier.rungs.find((r) => r.role === 'max')
   const dust = tier.rungs.filter((r) => r.role === 'dust')
   const maxPresent = maxRung?.present ?? 0
   const maxExpected = maxRung?.expected ?? 0
-  const maxOk = maxPresent === maxExpected
+  // Pending (just-closed, cron hasn't written yet) renders grey; only a
+  // real gap goes salmon.
+  const rungColor = (r: PyramidCoverRung): string | undefined =>
+    r.present === r.expected ? undefined :
+    r.present + r.pending === r.expected ? 'rgba(127,127,127,0.9)' :
+    'salmon'
   return (
     <tr>
       <td style={{ ...cellStyle('left'), fontWeight: 600 }}>/{tier.tier}</td>
       <td style={cellStyle('center')}><StatusBadge complete={tier.complete} compact /></td>
       <td style={cellStyle('right')}><code>{tier.maxRung}</code></td>
-      <td style={{ ...cellStyle('center'), color: maxOk ? undefined : 'salmon' }}>
+      <td style={{ ...cellStyle('center'), color: maxRung ? rungColor(maxRung) : undefined }}>
         {maxPresent} / {maxExpected}
       </td>
       <td style={cellStyle('left')}>
@@ -380,7 +495,7 @@ function PyramidTierRow({ tier }: { tier: PyramidTierCoverStatus }) {
           dust.map((r, i) => (
             <span key={r.shardDur} style={{ marginRight: i === dust.length - 1 ? 0 : '0.75em' }}>
               <code>{r.shardDur}</code>{' '}
-              <span style={{ color: r.present === r.expected ? undefined : 'salmon' }}>
+              <span style={{ color: rungColor(r) }}>
                 {r.present}/{r.expected}
               </span>
             </span>
