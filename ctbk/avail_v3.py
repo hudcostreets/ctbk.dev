@@ -42,25 +42,19 @@ from utz import err
 from utz.cli import flag
 
 from ctbk.cli.base import ctbk
+# Dependency-light definitions shared with the Lambda executor live in
+# `pyramid_cascade.lite` (which must stay importable without
+# pandas/polars/click); re-exported here for existing callers.
+from ctbk.pyramid_cascade.lite import AVAIL_GENESIS, R2_BUCKET, r2_client, r2_endpoint
 
-R2_BUCKET = 'ctbk'
 SRC_PREFIX = 'gbfs/avail/agg=1m/cons=1m'      # input: per-minute shards
 DST_PREFIX = 'avail-v3'                       # output: v3 pyramid (S2)
 INFO_PREFIX = 'gbfs/info'                     # daily station info JSON
 
 AVAIL_METRICS: tuple[str, ...] = ('bikes', 'ebikes', 'docks', 'disabled', 'pending')
-
-# Earliest UTC timestamp for which raw /1m WAL data exists. Trailing
-# max-shards emitted by `list_expected_shards` may cover pre-genesis
-# periods (its docstring: "the shard's notional period contains
-# pre-genesis time the materializer just leaves empty"); the materializer
-# clips ingester ranges to this and short-circuits shards whose entire
-# period lies before it.
-# Actual first raw poll on R2 is `gbfs/avail/agg=1m/cons=1m/2026-04-07/0116.parquet`;
-# the containing `/1m@5min` shard covers `T01:15-T01:20` (partial: 4/5 minutes).
-# Coarser tiers align at wider boundaries; their first fully-covered shard
-# starts 5-45 min later, with min-cover stepping down rungs to fit.
-AVAIL_GENESIS = datetime(2026, 4, 7, 1, 15, tzinfo=timezone.utc)
+# `AVAIL_GENESIS` (see lite.py): first raw poll on R2 is
+# `gbfs/avail/agg=1m/cons=1m/2026-04-07/0116.parquet`; the containing
+# `/1m@5min` shard covers `T01:15-T01:20` (partial: 4/5 minutes).
 
 # Coarsest S2 level we materialize. Every station contributes at every
 # level from L10 down to its LUC (finest unique level). Matches the
@@ -96,34 +90,6 @@ TIER_SPECS: dict[str, TierSpec] = {
     '3mo': TierSpec('3mo', None,       '1y',  '1d'),
     '1y':  TierSpec('1y',  None,       'all', '1d'),
 }
-
-
-# ─── R2 client ─────────────────────────────────────────────────────────
-
-def r2_endpoint() -> str:
-    aid = os.environ.get('CLOUDFLARE_ACCOUNT_ID') or os.environ.get('R2_ACCOUNT_ID')
-    if not aid:
-        raise RuntimeError("CLOUDFLARE_ACCOUNT_ID (or R2_ACCOUNT_ID) not set")
-    return f'https://{aid}.r2.cloudflarestorage.com'
-
-
-def r2_client():
-    """Boto3 S3 client wired for R2.
-
-    Prefers `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` (matches the
-    convention in `avail_geo_backfill.py`); falls back to AWS profile
-    `cf` (which we use locally with the R2 endpoint configured in
-    `~/.aws/config`).
-    """
-    if 'R2_ACCESS_KEY_ID' in os.environ and 'R2_SECRET_ACCESS_KEY' in os.environ:
-        sess = boto3.Session(
-            aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'],
-            aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'],
-            region_name='auto',
-        )
-    else:
-        sess = boto3.Session(profile_name='cf', region_name='auto')
-    return sess.client('s3', endpoint_url=r2_endpoint())
 
 
 # ─── Shard period encoding ─────────────────────────────────────────────

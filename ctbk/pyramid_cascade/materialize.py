@@ -38,21 +38,15 @@ import pyarrow.parquet as pq
 from pyrmts import ExpectedShard, Pyramid
 from pyrmts.axis import parse_duration
 
-from ctbk.avail_v3 import AVAIL_GENESIS, AVAIL_METRICS, R2_BUCKET, r2_client
+from ctbk.avail_v3 import AVAIL_METRICS
 from time import time
 from utz import err as _err
 from functools import partial
 
+# Shared with the Lambda executor via the polars-free `lite` module.
+from .lite import AVAIL_GENESIS, R2_BUCKET, UNIT_MIN, MaterializeResult, dur_min, r2_client
+
 err = partial(_err, flush=True)
-
-
-UNIT_MIN = {'min': 1, 'h': 60, 'd': 1440, 'mo': 1440 * 30, 'y': 1440 * 365}
-
-
-def dur_min(d: str) -> int:
-    """Pyrmts Duration string → minutes."""
-    p = parse_duration(d)
-    return p.count * UNIT_MIN[p.unit]
 
 
 def source_tier_for(pyramid: Pyramid, tier_name: str):
@@ -429,18 +423,6 @@ def _shard_key(pyramid: Pyramid, tier: str, shard_dur: str, period_start: dateti
 
 
 # ─── Per-shard materializer ────────────────────────────────────────────
-
-
-@dataclass
-class MaterializeResult:
-    gap: ExpectedShard
-    status: str   # 'wrote' / 'exists' / 'no_inputs' / 'empty' / 'error'
-    bytes_written: int = 0
-    rows: int = 0
-    inputs_present: int = 0
-    inputs_expected: int = 0
-    source_desc: str = ''  # e.g. '/1h@30d×2', '/1m@1d×60', 'raw'
-    error: str | None = None
 
 
 def materialize_shard(

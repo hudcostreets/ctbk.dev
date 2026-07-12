@@ -13,10 +13,23 @@ Orchestrator:
     3. Reduce: for each (tier, period) with multiple block-partials, concat
        + groupby+histogram-sum, write final, delete partials
     4. Emit manifest at <root>/_manifest.json
+
+Top-level re-exports resolve lazily (PEP 562): the engine/orchestrator
+pull polars, which the AWS Lambda bundle (see `gbfs/lambda/`)
+deliberately omits — the Lambda imports only the polars-free
+`lambda_exec`/`lite`/`fsck` modules and must not pay for these at
+package-import time.
 """
 from __future__ import annotations
 
-from .engine import ShardWriteSet, cascade_block
-from .orchestrator import CascadeRunResult, pyramid_cascade
-
 __all__ = ['cascade_block', 'ShardWriteSet', 'pyramid_cascade', 'CascadeRunResult']
+
+
+def __getattr__(name: str):
+    if name in ('cascade_block', 'ShardWriteSet'):
+        from . import engine
+        return getattr(engine, name)
+    if name in ('pyramid_cascade', 'CascadeRunResult'):
+        from . import orchestrator
+        return getattr(orchestrator, name)
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
