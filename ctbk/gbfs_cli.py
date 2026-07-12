@@ -416,3 +416,54 @@ def gbfs_r2_ls(
 		return
 	for k, sz in keys:
 		print(f'{sz:>12}  {k}' if show_size else k)
+
+
+# ─── Lambda executor (specs/avail-v3-lambda-cascade.md) ────────────────
+
+LAMBDA_FUNC = 'ctbk-avail-cascade'
+
+
+@gbfs.group('lambda', help='avail-v3 heavy-rung Lambda executor (`ctbk-avail-cascade`).')
+def gbfs_lambda() -> None:
+	pass
+
+
+@gbfs_lambda.command('fill', help='Run the heavy-rung fill locally (same code path as the Lambda handler).')
+@option('-L', '--limit', type=int, default=None, help='Stop after this many gaps.')
+@option('-n', '--dry-run', is_flag=True, help='Discover + list gaps, write nothing.')
+@option('-R', '--no-register', is_flag=True, help='Skip D1 registration of written shards.')
+def gbfs_lambda_fill(limit: int | None, dry_run: bool, no_register: bool) -> None:
+	from ctbk.pyramid_cascade.lambda_exec import run_extension_fill
+	config = Path(__file__).parents[1] / 'configs/pyramids/avail.yaml'
+	run_extension_fill(
+		config.read_text(),
+		fill_limit=limit,
+		dry_run=dry_run,
+		register=not no_register,
+	)
+
+
+@gbfs_lambda.command('invoke', help='Async-invoke the Lambda (fire one fill run now instead of waiting for the hourly cron).')
+def gbfs_lambda_invoke() -> None:
+	import boto3
+	resp = boto3.client('lambda').invoke(
+		FunctionName=LAMBDA_FUNC, InvocationType='Event', Payload=b'{}')
+	print(f"status: {resp['StatusCode']}")
+
+
+@gbfs_lambda.command('logs', help='Recent CloudWatch log lines (filtered to fill activity).')
+@option('-m', '--minutes', type=int, default=30, show_default=True, help='Look-back window.')
+@option('-a', '--all', 'show_all', is_flag=True, help='All lines, not just fill summaries/writes/errors.')
+def gbfs_lambda_logs(minutes: int, show_all: bool) -> None:
+	import re
+	import boto3
+	logs = boto3.client('logs')
+	start = int((datetime.now(timezone.utc) - timedelta(minutes=minutes)).timestamp() * 1000)
+	pat = re.compile(r'fillable gaps|extension fill|wrote \(|no_inputs|ERROR|Task timed|REPORT')
+	paginator = logs.get_paginator('filter_log_events')
+	for page in paginator.paginate(logGroupName=f'/aws/lambda/{LAMBDA_FUNC}', startTime=start):
+		for ev in page['events']:
+			msg = ev['message'].rstrip()
+			if show_all or pat.search(msg):
+				ts = datetime.fromtimestamp(ev['timestamp'] / 1000, timezone.utc).strftime('%H:%M:%S')
+				print(f'{ts} {msg[:160]}')

@@ -337,7 +337,13 @@ def run_extension_fill(
     # tier's smallest rung need raw/cross-tier ingest — those stay with
     # the CFW (it self-heals them within its budgets).
     smallest = {t.name: t.shards[0] for t in pyramid.tiers}
-    ext_gaps = [g for g in gaps if g.shard_dur != smallest[g.tier]]
+    ext_gaps = [
+        g for g in gaps
+        if g.shard_dur != smallest[g.tier]
+        # Trailing max-shards whose notional period ends pre-genesis can
+        # never exist — permanent no-ops, excluded from the census.
+        and g.period_end > AVAIL_GENESIS
+    ]
     err(f"fillable gaps: {len(ext_gaps)} of {len(gaps)} total missing")
     if dry_run:
         for g in ext_gaps[:40]:
