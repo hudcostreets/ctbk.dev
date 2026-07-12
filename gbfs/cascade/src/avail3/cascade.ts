@@ -263,12 +263,19 @@ async function existingKeysWithSize(r2: R2Bucket, keys: string[]): Promise<Array
  *  ~28 s CPU — right at the cap. A single 43 MB `/1m@1d` source pushes
  *  a `/Nm@1d` write past 30 s.
  *
- *  Threshold set below `/1m@1d`'s 43 MB so `/Nm@1d` targets bounce
- *  cleanly to offline. Under a healed intermediate-rung pyramid,
- *  smaller feeders (e.g. `/1m@3h` × 8 = 24 MB) fit the guard and
- *  build fine — this only skips shards whose only usable feeder is
- *  a large max-rung of the prev tier. */
-const MAX_SOURCE_BYTES = 30 * 1024 * 1024;
+ *  NOTE this guard is largely redundant with the ladder's `N ≤ 960`
+ *  cap, which already bounds ROWS per write (the real CPU/memory
+ *  driver — the streaming reader holds ≤ 3 × 8 MB chunks per source
+ *  regardless of file size). Bytes additionally vary with bin width
+ *  (coarser bins → fatter histogram JSON: ~6 B/row at /1m vs ~9 at
+ *  /2m) and with plan raggedness (`holeFillBytes` counts FULL source
+ *  file sizes for clipped reads). At 30 MB the cap sat exactly at
+ *  `/2m@1d`'s happy-path telescope (~30 MB) and permanently wedged it
+ *  after the 2026-07-10 scars inflated the plan to ~54 MB. 64 MB
+ *  clears every in-ladder rung (worst honest telescope ~30 MB;
+ *  accounting-inflated ragged plans ~54 MB) while still bouncing
+ *  genuinely oversized (off-ladder / misconfig) targets. */
+const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
 
 /** Pure-DAG cascade writer. For a target `(tier, shardDur, periodStart)`:
  *
