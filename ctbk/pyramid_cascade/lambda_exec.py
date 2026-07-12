@@ -129,6 +129,94 @@ def _tile_from_existing(
     return picks, holes
 
 
+def _source_tier_for(pyramid, tier_name: str) -> Tier | None:
+    """Strict-cascade source tier: the coarsest tier T' with
+    `bin(T') < bin(tier)` and `bin(tier) % bin(T') == 0` (divisibility
+    keeps floor-then-merge exact). `None` for the finest tier."""
+    target = dur_min(next(t for t in pyramid.tiers if t.name == tier_name).bin)
+    best = None
+    for t in pyramid.tiers:
+        b = dur_min(t.bin)
+        if b < target and target % b == 0 and (best is None or b > dur_min(best.bin)):
+            best = t
+    return best
+
+
+def _fill_hole_cross_tier(
+    r2,
+    pyramid,
+    tier: Tier,
+    hole: tuple[datetime, datetime],
+    key_set: set[str],
+) -> pa.Table | None:
+    """Rebin the finer source tier over `hole` up to `tier`'s bin:
+    floor dt, merge histogram JSONs per (cell, dt, metric) — the CFW's
+    `kwayMerge` hole-fill, in pure python (holes are small: the scars
+    are hours-to-a-day). Sources may be tiles CONTAINING the hole
+    (rows outside are clipped). Returns None if the source tier can't
+    cover the hole either."""
+    import json as _json
+    from datetime import timedelta
+    src = _source_tier_for(pyramid, tier.name)
+    if src is None:
+        return None
+    s, e = hole
+    # Prefer a single existing source tile containing the hole (common:
+    # a 12h tile absorbed the dust the hole is missing); else slot-tile.
+    containing = None
+    for rung in reversed(src.shards):
+        dur = timedelta(minutes=dur_min(rung))
+        slot = s - ((s - datetime(1970, 1, 1, tzinfo=timezone.utc)) % dur)
+        if slot + dur >= e:
+            k = _shard_key(pyramid, src.name, rung, slot)
+            if k in key_set:
+                containing = k
+                break
+    if containing:
+        keys = [containing]
+    else:
+        fake = ExpectedShard(tier=src.name, shard_dur=src.shards[-1],
+                             period_start=s, period_end=e, key='')
+        picks, holes2 = _tile_from_existing(pyramid, src, fake, key_set)
+        if holes2:
+            return None
+        keys = [k for _r, k in picks]
+
+    s_ms, e_ms = int(s.timestamp() * 1000), int(e.timestamp() * 1000)
+    bin_ms = dur_min(tier.bin) * 60_000
+    metrics = [m.name for m in pyramid.metrics]
+    acc: dict[tuple[str, int], list[dict[str, int]]] = {}
+    for k in keys:
+        obj = r2.get_object(Bucket=R2_BUCKET, Key=k)
+        t = pq.read_table(io.BytesIO(obj['Body'].read()))
+        cols = {c: t.column(c).to_pylist() for c in ['s2_cell', 'dt', *metrics]}
+        for i, dt in enumerate(cols['dt']):
+            dt = int(dt)
+            if not (s_ms <= dt < e_ms):
+                continue
+            key2 = (cols['s2_cell'][i], dt - dt % bin_ms)
+            hists = acc.get(key2)
+            if hists is None:
+                hists = acc[key2] = [{} for _ in metrics]
+            for mi, m in enumerate(metrics):
+                for state, n in _json.loads(cols[m][i]).items():
+                    h = hists[mi]
+                    h[state] = h.get(state, 0) + n
+        del cols, t
+    if not acc:
+        return None
+    cells, dts = zip(*acc.keys())
+    def dump(h: dict[str, int]) -> str:
+        return _json.dumps({k: h[k] for k in sorted(h, key=int)}, separators=(',', ':'))
+    arrays: dict[str, pa.Array] = {
+        's2_cell': pa.array(cells, pa.string()),
+        'dt': pa.array(dts, pa.int64()),
+    }
+    for mi, m in enumerate(metrics):
+        arrays[m] = pa.array([dump(v[mi]) for v in acc.values()], pa.string())
+    return pa.table(arrays)
+
+
 def materialize_extension_shard(
     r2,
     pyramid,
@@ -158,21 +246,27 @@ def materialize_extension_shard(
 
     tier = next(t for t in pyramid.tiers if t.name == gap.tier)
     picks, holes = _tile_from_existing(pyramid, tier, gap, key_set)
-    if holes:
-        h0 = holes[0]
-        err(f"  ⟶ {tag} → no_inputs ({len(holes)} uncovered, e.g. "
-            f"[{h0[0].isoformat()}, {h0[1].isoformat()}))")
-        return MaterializeResult(
-            gap=gap, status='no_inputs',
-            inputs_present=len(picks), inputs_expected=len(picks) + len(holes),
-            source_desc='same-tier existing tiling',
-        )
-    inputs_expected = len(picks)
-    if not picks:
+    hole_tables: list[pa.Table] = []
+    for hole in holes:
+        # Scar: dust that never materialized (e.g. the 2026-07-10
+        # incident windows). Rebin the finer tier over just the hole.
+        ht = _fill_hole_cross_tier(r2, pyramid, tier, hole, key_set)
+        if ht is None:
+            err(f"  ⟶ {tag} → no_inputs (hole "
+                f"[{hole[0].isoformat()}, {hole[1].isoformat()}) unfillable)")
+            return MaterializeResult(
+                gap=gap, status='no_inputs',
+                inputs_present=len(picks), inputs_expected=len(picks) + len(holes),
+                source_desc='same-tier tiling + cross-tier hole-fill',
+            )
+        hole_tables.append(ht)
+    inputs_expected = len(picks) + len(holes)
+    if not picks and not hole_tables:
         return MaterializeResult(gap=gap, status='empty', source_desc='no data in period')
 
-    err(f"  ⟶ {tag} → reading {inputs_expected} existing tiles")
-    tables: list[pa.Table] = []
+    err(f"  ⟶ {tag} → reading {len(picks)} existing tiles"
+        + (f" + {len(holes)} cross-tier holes" if holes else ""))
+    tables: list[pa.Table] = list(hole_tables)
     for _rung, k in picks:
         obj = r2.get_object(Bucket=R2_BUCKET, Key=k)
         t = pq.read_table(io.BytesIO(obj['Body'].read()))
