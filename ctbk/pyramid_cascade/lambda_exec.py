@@ -24,7 +24,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml as _yaml
 from pyrmts import ExpectedShard, parse_pyramid_yaml, pyramid_from_config
-from pyrmts.gap_discovery import _cover_for_tier
 from pyrmts.types import Tier
 from utz import err
 
@@ -66,13 +65,68 @@ def merge_lambda_shards(yaml_text: str) -> str:
     return _yaml.safe_dump(raw, sort_keys=False)
 
 
-def _sub_rung_tier_view(tier: Tier, gap_shard_dur: str) -> Tier:
-    """The tier with only rungs strictly smaller than the gap's — the
-    rungs its source cover may draw from (telescoping same-tier build;
-    fill order guarantees smaller extension rungs land first)."""
-    cap = dur_min(gap_shard_dur)
-    subs = tuple(r for r in tier.shards if dur_min(r) < cap)
-    return Tier(name=tier.name, bin=tier.bin, shards=subs)
+def _shard_key(pyramid, tier: str, shard_dur: str, period_start: datetime) -> str:
+    """Substitute the pyramid's keyTemplate for a specific shard."""
+    from pyrmts.axis import format_period, parse_duration
+    from pyrmts.keys import substitute_key
+    label = format_period(period_start, parse_duration(shard_dur))
+    return substitute_key(
+        pyramid.keyTemplate,
+        {'tier': tier, 'shard': shard_dur, 'period': label},
+    )
+
+
+def _tile_from_existing(
+    pyramid,
+    tier: Tier,
+    gap: ExpectedShard,
+    key_set: set[str],
+) -> tuple[list[tuple[str, str]], list[tuple[datetime, datetime]]]:
+    """Greedy largest-first tiling of the gap period from EXISTING
+    same-tier shards (`key_set` — the discovery-time R2 listing, kept
+    fresh by the fill loop). The prescriptive expected cover is wrong
+    here: it demands largest-fitting sub-rungs (e.g. `1d` tiles) that no
+    min-cover ever materialized; what's actually on R2 is whatever mix
+    of rungs history produced (12h tiles, relics, dust). Same principle
+    as the CFW's `planDustTiling`.
+
+    Returns `([(rung, key)...] in period order, [uncovered holes])`.
+    Pre-genesis segments are dropped (no data ever existed)."""
+    from datetime import timedelta
+    rungs = [r for r in tier.shards if dur_min(r) < dur_min(gap.shard_dur)]
+    picks: list[tuple[str, str]] = []
+    holes: list[tuple[datetime, datetime]] = []
+
+    def tile(seg_start: datetime, seg_end: datetime, idx: int) -> None:
+        if seg_end <= AVAIL_GENESIS:
+            return
+        if idx < 0:
+            holes.append((seg_start, seg_end))
+            return
+        rung = rungs[idx]
+        dur = timedelta(minutes=dur_min(rung))
+        # Epoch-aligned slots of `rung` within [seg_start, seg_end).
+        # Divisibility chaining ⇒ seg boundaries align to some rung ≤
+        # the current one; misaligned leading/trailing parts descend.
+        epoch_off = (seg_start - datetime(1970, 1, 1, tzinfo=timezone.utc)) % dur
+        first_slot = seg_start + ((dur - epoch_off) % dur)
+        cur = seg_start
+        slot = first_slot
+        while slot + dur <= seg_end:
+            if cur < slot:
+                tile(cur, slot, idx - 1)
+            key = _shard_key(pyramid, tier.name, rung, slot)
+            if key in key_set:
+                picks.append((rung, key))
+            else:
+                tile(slot, slot + dur, idx - 1)
+            cur = slot + dur
+            slot = cur
+        if cur < seg_end:
+            tile(cur, seg_end, idx - 1)
+
+    tile(gap.period_start, gap.period_end, len(rungs) - 1)
+    return picks, holes
 
 
 def materialize_extension_shard(
@@ -103,37 +157,24 @@ def materialize_extension_shard(
                                  inputs_expected=0, source_desc='pre-genesis')
 
     tier = next(t for t in pyramid.tiers if t.name == gap.tier)
-    view = _sub_rung_tier_view(tier, gap.shard_dur)
-    if not view.shards:
-        raise ValueError(f'{tag}: no sub-rungs to cover from')
-    cover = _cover_for_tier(pyramid, view, gap.period_start, gap.period_end, {})
-    # Pre-genesis tiles never had data; the genesis-straddling tile exists.
-    cover = [e for e in cover if e.period_end > AVAIL_GENESIS]
-    missing = [e.key for e in cover if e.key not in key_set]
-    inputs_expected = len(cover)
-    if missing:
-        # Distinguish "not in snapshot" from "not on R2" with HEADs.
-        really_missing = []
-        for k in missing:
-            try:
-                r2.head_object(Bucket=R2_BUCKET, Key=k)
-                key_set.add(k)
-            except r2.exceptions.ClientError:
-                really_missing.append(k)
-        if really_missing:
-            err(f"  ⟶ {tag} → no_inputs ({len(really_missing)}/{inputs_expected} "
-                f"missing, e.g. {really_missing[0]})")
-            return MaterializeResult(
-                gap=gap, status='no_inputs',
-                inputs_present=inputs_expected - len(really_missing),
-                inputs_expected=inputs_expected,
-                source_desc='same-tier cover',
-            )
+    picks, holes = _tile_from_existing(pyramid, tier, gap, key_set)
+    if holes:
+        h0 = holes[0]
+        err(f"  ⟶ {tag} → no_inputs ({len(holes)} uncovered, e.g. "
+            f"[{h0[0].isoformat()}, {h0[1].isoformat()}))")
+        return MaterializeResult(
+            gap=gap, status='no_inputs',
+            inputs_present=len(picks), inputs_expected=len(picks) + len(holes),
+            source_desc='same-tier existing tiling',
+        )
+    inputs_expected = len(picks)
+    if not picks:
+        return MaterializeResult(gap=gap, status='empty', source_desc='no data in period')
 
-    err(f"  ⟶ {tag} → reading {inputs_expected} cover tiles")
+    err(f"  ⟶ {tag} → reading {inputs_expected} existing tiles")
     tables: list[pa.Table] = []
-    for e in cover:
-        obj = r2.get_object(Bucket=R2_BUCKET, Key=e.key)
+    for _rung, k in picks:
+        obj = r2.get_object(Bucket=R2_BUCKET, Key=k)
         t = pq.read_table(io.BytesIO(obj['Body'].read()))
         # Cover tiles span writer eras (pyarrow / hyparquet-writer / CFW
         # restat) whose schemas differ in string vs large_string; cast to
