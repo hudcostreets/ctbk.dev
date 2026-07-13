@@ -132,9 +132,12 @@ def upsert_function(lam, role_arn: str, blob: bytes) -> str:
 
 
 def upsert_schedule(events, lam, func_arn: str) -> None:
-    # Minutely once the Lambda owns the whole ladder (FILL_ALL=1, P2);
-    # hourly while the CFW still runs the sub-day cascade.
-    rate = 'rate(1 minute)' if os.environ.get('FILL_ALL') == '1' else 'rate(1 hour)'
+    # With FILL_ALL (P2), fire at :01/:06/:11/… — the smallest shard
+    # anywhere in the ladder spans 5 min, so that's the work cadence;
+    # the +1-min phase lets the poller land each boundary's final raw
+    # minute first (else the fill sees a recent hole and defers a full
+    # cycle). Hourly while the CFW still ran the sub-day cascade.
+    rate = 'cron(1/5 * * * ? *)' if os.environ.get('FILL_ALL') == '1' else 'rate(1 hour)'
     rule_arn = events.put_rule(Name=RULE, ScheduleExpression=rate, State='ENABLED',
                                Description='avail-v3 cascade fill')['RuleArn']
     events.put_targets(Rule=RULE, Targets=[{'Id': 'fn', 'Arn': func_arn}])

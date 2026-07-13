@@ -40,10 +40,11 @@ def lambda_handler(event, context):
 
     gc = None
     from datetime import datetime, timezone
-    # At minutely cadence (FILL_ALL cutover), sweep hourly (:05) — a
-    # full GC scan per minute buys nothing. Hourly cadence always sweeps.
-    minutely = os.environ.get('FILL_ALL') == '1'
-    if os.environ.get('GC_ENABLED') == '1' and (not minutely or datetime.now(timezone.utc).minute == 5):
+    # At the 5-min cadence (FILL_ALL cutover, firings at :01/:06/…),
+    # sweep on the hour's first firing only — a full GC scan per tick
+    # buys nothing. The pre-cutover hourly cadence always sweeps.
+    frequent = os.environ.get('FILL_ALL') == '1'
+    if os.environ.get('GC_ENABLED') == '1' and (not frequent or datetime.now(timezone.utc).minute < 5):
         from ctbk.pyramid_cascade.gc import gc_sweep
         r = gc_sweep(config_yaml)
         gc = {'eligible': r.eligible, 'deleted': r.deleted, 'skipped': r.skipped}
