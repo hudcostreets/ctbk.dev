@@ -1163,6 +1163,21 @@ export default {
 		if (url.pathname === '/api/avail-v3' || url.pathname === '/api/avail-v3/cells') {
 			const cellsRoute = url.pathname.endsWith('/cells');
 			const cache = caches.default;
+			// Round a now-touching `to` DOWN to the last closed 5-min
+			// boundary (the ladder's finest shard span): every request in
+			// the same window then shares one cache entry, and the content
+			// is identical anyway — trailing partial bins aren't rendered,
+			// and the live edge rides `/api/stations/:id/today`, not this
+			// route. Past-only windows pass through untouched (immutable).
+			{
+				const toRaw = url.searchParams.get('to');
+				const toMs = toRaw ? Date.parse(toRaw) : NaN;
+				const boundary = Math.floor(Date.now() / 300_000) * 300_000;
+				if (Number.isFinite(toMs) && toMs > boundary) {
+					url.searchParams.set('to', new Date(boundary).toISOString());
+					request = new Request(url.toString(), request);
+				}
+			}
 			const cacheKey = new Request(url.toString(), { method: 'GET' });
 			const hit = await cache.match(cacheKey);
 			if (hit) {
@@ -1188,13 +1203,17 @@ export default {
 				});
 			}
 			if (resp.ok) {
-				// `to` exclusive — past-only iff `to` ≤ now − 5min (cron slack).
+				// `to` exclusive — past-only iff `to` ≤ now − 5min (cron
+				// slack). Now-touching windows were rounded to the last closed
+				// 5-min boundary above, so the live entry's KEY rotates each
+				// window; max-age=300 just bounds the orphaned entry's storage
+				// (correctness rides the key, not the TTL).
 				const toRaw = url.searchParams.get('to');
 				const toMs = toRaw ? Date.parse(toRaw) : NaN;
 				const isPast = Number.isFinite(toMs) && toMs <= Date.now() - 300_000;
 				const cacheControl = isPast
 					? 'public, max-age=86400, immutable'
-					: 'public, max-age=60';
+					: 'public, max-age=300';
 				const headers = new Headers(resp.headers);
 				headers.set('Cache-Control', cacheControl);
 				resp = new Response(resp.body, { status: resp.status, headers });
