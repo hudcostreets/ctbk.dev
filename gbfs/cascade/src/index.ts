@@ -257,20 +257,10 @@ export default {
 		const tickMin = Math.floor(event.scheduledTime / 60000);
 		const tickTime = new Date(event.scheduledTime);
 
-		// Daily avail-v3 GC sweep. Cron only fires `* * * * *` — dispatch
-		// on wall time inside the handler so we don't need a second
-		// cron entry (which would fire an EXTRA event at 06:05 UTC on
-		// top of the minutely one, coalescing back to the same second
-		// on the CF edge anyway). Bounded to a 25s budget.
-		if (tickTime.getUTCHours() === 6 && tickTime.getUTCMinutes() === 5) {
-			try {
-				const report = await gcSweep(env.R2, env.DB, { now: tickTime, timeBudgetMs: 25_000 });
-				console.log(`avail3-gc ${tickTime.toISOString()}: eligible=${report.totalEligible} deleted=${report.deleted.length} skipped=${report.skipped.length} stopped=${report.stoppedReason ?? '-'}`);
-			} catch (err) {
-				console.error('avail3 gc error:', err);
-			}
-			return;
-		}
+		// GC moved to the `ctbk-avail-cascade` Lambda (hourly, extended
+		// ladder, real budget — specs/avail-v3-lambda-cascade.md). The
+		// `/avail3-gc` endpoint above stays for manual `ctbk gbfs
+		// cascade gc` pokes.
 
 		// avail-v3 sub-shard cascade (task #130). Self-gates to /5m ticks.
 		// AWAITED (not waitUntil-fired) BEFORE the legacy cronTick because the

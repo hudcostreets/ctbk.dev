@@ -35,7 +35,10 @@ def lambda_handler(event, context):
     for r in results:
         by_status[r.status] = by_status.get(r.status, 0) + 1
 
+    gc = None
     if os.environ.get('GC_ENABLED') == '1':
-        raise NotImplementedError('GC port lands with the extended-ladder health config (spec P1 step 4)')
+        from ctbk.pyramid_cascade.gc import gc_sweep
+        r = gc_sweep(config_yaml)
+        gc = {'eligible': r.eligible, 'deleted': r.deleted, 'skipped': r.skipped}
 
-    return {'filled': by_status, 'total': len(results)}
+    return {'filled': by_status, 'total': len(results), 'gc': gc}

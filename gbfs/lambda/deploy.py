@@ -50,6 +50,7 @@ CTBK_MODULES = [
     'pyramid_cascade/storage.py',
     'pyramid_cascade/d1_http.py',
     'pyramid_cascade/lambda_exec.py',
+    'pyramid_cascade/gc.py',
 ]
 # Pure-python site-packages to vendor (pandas/pyarrow via layer; boto3
 # via runtime). C-extension .so files are excluded — pyyaml falls back
@@ -110,7 +111,7 @@ def upsert_role(iam) -> str:
 
 
 def upsert_function(lam, role_arn: str, blob: bytes) -> str:
-    env = {'Variables': {k: os.environ[k] for k in ENV_KEYS} | {'GC_ENABLED': '0'}}
+    env = {'Variables': {k: os.environ[k] for k in ENV_KEYS} | {'GC_ENABLED': '1'}}
     cfg = dict(
         Runtime='python3.12', Role=role_arn, Handler='handler.lambda_handler',
         Timeout=TIMEOUT_S, MemorySize=MEMORY_MB, Layers=[PANDAS_LAYER], Environment=env,
