@@ -262,23 +262,12 @@ export default {
 		// `/avail3-gc` endpoint above stays for manual `ctbk gbfs
 		// cascade gc` pokes.
 
-		// avail-v3 sub-shard cascade (task #130). Self-gates to /5m ticks.
-		// AWAITED (not waitUntil-fired) BEFORE the legacy cronTick because the
-		// legacy chain regularly burns the whole cron budget on heavy concat
-		// + writes; running avail3 in parallel via two `ctx.waitUntil` calls
-		// led to silent termination of avail3 mid-flight. Manual `/avail3`
-		// HTTP calls always succeeded → resource contention, not a code bug.
-		try {
-			const results = await avail3Tick(env.R2, env.DB, tickTime);
-			const summary = results
-				.filter((r) => r.status === 'wrote' || (r.status !== 'exists' && r.status !== 'no_inputs'))
-				.map((r) => r.status === 'wrote'
-					? `${r.key}: wrote ${r.bytes}B (${r.rows} rows)`
-					: `${r.key}: ${r.status}`);
-			if (summary.length) console.log(`avail3 tick ${tickTime.toISOString()}: ${summary.join(' | ')}`);
-		} catch (err) {
-			console.error('avail3 tick error:', err);
-		}
+		// avail-v3 cascade moved to the `ctbk-avail-cascade` Lambda
+		// (minutely, whole ladder — specs/avail-v3-lambda-cascade.md P2).
+		// The `/avail3` HTTP endpoint above stays as the manual tick /
+		// rollback lever (`ctbk gbfs cascade tick`). Only the LEGACY
+		// `gbfs/avail/agg=*/cons=*` chain remains cron-driven here, until
+		// its own retirement (#108 phase 3).
 		ctx.waitUntil(cronTick(env.R2, tickMin));
 	},
 

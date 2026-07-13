@@ -30,13 +30,20 @@ def lambda_handler(event, context):
         config_yaml,
         register=True,
         time_budget_s=TIME_BUDGET_S,
+        # P2 cutover flag: also own each tier's smallest rung (raw
+        # ingest / cross-tier). Off while the CFW cascade runs them.
+        fill_all=os.environ.get('FILL_ALL') == '1',
     )
     by_status: dict[str, int] = {}
     for r in results:
         by_status[r.status] = by_status.get(r.status, 0) + 1
 
     gc = None
-    if os.environ.get('GC_ENABLED') == '1':
+    from datetime import datetime, timezone
+    # At minutely cadence (FILL_ALL cutover), sweep hourly (:05) — a
+    # full GC scan per minute buys nothing. Hourly cadence always sweeps.
+    minutely = os.environ.get('FILL_ALL') == '1'
+    if os.environ.get('GC_ENABLED') == '1' and (not minutely or datetime.now(timezone.utc).minute == 5):
         from ctbk.pyramid_cascade.gc import gc_sweep
         r = gc_sweep(config_yaml)
         gc = {'eligible': r.eligible, 'deleted': r.deleted, 'skipped': r.skipped}

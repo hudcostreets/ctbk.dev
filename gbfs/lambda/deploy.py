@@ -55,7 +55,7 @@ CTBK_MODULES = [
 # Pure-python site-packages to vendor (pandas/pyarrow via layer; boto3
 # via runtime). C-extension .so files are excluded — pyyaml falls back
 # to its pure-python loader without `_yaml`.
-VENDOR = ['pyrmts', 'utz', 'yaml']
+VENDOR = ['pyrmts', 'utz', 'yaml', 's2cell']
 
 ENV_KEYS = ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_API_TOKEN']
 
@@ -111,7 +111,7 @@ def upsert_role(iam) -> str:
 
 
 def upsert_function(lam, role_arn: str, blob: bytes) -> str:
-    env = {'Variables': {k: os.environ[k] for k in ENV_KEYS} | {'GC_ENABLED': '1'}}
+    env = {'Variables': {k: os.environ[k] for k in ENV_KEYS} | {'GC_ENABLED': '1', 'FILL_ALL': os.environ.get('FILL_ALL', '0')}}
     cfg = dict(
         Runtime='python3.12', Role=role_arn, Handler='handler.lambda_handler',
         Timeout=TIMEOUT_S, MemorySize=MEMORY_MB, Layers=[PANDAS_LAYER], Environment=env,
@@ -132,8 +132,11 @@ def upsert_function(lam, role_arn: str, blob: bytes) -> str:
 
 
 def upsert_schedule(events, lam, func_arn: str) -> None:
-    rule_arn = events.put_rule(Name=RULE, ScheduleExpression='rate(1 hour)', State='ENABLED',
-                               Description='hourly avail-v3 heavy-rung fill')['RuleArn']
+    # Minutely once the Lambda owns the whole ladder (FILL_ALL=1, P2);
+    # hourly while the CFW still runs the sub-day cascade.
+    rate = 'rate(1 minute)' if os.environ.get('FILL_ALL') == '1' else 'rate(1 hour)'
+    rule_arn = events.put_rule(Name=RULE, ScheduleExpression=rate, State='ENABLED',
+                               Description='avail-v3 cascade fill')['RuleArn']
     events.put_targets(Rule=RULE, Targets=[{'Id': 'fn', 'Arn': func_arn}])
     try:
         lam.add_permission(FunctionName=FUNC, StatementId='events-invoke',
@@ -141,7 +144,7 @@ def upsert_schedule(events, lam, func_arn: str) -> None:
                            SourceArn=rule_arn)
     except lam.exceptions.ResourceConflictException:
         pass
-    err(f'schedule {RULE}: rate(1 hour)')
+    err(f'schedule {RULE}: {rate}')
 
 
 @command()

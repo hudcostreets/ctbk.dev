@@ -1,5 +1,14 @@
 # avail-v3: Lambda cascade (one executor for all rungs)
 
+**Status (2026-07-13): P1 COMPLETE; P2 cut over, in soak.**
+`ctbk-avail-cascade` owns the whole ladder on `rate(1 minute)`
+(`FILL_ALL=1`) + GC hourly (`:05`); the CFW's avail3 cron is removed
+(legacy `gbfs/avail` chain still cron-driven there until #108 P3; the
+`/avail3` endpoint remains the manual/rollback lever). Raw-ingest port
+validated at exact parity (19,390/19,390 rows identical vs a
+CFW-written `/1m@5min` shard). Remaining: soak across midnight, then
+delete `gbfs/cascade`'s avail3 code (step 4).
+
 ## Goal
 
 Replace the CFW cascade worker (`gbfs/cascade`) with a single AWS

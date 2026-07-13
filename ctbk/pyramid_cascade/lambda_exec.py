@@ -129,6 +129,105 @@ def _tile_from_existing(
     return picks, holes
 
 
+RAW_MINUTE_PREFIX = 'gbfs/avail/agg=1m/cons=1m'
+STATION_LUC_KEY = 'station-luc.json'
+COARSEST_LEVEL = 10
+# Past this age a missing raw WAL minute was a missed poll and will
+# never arrive; ship without it (same policy as the CFW cascade).
+RAW_FINALITY_S = 15 * 60
+
+_luc_chains_cache: dict[str, list[str]] | None = None
+
+
+def _luc_chains(r2) -> dict[str, list[str]]:
+    """UUID → [ancestor cells L10..LUC) + LUC anchor] (mirrors the CFW's
+    `buildChains` / avail_v3's `build_1m_hour_table`). Cached per
+    process (one fetch per Lambda container / local run)."""
+    global _luc_chains_cache
+    if _luc_chains_cache is None:
+        import json as _json
+        import s2cell
+        obj = r2.get_object(Bucket=R2_BUCKET, Key=STATION_LUC_KEY)
+        data = _json.loads(obj['Body'].read())
+        chains: dict[str, list[str]] = {}
+        for uuid, short_name in data['by_uuid'].items():
+            e = data['by_short_name'].get(short_name)
+            if not e:
+                continue
+            chain = [s2cell.lat_lon_to_token(e['lat'], e['lng'], lvl)
+                     for lvl in range(COARSEST_LEVEL, e['level'])]
+            chain.append(e['cell'])
+            chains[uuid] = chain
+        _luc_chains_cache = chains
+    return _luc_chains_cache
+
+
+def _fill_hole_raw(
+    r2,
+    pyramid,
+    hole: tuple[datetime, datetime],
+    now: datetime,
+) -> pa.Table | None:
+    """Finest-tier hole-fill from the raw per-minute WAL: LUC-expand each
+    station observation, accumulate histograms per (cell, dt, metric).
+    Missing minutes past `RAW_FINALITY_S` are skipped (missed polls);
+    a RECENT missing minute returns None (retry once the poller lands
+    it). Mirrors the CFW's `readRawRows` + finality policy."""
+    import json as _json
+    from datetime import timedelta
+    from collections import defaultdict
+    chains = _luc_chains(r2)
+    metrics = [m.name for m in pyramid.metrics]
+    accum: dict[tuple[str, int, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    s, e = hole
+    saw_any = False
+    cur = s
+    while cur < e:
+        key = f"{RAW_MINUTE_PREFIX}/{cur:%Y-%m-%d}/{cur:%H%M}.parquet"
+        try:
+            obj = r2.get_object(Bucket=R2_BUCKET, Key=key)
+        except r2.exceptions.ClientError:
+            if (now - cur).total_seconds() < RAW_FINALITY_S:
+                return None  # poller may still land it — retry next run
+            cur += timedelta(minutes=1)
+            continue
+        saw_any = True
+        tab = pq.read_table(io.BytesIO(obj['Body'].read()))
+        d = tab.select(['station_id', 'dt'] + [f'{m}_sum' for m in metrics]).to_pydict()
+        for i, sid in enumerate(d['station_id']):
+            chain = chains.get(sid)
+            if chain is None:
+                continue
+            dt_ms = int(d['dt'][i]) * 1000  # raw dt is SECONDS
+            for m in metrics:
+                v = d[f'{m}_sum'][i]
+                if v is None:
+                    continue
+                state = str(int(v))
+                for cell in chain:
+                    accum[(cell, dt_ms, m)][state] += 1
+        cur += timedelta(minutes=1)
+    if not saw_any or not accum:
+        # Nothing scraped in this span (all missed, past finality) —
+        # treat as empty rather than unfillable.
+        return pa.table({
+            's2_cell': pa.array([], pa.string()), 'dt': pa.array([], pa.int64()),
+            **{m: pa.array([], pa.string()) for m in metrics},
+        })
+    rows: dict[tuple[str, int], dict[str, str]] = {}
+    for (cell, dt_ms, m), hist in accum.items():
+        sorted_hist = dict(sorted(hist.items(), key=lambda kv: int(kv[0])))
+        rows.setdefault((cell, dt_ms), {})[m] = _json.dumps(sorted_hist, separators=(',', ':'))
+    keys = list(rows)
+    arrays: dict[str, pa.Array] = {
+        's2_cell': pa.array([k[0] for k in keys], pa.string()),
+        'dt': pa.array([k[1] for k in keys], pa.int64()),
+    }
+    for m in metrics:
+        arrays[m] = pa.array([rows[k].get(m) for k in keys], pa.string())
+    return pa.table(arrays)
+
+
 def _source_tier_for(pyramid, tier_name: str) -> Tier | None:
     """Strict-cascade source tier: the coarsest tier T' with
     `bin(T') < bin(tier)` and `bin(tier) % bin(T') == 0` (divisibility
@@ -245,12 +344,18 @@ def materialize_extension_shard(
                                  inputs_expected=0, source_desc='pre-genesis')
 
     tier = next(t for t in pyramid.tiers if t.name == gap.tier)
+    finest = min(pyramid.tiers, key=lambda t: dur_min(t.bin))
     picks, holes = _tile_from_existing(pyramid, tier, gap, key_set)
     hole_tables: list[pa.Table] = []
     for hole in holes:
-        # Scar: dust that never materialized (e.g. the 2026-07-10
-        # incident windows). Rebin the finer tier over just the hole.
-        ht = _fill_hole_cross_tier(r2, pyramid, tier, hole, key_set)
+        # Holes are either scars (dust that never materialized) or —
+        # for a tier's smallest rung, which has no sub-rungs — the
+        # whole period. The finest tier fills from the raw WAL; others
+        # rebin their divisible source tier.
+        if tier.name == finest.name:
+            ht = _fill_hole_raw(r2, pyramid, hole, datetime.now(timezone.utc))
+        else:
+            ht = _fill_hole_cross_tier(r2, pyramid, tier, hole, key_set)
         if ht is None:
             err(f"  ⟶ {tag} → no_inputs (hole "
                 f"[{hole[0].isoformat()}, {hole[1].isoformat()}) unfillable)")
@@ -310,6 +415,7 @@ def run_extension_fill(
     time_budget_s: float | None = None,
     register: bool = False,
     dry_run: bool = False,
+    fill_all: bool = False,
     pyramid_name: str = 'avail',
 ) -> list[MaterializeResult]:
     """Discover + fill missing extension-rung shards over
@@ -336,10 +442,13 @@ def run_extension_fill(
     # (e.g. `too_large` bounces: /3m@2d's ragged 95 MB plan). Gaps at a
     # tier's smallest rung need raw/cross-tier ingest — those stay with
     # the CFW (it self-heals them within its budgets).
+    # `fill_all` (P2 cutover): also handle each tier's smallest rung
+    # (raw ingest at the finest tier, cross-tier rebin elsewhere) — the
+    # rungs the CFW cascade owns until it's retired.
     smallest = {t.name: t.shards[0] for t in pyramid.tiers}
     ext_gaps = [
         g for g in gaps
-        if g.shard_dur != smallest[g.tier]
+        if (fill_all or g.shard_dur != smallest[g.tier])
         # Trailing max-shards whose notional period ends pre-genesis can
         # never exist — permanent no-ops, excluded from the census.
         and g.period_end > AVAIL_GENESIS
