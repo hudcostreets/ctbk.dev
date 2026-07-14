@@ -111,7 +111,7 @@ def upsert_role(iam) -> str:
 
 
 def upsert_function(lam, role_arn: str, blob: bytes) -> str:
-    env = {'Variables': {k: os.environ[k] for k in ENV_KEYS} | {'GC_ENABLED': '1', 'FILL_ALL': os.environ.get('FILL_ALL', '0')}}
+    env = {'Variables': {k: os.environ[k] for k in ENV_KEYS} | {'GC_ENABLED': '1', 'FILL_ALL': os.environ.get('FILL_ALL', '1')}}
     cfg = dict(
         Runtime='python3.12', Role=role_arn, Handler='handler.lambda_handler',
         Timeout=TIMEOUT_S, MemorySize=MEMORY_MB, Layers=[PANDAS_LAYER], Environment=env,
@@ -132,12 +132,14 @@ def upsert_function(lam, role_arn: str, blob: bytes) -> str:
 
 
 def upsert_schedule(events, lam, func_arn: str) -> None:
-    # With FILL_ALL (P2), fire at :01/:06/:11/… — the smallest shard
-    # anywhere in the ladder spans 5 min, so that's the work cadence;
-    # the +1-min phase lets the poller land each boundary's final raw
-    # minute first (else the fill sees a recent hole and defers a full
-    # cycle). Hourly while the CFW still ran the sub-day cascade.
-    rate = 'cron(1/5 * * * ? *)' if os.environ.get('FILL_ALL') == '1' else 'rate(1 hour)'
+    # FILL_ALL (P2 steady state, the default): fire at :01/:06/:11/… —
+    # the smallest shard anywhere in the ladder spans 5 min, so that's
+    # the work cadence; the +1-min phase lets the poller land each
+    # boundary's final raw minute first (else the fill sees a recent
+    # hole and defers a full cycle). FILL_ALL=0 (extensions-only +
+    # hourly) is the rollback to the era when the CFW still ran the
+    # sub-day cascade.
+    rate = 'cron(1/5 * * * ? *)' if os.environ.get('FILL_ALL', '1') == '1' else 'rate(1 hour)'
     rule_arn = events.put_rule(Name=RULE, ScheduleExpression=rate, State='ENABLED',
                                Description='avail-v3 cascade fill')['RuleArn']
     events.put_targets(Rule=RULE, Targets=[{'Id': 'fn', 'Arn': func_arn}])

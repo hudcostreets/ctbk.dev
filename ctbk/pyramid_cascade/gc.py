@@ -7,6 +7,12 @@ a budget that clears backlogs in one run:
   deletable = eligible ∧ past grace ∧ same-tier covering parent
               (strictly larger shard_dur, fully contains period,
                HEAD-verified on R2)
+            ∨ eligible ∧ period_end > now (mid-period registration —
+              violates the registered ⇒ complete invariant; the read
+              planner would trust it through period_end while its
+              content is frozen at write time, masking finer-tier
+              fall-through. No parent can cover a future period; the
+              live ladder independently min-covers its real content.)
   delete    = R2 object first, then the D1 row
 
 Conservative by construction: anything uncertain is skipped and
@@ -57,7 +63,7 @@ def gc_sweep(
 
     expected_keys = {e.key for e in list_expected_shards(pyramid, (AVAIL_GENESIS, now))}
     rows = d1_query(
-        'SELECT tier, shard_dur, period_start, period_end, key '
+        'SELECT tier, shard_dur, period_start, period_end, key, written_at '
         'FROM pyramid_shards WHERE pyramid = ?', [pyramid_name])
     err(f'gc: {len(rows)} registered, {len(expected_keys)} expected in cover')
 
@@ -87,18 +93,26 @@ def gc_sweep(
         if max_deletes is not None and report.deleted >= max_deletes:
             report.skip('budget')
             continue
-        if r['period_end'] + GRACE_MS > now_ms:
-            report.skip('within-grace')
-            continue
-        parent = covering_parent(r)
-        if parent is None:
-            report.skip('no-covering-parent')
-            continue
-        try:
-            r2.head_object(Bucket=R2_BUCKET, Key=parent['key'])
-        except r2.exceptions.ClientError:
-            report.skip('parent-not-on-r2')
-            continue
+        if r['period_end'] > now_ms:
+            # Mid-period registration (see module docstring). Grace on
+            # written_at, not period_end (which never elapses while the
+            # shard is doing damage), so an in-flight writer isn't raced.
+            if r['written_at'] + GRACE_MS > now_ms:
+                report.skip('future-period-within-grace')
+                continue
+        else:
+            if r['period_end'] + GRACE_MS > now_ms:
+                report.skip('within-grace')
+                continue
+            parent = covering_parent(r)
+            if parent is None:
+                report.skip('no-covering-parent')
+                continue
+            try:
+                r2.head_object(Bucket=R2_BUCKET, Key=parent['key'])
+            except r2.exceptions.ClientError:
+                report.skip('parent-not-on-r2')
+                continue
         if dry_run:
             report.deleted += 1
             continue
