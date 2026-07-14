@@ -187,7 +187,7 @@ def test_cascade_30m_from_1m_matches_manual_sum():
     date_str = '2026-05-22'
     one_m_tables = build_1m_for_full_day(date_str)
 
-    def fake_read_v3_shard(cli, tier, period):
+    def fake_read_v3_shard(cli, tier, period, *, prefix=None):
         assert tier == '1m', f"cascade should only read 1m, got {tier}"
         return one_m_tables.get(period)
 
@@ -224,7 +224,7 @@ def test_cascade_1h_from_30m_matches_manual_sum():
     date_str = '2026-05-22'
     one_m_tables = build_1m_for_full_day(date_str)
 
-    def read_1m(cli, tier, period):
+    def read_1m(cli, tier, period, *, prefix=None):
         assert tier == '1m'
         return one_m_tables.get(period)
 
@@ -236,7 +236,7 @@ def test_cascade_1h_from_30m_matches_manual_sum():
 
     thirty_m_shards = {date_str: thirty_m_tab}
 
-    def read_30m(cli, tier, period):
+    def read_30m(cli, tier, period, *, prefix=None):
         assert tier == '30m'
         return thirty_m_shards.get(period)
 
@@ -290,7 +290,7 @@ def test_cascade_from_1m_matches_per_level_cascade():
     # the per-level relay (1m source + each intermediate it needs).
     written: dict[str, pa.Table] = {}
 
-    def fake_read_v3_shard(cli, tier, period):
+    def fake_read_v3_shard(cli, tier, period, *, prefix=None):
         # cascade_from_1m only reads 1m source.
         if tier == '1m':
             return one_m_tables.get(period)
@@ -320,7 +320,7 @@ def test_cascade_from_1m_matches_per_level_cascade():
             tab = build_cascade_shard(tier, shard_start, all_dates=(one_d, next_d))
         return tab
 
-    def _relay_read(cli, tier, period):
+    def _relay_read(cli, tier, period, *, prefix=None):
         if tier == '1m':
             return one_m_tables.get(period)
         return _relay_cascade.get((tier, period))
