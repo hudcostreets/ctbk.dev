@@ -60,6 +60,14 @@ def update(
     err(f"--- Station pair JSONs ---")
     ctbk_run('spj', 'create', ym)
 
+    # Per-station monthly trips JSONs (og cards + StationDetail trips
+    # panel read these via `ymdgtb-index.json`). Whole-artifact rebuild
+    # from the ymrgtb{s,e} aggregates just produced above; without this
+    # step the artifact silently freezes at its last manual build
+    # (2026-04..07: stuck at 2026-03). Retires with rides-v3 LUC (#109).
+    err(f"--- Station trips JSONs ---")
+    ctbk_run('station-trips-json', '-a', '-d')
+
     # Rebuild rides pyramids (v1/v2/v3) that back /api/rides-{v1,v2,v3}.
     # Range = prev-month → current: rebuilding prev month's /1h start-anchored
     # shard picks up rides that started in prev but ended in current (dropped
