@@ -1,5 +1,50 @@
 # Rides-v3 LUC-anchored materialization
 
+Status 2026-07-14: Phases A/B were completed earlier (denorm is
+short_name-keyed; avail-v3 rebuilt against it). Phase C laptop work is
+DONE — see "Resolved decisions" below for deltas vs the original
+recommendations (canonical-position keying chosen over the
+`luc_history` hybrid; same-dock L20 merge policy added). Next: Phase C
+rebuild on `e`, then D/E.
+
+## Resolved decisions (2026-07-14)
+
+1. **Canonical-position keying, no `luc_history`** (option (b), the
+   hybrid dropped). Measurement that settled it: JC115's
+   2023-01..2024-07 months undercount -3%..-16% under coordinate
+   keying (392,941 vs 396,760 all-time) — *small-jitter* boundary
+   crossings, nothing near the 160 m "mover" threshold the hybrid
+   gated on. Per-ride-coordinate keying can't be made exact without
+   tracking every cell a station ever occupied; keying by station
+   identity at the canonical position is exact by construction. Cost:
+   pre-move rides of the ~90 >160 m movers materialize at the new
+   location — a polygon-boundary rollup effect only, accepted.
+2. **Historical union source**: `station-history.parquet` (id0-keyed
+   eras; prefer the `id == id0` row, else latest `first`). Measured:
+   2,420 active + 278 historical-only canonicals.
+3. **Same-dock merge**: 9 clusters (18 stations) share an L20 cell
+   (~10 m) — renamed/renumbered docks `station-id-map` never joined
+   (`3660`→`4651.02`, `3477`→`3501.01`, `3197`→`JC104`, …). Each
+   cluster collapses into its active member (else lexically-max);
+   denorm gains a `merged: {loser: survivor}` map, applied after
+   id-map during canonicalization. A surviving station's history
+   includes its prior-id era (intentional; its counts exceed the
+   legacy artifact's, which kept the ids separate).
+4. **Unmapped-sid fallback**: coordinate chain L10..L15 minus the set
+   of ALL LUC cells, so fallback rows can never leak into a
+   per-station query; count + `err()` per month. Null-coord rides are
+   now kept when their sid maps (identity keying needs no coords) —
+   previously dropped.
+5. **Active-LUC churn: 166 stations move** under joint uniqueness ⇒
+   avail-v3 re-key rebuild on `e` is REQUIRED before the v2 denorm
+   ships. Sequencing: build denorm v2 on `e` → rides-v3 full rebuild →
+   avail-v3 rebuild → denorm + www + worker deploy together (the
+   deployed FE keeps the old denorm until then).
+6. **Acceptance**: JC115 monthly `rides-v3?cells=89c250b24` == legacy
+   `ymdgtb` for every month incl. the drift window; one merged-dock
+   station asserts legacy_A + legacy_H == v3; Home/region totals
+   unchanged vs pre-rebuild.
+
 ## Goal
 
 Bring the same LUC + ancestors materialization that avail-v3 just got

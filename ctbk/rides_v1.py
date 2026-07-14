@@ -294,6 +294,50 @@ def output_key(anchor: Anchor, tier: str, period: str, variant: Variant = 'v1') 
     return f'{dst_prefix(variant)}/{anchor}/{tier}/{period}.parquet'
 
 
+# ─── LUC denorm (v3 canonical keying) ──────────────────────────────────
+
+STATION_LUC_PATH = Path('www/public/assets/station-luc.json')
+ID_MAP_PATH = Path(f's3/{R2_BUCKET}/stations/station-id-map.json')
+
+# Coordinate-fallback levels for rides whose station id resolves to no
+# denorm entry (expected ≈0 after the historical union). Cells that ARE
+# some station's LUC are excluded so fallback rows can never leak into a
+# per-station query.
+FALLBACK_LEVELS: tuple[int, ...] = (10, 11, 12, 13, 14, 15)
+
+
+@lru_cache(maxsize=1)
+def luc_chains() -> tuple[dict[str, tuple[str, ...]], frozenset[str]]:
+    """Per-canonical S2 cell chain (L10..LUC ancestors from the
+    CANONICAL position, LUC cell verbatim) + the set of all LUC cells
+    (fallback exclusion). Keying rides by station identity instead of
+    per-ride coordinates is what makes per-station queries exact: era
+    coordinate jitter crosses cell boundaries at ANY magnitude (JC115's
+    2023-01..2024-07 rides undercounted -3..-16%/mo under coordinate
+    keying). See `specs/rides-v3-luc.md`."""
+    import json
+    d = json.loads(STATION_LUC_PATH.read_text())
+    bs = d['by_short_name']
+    chains = {
+        sn: tuple(
+            s2cell.lat_lon_to_token(e['lat'], e['lng'], lvl)
+            for lvl in range(FALLBACK_LEVELS[0], e['level'])
+        ) + (e['cell'],)
+        for sn, e in bs.items()
+    }
+    return chains, frozenset(e['cell'] for e in bs.values())
+
+
+@lru_cache(maxsize=1)
+def canonical_station_map() -> dict[str, str]:
+    """Raw ride station id → canonical short_name: `station-id-map`
+    composed with the denorm's same-dock `merged` map."""
+    import json
+    idm = json.loads(ID_MAP_PATH.read_text())
+    merged = json.loads(STATION_LUC_PATH.read_text()).get('merged', {})
+    return {sid: merged.get(canon, canon) for sid, canon in idm.items()}
+
+
 # ─── Station-id → lat/lng fallback ─────────────────────────────────────
 
 @lru_cache(maxsize=1)
@@ -393,10 +437,23 @@ def build_1h_month_table(
             df.loc[found_rows, cfg['lng_col']] = [geo[r][1] for r in found_rows]
             err(f"  {ym} [{anchor}]: filled {int(found_mask.sum()):,}/{n_initial_null:,} null lat/lng from station-observations")
 
-    n_still_null = int((df[cfg['lat_col']].isna() | df[cfg['lng_col']].isna()).sum())
-    if n_still_null:
-        df = df.dropna(subset=[cfg['lat_col'], cfg['lng_col']])
-        err(f"  {ym} [{anchor}]: dropped {n_still_null:,} rides still missing lat/lng after fallback")
+    # v3 keys by station identity, so coordinates only matter for the
+    # (unmapped-sid) fallback — null-coord rides with a known station id
+    # are kept (they were dropped under coordinate keying).
+    still_null = df[cfg['lat_col']].isna() | df[cfg['lng_col']].isna()
+    if variant == 'v3':
+        canon0 = canonical_station_map()
+        chains0, _ = luc_chains()
+        sids0 = df[sid_col].astype(str)
+        unmapped = ~sids0.map(lambda s: canon0.get(s, s)).isin(chains0.keys())
+        droppable = still_null & unmapped
+    else:
+        droppable = still_null
+    n_drop = int(droppable.sum())
+    if n_drop:
+        df = df[~droppable]
+        err(f"  {ym} [{anchor}]: dropped {n_drop:,} rides with no lat/lng"
+            + (" and no station-id mapping" if variant == 'v3' else " after fallback"))
     err(f"  {ym} [{anchor}]: {len(df):,} rides")
 
     # Hour-floor dt → unix ms
@@ -415,23 +472,55 @@ def build_1h_month_table(
     lat = df[cfg['lat_col']].values
     lng = df[cfg['lng_col']].values
 
-    # Inflate by len(resolutions) (one row per resolution), then groupby+sum.
-    chunks = []
-    for res in resolutions:
-        if variant == 'v3':
-            cells = [s2cell.lat_lon_to_token(la, ln, res) for la, ln in zip(lat, lng)]
-        else:
+    if variant == 'v3':
+        # LUC-anchored: each ride materializes at its CANONICAL
+        # station's L10..LUC chain (station identity, not per-ride
+        # coordinates — see `luc_chains` docstring / rides-v3-luc.md).
+        import itertools
+        import numpy as np
+        chains, luc_cells = luc_chains()
+        canon = canonical_station_map()
+        sids = df[sid_col].astype(str).values
+        ride_chains: list[tuple[str, ...]] = []
+        n_unknown = 0
+        for sid, la, ln in zip(sids, lat, lng):
+            ch = chains.get(canon.get(sid, sid))
+            if ch is None:
+                n_unknown += 1
+                ch = tuple(
+                    t for lvl in FALLBACK_LEVELS
+                    if (t := s2cell.lat_lon_to_token(la, ln, lvl)) not in luc_cells
+                )
+            ride_chains.append(ch)
+        if n_unknown:
+            err(f"  {ym} [{anchor}]: {n_unknown:,} rides with unmapped station id — "
+                f"coordinate fallback (LUC cells excluded)")
+        lens = np.fromiter((len(c) for c in ride_chains), dtype=np.int64, count=len(ride_chains))
+        rep = np.repeat(np.arange(len(ride_chains)), lens)
+        long_df = pd.DataFrame({
+            cc: list(itertools.chain.from_iterable(ride_chains)),
+            'dt': dt_hour_ms[rep],
+            'gender': gender[rep],
+            'user_type': user_type[rep],
+            'bike_type': bike_type[rep],
+            'duration_s': duration_s[rep],
+            'duration_sq': duration_sq[rep],
+        })
+    else:
+        # Inflate by len(resolutions) (one row per resolution), then groupby+sum.
+        chunks = []
+        for res in resolutions:
             cells = [h3.latlng_to_cell(la, ln, res) for la, ln in zip(lat, lng)]
-        chunks.append(pd.DataFrame({
-            cc: cells,
-            'dt': dt_hour_ms,
-            'gender': gender,
-            'user_type': user_type,
-            'bike_type': bike_type,
-            'duration_s': duration_s,
-            'duration_sq': duration_sq,
-        }))
-    long_df = pd.concat(chunks, ignore_index=True)
+            chunks.append(pd.DataFrame({
+                cc: cells,
+                'dt': dt_hour_ms,
+                'gender': gender,
+                'user_type': user_type,
+                'bike_type': bike_type,
+                'duration_s': duration_s,
+                'duration_sq': duration_sq,
+            }))
+        long_df = pd.concat(chunks, ignore_index=True)
 
     group_keys = [cc, 'dt', 'gender', 'user_type', 'bike_type']
     agg = (

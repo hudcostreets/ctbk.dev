@@ -62,6 +62,7 @@ from ctbk.cli.base import ctbk
 
 OUTPUT_KEY = 'station-luc.json'                          # R2 key
 LOCAL_PATH = 'www/public/assets/station-luc.json'        # FE-fetched
+HISTORY_PATH = 's3/ctbk/stations/station-history.parquet'  # id0-canonicalized eras
 
 # Range of S2 levels to consider for LUC. L10 is the coarsest level the
 # pyramids materialize (matches the `coarsestLevel` cap on
@@ -132,6 +133,55 @@ def union_stations(cli, dates: list[str]) -> tuple[dict[str, dict], dict[str, st
     return by_short_name, by_uuid
 
 
+def historical_stations(active: dict[str, dict]) -> dict[str, dict]:
+    """Canonical (id0) stations from rides history absent from the
+    active GBFS union, positioned at their most recent era (preferring
+    the `id == id0` canonical-era row). Joining them into the LUC
+    uniqueness pass means a dead station's rides can never impersonate
+    an active station's per-station query (`specs/rides-v3-luc.md`)."""
+    import pandas as pd
+    h = pd.read_parquet(HISTORY_PATH)
+    h = h.dropna(subset=['lat', 'lng'])
+    h = h[(h['lat'] != 0.0) | (h['lng'] != 0.0)]
+    h = h.assign(is_canon_era=(h['id'] == h['id0']).astype(int))
+    last = h.sort_values(['is_canon_era', 'first']).groupby('id0').tail(1)
+    return {
+        r.id0: {'lat': float(r.lat), 'lng': float(r.lng)}
+        for r in last.itertuples()
+        if r.id0 not in active
+    }
+
+
+def merge_same_dock(stations: dict[str, dict]) -> dict[str, str]:
+    """Collapse L20-cell (~10 m) collision clusters: same physical dock
+    under renamed/renumbered canonical ids that `station-id-map` never
+    joined (e.g. `3660` → `4651.02` "Clinton Ave & Myrtle Ave"). The
+    active member survives (a station page carries its dock's full ride
+    history); all-historical clusters keep the lexically-max id (these
+    are numbered chronologically in practice, and both members are
+    dead, so the choice only names the merged entity). Losers are
+    removed from `stations`; returns `{loser: survivor}`."""
+    from collections import defaultdict
+    groups: dict[str, list[str]] = defaultdict(list)
+    for sn, v in stations.items():
+        groups[s2cell.lat_lon_to_token(v['lat'], v['lng'], LUC_MAX_LEVEL)].append(sn)
+    merged: dict[str, str] = {}
+    for cell, sns in groups.items():
+        if len(sns) < 2:
+            continue
+        actives = [sn for sn in sns if stations[sn].get('active')]
+        if len(actives) > 1:
+            raise RuntimeError(
+                f"L{LUC_MAX_LEVEL} cell {cell} holds {len(actives)} ACTIVE stations "
+                f"{actives}; two live docks within ~10 m — resolve manually")
+        survivor = actives[0] if actives else max(sns)
+        for sn in sns:
+            if sn != survivor:
+                merged[sn] = survivor
+                del stations[sn]
+    return merged
+
+
 def compute_luc(stations: dict[str, dict]) -> dict[str, dict]:
     """For each station, find the coarsest S2 level where its cell is
     unique among the station set. Mutates `stations` in place, adding
@@ -169,11 +219,12 @@ def luc_distribution_summary(by_short_name: dict[str, dict]) -> str:
     return '\n'.join(f'  L{lvl:<3} {counts[lvl]:6d}  {100*counts[lvl]/n:5.1f}%' for lvl in sorted(counts))
 
 
-@ctbk.command('station-luc-build', help="Build station-luc.json (canonical short_name → LUC denorm) by unioning gbfs/info snapshots across a date window.")
+@ctbk.command('station-luc-build', help="Build station-luc.json (canonical short_name → LUC denorm): gbfs/info snapshot union + historical rides canonicals, joint uniqueness.")
 @option('-f', '--date-from', 'date_from', default=WAL_PERIOD_START, help=f"Inclusive start (YYYY-MM-DD; default: {WAL_PERIOD_START}, matching the WAL period start).")
+@flag('-H', '--no-history', help="Active GBFS stations only (pre-rides-v3-LUC behavior); skips station-history canonicals + same-dock merge.")
 @option('-T', '--date-to', 'date_to', default=None, help="Exclusive end (YYYY-MM-DD; default: tomorrow UTC, so today's snapshot is included).")
 @flag('-R', '--no-r2', help="Skip R2 upload; write local file only.")
-def station_luc_build_cmd(date_from: str, date_to: str | None, no_r2: bool):
+def station_luc_build_cmd(date_from: str, no_history: bool, date_to: str | None, no_r2: bool):
     df = Date.fromisoformat(date_from)
     if date_to is None:
         dt = (datetime.now(timezone.utc).date() + timedelta(days=1))
@@ -191,12 +242,45 @@ def station_luc_build_cmd(date_from: str, date_to: str | None, no_r2: bool):
     by_short_name, by_uuid = union_stations(cli, dates)
     err(f"  union: {len(by_short_name)} short_names, {len(by_uuid)} uuids")
 
+    merged: dict[str, str] = {}
+    if not no_history:
+        for v in by_short_name.values():
+            v['active'] = True
+        hist = historical_stations(by_short_name)
+        for v in hist.values():
+            v['active'] = False
+        err(f"  historical-only canonicals: {len(hist)}")
+        by_short_name.update(hist)
+        merged = merge_same_dock(by_short_name)
+        if merged:
+            err(f"  same-dock merges: {len(merged)}")
+            for loser, survivor in sorted(merged.items()):
+                err(f"    {loser} -> {survivor}")
+
+    # Churn report: active stations whose LUC moves vs the deployed
+    # denorm (each requires re-keyed pyramid rows — gates the rebuild
+    # sequencing in `specs/rides-v3-luc.md`).
+    try:
+        with open(LOCAL_PATH) as f:
+            prev = json.load(f)['by_short_name']
+    except (FileNotFoundError, KeyError, json.JSONDecodeError):
+        prev = {}
+
     compute_luc(by_short_name)
     err(f"  LUC distribution:")
     err(luc_distribution_summary(by_short_name))
 
+    if prev:
+        moved = [
+            sn for sn, v in by_short_name.items()
+            if sn in prev and (v['cell'], v['level']) != (prev[sn]['cell'], prev[sn]['level'])
+        ]
+        err(f"  LUC churn vs {LOCAL_PATH}: {len(moved)} stations moved")
+        for sn in sorted(moved)[:20]:
+            err(f"    {sn}: L{prev[sn]['level']} {prev[sn]['cell']} -> L{by_short_name[sn]['level']} {by_short_name[sn]['cell']}")
+
     body = json.dumps(
-        {'by_short_name': by_short_name, 'by_uuid': by_uuid},
+        {'by_short_name': by_short_name, 'by_uuid': by_uuid, 'merged': merged},
         sort_keys=True,
         separators=(',', ':'),
     ).encode('utf-8')
