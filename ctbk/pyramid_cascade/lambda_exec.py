@@ -241,6 +241,54 @@ def _source_tier_for(pyramid, tier_name: str) -> Tier | None:
     return best
 
 
+def _overlap_cover(
+    pyramid,
+    src: Tier,
+    s: datetime,
+    e: datetime,
+    key_set: set[str],
+) -> tuple[list[tuple[str, datetime, datetime]], list[tuple[datetime, datetime]]]:
+    """Cover [s, e) with EXISTING source-tier tiles of any rung —
+    including tiles that only PARTIALLY overlap the interval (the
+    reader clips each tile to its assigned subinterval). Nested-slot
+    tiling misses these: a source min-cover tile (/15m@3h
+    [18:00, 21:00)) can cover the head of a /30m@2h hole
+    [20:00, 22:00) while no /15m@1h tile at 20:00 ever exists — the
+    2026-07-13 evening wedge, where two such holes bounced `no_inputs`
+    for 2.5 h and dammed every coarser tier until the midnight
+    boundary reshuffled the rung layout.
+
+    Greedy coarsest-first; assigned subintervals are disjoint by
+    construction (each pick advances only through still-uncovered
+    range), so per-pick clipping can't double-count rows. Returns
+    `([(key, clip_start, clip_end)…], [uncovered holes])`."""
+    from datetime import timedelta
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    uncovered = [(s, e)]
+    picks: list[tuple[str, datetime, datetime]] = []
+    for rung in reversed(src.shards):
+        dur = timedelta(minutes=dur_min(rung))
+        remaining: list[tuple[datetime, datetime]] = []
+        for a, b in uncovered:
+            cur = a
+            slot = a - ((a - epoch) % dur)
+            while slot < b:
+                if _shard_key(pyramid, src.name, rung, slot) in key_set:
+                    if cur < slot:
+                        remaining.append((cur, slot))
+                    lo, hi = max(cur, slot), min(b, slot + dur)
+                    if lo < hi:
+                        picks.append((_shard_key(pyramid, src.name, rung, slot), lo, hi))
+                    cur = max(cur, hi)
+                slot += dur
+            if cur < b:
+                remaining.append((cur, b))
+        uncovered = remaining
+        if not uncovered:
+            break
+    return picks, uncovered
+
+
 def _fill_hole_cross_tier(
     r2,
     pyramid,
@@ -251,47 +299,34 @@ def _fill_hole_cross_tier(
     """Rebin the finer source tier over `hole` up to `tier`'s bin:
     floor dt, merge histogram JSONs per (cell, dt, metric) — the CFW's
     `kwayMerge` hole-fill, in pure python (holes are small: the scars
-    are hours-to-a-day). Sources may be tiles CONTAINING the hole
-    (rows outside are clipped). Returns None if the source tier can't
-    cover the hole either."""
+    are hours-to-a-day). Sources may be tiles merely OVERLAPPING the
+    hole (each is clipped to its assigned subinterval on read).
+    Returns None if the source tier can't cover the hole either."""
     import json as _json
-    from datetime import timedelta
     src = _source_tier_for(pyramid, tier.name)
     if src is None:
         return None
     s, e = hole
-    # Prefer a single existing source tile containing the hole (common:
-    # a 12h tile absorbed the dust the hole is missing); else slot-tile.
-    containing = None
-    for rung in reversed(src.shards):
-        dur = timedelta(minutes=dur_min(rung))
-        slot = s - ((s - datetime(1970, 1, 1, tzinfo=timezone.utc)) % dur)
-        if slot + dur >= e:
-            k = _shard_key(pyramid, src.name, rung, slot)
-            if k in key_set:
-                containing = k
-                break
-    if containing:
-        keys = [containing]
-    else:
-        fake = ExpectedShard(tier=src.name, shard_dur=src.shards[-1],
-                             period_start=s, period_end=e, key='')
-        picks, holes2 = _tile_from_existing(pyramid, src, fake, key_set)
-        if holes2:
-            return None
-        keys = [k for _r, k in picks]
+    entries, uncovered = _overlap_cover(pyramid, src, s, e, key_set)
+    if uncovered:
+        return None
+    # One R2 read per distinct key, applied over that key's (disjoint)
+    # assigned clip ranges.
+    by_key: dict[str, list[tuple[int, int]]] = {}
+    for k, cs, ce in entries:
+        by_key.setdefault(k, []).append(
+            (int(cs.timestamp() * 1000), int(ce.timestamp() * 1000)))
 
-    s_ms, e_ms = int(s.timestamp() * 1000), int(e.timestamp() * 1000)
     bin_ms = dur_min(tier.bin) * 60_000
     metrics = [m.name for m in pyramid.metrics]
     acc: dict[tuple[str, int], list[dict[str, int]]] = {}
-    for k in keys:
+    for k, ranges in by_key.items():
         obj = r2.get_object(Bucket=R2_BUCKET, Key=k)
         t = pq.read_table(io.BytesIO(obj['Body'].read()))
         cols = {c: t.column(c).to_pylist() for c in ['s2_cell', 'dt', *metrics]}
         for i, dt in enumerate(cols['dt']):
             dt = int(dt)
-            if not (s_ms <= dt < e_ms):
+            if not any(lo <= dt < hi for lo, hi in ranges):
                 continue
             key2 = (cols['s2_cell'][i], dt - dt % bin_ms)
             hists = acc.get(key2)
