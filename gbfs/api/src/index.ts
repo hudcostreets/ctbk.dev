@@ -1508,28 +1508,47 @@ export default {
 
 		// /og/s/:slug.png — dynamic per-station og:image (satori-rendered
 		// share card with a live 7d availability sparkline; see `og.ts`).
-		// Referenced from per-station HTML stubs' `og:image` meta. Cached
-		// 1d at the edge — render cost is paid ~once/day per shared station.
+		// Referenced from per-station HTML stubs' `og:image` meta.
+		// Stale-while-revalidate: entries live 7d in the edge cache with
+		// an `X-Rendered-At` stamp; hits older than 1h serve immediately
+		// and re-render in the background (`ctx.waitUntil`), so only the
+		// very first request per station per colo pays the ~1-1.5s render
+		// (matters for crawlers with short preview-fetch timeouts).
 		const ogMatch = url.pathname.match(/^\/og\/s\/([a-z0-9-]+)\.png$/);
 		if (ogMatch) {
 			const cache = caches.default;
 			const cacheKey = new Request(url.toString(), { method: 'GET' });
+			const OG_FRESH_MS = 3600_000;
+			// Render + cache (long edge TTL; the client-facing copy below
+			// carries its own shorter Cache-Control). Non-ok renders
+			// (unknown slug) pass through uncached.
+			const render = async (): Promise<Response> => {
+				const { serveStationOg } = await import('./og');
+				const resp = await serveStationOg(env.R2, env.DB, ogMatch[1]!);
+				if (!resp.ok) return resp;
+				const headers = new Headers(resp.headers);
+				headers.set('Cache-Control', 'public, max-age=604800');
+				headers.set('X-Rendered-At', String(Date.now()));
+				const cached = new Response(resp.body, { status: resp.status, headers });
+				await cache.put(cacheKey, cached.clone());
+				return cached;
+			};
+			const clientCopy = (resp: Response, xCache: string): Response => {
+				const headers = new Headers(resp.headers);
+				headers.set('Cache-Control', 'public, max-age=3600');
+				headers.set('X-Cache', xCache);
+				return new Response(resp.body, { status: resp.status, headers });
+			};
 			const hit = await cache.match(cacheKey);
 			if (hit) {
-				const headers = new Headers(hit.headers);
-				headers.set('X-Cache', 'HIT');
-				return new Response(hit.body, { status: hit.status, headers });
+				const renderedAt = Number(hit.headers.get('X-Rendered-At') ?? 0);
+				if (Date.now() - renderedAt > OG_FRESH_MS) {
+					ctx.waitUntil(render().catch(() => {}));
+				}
+				return clientCopy(hit, 'HIT');
 			}
 			try {
-				const { serveStationOg } = await import('./og');
-				let resp = await serveStationOg(env.R2, env.DB, ogMatch[1]!);
-				if (resp.ok) {
-					const headers = new Headers(resp.headers);
-					headers.set('Cache-Control', 'public, max-age=86400');
-					resp = new Response(resp.body, { status: resp.status, headers });
-					ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-				}
-				return resp;
+				return clientCopy(await render(), 'MISS');
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'og render error', 500, env);
 			}
@@ -1539,7 +1558,7 @@ export default {
 		// stub generation in www (one row per station page to emit).
 		if (url.pathname === '/api/stations/slugs') {
 			const { results } = await env.DB.prepare(
-				`SELECT slug, short_name, name FROM stations WHERE slug IS NOT NULL ORDER BY slug`
+				`SELECT slug, short_name, name, capacity, station_type, first_seen FROM stations WHERE slug IS NOT NULL ORDER BY slug`
 			).all();
 			return jsonResponse({ stations: results }, env, {
 				headers: { 'Cache-Control': 'public, max-age=3600' },

@@ -42,13 +42,24 @@ if (!stations?.length) throw new Error('no slugged stations returned')
 const template = readFileSync(join(distDir, 'index.html'), 'utf8')
 if (!/<title>/.test(template)) throw new Error('dist/index.html missing <title>')
 
-for (const { slug, name } of stations) {
+for (const { slug, name, capacity, station_type, first_seen } of stations) {
   const title = `${name} — Citi Bike station | ctbk.dev`
+  const bits = []
+  if (capacity) bits.push(`${capacity}-dock`)
+  if (station_type) bits.push(station_type)
+  const kind = bits.length ? `${bits.join(' ')} Citi Bike station` : 'Citi Bike station'
+  const since = first_seen ? `, in service since ${first_seen.slice(0, 4)}` : ''
+  const desc = `${name}: ${kind}${since} — live availability + ride history on ctbk.dev.`
   let html = template.replace(/<title>[^<]*<\/title>/, `<title>${escapeHtml(title)}</title>`)
   html = setMeta(html, 'og:title', title)
-  html = setMeta(html, 'og:description', `Live availability + trip history for the ${name} Citi Bike station.`)
+  html = setMeta(html, 'og:description', desc)
   html = setMeta(html, 'og:image', `${API_BASE}/og/s/${slug}.png`)
   html = setMeta(html, 'og:url', `${SITE}/s/${slug}`)
+  // Dimension hints let crawlers reserve layout before fetching the image.
+  html = html.replace(
+    /(<meta property="og:image"[^>]*\/>)/,
+    `$1\n    <meta property="og:image:width" content="1200" />\n    <meta property="og:image:height" content="630" />`,
+  )
   const dir = join(distDir, 's', slug)
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'index.html'), html)
