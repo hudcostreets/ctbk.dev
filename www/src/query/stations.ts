@@ -98,14 +98,11 @@ export interface AvailabilityOverviewResponse {
  *  raw tier (sub-hour bins served via `/day raw` bundles + WAL-stitched today)
  *  there's no longer a useRaw fork; sub-hour bins are first-class.
  *
- *  Tier-cost floor for very-wide windows: span > 30d forces binS ≥ 86400
- *  (d1 tier, yearly files); span > 1y forces binS ≥ 1mo (mo1 tier, decade
- *  files). Caps the per-file decode load on the Worker. */
+ *  No coarse-window tier floor: the avail-v3 ladder's min-cover keeps file
+ *  counts bounded at any (span, bin) combination, so the pixel target alone
+ *  decides (the legacy floor forced 1d bins past 30d spans — chunky). The
+ *  worker's planner still coarsens the *output* tier if the budget warrants. */
 export function pickAvailBinAuto(spanS: number, viewportPx: number): number {
-  const DAY_S = 86400
-  const MONTH_S = 30 * DAY_S
-  const YEAR_S = 365 * DAY_S
-  const tierFloor = spanS > YEAR_S ? MONTH_S : spanS > 30 * DAY_S ? DAY_S : 60
   const NICE_BINS = [
     60,              //  1 min
     300,             //  5 min
@@ -123,7 +120,7 @@ export function pickAvailBinAuto(spanS: number, viewportPx: number): number {
     2592000 * 3,     // ~3 mo
     2592000 * 12,    // ~1 y
   ]
-  const target = Math.max(tierFloor, spanS / viewportPx)
+  const target = Math.max(60, spanS / viewportPx)
   return NICE_BINS.find((n) => n >= target) ?? NICE_BINS[NICE_BINS.length - 1]
 }
 
@@ -331,6 +328,16 @@ function availV3RowsToAvailabilityRows(
     .sort((a, b) => a.polled_at - b.polled_at)
 }
 
+/** Parse a pyrmts Duration string (`1min` / `30min` / `1h` / `3d`) to
+ *  seconds; null on anything unrecognized. */
+function durationToS(dur: string | undefined): number | null {
+  if (!dur) return null
+  const m = /^(\d+)(min|h|d|w|y)$/.exec(dur)
+  if (!m) return null
+  const mult = { min: 60, h: 3600, d: 86400, w: 7 * 86400, y: 365 * 86400 }[m[2] as 'min' | 'h' | 'd' | 'w' | 'y']
+  return Number(m[1]) * mult
+}
+
 const stationAvailV3Key = (gbfsId: string, fromS: number, toS: number, binBudget: number) =>
   ['station-avail-v3', gbfsId, fromS, toS, `bb${binBudget}`] as const
 
@@ -348,10 +355,12 @@ const stationAvailV3Fn = async (
   const res = await fetch(url.toString())
   if (!res.ok) throw new Error(`avail-v3: HTTP ${res.status}`)
   const data = await res.json() as AvailV3Response
-  // Reverse-engineer the bin size the planner picked, so the chart's
-  // sample-count + tooltip line up. `outputBin` is a pyrmts Duration
-  // string like '1h' / '30min'.
-  const binS = Math.max(1, Math.round((toS - fromS) / Math.max(1, binBudget)))
+  // The planner reports the bin it actually served (`outputBin`, a pyrmts
+  // Duration like '1h' / '30min' / '3d') — it may be coarser than
+  // span/budget when a coarse tier satisfies the budget. Fall back to the
+  // budget-derived estimate if the field is missing/unparseable.
+  const binS = durationToS(data.plan?.outputBin)
+    ?? Math.max(1, Math.round((toS - fromS) / Math.max(1, binBudget)))
   return {
     station_id: gbfsId,
     from: fromS,
