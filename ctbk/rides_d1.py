@@ -238,3 +238,78 @@ def rides_d1_build_cmd(
     with sidecar.open('w') as f:
         json.dump(DIM_MAPS, f, indent=2)
     err(f"rides-d1-build: wrote {sidecar} (dim INT→string maps)")
+
+
+@ctbk.command('rides-d1-dump', help="Dump a rides-d1-build SQLite file to chunked .sql for `wrangler d1 execute --remote --file`.")
+@option('-b', '--batch-rows', type=int, default=500, show_default=True, help='Rows per multi-row INSERT statement.')
+@option('-c', '--chunk-mb', type=int, default=800, show_default=True, help='Approx max size per output .sql chunk (MB).')
+@option('-i', '--input', 'input_', type=str, required=True, help='Input SQLite file (from rides-d1-build).')
+@option('-o', '--out-dir', type=str, required=True, help='Output directory for .sql chunks.')
+def rides_d1_dump_cmd(
+    batch_rows: int,
+    chunk_mb: int,
+    input_: str,
+    out_dir: str,
+):
+    """Emit `<table>.NNNN.sql` chunk files, each independently executable
+    (chunk 0 of each table carries the CREATE TABLE + index DDL). Rows
+    stream in PK order (WITHOUT ROWID iteration order), multi-row
+    INSERTs of `--batch-rows`, files cut at ~`--chunk-mb`."""
+    in_path = Path(input_)
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    chunk_bytes = chunk_mb * 1024 * 1024
+    conn = sqlite3.connect(str(in_path))
+    cur = conn.cursor()
+    tables = [r[0] for r in cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+    err(f"rides-d1-dump: {in_path} → {out_path}/ ({len(tables)} tables)")
+    cols = ['dt', 'cell', 'gender', 'user_type', 'bike_type',
+            'count_n', 'count_sum', 'count_sumsq',
+            'duration_n', 'duration_sum', 'duration_sumsq']
+    col_list = ','.join(cols)
+    for tbl in tables:
+        ddl = [r[0] for r in cur.execute(
+            "SELECT sql FROM sqlite_master WHERE tbl_name=? AND sql IS NOT NULL", (tbl,))]
+        n_chunk = 0
+        n_rows = 0
+        f = None
+        written = 0
+
+        def open_chunk():
+            nonlocal f, written
+            p = out_path / f'{tbl}.{n_chunk:04d}.sql'
+            f = p.open('w')
+            written = 0
+            if n_chunk == 0:
+                for stmt in ddl:
+                    f.write(stmt.rstrip().rstrip(';') + ';\n')
+
+        open_chunk()
+        batch: list[str] = []
+
+        def flush_batch():
+            nonlocal written
+            if not batch:
+                return
+            stmt = f'INSERT INTO {tbl} ({col_list}) VALUES\n' + ',\n'.join(batch) + ';\n'
+            f.write(stmt)
+            written += len(stmt)
+            batch.clear()
+
+        row_cur = conn.cursor()
+        for row in row_cur.execute(f'SELECT {col_list} FROM {tbl}'):
+            dt, cell, *ints = row
+            batch.append(f"({dt},'{cell}',{','.join(map(str, ints))})")
+            n_rows += 1
+            if len(batch) >= batch_rows:
+                flush_batch()
+                if written >= chunk_bytes:
+                    f.close()
+                    n_chunk += 1
+                    open_chunk()
+        flush_batch()
+        f.close()
+        err(f"  {tbl}: {n_rows:,} rows → {n_chunk + 1} chunk(s)")
+    conn.close()
+    err("rides-d1-dump: done")
