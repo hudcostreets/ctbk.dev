@@ -4,8 +4,12 @@ Status 2026-07-14: Phases A/B were completed earlier (denorm is
 short_name-keyed; avail-v3 rebuilt against it). Phase C laptop work is
 DONE — see "Resolved decisions" below for deltas vs the original
 recommendations (canonical-position keying chosen over the
-`luc_history` hybrid; same-dock L20 merge policy added). Next: Phase C
-rebuild on `e`, then D/E.
+`luc_history` hybrid; same-dock L20 merge policy added). Phase C `e`
+rebuild is DONE and acceptance-verified — see "Phase C acceptance
+(2026-07-14)", which also surfaced two pre-existing prod bugs in
+coarse-tier serving (stale D1 + a shard-naming mismatch; fixes in
+flight). Next: finish D1 reload, then D/E + the denorm/www/worker
+flip train.
 
 ## Resolved decisions (2026-07-14)
 
@@ -44,6 +48,59 @@ rebuild on `e`, then D/E.
    `ymdgtb` for every month incl. the drift window; one merged-dock
    station asserts legacy_A + legacy_H == v3; Home/region totals
    unchanged vs pre-rebuild.
+
+## Phase C acceptance (2026-07-14)
+
+`e` rebuilt the full pyramid (1h all months + every cascade tier,
+`-O`); wrinkles: one OOM at `-c 16` on the 1h tier (redone `-c 8`),
+and 202605/202606 normalized parquets initially not `dvc pull`ed
+(empty shards; fixed + all-tier fixup). Denorm regen on `e`: 2,745
+canonicals = 2,475 active + 270 historical, 6 same-dock merges, 166
+active-LUC churn. Deltas vs the numbers above are snapshot drift
+between the spec-time dev run and `e`'s regen (+55 active; 3 merges
+evaporated — e.g. `3660`'s canonical position moved ~6 km off
+`4651.02`'s dock in the newer window-union, so they no longer share an
+L20 cell). The rebuilt pyramid + `e` denorm are self-consistent, which
+is what matters; the committed Phase-A.1 denorm is a strict subset
+(all 2,420 entries present, +325 new, 166 cell changes).
+
+Acceptance ran via `scripts/rides-v3-acceptance.py` (new; legacy
+`ymdgtb` JSON vs `/api/rides-v3?cells=<LUC>`, monthly bins, both
+anchors, `SURVIVOR+LOSER` syntax for merged docks):
+
+- **JC115**: drift-window undercount GONE. Totals 882,678 (v3) vs
+  882,628 (legacy), +0.006%. Every residual spot-checked against the
+  normalized parquet ground truth resolved in v3's favor: legacy
+  mis-months a ride at some boundaries (adjacent-month ±1 cancel
+  pairs), and misses sid-mapped rides 2016-09..2017-01 (2016-09 GT
+  5,157 = v3; legacy 5,148). PASS.
+- **Merged dock `3501.01+3477`**: Σ exactly equal (41,904); residuals
+  are the same legacy cancel-pair class. PASS.
+- **Region totals**: D1 (= pre-rebuild snapshot) vs parquet agree
+  where both serve; see bugs below for the two backends' failure
+  modes. Effective PASS via per-station + JC/HOB parity.
+
+### Prod bugs surfaced (pre-existing, masked until now)
+
+1. **Coarse-tier shard-name mismatch**: worker Tiers (since
+   `fab241bb`) declare coarse shards as `120y` → pyrmts plans
+   `{tier}/1920.parquet` (120y calendar floor of 2013 = 1920); the
+   ctbk build has always written `all.parquet`. Pure-parquet coarse
+   reads 500'd in prod for BOTH v2 and v3 — masked on v3 by the D1
+   hybrid default, unnoticed on v2 (nothing queries v2 coarse).
+   Fixed: `ctbk/rides_v1.py:shard_period` now emits `1920` for
+   `'all'` shards; the 14 v3 coarse R2 objects were server-side
+   copied to `1920.parquet` and the `all.parquet` originals deleted
+   (new `ctbk gbfs r2 cp` / `rm` subcommands).
+2. **Stale D1 `RIDES_V3_COARSE`**: the hybrid's D1 side was a
+   one-time bakeoff load (2026-06-07) with no refresh pipeline —
+   prod monthly views were serving pre-LUC (drift-era) data and ZERO
+   for 2026-05/06. Decision (closes the #105 question): KEEP the
+   hybrid — pure-parquet coarse 503s at NYC-region covers (237
+   cells × 158 months; the CPU wall that motivated D1) — and reload
+   D1 blue/green from the rebuilt shards (`ctbk rides-d1-build` →
+   new DB `ctbk-rides-v3-coarse-luc` → binding flip). Follow-up:
+   wire a monthly D1 refresh into the update flow.
 
 ## Goal
 
