@@ -1,6 +1,7 @@
 export { BlueskyIcon } from './Bluesky'
 export { CommandIcon } from './Command'
 export { GitHubIcon } from './GitHub'
+export { HealthIcon } from './Health'
 export { HomeIcon } from './Home'
 export { PipelineIcon } from './Pipeline'
 export { S3Icon } from './S3'

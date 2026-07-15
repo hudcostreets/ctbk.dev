@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { GitHubIcon, S3Icon, BlueskyIcon, PipelineIcon, HomeIcon } from "./icons"
+import { GitHubIcon, HealthIcon, S3Icon, BlueskyIcon, PipelineIcon, HomeIcon } from "./icons"
 import css from './Footer.module.css'
 
 interface FooterProps {
@@ -26,6 +26,7 @@ export function Footer({ showPipeline = true, showHome = false }: FooterProps) {
           Pipeline: <Link to="/pipeline"><PipelineIcon className={css.icon} /></Link>
         </>
       )}
+      Health: <Link to="/health"><HealthIcon className={css.icon} /></Link>
       Author: <a href="https://bsky.app/profile/runsascoded.com" target="_blank" rel="noopener noreferrer">
         <BlueskyIcon className={css.icon} />
       </a>
