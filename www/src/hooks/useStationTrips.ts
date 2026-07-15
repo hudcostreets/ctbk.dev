@@ -101,13 +101,19 @@ async function fetchV3Rows(shortName: string): Promise<StationTripsRow[]> {
   // bbox is a required coarse filter on the endpoint; a small box around
   // the station suffices (the `cells=` predicate does the real work).
   const bbox = [entry.lat - 0.02, entry.lng - 0.02, entry.lat + 0.02, entry.lng + 0.02].join(',')
+  // `to` quantized to next-month-start (matches `defaultTo()` in
+  // `query/ridesV1.ts`): a ms-fresh `to` makes every request URL unique,
+  // defeating the worker's CF edge cache entirely. Monthly bins make
+  // anything finer meaningless anyway.
+  const now = new Date()
+  const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString()
   const rows = await Promise.all((['start', 'end'] as const).map(async (anchor) => {
     const url = new URL(`${API_BASE}/api/rides-v3`)
     url.searchParams.set('anchor', anchor)
     url.searchParams.set('cells', entry.cell)
     url.searchParams.set('bbox', bbox)
     url.searchParams.set('from', V3_FROM)
-    url.searchParams.set('to', new Date().toISOString())
+    url.searchParams.set('to', to)
     url.searchParams.set('bin_budget', String(V3_BIN_BUDGET))
     const res = await fetch(url.toString())
     if (!res.ok) throw new Error(`rides-v3 [${anchor}]: HTTP ${res.status}`)
