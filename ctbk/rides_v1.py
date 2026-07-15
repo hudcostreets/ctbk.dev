@@ -156,12 +156,18 @@ def tier_specs(variant: Variant) -> dict[str, TierSpec]:
 
 def sort_cols(variant: Variant, cell_col: str) -> list[str]:
     """v1: (dt, cell) — time-window queries prune via `dt` RG stats.
-    v2/v3: (cell, dt) — cell-filter queries prune via cell RG stats.
+    v2/v3: (cell, dt) — cell-filter queries prune via cell RG stats;
+    dims as tertiary keys for deterministic layout + better
+    dictionary/RLE encoding (rows within one (cell, dt) are the
+    handful of dim combos). Dims deliberately come AFTER dt: the
+    dominant query fetches the full dim cartesian over a time window,
+    which stays one contiguous range per cell; dims-before-dt would
+    shatter it into a range per combo.
     """
     if variant == 'v1':
         return ['dt', cell_col]
     if variant in ('v2', 'v3'):
-        return [cell_col, 'dt']
+        return [cell_col, 'dt', *DIM_COLS]
     raise ValueError(f"unknown variant: {variant!r}")
 
 

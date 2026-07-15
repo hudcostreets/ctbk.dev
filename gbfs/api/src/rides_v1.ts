@@ -48,7 +48,7 @@ import {
 	type Tier,
 } from 'pyrmts';
 import { parquetBackend } from 'pyrmts';
-import { d1Backend, r2Storage } from 'pyrmts-cfw';
+import { r2Storage } from 'pyrmts-cfw';
 import {
 	filterCellsAndRes,
 	filterCellsByCover,
@@ -171,204 +171,6 @@ export function ridesCellsPyramid(bucket: R2Bucket, anchor: Anchor, variant: Var
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// D1 backend (rides-v3 only — COARSE tiers in the RIDES_V3_COARSE DB).
-//
-// Tables: `rides_{start,end}_{1d,3d,7d,14d,1mo,3mo,1y}` — one row per
-// (cell, dt, gender, user_type, bike_type) with sum-monoid state.
-//
-// Dim columns are INT-encoded in D1 (gender/user_type/bike_type are
-// int 0-2, see `ctbk/rides_d1.py:GENDER_INT` etc.). On fetch, the
-// backend wrapper decodes back to strings so downstream stitch/reduce
-// code sees the same row shape as the parquet path. See
-// `specs/pyrmts-d1-backend.md` §"Verdict" — INT-encoded coarse fits
-// one D1 (~6.6 GB across 14 tables); TEXT-encoded the same data is
-// 12 GB (the dt secondary index also embeds the PK).
-
-/** Dim INT→string decode maps. Must match `ctbk/rides_d1.py:DIM_MAPS`
- *  — when that builder writes a new dim value, bump these too. */
-const DIM_DECODE: { [dim: string]: { [k: number]: string } } = {
-	gender:    { 0: 'unknown', 1: 'male', 2: 'female' },
-	user_type: { 0: 'Customer', 1: 'Subscriber', 2: 'nan' },
-	bike_type: { 0: 'unknown', 1: 'classic_bike', 2: 'electric_bike' },
-};
-const DIM_ENCODE: { [dim: string]: { [k: string]: number } } = {
-	gender:    { unknown: 0, male: 1, female: 2 },
-	user_type: { Customer: 0, Subscriber: 1, nan: 2 },
-	bike_type: { unknown: 0, classic_bike: 1, electric_bike: 2 },
-};
-
-/** Wrap a StorageBackend so:
- *   - incoming `filters` on dim columns get their string values encoded
- *     to INT before hitting D1's WHERE clause
- *   - returned rows have dim INT values swapped back to strings (matches
- *     the parquet row shape so stitch/reduce work without dispatching
- *     on backend)
- *   - the parquet-style cell column name (`{anchor}_s2_cell`) is
- *     translated to D1's canonical `cell` on the way down, and back to
- *     the parquet name on the way up — see `ctbk/rides_d1.py` which
- *     renames `start_s2_cell` → `cell` at load. This keeps callers (and
- *     downstream stitch/reduce code) agnostic to the storage backend. */
-// Per-request scratch for backend timing diagnostics. Populated by
-// `withDimCodec` (`fetchMs` = inner backend wall-time;
-// `decodeMs` = post-fetch row-iteration). Drained + cleared per request
-// in `serveRidesReduced`.
-const __d1Diag: { fetchMs: number; decodeMs: number; rowsIn: number; calls: number; perCallMs: number[] } = {
-	fetchMs: 0,
-	decodeMs: 0,
-	rowsIn: 0,
-	calls: 0,
-	perCallMs: [],
-};
-function resetD1Diag() {
-	__d1Diag.fetchMs = 0;
-	__d1Diag.decodeMs = 0;
-	__d1Diag.rowsIn = 0;
-	__d1Diag.calls = 0;
-	__d1Diag.perCallMs = [];
-}
-
-function withDimCodec<T extends import('pyrmts').FetchOptionsBase>(
-	backend: import('pyrmts').StorageBackend<T>,
-	parquetCellCol: string,
-): import('pyrmts').StorageBackend<T> {
-	return {
-		name: `${backend.name}+dim-codec`,
-		async fetchSegment(segment, opts) {
-			let encOpts = opts;
-			if (opts?.filters) {
-				const encodedFilters = opts.filters.map((f) => {
-					// Rename parquet-style cellCol to D1's `cell`.
-					if (f.col === parquetCellCol) {
-						return 'values' in f
-							? { col: 'cell', values: f.values }
-							: { col: 'cell', range: f.range };
-					}
-					if (!('values' in f) || !(f.col in DIM_ENCODE)) return f;
-					const map = DIM_ENCODE[f.col]!;
-					const encVals = (f.values as readonly string[])
-						.map((v) => map[v])
-						.filter((v): v is number => v !== undefined);
-					return { col: f.col, values: encVals };
-				});
-				encOpts = { ...opts, filters: encodedFilters } as T;
-			}
-			const t0 = performance.now();
-			const rows = await backend.fetchSegment(segment, encOpts);
-			const t1 = performance.now();
-			__d1Diag.fetchMs += t1 - t0;
-			__d1Diag.rowsIn += rows.length;
-			__d1Diag.calls += 1;
-			__d1Diag.perCallMs.push(Math.round((t1 - t0) * 10) / 10);
-			for (const r of rows) {
-				// Rename D1 `cell` back to parquet `{anchor}_s2_cell` so
-				// downstream code keys off pyramid.geo.cellCol uniformly.
-				if (r.cell !== undefined && r[parquetCellCol] === undefined) {
-					r[parquetCellCol] = r.cell;
-					delete r.cell;
-				}
-				for (const dim of DIMS) {
-					const v = r[dim];
-					if (typeof v === 'number' && DIM_DECODE[dim]) {
-						const s = DIM_DECODE[dim]![v];
-						if (s !== undefined) r[dim] = s;
-					}
-				}
-			}
-			const t2 = performance.now();
-			__d1Diag.decodeMs += t2 - t1;
-			return rows;
-		},
-	};
-}
-
-/** Tier names served by the `RIDES_V3_COARSE` D1 (matches
- *  `ctbk/rides_d1.py:TIER_GROUPS['COARSE']`). All other v3 tiers
- *  (`1h`/`3h`/`6h`/`12h`) fall through to the parquet backend in the
- *  hybrid v3 pyramid. */
-const V3_D1_TIER_NAMES = new Set(['1d', '3d', '7d', '14d', '1mo', '3mo', '1y']);
-
-/** Tier-routing storage backend: dispatch each `fetchSegment` to one of
- *  two underlying backends based on the segment's tier name. Used to
- *  build the hybrid v3 pyramid where D1 owns coarse tiers and parquet
- *  owns the fine ones — planner sees a single full tier ladder and
- *  picks freely, multiplex routes per call. */
-function multiplexStorage<T extends import('pyrmts').FetchOptionsBase>(
-	pickD1: (tierName: string) => boolean,
-	d1Backend_: import('pyrmts').StorageBackend<T>,
-	parquetBackend_: import('pyrmts').StorageBackend<T>,
-): import('pyrmts').StorageBackend<T> {
-	return {
-		name: `multiplex(${d1Backend_.name}|${parquetBackend_.name})`,
-		fetchSegment(segment, opts) {
-			const backend = pickD1(segment.shardTier.name) ? d1Backend_ : parquetBackend_;
-			return backend.fetchSegment(segment, opts);
-		},
-	};
-}
-
-function makeBaseHybridProps(bucket: R2Bucket, db: D1Database, anchor: Anchor): Omit<GeoPyramid, 'dims'> {
-	const parquetCellCol = cellCol(anchor, 'v3');
-	const d1B = withDimCodec(d1Backend(db, { tableTemplate: `rides_${anchor}_{tier}` }), parquetCellCol);
-	const parquetB = parquetBackend(r2Storage(bucket));
-	return {
-		storage: multiplexStorage((t) => V3_D1_TIER_NAMES.has(t), d1B, parquetB),
-		// keyTemplate is parquet-flavored — used by the parquet leg.
-		// The D1 leg derives its table from `segment.shardTier.name` via
-		// its own `tableTemplate`, so this template only affects parquet.
-		keyTemplate: keyTemplate(anchor, 'v3'),
-		axis: 'time',
-		binCol: 'dt',
-		metrics: METRICS.map((name) => ({ name, monoid: 'sum' as const })),
-		tiers: TIERS_BY_VARIANT['v3'],
-		geo: {
-			cellCol: cellCol(anchor, 'v3'),
-			resolutions: resolutions('v3'),
-			index: s2Index,
-		},
-	};
-}
-
-/** Hybrid v3 pyramid: D1 for coarse tiers (≥1d), parquet for fine.
- *  Planner picks the finest tier within the requested bin_budget;
- *  storage layer routes per-segment. */
-export function ridesPyramidV3Hybrid(bucket: R2Bucket, db: D1Database, anchor: Anchor): GeoPyramid {
-	return { ...makeBaseHybridProps(bucket, db, anchor), dims: DIMS.map((d) => ({ name: d, type: 'string' as const })) };
-}
-
-/** D1-only v3 pyramid — diagnostic helper for `/api/d1-probe`. Production
- *  v3 always uses `ridesPyramidV3Hybrid`. Restricted to D1 COARSE tiers
- *  so the planner can't pick a tier that isn't in D1. */
-export function ridesPyramidV3D1(db: D1Database, anchor: Anchor): GeoPyramid {
-	const parquetCellCol = cellCol(anchor, 'v3');
-	const d1Only = withDimCodec(d1Backend(db, { tableTemplate: `rides_${anchor}_{tier}` }), parquetCellCol);
-	const coarseTiers: Tier[] = TIERS_BY_VARIANT['v3'].filter((t) => V3_D1_TIER_NAMES.has(t.name));
-	return {
-		storage: d1Only,
-		keyTemplate: `rides_${anchor}_{tier}`,
-		axis: 'time',
-		binCol: 'dt',
-		metrics: METRICS.map((name) => ({ name, monoid: 'sum' as const })),
-		tiers: coarseTiers,
-		geo: {
-			cellCol: cellCol(anchor, 'v3'),
-			resolutions: resolutions('v3'),
-			index: s2Index,
-		},
-		dims: DIMS.map((d) => ({ name: d, type: 'string' as const })),
-	};
-}
-
-export function ridesCellsPyramidV3Hybrid(bucket: R2Bucket, db: D1Database, anchor: Anchor): GeoPyramid {
-	return {
-		...makeBaseHybridProps(bucket, db, anchor),
-		dims: [
-			{ name: cellCol(anchor, 'v3'), type: 'string' as const },
-			...DIMS.map((d) => ({ name: d, type: 'string' as const })),
-		],
-	};
-}
-
-// ─────────────────────────────────────────────────────────────────────
 // Sum-monoid reducer math.
 
 /** Collapse a `{n, sum, sumsq}` triplet to a scalar per the requested reducer.
@@ -478,7 +280,6 @@ async function serveRidesReduced(
 	dropCellCol: boolean,
 ): Promise<Response> {
 	const tStart = performance.now();
-	resetD1Diag();
 	const url = new URL(request.url);
 	const from = parseInstant(url.searchParams.get('from'));
 	const to = parseInstant(url.searchParams.get('to'));
@@ -539,9 +340,9 @@ async function serveRidesReduced(
 		? (userCoverIsMixed ? -1 : userCoverLevels[0]!)  // -1 sentinel: don't filter by level
 		: null;
 	// `outputCells` (caller-supplied cover) path bypasses `pickResolution`,
-	// skipping `bboxToCells`'s `RegionCoverer` allocation — avoids the V8
-	// GC tail that adds 3-5s to the next async safepoint (`stmt.all()` in
-	// d1Backend). See pyrmts `specs/done/plan-geo-query-precomputed-cover.md`.
+	// skipping `bboxToCells`'s `RegionCoverer` allocation and the V8 GC
+	// tail it hangs on the next async safepoint. See pyrmts
+	// `specs/done/plan-geo-query-precomputed-cover.md`.
 	const plan = userCells !== null
 		? planGeoQuery(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells } })
 		: planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox, cellBudget });
@@ -662,12 +463,7 @@ async function serveRidesReduced(
 					stitched: stitched.length,
 					reduced: reduced.length,
 				},
-				d1Diag: {
-					...__d1Diag,
-					fetchMs: Math.round(__d1Diag.fetchMs * 100) / 100,
-					decodeMs: Math.round(__d1Diag.decodeMs * 100) / 100,
-					workerColo: (request as any).cf?.colo ?? null,
-				},
+				workerColo: (request as any).cf?.colo ?? null,
 				cellsFilter: userCells !== null ? userCells.length : null,
 				dimFilters: rgFilters ?? null,
 				reducer,
@@ -740,44 +536,33 @@ function parseAnchor(url: URL, cors: string | null): Anchor | Response {
  *  (dt, dims). Strips the `{anchor}_h3_cell` column from response rows
  *  (rollup has no meaningful cell value).
  *
- *  For v3, when `?backend=d1` and a D1 binding is provided, the rollup
- *  queries `RIDES_V3_COARSE` directly (single SELECT per segment) — see
- *  `specs/pyrmts-d1-backend.md`. Other variants ignore `?backend`. */
-export async function serveRides(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant, db?: D1Database): Promise<Response> {
+ *  All variants serve pure parquet. The v3 D1 hybrid (coarse tiers in
+ *  `RIDES_V3_COARSE`, 2026-06..07) was removed once realistic FE covers
+ *  (~10 include + few exclude cells, `allowSubtraction`) proved cheap on
+ *  parquet — the bakeoff that justified D1 predated the `outputCells`
+ *  planner API and the LUC-rebuild layout. A stray `?backend=` param is
+ *  ignored. */
+export async function serveRides(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant): Promise<Response> {
 	const cors = corsOrigin || null;
 	const url = new URL(request.url);
 	const anchor = parseAnchor(url, cors);
 	if (anchor instanceof Response) return anchor;
-	// v3 default: hybrid (D1 for coarse tiers, parquet for fine — D1 wins on
-	// CPU at large covers since SQL aggregates server-side). `?backend=parquet`
-	// forces pure parquet (diagnostic); `?backend=d1` is an alias retained for
-	// back-compat with the bench tooling. v1/v2 ignore `?backend`.
-	const backendOverride = url.searchParams.get('backend');
-	if (variant === 'v3' && db !== undefined && backendOverride !== 'parquet') {
-		return serveRidesReduced(ridesPyramidV3Hybrid(bucket, db, anchor), request, cors, true);
-	}
 	return serveRidesReduced(ridesPyramid(bucket, anchor, variant), request, cors, true);
 }
 
 /** HTTP handler for `/api/rides-{v1,v2,v3}/cells` — per-cell breakdown preserved. */
-export async function serveRidesCells(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant, db?: D1Database): Promise<Response> {
+export async function serveRidesCells(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant): Promise<Response> {
 	const cors = corsOrigin || null;
 	const url = new URL(request.url);
 	const anchor = parseAnchor(url, cors);
 	if (anchor instanceof Response) return anchor;
-	const backendOverride = url.searchParams.get('backend');
-	if (variant === 'v3' && db !== undefined && backendOverride !== 'parquet') {
-		return serveRidesReduced(ridesCellsPyramidV3Hybrid(bucket, db, anchor), request, cors, false);
-	}
 	return serveRidesReduced(ridesCellsPyramid(bucket, anchor, variant), request, cors, false);
 }
 
-// Back-compat aliases used by `index.ts` route handlers. v1/v2 accept (and
-// ignore) the trailing `db` arg so all six handlers share one signature
-// — index.ts can call them uniformly without per-variant dispatch.
-export const serveRidesV1 = (bucket: R2Bucket, request: Request, corsOrigin: string, _db?: D1Database) => serveRides(bucket, request, corsOrigin, 'v1');
-export const serveRidesV1Cells = (bucket: R2Bucket, request: Request, corsOrigin: string, _db?: D1Database) => serveRidesCells(bucket, request, corsOrigin, 'v1');
-export const serveRidesV2 = (bucket: R2Bucket, request: Request, corsOrigin: string, _db?: D1Database) => serveRides(bucket, request, corsOrigin, 'v2');
-export const serveRidesV2Cells = (bucket: R2Bucket, request: Request, corsOrigin: string, _db?: D1Database) => serveRidesCells(bucket, request, corsOrigin, 'v2');
-export const serveRidesV3 = (bucket: R2Bucket, request: Request, corsOrigin: string, db?: D1Database) => serveRides(bucket, request, corsOrigin, 'v3', db);
-export const serveRidesV3Cells = (bucket: R2Bucket, request: Request, corsOrigin: string, db?: D1Database) => serveRidesCells(bucket, request, corsOrigin, 'v3', db);
+// Per-variant aliases used by `index.ts` route handlers.
+export const serveRidesV1 = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRides(bucket, request, corsOrigin, 'v1');
+export const serveRidesV1Cells = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRidesCells(bucket, request, corsOrigin, 'v1');
+export const serveRidesV2 = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRides(bucket, request, corsOrigin, 'v2');
+export const serveRidesV2Cells = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRidesCells(bucket, request, corsOrigin, 'v2');
+export const serveRidesV3 = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRides(bucket, request, corsOrigin, 'v3');
+export const serveRidesV3Cells = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRidesCells(bucket, request, corsOrigin, 'v3');

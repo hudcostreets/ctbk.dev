@@ -95,12 +95,28 @@ anchors, `SURVIVOR+LOSER` syntax for merged docks):
 2. **Stale D1 `RIDES_V3_COARSE`**: the hybrid's D1 side was a
    one-time bakeoff load (2026-06-07) with no refresh pipeline —
    prod monthly views were serving pre-LUC (drift-era) data and ZERO
-   for 2026-05/06. Decision (closes the #105 question): KEEP the
-   hybrid — pure-parquet coarse 503s at NYC-region covers (237
-   cells × 158 months; the CPU wall that motivated D1) — and reload
-   D1 blue/green from the rebuilt shards (`ctbk rides-d1-build` →
-   new DB `ctbk-rides-v3-coarse-luc` → binding flip). Follow-up:
-   wire a monthly D1 refresh into the update flow.
+   for 2026-05/06. Decision (closes #105): **DROP D1**. The first
+   instinct was keep-hybrid + blue/green reload (an import into
+   `ctbk-rides-v3-coarse-luc` ran to ~45%, ~$110 of D1 row-writes at
+   $1/M, before being stopped) — justified by a pure-parquet 503 at
+   "NYC-region covers". That repro was wrong: it used the stale
+   237-cell static `region-cells-s2.json`, which the v3 FE doesn't
+   use. Real FE covers (`minimalCover`, `allowSubtraction: true`,
+   `coarsestLevel: 10`) are NYC=9+3excl / JC=3+4 / HOB=7+1, and pure
+   parquet serves them fine post-rebuild: 1.2-1.5 s cold for
+   monthly full-history, 1.6-2.3 s for 1d 90-day windows. The
+   bakeoff that motivated D1 (#88-93) predated the `outputCells`
+   planner API + this rebuild's layout. Hybrid routing, the
+   `/api/d1-probe` route, keep-warm cron, and both `RIDES_V3_COARSE`
+   bindings are excised from the worker; the two D1 databases
+   (`ctbk-rides-v3-coarse`, partially-loaded `…-luc`) are parked
+   (not deleted) as rollback insurance. Cold-latency follow-ups:
+   CF-edge-cache coarse responses (the #151 avail pattern); tertiary
+   `(gender, user_type, bike_type)` sort within `(cell, dt)` landed
+   for future shard writes. Known cover gap: covers generate from
+   ACTIVE stations only, so historical canonicals leak (HOB shows
+   11.8k pre-launch rides ≈ 0.5%); fix = denorm-based covers, part
+   of the flip train.
 
 ## Goal
 

@@ -44,17 +44,6 @@ interface Env {
 	/** Optional — when present, the scheduled handler posts threshold-breach
 	 *  alerts to Slack (`#ctbk-bot`). Absent ⇒ alerts disabled. */
 	SLACK_BOT_TOKEN?: string;
-	/** Optional — when `'1'`, `/api/totals?kind=availability` runs the
-	 *  pyrmts-based reader in parallel with the legacy path and logs a
-	 *  delta. Pure observation; client gets the legacy response unchanged. */
-	/** Optional — when `'1'`, dev-only diagnostic routes (`/api/d1-probe`)
-	 *  are enabled. Set in `[env.dev.vars]` only. */
-	DEV_ROUTES?: string;
-	/** Optional — when bound, `/api/rides-v3?backend=d1` queries this D1
-	 *  database instead of fanning out parquet reads. Holds the COARSE
-	 *  bundle (1d-1y tiers, both anchors; ~6.6 GB). See
-	 *  `specs/pyrmts-d1-backend.md`. */
-	RIDES_V3_COARSE?: D1Database;
 	/** Workers Analytics Engine dataset for per-request perf telemetry.
 	 *  Configured in `wrangler.toml` `[[analytics_engine_datasets]]`.
 	 *  `writeDataPoint({ blobs, doubles, indexes })`:
@@ -1250,20 +1239,10 @@ export default {
 				v3: { rollup: serveRidesV3, cells: serveRidesV3Cells },
 			} as const;
 			const serve = cellsRoute ? serveByVariant[variant].cells : serveByVariant[variant].rollup;
-			// D1 Sessions API: route reads to nearest read-replica.
-			// `first-unconstrained` = any replica (incl. slightly stale) is OK
-			// for first query — fine because rides shards are immutable
-			// post-ingest. Without this the binding still goes to primary in
-			// IAD and we pay the EWR→IAD ~5s hop on cold isolates. See
-			// `wrangler.toml` `[placement]` and `read_replication: auto`
-			// on the D1 DB (enabled via API 2026-06-13).
-			const ridesV3DB = env.RIDES_V3_COARSE
-				? (env.RIDES_V3_COARSE.withSession('first-unconstrained') as unknown as D1Database)
-				: undefined;
 			const tRidesStart = performance.now();
 			let resp: Response;
 			try {
-				resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*', ridesV3DB);
+				resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*');
 			} catch (err: any) {
 				return errorResponse(err.message ?? `rides-${variant} error`, 500, env);
 			}
@@ -1377,114 +1356,6 @@ export default {
 			const resp = jsonResponse(result, env, { headers: { 'Cache-Control': cacheControl } });
 			ctx.waitUntil(cache.put(cacheKey, resp.clone()));
 			return resp;
-		}
-
-		// `/api/d1-probe` — diagnostic for D1 latency profiling. Times bare
-		// `.all()`, `d1Backend.fetchSegment()`, and `pyramid.storage.fetchSegment()`
-		// against `RIDES_V3_COARSE` so we can isolate the per-invocation
-		// cold-start (~5s first query, ~40ms subsequent — observed for D1
-		// from CFW workers, see `scripts/d1-probe.py`).
-		// `?sql=…` accepts arbitrary SQL (read-only D1 binding, but still
-		// gated on the dev environment to avoid prod surface). Dev-only.
-		if (url.pathname === '/api/d1-probe') {
-			if (env.DEV_ROUTES !== '1') return new Response('not found', { status: 404 });
-			if (!env.RIDES_V3_COARSE) return new Response(JSON.stringify({error: 'no RIDES_V3_COARSE binding'}), {status: 503, headers: {'Content-Type': 'application/json'}});
-			const { d1Backend } = await import('pyrmts-cfw');
-			const { ridesPyramidV3D1 } = await import('./rides_v1');
-			const limit = url.searchParams.get('limit') ?? '1080';
-			const customSql = url.searchParams.get('sql');
-			const repeats = parseInt(url.searchParams.get('n') ?? '1', 10);
-			const useBackend = url.searchParams.get('backend') === '1';
-			const usePyramid = url.searchParams.get('pyramid') === '1';
-			const useCellAsName = url.searchParams.get('cellcol') === 'start_s2_cell';
-			const tableName = url.searchParams.get('table') ?? 'rides_start_1d';
-			const cells = (url.searchParams.get('cells') ?? '89c2f5,89c259,89c25d,89c2f7,89c25b,89c25f,89c2f3,89c245,89c24f').split(',');
-			const dtFrom = parseInt(url.searchParams.get('dt_from') ?? '1761955200000');
-			const dtTo = parseInt(url.searchParams.get('dt_to') ?? '1764547200000');
-			const sqlBase = customSql ?? `SELECT * FROM "${tableName}" WHERE dt >= ? AND dt < ? AND cell IN (${cells.map(() => '?').join(',')}) LIMIT ${limit}`;
-			// Route through the Sessions API so replicas are exercised — see
-			// the rides-v3 dispatch path comment above.
-			const probeDB = env.RIDES_V3_COARSE.withSession('first-unconstrained') as unknown as D1Database;
-			const backend = useBackend ? d1Backend(probeDB, { tableTemplate: tableName }) : null;
-			const pyr = usePyramid ? ridesPyramidV3D1(probeDB, 'start') : null;
-			const runs: any[] = [];
-			for (let i = 0; i < repeats; i++) {
-				const t0 = performance.now();
-				let rowsLen = 0;
-				let meta: any = null;
-				let mode = 'raw';
-				if (pyr) {
-					mode = 'pyramid.storage';
-					const filterCol = useCellAsName ? 'start_s2_cell' : 'cell';
-					// Match the EXACT shape the real planner emits — includes
-					// `reaggregate` + `cells` (48-cell bbox-derived) properties
-					// the worker passes to fetchSegment in the rides-v3 path.
-					const segment = {
-						from: new Date(dtFrom),
-						to: new Date(dtTo),
-						shardTier: { name: '1d', bin: '1d' as const, shard: 'all' as const },
-						keys: [tableName],
-						reaggregate: false,
-						cells: Array.from({ length: 48 }, (_, i) => `89c2${i.toString(16).padStart(2, '0')}`),
-					};
-					const rows = await pyr.storage.fetchSegment(segment as any, {
-						binCol: 'dt',
-						range: { from: new Date(dtFrom), to: new Date(dtTo) },
-						filters: [{ col: filterCol, values: cells }],
-						trace: [] as any,
-					} as any);
-					rowsLen = rows.length;
-				} else if (backend) {
-					mode = 'd1Backend';
-					const segment = {
-						from: new Date(dtFrom),
-						to: new Date(dtTo),
-						shardTier: { name: tableName, bin: '1d' as const, shard: 'all' as const },
-						keys: [tableName],
-					};
-					const rows = await backend.fetchSegment(segment as any, {
-						binCol: 'dt',
-						range: { from: new Date(dtFrom), to: new Date(dtTo) },
-						filters: [{ col: 'cell', values: cells }],
-					});
-					rowsLen = rows.length;
-				} else {
-					const stmt = customSql ? probeDB.prepare(sqlBase) : probeDB.prepare(sqlBase).bind(dtFrom, dtTo, ...cells);
-					const res = await stmt.all();
-					rowsLen = res.results.length;
-					meta = res.meta;
-				}
-				const t1 = performance.now();
-				runs.push({
-					run: i,
-					mode,
-					wallMs: Math.round((t1 - t0) * 100) / 100,
-					rows: rowsLen,
-					sqlDurationMs: meta?.duration ?? null,
-					colo: meta?.served_by_colo,
-				});
-			}
-			// Unconditional D1 colo probe — guarantees served_by_colo even
-			// when runs[] used the pyramid/backend path (which doesn't
-			// surface meta). One extra round-trip; negligible vs the
-			// ~5s diagnostic itself.
-			let d1Colo: string | null = null;
-			try {
-				const probe = await probeDB.prepare(`SELECT 1 AS x`).all();
-				d1Colo = (probe.meta as any)?.served_by_colo ?? null;
-			} catch (e: any) {
-				d1Colo = `error:${e?.message ?? 'unknown'}`;
-			}
-			const workerColo = (request as any).cf?.colo ?? null;
-			return new Response(JSON.stringify({
-				sql: sqlBase,
-				table: tableName,
-				workerColo,
-				d1Colo,
-				runs,
-			}, null, 2), {
-				headers: { 'Content-Type': 'application/json' },
-			});
 		}
 
 		// /api/rides — paginated raw-rides table per station (see specs/multiscale-timeseries-backend.md
@@ -1735,18 +1606,9 @@ export default {
 		return errorResponse('Not found', 404, env);
 	},
 
-	/** Scheduled handler — every-minute cron. Two concerns:
-	 *   1. D1 keep-warm: fire a trivial `SELECT 1` against `RIDES_V3_COARSE`
-	 *      so the D1 DO doesn't hibernate between low-traffic real requests.
-	 *      D1 hibernates after "dozens of seconds" idle (chimame benchmark)
-	 *      with a 300-600ms cold-path penalty; ours is observed at ~5s,
-	 *      worse than baseline (likely DO wake + cross-DC RPC compounded).
-	 *      $0 — 1 row read × 1440/day = 43k/mo vs 25B free tier.
-	 *   2. Slack alerts (existing): evaluate threshold rules and post
-	 *      firing/resolved transitions. Already idempotent — every-minute
-	 *      eval is fine; only posts on state change.
-	 *  Both phases emit AE data points so we can verify keep-warm latency
-	 *  + correlate with /api/rides-v3 cold-path improvement. */
+	/** Scheduled handler — every-minute cron: refresh the /api/health
+	 *  snapshot cache, then evaluate Slack alert rules (idempotent —
+	 *  only posts on state change). */
 	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
 		// Refresh the /api/health snapshot cache (~7 s of R2 listings + D1
 		// scans, off the request path). Runs every minute; the route serves
@@ -1755,33 +1617,6 @@ export default {
 			computeAndStoreHealthSnapshot(env.R2, env.DB)
 				.catch((err) => console.error('health-snapshot cron error:', err?.message ?? err)),
 		);
-		// D1 keep-warm — route through Sessions API so it exercises the
-		// same code path as /api/rides-v3, not just primary.
-		if (env.RIDES_V3_COARSE) {
-			const t0 = performance.now();
-			const session = env.RIDES_V3_COARSE.withSession('first-unconstrained') as unknown as D1Database;
-			ctx.waitUntil(session.prepare('SELECT 1 AS x').first()
-				.then((_row) => {
-					const wallMs = performance.now() - t0;
-					if (env.PERF) {
-						env.PERF.writeDataPoint({
-							blobs: ['cron:d1-keepwarm', 'cron', '200'],
-							doubles: [wallMs],
-							indexes: ['cron:d1-keepwarm'],
-						});
-					}
-				})
-				.catch((err) => {
-					console.error('d1-keepwarm error:', err?.message ?? err);
-					if (env.PERF) {
-						env.PERF.writeDataPoint({
-							blobs: ['cron:d1-keepwarm', 'cron', '500'],
-							doubles: [performance.now() - t0],
-							indexes: ['cron:d1-keepwarm'],
-						});
-					}
-				}));
-		}
 		if (!env.SLACK_BOT_TOKEN) {
 			console.log('alerts: SLACK_BOT_TOKEN not set; skipping');
 			return;
