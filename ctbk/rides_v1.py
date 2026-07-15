@@ -181,11 +181,19 @@ def shard_period(shard: str, t: datetime) -> str:
     share the 1mo formatter. A 3mo shard starting Apr 2013 is
     `2013-04.parquet`; a 6mo shard starting Jul 2013 is
     `2013-07.parquet`.
+
+    `'all'` shards are declared as `120y` on the worker side
+    (`gbfs/api/src/rides_v1.ts` — pyrmts has no whole-dataset shard
+    concept), so their `{period}` is the 120y-aligned window start:
+    pyrmts floors any year in 1920-2039 to `1920`. Writing `all` here
+    made the coarse tiers unreadable via the parquet backend (planner
+    requested `1920.parquet`, R2 had `all.parquet`) — masked in prod
+    by the D1 hybrid until the LUC-rebuild acceptance run.
     """
     if shard in ('1mo', '3mo', '6mo'):
         return t.strftime('%Y-%m')
     if shard == '1y':  return t.strftime('%Y')
-    if shard == 'all': return 'all'
+    if shard == 'all': return '1920'
     raise ValueError(f"unknown shard granularity: {shard!r}")
 
 
