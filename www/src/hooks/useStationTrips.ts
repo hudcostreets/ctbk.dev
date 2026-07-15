@@ -1,15 +1,15 @@
 /**
  * Loads per-station monthly trip data.
  *
- * Two sources, selected by the `src` param (default legacy until the
- * rides-v3 LUC rebuild lands — `specs/rides-v3-luc.md`):
- *  - `legacy`: static `ymdgtb_cd.json` from the public DVX cache in S3,
- *    resolved via the build-time `ymdgtb-index.json`.
+ * Two sources, selected by the `src` param (default `v3` since the
+ * rides-v3 LUC rebuild landed — `specs/rides-v3-luc.md`; acceptance
+ * showed v3 matches ride-level ground truth where the legacy JSONs
+ * are off by a few rides/month):
  *  - `v3`: two `/api/rides-v3?cells=<LUC>` monthly queries (one per
  *    anchor → `Docking`), reshaped to the same `StationTripsRow[]`.
- *    Exact per-station counts require the LUC-anchored pyramid rebuild;
- *    against the current coordinate-keyed pyramid it undercounts
- *    drift-era months (JC115: -3..-16%/mo across 2023-01..2024-07).
+ *  - `legacy`: static `ymdgtb_cd.json` from the public DVX cache in S3,
+ *    resolved via the build-time `ymdgtb-index.json`. Kept for
+ *    comparison (`?tsrc=legacy`) until Phase E deletes the artifacts.
  */
 import { useEffect, useState } from 'react'
 

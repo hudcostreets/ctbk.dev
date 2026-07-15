@@ -219,11 +219,10 @@ export default function StationDetail() {
     void prefetchStationDetail(queryClient, id, bufFromS, bufToS, binS)
   }, [queryClient, bufFromS, bufToS, binMs, availViewportPx])
 
-  // Load monthly trip history. `?tsrc=v3` queries rides-v3 by LUC cell
-  // instead of the legacy static JSONs — comparison/cutover toggle for
-  // the LUC-anchored rebuild (`specs/rides-v3-luc.md`); flips to
-  // default (then loses the toggle) once the rebuild ships.
-  const [tripsSrc] = useUrlState('tsrc', codeParam<'legacy' | 'v3'>('legacy', [['legacy', 'l'], ['v3', 'v3']]))
+  // Load monthly trip history. Default `v3` (rides-v3 by LUC cell, since
+  // the LUC-anchored rebuild — `specs/rides-v3-luc.md`); `?tsrc=legacy`
+  // keeps the static-JSON path for comparison until Phase E deletes it.
+  const [tripsSrc] = useUrlState('tsrc', codeParam<'legacy' | 'v3'>('v3', [['legacy', 'l'], ['v3', 'v3']]))
   const { rows: tripsRows } = useStationTrips(info?.short_name, tripsSrc)
 
   // Trips-chart controls (per-page URL params)
