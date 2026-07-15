@@ -21,6 +21,7 @@ from pathlib import Path
 
 import click
 from click import argument, group, option
+from utz import err
 from urllib import request as _urlrequest
 from urllib.error import HTTPError, URLError
 
@@ -416,6 +417,32 @@ def gbfs_r2_ls(
 		return
 	for k, sz in keys:
 		print(f'{sz:>12}  {k}' if show_size else k)
+
+
+@gbfs_r2.command('cp', help='Server-side copy KEY to DEST key (same bucket).')
+@option('-f', '--force', is_flag=True, help='Overwrite DEST if it already exists.')
+@argument('key', metavar='KEY')
+@argument('dest', metavar='DEST')
+def gbfs_r2_cp(force: bool, key: str, dest: str) -> None:
+	client, bucket = _r2_client()
+	if not force:
+		try:
+			client.head_object(Bucket=bucket, Key=dest)  # type: ignore[attr-defined]
+			raise click.ClickException(f'{dest} exists (use -f to overwrite)')
+		except client.exceptions.ClientError:  # type: ignore[attr-defined]
+			pass
+	client.copy_object(Bucket=bucket, Key=dest, CopySource={'Bucket': bucket, 'Key': key})  # type: ignore[attr-defined]
+	err(f'{key} → {dest}')
+
+
+@gbfs_r2.command('rm', help='Delete R2 keys (exact keys, no globbing).')
+@argument('keys', metavar='KEY...', nargs=-1, required=True)
+def gbfs_r2_rm(keys: tuple[str, ...]) -> None:
+	client, bucket = _r2_client()
+	for key in keys:
+		client.head_object(Bucket=bucket, Key=key)  # type: ignore[attr-defined]  # raise if absent
+		client.delete_object(Bucket=bucket, Key=key)  # type: ignore[attr-defined]
+		err(f'deleted {key}')
 
 
 # ─── Lambda executor (specs/avail-v3-lambda-cascade.md) ────────────────
