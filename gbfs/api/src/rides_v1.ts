@@ -49,6 +49,7 @@ import {
 } from 'pyrmts';
 import { parquetBackend } from 'pyrmts';
 import { r2Storage } from 'pyrmts-cfw';
+import { retryingStorage } from './r2_retry';
 import {
 	filterCellsAndRes,
 	filterCellsByCover,
@@ -134,7 +135,7 @@ function keyTemplate(anchor: Anchor, variant: Variant): string {
 /** Shared pyramid skeleton; only key-template + cellCol + `dims` + `index` vary. */
 function makeBaseProps(bucket: R2Bucket, anchor: Anchor, variant: Variant): Omit<GeoPyramid, 'dims'> {
 	return {
-		storage: parquetBackend(r2Storage(bucket)),
+		storage: parquetBackend(retryingStorage(r2Storage(bucket))),
 		keyTemplate: keyTemplate(anchor, variant),
 		axis: 'time',
 		binCol: 'dt',

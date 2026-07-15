@@ -36,6 +36,7 @@ import {
 } from 'pyrmts';
 import { parquetBackend, CachedShardIndex, type ShardIndex } from 'pyrmts';
 import { r2Storage, D1ShardIndex } from 'pyrmts-cfw';
+import { retryingStorage } from './r2_retry';
 import {
 	filterCellsAndRes,
 	planGeoQueryFromInventory,
@@ -105,7 +106,7 @@ export const AVAIL_GENESIS = new Date('2026-04-07T01:15:00Z');
 
 function makeBaseProps(bucket: R2Bucket): Omit<GeoPyramid, 'dims'> {
 	return {
-		storage: parquetBackend(r2Storage(bucket)),
+		storage: parquetBackend(retryingStorage(r2Storage(bucket))),
 		// Unified `{tier}/{shard}/{period}` template per unified-shard-ladder
 		// (pyrmts spec). Per-tier `shards: [...]` arrays above declare each
 		// tier's full duration ladder; the planner picks largest-shard-first

@@ -208,7 +208,7 @@ async function readMinuteJsonsForHour(r2: R2Bucket, date: string, hour: string):
 	const keys = result.objects.map((o) => o.key).filter((k) => k.endsWith('.json'));
 	const reads = await Promise.all(
 		keys.map(async (k) => {
-			const obj = await r2.get(k);
+			const obj = await withR2Retry(`get ${k}`, () => r2.get(k));
 			if (!obj) return null;
 			try {
 				return JSON.parse(await obj.text()) as MinuteSnapshot;
@@ -312,7 +312,7 @@ async function getStationMonthFromR2(
 	yyyymm: string,
 ): Promise<Record<string, unknown>[]> {
 	const key = `gbfs/stations/${stationId}/${yyyymm}.parquet`;
-	const obj = await r2.get(key);
+	const obj = await withR2Retry(`get ${key}`, () => r2.get(key));
 	if (!obj) return [];
 	const buf = await obj.arrayBuffer();
 	const file = {
@@ -486,6 +486,7 @@ import { computeAndStoreHealthSnapshot, readCachedHealthSnapshot } from './healt
 import { runAlerts } from './alerts';
 import { serveAvailV3, serveAvailV3Cells } from './avail_geo';
 import { serveRidesV1, serveRidesV1Cells, serveRidesV2, serveRidesV2Cells, serveRidesV3, serveRidesV3Cells } from './rides_v1';
+import { withR2Retry } from './r2_retry';
 
 /**
  * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
@@ -512,7 +513,7 @@ async function asyncBufferFromR2(
 		slice: async (start: number, end?: number): Promise<ArrayBuffer> => {
 			const length = (end ?? byteLength) - start;
 			if (length <= 0) return new ArrayBuffer(0);
-			const obj = await r2.get(key, { range: { offset: start, length } });
+			const obj = await withR2Retry(`getRange ${key}`, () => r2.get(key, { range: { offset: start, length } }));
 			if (!obj) throw new Error(`r2.get failed: ${key} [${start}, ${end ?? byteLength})`);
 			return obj.arrayBuffer();
 		},
