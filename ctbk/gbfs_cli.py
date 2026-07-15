@@ -435,6 +435,17 @@ def gbfs_r2_cp(force: bool, key: str, dest: str) -> None:
 	err(f'{key} → {dest}')
 
 
+@gbfs_r2.command('put', help='Upload a local file to an R2 key.')
+@option('-t', '--content-type', default='application/json', show_default=True, help='Content-Type for the uploaded object.')
+@argument('src', metavar='SRC', type=click.Path(exists=True, dir_okay=False))
+@argument('key', metavar='KEY')
+def gbfs_r2_put(content_type: str, src: str, key: str) -> None:
+	client, bucket = _r2_client()
+	body = Path(src).read_bytes()
+	client.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)  # type: ignore[attr-defined]
+	err(f'{src} → r2://{bucket}/{key} ({len(body):,} B)')
+
+
 @gbfs_r2.command('rm', help='Delete R2 keys (exact keys, no globbing).')
 @argument('keys', metavar='KEY...', nargs=-1, required=True)
 def gbfs_r2_rm(keys: tuple[str, ...]) -> None:
