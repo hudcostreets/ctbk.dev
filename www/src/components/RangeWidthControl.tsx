@@ -68,7 +68,7 @@ export function RangeWidthControl({ value, onChange, presets = DEFAULT_PRESETS }
       <button
         type="button"
         className={`${css.latest} ${isLatest ? css.active : ''}`}
-        onClick={() => { if (!isLatest) onChange({ ...value, timestamp: null }) }}
+        onClick={() => onChange({ ...value, timestamp: null })}
         title={isLatest ? 'Tracking latest data' : 'Jump to latest'}
         aria-pressed={isLatest}
       >

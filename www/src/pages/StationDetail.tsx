@@ -136,13 +136,26 @@ export default function StationDetail() {
 
   const { data: info } = useStationInfo(id)
 
-  // Snapshot `Date.now()` once per range change — using it directly would
-  // recompute `toS` every render in Latest mode, churning the query key.
   const rangeDuration = range.duration
   const rangeTimestampMs = range.timestamp?.getTime() ?? null
   const isLatestMode = rangeTimestampMs === null
+  // Latest mode tracks "now" as a ticking state (minute-quantized so the
+  // query key advances in whole steps, not per render): a 60s interval
+  // matches the liveRefresh refetch cadence, and a visibilitychange
+  // handler catches long-backgrounded tabs immediately on return —
+  // browsers throttle hidden-tab timers, which previously left the
+  // window end frozen at mount-time "now" (stale-tab bug).
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    if (!isLatestMode) return
+    const tick = () => setNowMs(Date.now())
+    const iv = setInterval(tick, 60_000)
+    const onVis = () => { if (document.visibilityState === 'visible') tick() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => { clearInterval(iv); document.removeEventListener('visibilitychange', onVis) }
+  }, [isLatestMode])
   const { fromS, toS } = useMemo(() => {
-    const toMs = rangeTimestampMs ?? Date.now()
+    const toMs = rangeTimestampMs ?? Math.floor(nowMs / 60_000) * 60_000
     const wantFrom = Math.floor((toMs - rangeDuration) / 1000)
     return {
       // Clip `from` at the genesis floor — there's no data before the scrape
@@ -150,7 +163,7 @@ export default function StationDetail() {
       fromS: Math.max(GENESIS_S, wantFrom),
       toS: Math.floor(toMs / 1000),
     }
-  }, [rangeDuration, rangeTimestampMs])
+  }, [rangeDuration, rangeTimestampMs, nowMs])
 
   // Fetch a quantum-rounded super-range of the visible window so drag-pan
   // within the buffer is instant (TSQ cache hit) and uPlot has data to
@@ -460,7 +473,10 @@ export default function StationDetail() {
       </Typography>
 
       <Box my={1} display="flex" alignItems="center" gap={2} flexWrap="wrap">
-        <RangeWidthControl value={range} onChange={setRange} />
+        {/* Clicking "Latest" while already tracking still kicks `nowMs` so a
+            stale window jumps forward immediately (setRange alone would
+            no-op — the param value is unchanged). */}
+        <RangeWidthControl value={range} onChange={(r) => { if (r.timestamp === null) setNowMs(Date.now()); setRange(r) }} />
         <BinSelect
           value={binMs > 0 ? binMs : undefined}
           onChange={(ms) => setBinMs(ms ?? 0)}
