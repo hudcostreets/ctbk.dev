@@ -1,5 +1,11 @@
 # avail-v3: LE-driven bulk rebuilds (stale-content re-keys without `e`)
 
+**Status: implemented 2026-07-16** (`ctbk gbfs lambda rebuild`; see
+"Implementation notes" at bottom for deviations from the sketch below).
+First production re-key still pending — exercised so far via smoke
+(single fresh fill + single in-place stale overwrite through
+`ctbk-avail-rebuild`).
+
 ## Context
 
 The Lambda executor is live (P2 cut over 2026-07-13, see
@@ -79,9 +85,12 @@ patching beats even fanned-out rebuilds for small churn.
 ## Open questions
 
 1. Concurrency mechanics: second Lambda alias with its own reserved
-   concurrency vs unreserved + driver-side bound. (Alias is cleaner —
-   the steady-state minutely function keeps `reserved=1` semantics,
-   so a rebuild can't starve the live tick.)
+   concurrency vs unreserved + driver-side bound. → **Resolved:
+   neither as sketched.** Reserved concurrency is function-level in
+   AWS (aliases can't carry their own), so it's a second FUNCTION,
+   `ctbk-avail-rebuild`: same zip, no schedule, UNRESERVED (account
+   pool); the driver's `-c` thread pool is the only bound — hence
+   arbitrary parallelism. The tick keeps `reserved=1`.
 2. Does the rebuild need to pause the minutely tick? No — its
    discovery is existence-driven, rebuilt keys stay registered, and
    same-key overwrites are atomic on R2. GC is likewise safe (all
@@ -91,8 +100,58 @@ patching beats even fanned-out rebuilds for small churn.
    input on `e`'s fsck path) — the LE's accumulator materializer
    reads tiles differently; measure before assuming the mid-tier
    layers are fast in-Lambda. If they're slow, the same base-tier
-   raw substitution landed in `dddd24d1` applies.
+   raw substitution landed in `dddd24d1` applies. → **Per `e`
+   (2026-07-16): the 30 GB blowup is an fsck-materializer artifact
+   (it explodes inputs to full long-form frames); the LE accumulator
+   runs ~375 B/output-row (~5 GB for the same shards), so they fit
+   the 10 GB Lambda. Porting the accumulator pattern into the fsck
+   path is the proper fix for both memory and (much of) decode time —
+   follow-up tracked in `e`'s incident spec.**
 4. Rides-v3: same pattern would remove `e` from rides re-keys too,
    but rides' 1h base builds from monthly normalized parquets
    (~7-8 GB RSS at 2023+ months) — over the 10 GB Lambda budget for
    some months. Out of scope; revisit with per-month memory profiling.
+
+## Implementation notes (2026-07-16)
+
+Landed as `ctbk gbfs lambda rebuild` (nested in the existing
+`ctbk gbfs lambda` group, not the sketch's top-level
+`avail-lambda-rebuild`). Deviations from the design above:
+
+- **Sync invocations, not async+poll.** The driver invokes
+  `RequestResponse` from a `-c`-sized thread pool
+  (`pyramid_cascade/rebuild.py`): each invoke returns the shard's
+  exact `MaterializeResult` status — no D1/R2 completion polling, and
+  no Lambda-service async retries that could double-invoke. botocore
+  `read_timeout=920` ≥ the function's 900 s cap;
+  `retries={max_attempts: 1}` so a transport timeout can't re-invoke.
+- **Layers are `(tier, rung)`, not tier.** `materialize_extension_shard`
+  tiles a gap from same-tier SUB-rung shards, so within a tier the
+  smallest rung must land first (from raw / cross-tier) for coarser
+  rungs to concat it instead of re-aggregating per rung. The
+  serialized 1-2-shard coarse tail this costs is seconds per layer.
+  Layer-order violations degrade to `no_inputs` bounces + re-run
+  (discovery skips completed shards — resumable as designed).
+- **`head_check=False` on stale rebuilds.** The pre-existing
+  HEAD-probe idempotency in `materialize_extension_shard` would
+  'exists'-skip a stale key (it IS on R2); with `stale_before` the
+  fresh-keys `key_set` alone decides, and stale keys are overwritten
+  in place.
+- **Warm-container denorm hazard, two halves.** (a) In-Lambda:
+  `_luc_chains` caches per container; a rebuild invocation passes
+  `fetched_after=stale_before` so a pre-re-key cache refetches.
+  (b) Tick-side: warm `ctbk-avail-cascade` containers would keep
+  writing tail shards with the OLD chains — fresh mtimes, invisible
+  to any `stale_before`. `rebuild -T/--touch-tick` bumps the tick
+  function's env (`DENORM_REV`) to recycle its containers, then
+  raises the effective `stale_before` to the touch time (i.e. a `-T`
+  rebuild treats the whole pyramid as stale — the honest semantics of
+  a re-key). Denorm re-key runbook: upload denorm → `rebuild -T -c 16`.
+- **Bulk path too:** `run_extension_fill(stale_before=…)` is also
+  wired (handler reads `event['stale_before']`), for small stale sets
+  that fit one serial invocation.
+- Census at implementation time: full re-key = **184 shards / 71
+  layers** (spec's "148" had aged with the ladder). Smoke: fresh
+  `/1m@5min` wrote in 9 s via single-gap invoke (D1-registered
+  in-Lambda); same shard then rebuilt in place under `-B now`
+  (stale-overwrite path).

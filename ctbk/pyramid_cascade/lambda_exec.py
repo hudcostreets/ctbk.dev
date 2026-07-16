@@ -136,14 +136,23 @@ COARSEST_LEVEL = 10
 # never arrive; ship without it (same policy as the CFW cascade).
 RAW_FINALITY_S = 15 * 60
 
-_luc_chains_cache: dict[str, list[str]] | None = None
+# (fetched_at, chains) — see `fetched_after` below.
+_luc_chains_cache: tuple[datetime, dict[str, list[str]]] | None = None
 
 
-def _luc_chains(r2) -> dict[str, list[str]]:
+def _luc_chains(r2, fetched_after: datetime | None = None) -> dict[str, list[str]]:
     """UUID → [ancestor cells L10..LUC) + LUC anchor] (mirrors the CFW's
     `buildChains` / avail_v3's `build_1m_hour_table`). Cached per
-    process (one fetch per Lambda container / local run)."""
+    process (one fetch per Lambda container / local run).
+
+    `fetched_after`: refetch if the cached copy predates this timestamp.
+    A warm Lambda container can outlive a denorm re-key; a stale-content
+    rebuild (`stale_before`) must not re-expand stations through the OLD
+    chains it cached before the re-key."""
     global _luc_chains_cache
+    if _luc_chains_cache is not None and fetched_after is not None \
+            and _luc_chains_cache[0] < fetched_after:
+        _luc_chains_cache = None
     if _luc_chains_cache is None:
         import json as _json
         import s2cell
@@ -158,8 +167,8 @@ def _luc_chains(r2) -> dict[str, list[str]]:
                      for lvl in range(COARSEST_LEVEL, e['level'])]
             chain.append(e['cell'])
             chains[uuid] = chain
-        _luc_chains_cache = chains
-    return _luc_chains_cache
+        _luc_chains_cache = (datetime.now(timezone.utc), chains)
+    return _luc_chains_cache[1]
 
 
 def _fill_hole_raw(
@@ -358,22 +367,30 @@ def materialize_extension_shard(
     *,
     key_set: set[str],
     rg_size: int = 2048,
+    head_check: bool = True,
 ) -> MaterializeResult:
     """Same-tier concat build of one extension shard. Idempotent
     (`key_set`/HEAD skip). Source = the tier's sub-rung cover of the
     gap period; cover tiles entirely pre-genesis are skipped (no data
     ever existed); any other missing tile → `no_inputs` (retry next
-    invocation once the CFW/fill-order lands it)."""
+    invocation once the CFW/fill-order lands it).
+
+    `head_check=False` for stale-content rebuilds: the key EXISTS on R2
+    (with a pre-`stale_before` mtime, excluded from `key_set`) and must
+    be overwritten in place — the HEAD probe would wrongly 'exists'-skip
+    it. `key_set` membership (fresh keys only) still short-circuits, so
+    a re-run skips shards already rebuilt."""
     tag = f"/{gap.tier}@{gap.shard_dur} {gap.period_start.date()}"
     t0 = _time.time()
     if gap.key in key_set:
         return MaterializeResult(gap=gap, status='exists')
-    try:
-        r2.head_object(Bucket=R2_BUCKET, Key=gap.key)
-        key_set.add(gap.key)
-        return MaterializeResult(gap=gap, status='exists')
-    except r2.exceptions.ClientError:
-        pass
+    if head_check:
+        try:
+            r2.head_object(Bucket=R2_BUCKET, Key=gap.key)
+            key_set.add(gap.key)
+            return MaterializeResult(gap=gap, status='exists')
+        except r2.exceptions.ClientError:
+            pass
     if gap.period_end <= AVAIL_GENESIS:
         return MaterializeResult(gap=gap, status='no_inputs', inputs_present=0,
                                  inputs_expected=0, source_desc='pre-genesis')
@@ -452,12 +469,18 @@ def run_extension_fill(
     dry_run: bool = False,
     fill_all: bool = False,
     pyramid_name: str = 'avail',
+    stale_before: datetime | None = None,
 ) -> list[MaterializeResult]:
     """Discover + fill missing extension-rung shards over
     [genesis, now). With `register`, each `wrote` is INSERT-OR-REPLACEd
     into `pyramid_shards` via the D1 REST API immediately after its R2
     put (per-shard, so a mid-run abort can't strand unregistered keys
-    beyond the one in flight)."""
+    beyond the one in flight).
+
+    `stale_before`: shards last-modified before this UTC timestamp are
+    treated as missing and rebuilt in place (content invalidation, e.g.
+    a station-luc re-key — see `specs/avail-v3-lambda-rebuild.md`). The
+    steady-state EventBridge tick never sets it."""
     from .fsck import discover_gaps
     from .lite import r2_client
 
@@ -471,7 +494,8 @@ def run_extension_fill(
     pyramid = pyramid_from_config(cfg, storage_from_cfg(cfg.storage))
     rg_sizes = parse_rg_sizes(config_yaml)
 
-    gaps, existing, _expected = discover_gaps(pyramid, (AVAIL_GENESIS, now))
+    gaps, existing, _expected = discover_gaps(
+        pyramid, (AVAIL_GENESIS, now), stale_before=stale_before)
     # Any gap with same-tier sub-rungs to build from is ours — extension
     # rungs by design, but also in-ladder rungs the CFW couldn't produce
     # (e.g. `too_large` bounces: /3m@2d's ragged 95 MB plan). Gaps at a
@@ -495,6 +519,11 @@ def run_extension_fill(
         return []
 
     r2 = r2_client()
+    if stale_before is not None:
+        # A warm container's cached station-luc chains may predate the
+        # re-key that made these shards stale; refresh before any raw
+        # hole-fill expands stations through old anchors.
+        _luc_chains(r2, fetched_after=stale_before)
     t0 = _time.time()
     results: list[MaterializeResult] = []
     for g in ext_gaps:
@@ -505,7 +534,8 @@ def run_extension_fill(
             err(f"  hit time budget {time_budget_s:.0f}s; stopping")
             break
         res = materialize_extension_shard(
-            r2, pyramid, g, key_set=existing, rg_size=rg_size_for(rg_sizes, g.tier))
+            r2, pyramid, g, key_set=existing, rg_size=rg_size_for(rg_sizes, g.tier),
+            head_check=stale_before is None)
         results.append(res)
         if res.status == 'wrote' and register:
             from .d1_http import register_shard
@@ -521,3 +551,82 @@ def run_extension_fill(
         by_status[r.status] = by_status.get(r.status, 0) + 1
     err(f"extension fill: {by_status or 'nothing to do'}")
     return results
+
+
+# ─── Single-gap invocations (specs/avail-v3-lambda-rebuild.md) ─────────
+#
+# The fan-out rebuild driver (`ctbk gbfs lambda rebuild`) discovers gaps
+# locally and invokes the Lambda once per gap; the event carries the full
+# `ExpectedShard` (all durations in the avail ladder are fixed — no
+# calendar units — so the driver-side key/period computation is
+# authoritative and the handler doesn't re-derive it).
+
+
+def encode_gap(gap: ExpectedShard) -> dict:
+    """`ExpectedShard` → JSON-serializable event payload."""
+    return {
+        'tier': gap.tier,
+        'shard_dur': gap.shard_dur,
+        'period_start': gap.period_start.isoformat(),
+        'period_end': gap.period_end.isoformat(),
+        'key': gap.key,
+    }
+
+
+def decode_gap(d: dict) -> ExpectedShard:
+    """Event payload → `ExpectedShard` (inverse of `encode_gap`)."""
+    return ExpectedShard(
+        tier=d['tier'],
+        shard_dur=d['shard_dur'],
+        period_start=datetime.fromisoformat(d['period_start']),
+        period_end=datetime.fromisoformat(d['period_end']),
+        key=d['key'],
+    )
+
+
+def run_single_gap(
+    config_yaml: str,
+    gap: ExpectedShard,
+    *,
+    stale_before: datetime | None = None,
+    register: bool = True,
+    pyramid_name: str = 'avail',
+) -> MaterializeResult:
+    """Materialize ONE shard (no discovery loop) — the handler branch a
+    fan-out driver invokes concurrently. Lists existing keys (a few LIST
+    pages) so same-tier tiling / cross-tier covers see the current R2
+    state; with `stale_before`, pre-re-key keys are excluded from that
+    view (stale sub-tiles are never concat'd into a rebuilt shard) and
+    the target key is overwritten in place."""
+    from .fsck import list_existing_with_mtime, split_stale
+    from .lite import r2_client
+    from .storage import storage_from_cfg
+
+    merged_yaml = merge_lambda_shards(config_yaml)
+    cfg = parse_pyramid_yaml(merged_yaml)
+    pyramid = pyramid_from_config(cfg, storage_from_cfg(cfg.storage))
+    rg_sizes = parse_rg_sizes(config_yaml)
+
+    r2 = r2_client()
+    if stale_before is not None:
+        _luc_chains(r2, fetched_after=stale_before)
+    existing_mtimes = list_existing_with_mtime(pyramid, pyramid.storage)
+    fresh, stale = split_stale(existing_mtimes, stale_before)
+    err(f"single-gap /{gap.tier}@{gap.shard_dur} {gap.period_start.date()}: "
+        f"{len(fresh)} fresh keys" + (f", {len(stale)} stale" if stale else ""))
+    res = materialize_extension_shard(
+        r2, pyramid, gap,
+        key_set=fresh,
+        rg_size=rg_size_for(rg_sizes, gap.tier),
+        head_check=stale_before is None,
+    )
+    if res.status == 'wrote' and register:
+        from .d1_http import register_shard
+        register_shard(
+            pyramid=pyramid_name, tier=gap.tier, shard_dur=gap.shard_dur,
+            period_start_ms=int(gap.period_start.timestamp() * 1000),
+            period_end_ms=int(gap.period_end.timestamp() * 1000),
+            key=gap.key,
+            written_at_ms=int(_time.time() * 1000),
+        )
+    return res

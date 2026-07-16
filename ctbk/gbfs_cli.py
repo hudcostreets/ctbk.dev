@@ -481,6 +481,43 @@ def gbfs_lambda_fill(limit: int | None, dry_run: bool, no_register: bool) -> Non
 	)
 
 
+@gbfs_lambda.command('rebuild', help='Fan-out bulk rebuild: discover gaps locally, sync-invoke the rebuild Lambda once per shard, layered (tier, rung) finest-first (specs/avail-v3-lambda-rebuild.md).')
+@option('-B', '--stale-before', default=None, help='Treat shards last-modified before this UTC ISO 8601 timestamp as stale — rebuild them in place.')
+@option('-c', '--concurrency', type=int, default=16, show_default=True, help='Max concurrent Lambda invocations (function is unreserved; this is the only bound).')
+@option('-f', '--function', 'function_name', default=None, help='Lambda function to invoke [default: ctbk-avail-rebuild].')
+@option('-L', '--limit', type=int, default=None, help='Stop after this many shards.')
+@option('-n', '--dry-run', is_flag=True, help='Discover + print the layer plan; invoke nothing.')
+@option('-T', '--touch-tick', is_flag=True, help='First recycle the tick function\'s containers (env bump) and raise stale_before to the touch time — required for denorm re-keys, where warm ticks may keep writing tail shards with the OLD cached station-luc chains.')
+def gbfs_lambda_rebuild(
+	stale_before: str | None,
+	concurrency: int,
+	function_name: str | None,
+	limit: int | None,
+	dry_run: bool,
+	touch_tick: bool,
+) -> None:
+	from ctbk.pyramid_cascade.rebuild import REBUILD_FUNC, run_rebuild
+	if stale_before is not None:
+		sb = datetime.fromisoformat(stale_before)
+		if sb.tzinfo is None:
+			sb = sb.replace(tzinfo=timezone.utc)
+	else:
+		sb = None
+	if sb is not None and not touch_tick:
+		err('note: -B without -T — if this rebuild follows a station-luc re-key, '
+			'warm tick containers may still write stale tail shards; consider -T')
+	config = Path(__file__).parents[1] / 'configs/pyramids/avail.yaml'
+	run_rebuild(
+		config.read_text(),
+		stale_before=sb,
+		touch_tick=touch_tick,
+		concurrency=concurrency,
+		function_name=function_name or REBUILD_FUNC,
+		dry_run=dry_run,
+		limit=limit,
+	)
+
+
 @gbfs_lambda.command('invoke', help='Async-invoke the Lambda (fire one fill run now instead of waiting for the hourly cron).')
 def gbfs_lambda_invoke() -> None:
 	import boto3

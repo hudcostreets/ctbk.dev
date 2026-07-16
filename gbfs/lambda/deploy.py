@@ -30,6 +30,12 @@ from click import command, option
 err = lambda *a: print(*a, file=sys.stderr)
 
 FUNC = 'ctbk-avail-cascade'
+# Same zip, no schedule, UNRESERVED concurrency: invoked per-gap by the
+# `ctbk gbfs lambda rebuild` fan-out driver (whose `-c` is the bound) —
+# see `specs/avail-v3-lambda-rebuild.md`. Separate function because
+# reserved concurrency is function-level in AWS (aliases can't have
+# their own), and the minutely tick must keep `reserved=1` semantics.
+REBUILD_FUNC = 'ctbk-avail-rebuild'
 ROLE = f'{FUNC}-role'
 RULE = f'{FUNC}-hourly'
 # pandas + pyarrow + numpy. Region-specific ARN (us-east-1); versions:
@@ -110,25 +116,37 @@ def upsert_role(iam) -> str:
     return arn
 
 
-def upsert_function(lam, role_arn: str, blob: bytes) -> str:
-    env = {'Variables': {k: os.environ[k] for k in ENV_KEYS} | {'GC_ENABLED': '1', 'FILL_ALL': os.environ.get('FILL_ALL', '1')}}
+def upsert_function(
+    lam,
+    role_arn: str,
+    blob: bytes,
+    *,
+    name: str,
+    description: str,
+    env_extra: dict[str, str],
+    reserved: int | None,
+) -> str:
+    env = {'Variables': {k: os.environ[k] for k in ENV_KEYS} | env_extra}
     cfg = dict(
         Runtime='python3.12', Role=role_arn, Handler='handler.lambda_handler',
         Timeout=TIMEOUT_S, MemorySize=MEMORY_MB, Layers=[PANDAS_LAYER], Environment=env,
-        Description='avail-v3 heavy-rung cascade (specs/avail-v3-lambda-cascade.md P1)',
+        Description=description,
     )
     try:
-        lam.get_function(FunctionName=FUNC)
-        lam.update_function_code(FunctionName=FUNC, ZipFile=blob)
-        lam.get_waiter('function_updated').wait(FunctionName=FUNC)
-        lam.update_function_configuration(FunctionName=FUNC, **cfg)
-        err(f'updated {FUNC}')
+        lam.get_function(FunctionName=name)
+        lam.update_function_code(FunctionName=name, ZipFile=blob)
+        lam.get_waiter('function_updated').wait(FunctionName=name)
+        lam.update_function_configuration(FunctionName=name, **cfg)
+        err(f'updated {name}')
     except lam.exceptions.ResourceNotFoundException:
-        lam.create_function(FunctionName=FUNC, Code={'ZipFile': blob}, **cfg)
-        err(f'created {FUNC}')
-    lam.get_waiter('function_updated').wait(FunctionName=FUNC)
-    lam.put_function_concurrency(FunctionName=FUNC, ReservedConcurrentExecutions=1)
-    return lam.get_function(FunctionName=FUNC)['Configuration']['FunctionArn']
+        lam.create_function(FunctionName=name, Code={'ZipFile': blob}, **cfg)
+        err(f'created {name}')
+    lam.get_waiter('function_updated').wait(FunctionName=name)
+    if reserved is not None:
+        lam.put_function_concurrency(FunctionName=name, ReservedConcurrentExecutions=reserved)
+    else:
+        lam.delete_function_concurrency(FunctionName=name)
+    return lam.get_function(FunctionName=name)['Configuration']['FunctionArn']
 
 
 def upsert_schedule(events, lam, func_arn: str) -> None:
@@ -165,9 +183,25 @@ def main(dry_run: bool):
     sess = boto3.Session()
     role_arn = upsert_role(sess.client('iam'))
     lam = sess.client('lambda')
-    func_arn = upsert_function(lam, role_arn, blob)
+    func_arn = upsert_function(
+        lam, role_arn, blob,
+        name=FUNC,
+        description='avail-v3 heavy-rung cascade (specs/avail-v3-lambda-cascade.md P1)',
+        env_extra={'GC_ENABLED': '1', 'FILL_ALL': os.environ.get('FILL_ALL', '1')},
+        reserved=1,
+    )
     upsert_schedule(sess.client('events'), lam, func_arn)
+    # GC_ENABLED=0: only the scheduled tick should sweep — a stray {}
+    # invocation of the rebuild function must not race a second GC.
+    rebuild_arn = upsert_function(
+        lam, role_arn, blob,
+        name=REBUILD_FUNC,
+        description='avail-v3 single-gap rebuild fan-out (specs/avail-v3-lambda-rebuild.md); no schedule',
+        env_extra={'GC_ENABLED': '0', 'FILL_ALL': '1'},
+        reserved=None,
+    )
     err(f'deployed: {func_arn}')
+    err(f'deployed: {rebuild_arn}')
 
 
 if __name__ == '__main__':

@@ -5,6 +5,11 @@ same-tier sub-cover (ladder-extension rungs, plus any in-ladder rung the
 CFW bounced), registering each in D1 via the CF REST API. See
 `specs/avail-v3-lambda-cascade.md`.
 
+Events with a `gap` key take the single-gap branch instead: materialize
+exactly that shard (bulk-rebuild fan-out from `ctbk gbfs lambda
+rebuild`, deployed as the schedule-less `ctbk-avail-rebuild` function —
+`specs/avail-v3-lambda-rebuild.md`).
+
 Bundle: this file + a trimmed `ctbk` package (`pyramid_cascade` only,
 empty root `__init__`) + pyrmts + utz + pyyaml; pandas/pyarrow/numpy
 come from the AWS-managed `AWSSDKPandas` layer; boto3 from the runtime.
@@ -26,6 +31,29 @@ def lambda_handler(event, context):
     from ctbk.pyramid_cascade.lambda_exec import run_extension_fill
 
     config_yaml = (Path(__file__).parent / 'avail.yaml').read_text()
+
+    if 'gap' in event:
+        # Single-gap invocation from the fan-out rebuild driver
+        # (`ctbk gbfs lambda rebuild` — specs/avail-v3-lambda-rebuild.md):
+        # materialize + register exactly one shard, skip discovery/GC.
+        from datetime import datetime
+        from ctbk.pyramid_cascade.lambda_exec import decode_gap, run_single_gap
+        sb = event.get('stale_before')
+        res = run_single_gap(
+            config_yaml,
+            decode_gap(event['gap']),
+            stale_before=datetime.fromisoformat(sb) if sb else None,
+            register=True,
+        )
+        return {
+            'status': res.status,
+            'key': res.gap.key,
+            'rows': res.rows,
+            'bytes': res.bytes_written,
+            'source': res.source_desc,
+            'error': res.error,
+        }
+
     results = run_extension_fill(
         config_yaml,
         register=True,
