@@ -11,8 +11,10 @@ N; enforced by `fsck.fill_gaps` sorting missing shards by (tier_idx,
 shard_dur, period_start) ascending and processing tier layers
 finest-first.
 
-Tier `/1m` sources from raw WAL via `avail_ingester.avail_ingest_1m` —
-that's the only place raw ingestion happens.
+Tier `/1m` sources from raw WAL via `avail_ingester.avail_ingest_1m`,
+as do tiers whose strict-cascade source tier IS `/1m` (reading raw is
+~5x cheaper than decoding `/1m` parquets back to long form — see the
+base-tier substitution in `source_long_for_gap`).
 
 Prior versions did heterogeneous multi-tier covers with `/1m` fallback
 picks that could be emitted without checking R2 existence, silently
@@ -312,8 +314,9 @@ def source_long_for_gap(
     tiles that overshoot gap.eff_gap.period_end (safely — the target
     build filters `dt < seg_to`).
 
-    Tier `/1m` sources from raw WAL via `avail_ingest_1m` — this is the
-    only place raw ingestion happens.
+    Tier `/1m` sources from raw WAL via `avail_ingest_1m`. Tiers whose
+    source tier IS the base tier (2m/3m/5m under the avail ladder) also
+    ingest raw — see the base-tier substitution below.
 
     Each source shard is pre-aggregated to the target tier's bin before
     concatenation — bounds peak memory to O(target-bins × cells × metrics
@@ -343,6 +346,38 @@ def source_long_for_gap(
 
     src_tag = f"/{gap.tier}@{gap.shard_dur} {gap.period_start.date()}"
     src_tier = source_tier_for(pyramid, gap.tier)  # not None: /1m handled above
+
+    if src_tier.name == pyramid.tiers[0].name:
+        # Base-tier substitution: the base tier's shards are R2-parquet
+        # copies of raw (same minute-grain long form), and decoding them
+        # via `shard_to_long`'s JSON-histogram unpivot costs ~5x the raw
+        # fetch+parse for the same window (observed 500s vs ~100s per
+        # /1m@2d). Ingest raw directly, chunked by UTC day so peak memory
+        # stays O(1 day of raw) regardless of gap.shard_dur. Chunks whose
+        # bins straddle a boundary produce partial sums per (cell, dt,
+        # metric, state) — exact after `_build_tier_shard`'s group-by sum.
+        from .avail_ingester import avail_ingest_1m
+        t_reads = time()
+        err(f"    {src_tag} sourcing raw (base-tier substitution), 1d chunks...")
+        longs: list[pl.DataFrame] = []
+        chunk_from = eff_gap.period_start
+        while chunk_from < eff_gap.period_end:
+            next_midnight = (chunk_from + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0,
+            )
+            chunk_to = min(next_midnight, eff_gap.period_end)
+            sub = avail_ingest_1m(chunk_from, chunk_to).collect(engine='streaming')
+            if not sub.is_empty():
+                longs.append(_preaggregate_to_tier_bin(sub, target_bin))
+            chunk_from = chunk_to
+        err(f"    {src_tag} raw reads done ({time()-t_reads:.1f}s)")
+        if not longs:
+            empty = pl.DataFrame(
+                schema={'s2_cell': pl.Utf8, 'dt': pl.Int64, 'metric': pl.Utf8,
+                        'state': pl.Int64, 'count': pl.Int64},
+            )
+            return empty, 0, 1, 'raw'
+        return pl.concat(longs, how='vertical'), 1, 1, 'raw'
 
     if expected_by_tier is None:
         # Fall-back: use pyrmts's cover of just eff_gap. Sufficient when
