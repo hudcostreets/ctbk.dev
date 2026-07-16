@@ -485,6 +485,7 @@ def gbfs_lambda_fill(limit: int | None, dry_run: bool, no_register: bool) -> Non
 @option('-B', '--stale-before', default=None, help='Treat shards last-modified before this UTC ISO 8601 timestamp as stale — rebuild them in place.')
 @option('-c', '--concurrency', type=int, default=16, show_default=True, help='Max concurrent Lambda invocations (function is unreserved; this is the only bound).')
 @option('-f', '--function', 'function_name', default=None, help='Lambda function to invoke [default: ctbk-avail-rebuild].')
+@option('-k', '--keep-scaffolds', is_flag=True, help='Leave scaffold shards on R2 after a clean run (they are unregistered; a later re-run reuses them).')
 @option('-L', '--limit', type=int, default=None, help='Stop after this many shards.')
 @option('-n', '--dry-run', is_flag=True, help='Discover + print the layer plan; invoke nothing.')
 @option('-T', '--touch-tick', is_flag=True, help='First recycle the tick function\'s containers (env bump) and raise stale_before to the touch time — required for denorm re-keys, where warm ticks may keep writing tail shards with the OLD cached station-luc chains.')
@@ -492,6 +493,7 @@ def gbfs_lambda_rebuild(
 	stale_before: str | None,
 	concurrency: int,
 	function_name: str | None,
+	keep_scaffolds: bool,
 	limit: int | None,
 	dry_run: bool,
 	touch_tick: bool,
@@ -515,6 +517,7 @@ def gbfs_lambda_rebuild(
 		function_name=function_name or REBUILD_FUNC,
 		dry_run=dry_run,
 		limit=limit,
+		keep_scaffolds=keep_scaffolds,
 	)
 
 

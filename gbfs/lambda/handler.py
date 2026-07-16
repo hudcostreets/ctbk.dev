@@ -43,7 +43,10 @@ def lambda_handler(event, context):
             config_yaml,
             decode_gap(event['gap']),
             stale_before=datetime.fromisoformat(sb) if sb else None,
-            register=True,
+            # register=False marks a driver-planned SCAFFOLD shard:
+            # unregistered so D1-gated reads and the D1-driven GC never
+            # see it; the driver deletes it after the parent layer.
+            register=event.get('register', True),
         )
         return {
             'status': res.status,

@@ -155,3 +155,22 @@ Landed as `ctbk gbfs lambda rebuild` (nested in the existing
   `/1m@5min` wrote in 9 s via single-gap invoke (D1-registered
   in-Lambda); same shard then rebuilt in place under `-B now`
   (stale-overwrite path).
+- **Scaffold layers** (added after the first full `-T` dress
+  rehearsal): a rebuilt-from-scratch max-rung shard has no fresh
+  sub-rungs to concat (GC swept them long ago), so its build
+  degenerates to a whole-period raw/cross-tier fill — `/1m@2d` =
+  2880 raw minutes, which TIMED OUT at the hard 900 s Lambda cap
+  (28 timeouts, ~$12; `/1m@12h` = 720 minutes took 258 s — the §3
+  "few minutes" estimate only held for concat-able shards). The
+  driver now inserts per-tier scaffold layers at the largest rung
+  with ≤720 source bins (`SOURCE_BIN_BUDGET`; e.g. `/1m@12h`,
+  `/15m@2d`, `/7d@448d`) ahead of bigger rungs, which then concat
+  2-16 fresh tiles. Scaffolds are real in-ladder shards invoked with
+  `register=False`: D1-gated reads and the D1-driven `gc_sweep`
+  never see them (registration would let the hourly GC delete a
+  scaffold mid-rebuild — its "covering parent", the STALE max-rung
+  shard, exists on R2); the driver deletes them after a clean run
+  and keeps them for reuse when shards bounced. Honest envelope with
+  scaffolds: full re-key = ~145 expected shards + ~900 scaffolds,
+  wall ~1 h at `-c 48`, ~$25-40 of Lambda (scaffold fills dominate)
+  — more than the §3 guess, still ≪ `e`'s hours + egress + live box.
