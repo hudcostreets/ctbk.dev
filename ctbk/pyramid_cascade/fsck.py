@@ -55,6 +55,52 @@ def list_existing_keys(
     return keys
 
 
+def list_existing_with_mtime(
+    pyramid: Pyramid,
+    storage,
+) -> dict[str, datetime | None]:
+    """Like `list_existing_keys` but `{key: LastModified}`.
+
+    Uses the S3/R2 paginator directly when the backend exposes one
+    (pyrmts `S3Storage`); other backends (e.g. `MemStorage` in tests)
+    fall back to `list()` with `None` mtimes (treated as fresh).
+    """
+    template = pyramid.keyTemplate
+    prefix = template.split('{')[0]
+    client = getattr(storage, '_client', None)
+    bucket = getattr(storage, 'bucket', None)
+    if client is None or bucket is None:
+        return {key: None for key in storage.list(prefix)}
+    out: dict[str, datetime | None] = {}
+    paginator = client.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get('Contents', []):
+            out[obj['Key']] = obj['LastModified']
+    return out
+
+
+def split_stale(
+    existing: dict[str, datetime | None],
+    stale_before: datetime | None,
+) -> tuple[set[str], set[str]]:
+    """Partition `{key: mtime}` into `(fresh_keys, stale_keys)`.
+
+    A key is stale iff `stale_before` is set and its mtime is known and
+    `< stale_before`. Unknown mtimes (`None`) are treated as fresh —
+    backends that can't report mtimes shouldn't trigger rebuilds.
+    """
+    if stale_before is None:
+        return set(existing), set()
+    fresh: set[str] = set()
+    stale: set[str] = set()
+    for key, mtime in existing.items():
+        if mtime is not None and mtime < stale_before:
+            stale.add(key)
+        else:
+            fresh.add(key)
+    return fresh, stale
+
+
 def diff_with_existing(
     expected: list[ExpectedShard],
     existing_keys: set[str],
@@ -127,6 +173,7 @@ def discover_gaps(
     pyramid: Pyramid,
     time_range: tuple[datetime, datetime],
     filter: dict | None = None,
+    stale_before: datetime | None = None,
 ) -> tuple[list[ExpectedShard], set[str], dict[str, list[ExpectedShard]]]:
     """End-to-end discovery: enumerate expected → list R2 → diff → sort.
 
@@ -141,13 +188,22 @@ def discover_gaps(
       outer expected set intersecting eff_gap (rather than a fresh
       eff_gap-only cover, which can request shards that weren't part
       of the outer fill).
+
+    `stale_before`: existing shards last-modified before this UTC
+    timestamp are treated as missing — the fill loop rebuilds them in
+    place (same key, overwrite on put). Content-invalidation knob for
+    "an upstream input changed; everything built before T is stale"
+    (e.g. a station-luc denorm re-key).
     """
     err(f"fsck: discovering gaps in {pyramid.keyTemplate.split('{')[0]} "
         f"over [{time_range[0].date()}, {time_range[1].date()})...")
     expected = list_expected_shards(pyramid, time_range, filter=filter)
     err(f"  expected: {len(expected)} shards declared by the ladder")
-    existing = list_existing_keys(pyramid, pyramid.storage)
-    err(f"  existing: {len(existing)} keys on storage")
+    existing_mtimes = list_existing_with_mtime(pyramid, pyramid.storage)
+    existing, stale = split_stale(existing_mtimes, stale_before)
+    err(f"  existing: {len(existing_mtimes)} keys on storage"
+        + (f" ({len(stale)} stale, modified before {stale_before.isoformat()})"
+           if stale_before is not None else ""))
     missing = diff_with_existing(expected, existing)
     err(f"  missing:  {len(missing)} shards to fill")
     expected_by_tier: dict[str, list[ExpectedShard]] = {}

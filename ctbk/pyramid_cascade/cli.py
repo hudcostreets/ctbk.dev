@@ -97,6 +97,7 @@ def _resolve_stream_source(name: str) -> tuple:
 
 
 @ctbk.command('pyramid-cascade', help="Build a cascading pyramid: read base-tier source, emit all derived tiers.")
+@option('-B', '--stale-before', 'stale_before', default=None, help='With --fsck: treat existing shards last-modified before this UTC timestamp (ISO 8601) as missing — rebuild them in place. Content-invalidation knob for upstream-input changes (e.g. station-luc denorm re-key).')
 @option('-c', '--config', 'config_path', required=True, help='Path to pyramid YAML config.')
 @option('-D', '--shard-dur', 'shard_dur_filter', multiple=True, help='With --fsck: only consider gaps in this shard duration (e.g. `1d`, `32d`). Repeatable.')
 @option('-E', '--engine', 'engine_name', type=click.Choice(['block', 'streaming']), default='block', show_default=True, help='Cascade engine. `block` = ProcessPool over time-aligned blocks (vectorized Polars per block). `streaming` = single-process source iterator + per-(tier,period) dict accumulators (matches the prior `cascade-from-1m` design).')
@@ -112,8 +113,11 @@ def _resolve_stream_source(name: str) -> tuple:
 @option('-f', '--fsck', is_flag=True, help='Discover + report missing (tier, shard_dur, period) gaps vs the YAML ladder. Add --fill to materialize the gaps (Phase B).')
 @option('-F', '--fill', is_flag=True, help='With --fsck: materialize each missing shard. Idempotent (HEAD-skip), writes D1 INSERT SQL batch to tmp/fsck-d1-record.sql for the api worker to ingest.')
 @option('-L', '--fill-limit', type=int, default=None, help='With --fill: stop after this many gaps (for staged smoke tests).')
+@option('-M', '--merged-ladder', 'merged_ladder', is_flag=True, help='Merge each tier\'s `lambda_shards` extension rungs into its `shards` ladder (the view the GC sweep + Lambda executor use). Without this, fsck\'s expected set diverges from GC\'s: fsck fills sub-max rungs (e.g. `/1m@12h`) that GC then deletes as redundant with the lambda-rung cover (`/1m@2d`).')
+@option('-w', '--fill-workers', 'fill_workers', type=int, default=3, show_default=True, help='With --fill: per-rung-batch threadpool size. Lower it for memory-heavy rungs (a /1m@2d-from-raw build holds ~4x the rows of /1m@12h).')
 def pyramid_cascade_cmd(
     config_path: str,
+    stale_before: str | None,
     shard_dur_filter: tuple[str, ...],
     engine_name: str,
     ingester: str | None,
@@ -128,6 +132,8 @@ def pyramid_cascade_cmd(
     fsck: bool,
     fill: bool,
     fill_limit: int | None,
+    merged_ladder: bool,
+    fill_workers: int,
 ):
     if not fsck and not ingester:
         raise BadParameter("--ingester is required unless --fsck is set")
@@ -135,7 +141,17 @@ def pyramid_cascade_cmd(
         raise BadParameter("--fill requires --fsck")
     if (tier_filter or shard_dur_filter) and not fsck:
         raise BadParameter("--tier/--shard-dur require --fsck")
+    if stale_before is not None and not fsck:
+        raise BadParameter("--stale-before requires --fsck")
+    stale_before_dt = None
+    if stale_before is not None:
+        stale_before_dt = datetime.fromisoformat(stale_before.replace('Z', '+00:00'))
+        if stale_before_dt.tzinfo is None:
+            stale_before_dt = stale_before_dt.replace(tzinfo=timezone.utc)
     config_yaml = Path(config_path).read_text()
+    if merged_ladder:
+        from .lambda_exec import merge_lambda_shards
+        config_yaml = merge_lambda_shards(config_yaml)
     if prefix is not None:
         config_yaml = _override_key_prefix(config_yaml, prefix)
     cfg = parse_pyramid_yaml(config_yaml)
@@ -147,16 +163,20 @@ def pyramid_cascade_cmd(
     if fsck:
         from .fsck import discover_gaps, fill_gaps, report_gaps
         err(f"pyramid-cascade --fsck" + (" --fill" if fill else ""))
-        err(f"  config:    {config_path}")
+        err(f"  config:    {config_path}" + (" (merged ladder: shards + lambda_shards)" if merged_ladder else ""))
         err(f"  range:     {range_tuple[0].isoformat()} → {range_tuple[1].isoformat()}")
         err(f"  tiers:     {len(pyramid.tiers)}: {[t.name for t in pyramid.tiers]}")
+        if stale_before_dt is not None:
+            err(f"  stale-before: {stale_before_dt.isoformat()} (older shards rebuilt in place)")
         if tier_filter:
             err(f"  tier filter: {sorted(tier_filter)}")
         if shard_dur_filter:
             err(f"  shard filter: {sorted(shard_dur_filter)}")
         if fill_limit is not None:
             err(f"  limit:     {fill_limit} gaps")
-        missing, existing_keys, expected_by_tier = discover_gaps(pyramid, range_tuple)
+        missing, existing_keys, expected_by_tier = discover_gaps(
+            pyramid, range_tuple, stale_before=stale_before_dt,
+        )
         if tier_filter or shard_dur_filter:
             tf = set(tier_filter)
             sf = set(shard_dur_filter)
@@ -170,7 +190,8 @@ def pyramid_cascade_cmd(
             err("")
             fill_gaps(pyramid, missing, limit=fill_limit,
                       existing_keys=existing_keys,
-                      expected_by_tier=expected_by_tier)
+                      expected_by_tier=expected_by_tier,
+                      max_workers=fill_workers)
         return
 
     err(f"pyramid-cascade")

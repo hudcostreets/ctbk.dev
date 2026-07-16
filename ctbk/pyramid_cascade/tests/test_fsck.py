@@ -1,0 +1,132 @@
+"""Tests for fsck discovery — in particular the `stale_before`
+content-invalidation knob (treat shards older than T as missing) and
+its interaction with the expected-set diff.
+
+Regression context (2026-07-16): the avail-v3 LUC re-key rebuilt shards
+via the block engine + fsck-fill, but fsck's HEAD-skip idempotency
+meant stale-content shards (built against the OLD station-luc denorm,
+e.g. `/1m@2d` lambda rungs) were skipped — the pyramid kept serving
+old-denorm data at exactly the rungs the GC sweep's min-cover prefers.
+`stale_before` closes that hole: existing shards last-modified before
+the given timestamp are treated as gaps and rebuilt in place.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+from pyrmts import Dim, Metric, Pyramid, Tier
+from pyrmts.storage import MemStorage
+
+from ctbk.pyramid_cascade.fsck import discover_gaps, split_stale
+
+T0 = datetime(2026, 7, 15, 23, 21, tzinfo=timezone.utc)
+OLD = datetime(2026, 7, 12, 0, 0, tzinfo=timezone.utc)
+NEW = datetime(2026, 7, 16, 2, 30, tzinfo=timezone.utc)
+
+
+class TestSplitStale:
+    def test_no_cutoff_all_fresh(self):
+        existing = {'a': OLD, 'b': NEW, 'c': None}
+        assert split_stale(existing, None) == ({'a', 'b', 'c'}, set())
+
+    def test_cutoff_partitions_by_mtime(self):
+        existing = {'a': OLD, 'b': NEW}
+        assert split_stale(existing, T0) == ({'b'}, {'a'})
+
+    def test_unknown_mtime_is_fresh(self):
+        """Backends that can't report mtimes must not trigger rebuilds."""
+        existing = {'a': None, 'b': OLD}
+        assert split_stale(existing, T0) == ({'a'}, {'b'})
+
+    def test_exact_boundary_is_fresh(self):
+        """`mtime == stale_before` is fresh (strict `<` comparison)."""
+        existing = {'a': T0}
+        assert split_stale(existing, T0) == ({'a'}, set())
+
+
+@pytest.fixture
+def pyramid() -> Pyramid:
+    """Two-tier pyramid, 1d shards, over MemStorage (mtimes unavailable
+    → `list_existing_with_mtime` falls back to `list()` + None mtimes)."""
+    return Pyramid(
+        storage=MemStorage(),
+        keyTemplate='fsck-test/{tier}/{shard}/{period}.parquet',
+        binCol='dt',
+        dims=[Dim(name='s2_cell', type='string')],
+        metrics=[Metric(name='bikes', monoid='histogram')],
+        tiers=[
+            Tier(name='1m', bin='1min', shards=('1d',)),
+            Tier(name='2m', bin='2min', shards=('1d',)),
+        ],
+    )
+
+
+class _MtimeStorage(MemStorage):
+    """MemStorage exposing the S3-paginator surface that
+    `list_existing_with_mtime` duck-types on (`_client` + `bucket`),
+    with per-key mtimes."""
+
+    def __init__(self, mtimes: dict[str, datetime]):
+        super().__init__()
+        self.bucket = 'test'
+        self._mtimes = mtimes
+        for key in mtimes:
+            self.put(key, b'x')
+        storage = self
+
+        class _Paginator:
+            def paginate(self, Bucket: str, Prefix: str):
+                contents = [
+                    {'Key': k, 'LastModified': m}
+                    for k, m in storage._mtimes.items()
+                    if k.startswith(Prefix)
+                ]
+                yield {'Contents': contents}
+
+        class _Client:
+            def get_paginator(self, name: str):
+                assert name == 'list_objects_v2'
+                return _Paginator()
+
+        self._client = _Client()
+
+
+def _expected_keys(pyramid: Pyramid, time_range) -> list[str]:
+    from pyrmts import list_expected_shards
+    return [e.key for e in list_expected_shards(pyramid, time_range)]
+
+
+def test_discover_gaps_stale_before_rebuilds_old_shards(pyramid):
+    """Both expected 1-day shards exist, but one predates the cutoff —
+    discovery must report exactly that one as a gap, and exclude it
+    from the existing-keys snapshot handed to the fill loop."""
+    time_range = (
+        datetime(2026, 7, 14, tzinfo=timezone.utc),
+        datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+    keys = _expected_keys(pyramid, time_range)
+    day1 = [k for k in keys if '2026-07-14' in k]
+    day2 = [k for k in keys if '2026-07-15' in k]
+    assert len(day1) + len(day2) == len(keys)
+
+    mtimes = {k: OLD for k in day1} | {k: NEW for k in day2}
+    pyramid.storage = _MtimeStorage(mtimes)
+
+    missing, existing_keys, _ = discover_gaps(pyramid, time_range, stale_before=T0)
+    assert sorted(g.key for g in missing) == sorted(day1)
+    assert existing_keys == set(day2)
+
+
+def test_discover_gaps_no_stale_before_skips_all_existing(pyramid):
+    """Without the cutoff, every on-storage key counts as present."""
+    time_range = (
+        datetime(2026, 7, 14, tzinfo=timezone.utc),
+        datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+    keys = _expected_keys(pyramid, time_range)
+    pyramid.storage = _MtimeStorage({k: OLD for k in keys})
+
+    missing, existing_keys, _ = discover_gaps(pyramid, time_range)
+    assert missing == []
+    assert existing_keys == set(keys)
