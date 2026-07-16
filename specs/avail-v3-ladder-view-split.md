@@ -108,3 +108,14 @@ content as each put lands.
    full re-keys (monthly GBFS drift moving anchors), but denorm
    changes will still happen (new stations, same-dock merges); `-M -B`
    is the tool for those.
+6. **Port the LE's accumulator materializer into the fsck fill path.**
+   The fsck materializer explodes each source shard to a full polars
+   long frame — a max-rung mid-tier input (`/15m@32d`, ~130 M wide
+   rows) decodes in ~500 s and peaks ~30 GB per in-flight shard, which
+   OOM'd a 61 GB box twice during this remediation (at `-w 3` and
+   `-w 2`; the coarse tail ran `-w 1`). The Lambda's
+   `materialize_extension_shard` accumulator runs ~375 B/output-row
+   (~5 GB for the same shards) and would fix both the memory ceiling
+   and most of the decode time. Until then: `-w 1` for coarse-tier
+   layers on 61 GB boxes; the base-tier raw substitution
+   (`dddd24d1`) already covers the 2m/3m/5m layers.
