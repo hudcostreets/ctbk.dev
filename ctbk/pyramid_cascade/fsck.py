@@ -229,20 +229,22 @@ def report_gaps(missing: list[ExpectedShard], limit_per_rung: int = 3) -> None:
 # ─── Phase B: fill driver ────────────────────────────────────────────
 
 
-def _group_by_rung(
+def _group_by_tier(
     gaps: list[ExpectedShard],
-) -> list[tuple[str, str, list[ExpectedShard]]]:
-    """Consecutive-run grouping by (tier, shard_dur). Since `gaps` is
-    already dependency-sorted (tier index, shard_dur asc, period),
-    consecutive entries with the same (tier, shard_dur) form a rung
-    batch — all shards in a batch are independent (no cross-shard
-    dependency), so the batch can fan out in parallel."""
-    out: list[tuple[str, str, list[ExpectedShard]]] = []
+) -> list[tuple[str, list[ExpectedShard]]]:
+    """Consecutive-run grouping by tier. Since `gaps` is already
+    dependency-sorted (tier index, shard_dur asc, period), consecutive
+    entries with the same tier form a layer batch. All shards within a
+    tier are independent — the strict cascade sources ONLY from tier
+    N-1, never same-tier — so the whole layer can fan out in parallel.
+    (Grouping by (tier, shard_dur) here would serialize the common
+    coarse-tier tail of 1-2 shards per rung.)"""
+    out: list[tuple[str, list[ExpectedShard]]] = []
     for g in gaps:
-        if out and out[-1][0] == g.tier and out[-1][1] == g.shard_dur:
-            out[-1][2].append(g)
+        if out and out[-1][0] == g.tier:
+            out[-1][1].append(g)
         else:
-            out.append((g.tier, g.shard_dur, [g]))
+            out.append((g.tier, [g]))
     return out
 
 
@@ -258,10 +260,10 @@ def fill_gaps(
     expected_by_tier: dict[str, list[ExpectedShard]] | None = None,
     max_workers: int = 3,
 ) -> list:
-    """Materialize gaps in dependency order. Shards within a (tier,
-    shard_dur) batch fan out to a `max_workers`-sized threadpool
-    (bounded by the per-shard memory footprint — /2m@2d peaked at
-    ~17 GB, so 3 workers × 20 GB ≈ 60 GB RAM ceiling).
+    """Materialize gaps in dependency order. Shards within a tier
+    layer fan out to a `max_workers`-sized threadpool (bounded by the
+    per-shard memory footprint — /2m@2d peaked at ~17 GB, so 3 workers
+    × 20 GB ≈ 60 GB RAM ceiling).
 
     `existing_keys` is a snapshot of R2 keys from discovery; the fill
     loop extends it as each shard is written so downstream prev-rung
@@ -292,8 +294,8 @@ def fill_gaps(
     from pathlib import Path
     Path(d1_sql_path).parent.mkdir(parents=True, exist_ok=True)
 
-    rung_batches = _group_by_rung(gaps)
-    for tier, shard_dur, batch in rung_batches:
+    tier_batches = _group_by_tier(gaps)
+    for tier, batch in tier_batches:
         if limit is not None and processed >= limit:
             err(f"  hit --limit {limit}; stopping after {processed} gaps")
             break
@@ -319,7 +321,7 @@ def fill_gaps(
                         else f" ({res.source_desc})" if res.source_desc else ""
                     err(f"  [{processed}/{len(gaps)}] /{gap.tier}@{gap.shard_dur} "
                         f"{gap.period_start.date()} → {res.status}{tag}")
-        # Checkpoint D1 SQL after each rung — safe to kill fill any time.
+        # Checkpoint D1 SQL after each tier layer — safe to kill fill any time.
         if any(r.status == 'wrote' for r in results):
             emit_d1_insert_sql(pyramid_name, results, d1_sql_path)
     err(f"fill summary: " + ", ".join(f"{k}={v}" for k, v in sorted(by_status.items())))

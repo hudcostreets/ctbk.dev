@@ -15,10 +15,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
-from pyrmts import Dim, Metric, Pyramid, Tier
+from pyrmts import Dim, ExpectedShard, Metric, Pyramid, Tier
 from pyrmts.storage import MemStorage
 
-from ctbk.pyramid_cascade.fsck import discover_gaps, split_stale
+from ctbk.pyramid_cascade.fsck import _group_by_tier, discover_gaps, split_stale
 
 T0 = datetime(2026, 7, 15, 23, 21, tzinfo=timezone.utc)
 OLD = datetime(2026, 7, 12, 0, 0, tzinfo=timezone.utc)
@@ -43,6 +43,26 @@ class TestSplitStale:
         """`mtime == stale_before` is fresh (strict `<` comparison)."""
         existing = {'a': T0}
         assert split_stale(existing, T0) == ({'a'}, set())
+
+
+class TestGroupByTier:
+    def test_rungs_within_a_tier_share_one_batch(self):
+        """A tier's rungs (already dependency-sorted) form ONE parallel
+        layer — grouping per (tier, rung) would serialize the common
+        coarse-tier tail of 1-2 shards per rung."""
+        def shard(tier, dur, day):
+            ps = datetime(2026, 7, day, tzinfo=timezone.utc)
+            return ExpectedShard(tier=tier, shard_dur=dur, period_start=ps,
+                                 period_end=ps, key=f'{tier}/{dur}/{day}')
+        gaps = [
+            shard('30m', '8d', 1), shard('30m', '32d', 2), shard('30m', '64d', 3),
+            shard('1h', '8d', 4), shard('1h', '128d', 5),
+        ]
+        batches = _group_by_tier(gaps)
+        assert [(t, [g.key for g in b]) for t, b in batches] == [
+            ('30m', ['30m/8d/1', '30m/32d/2', '30m/64d/3']),
+            ('1h', ['1h/8d/4', '1h/128d/5']),
+        ]
 
 
 @pytest.fixture
