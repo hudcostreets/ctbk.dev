@@ -75,13 +75,17 @@ content as each put lands.
 
 ## Fallout / follow-ups (not addressed here)
 
-1. **CFW converge still plans against the unmerged ladder.** It
-   expects historical `/1m@12h` (etc.), can't build them (finer inputs
-   don't exist historically), and reports `no_inputs≈200` every /5m
-   tick — wasted planning work, alarming dry-run numbers. Fix: the
-   CFW's *coverage/read* checks should use the merged view (a lambda-
-   rung shard satisfies coverage), while its *write* budget stays
-   N≤960. Needs a worker change + deploy (macbook).
+1. **The CFW `/avail3` endpoint still plans against the unmerged
+   ladder.** Its cron was removed at the LE P2 cutover
+   (`specs/avail-v3-lambda-cascade.md`) so nothing burns per-tick —
+   but the endpoint remains the manual/rollback lever, and a manual
+   `?dryRun=1` reports ~200 `no_inputs` for historical `/1m@12h` it
+   thinks should exist. Misleading during verification (this incident
+   initially read those numbers as real gaps). Either point its
+   planner at the merged view or fold the check into `/health` and
+   delete the endpoint (P2 step 4 already slates the avail3 code for
+   deletion). Also DC the api worker's health config adopted the
+   extended ladder per the LE spec's sequencing.
 2. **Block engine writes rungs GC will eventually orphan.** Its
    max-`shards`-rung finals (e.g. `/2m@1d`) aren't in the merged
    min-cover wherever a lambda rung covers them; since the block
