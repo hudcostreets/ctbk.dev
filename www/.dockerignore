@@ -140,6 +140,7 @@
 !src/components/icons/Bluesky.tsx
 !src/components/icons/Command.tsx
 !src/components/icons/GitHub.tsx
+!src/components/icons/Health.tsx
 !src/components/icons/Home.tsx
 !src/components/icons/Pipeline.tsx
 !src/components/icons/S3.tsx
