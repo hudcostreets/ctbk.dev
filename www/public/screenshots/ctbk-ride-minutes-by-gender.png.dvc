@@ -1,0 +1,5 @@
+outs:
+- md5: 30a997629f1383e03076632e0ba0bf8a
+  size: 37588
+  hash: md5
+  path: ctbk-ride-minutes-by-gender.png

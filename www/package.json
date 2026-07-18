@@ -56,9 +56,9 @@
   "scripts": {
     "clean": "rm -rf node_modules/.vite",
     "gen-ymdgtb-index": "node scripts/gen-ymdgtb-index.js",
-    "predev": "node scripts/gen-ymdgtb-index.js",
+    "predev": "node scripts/gen-ymdgtb-index.js && node scripts/fetch-screenshots.js",
     "dev": "vite",
-    "prebuild": "node scripts/gen-ymdgtb-index.js",
+    "prebuild": "node scripts/gen-ymdgtb-index.js && node scripts/fetch-screenshots.js",
     "build": "vite build",
     "postbuild": "node scripts/gen-station-stubs.js",
     "preview": "vite preview",

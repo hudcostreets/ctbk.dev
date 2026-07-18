@@ -1,0 +1,5 @@
+outs:
+- md5: b99c300bfec41dc03e74082d3c95ddc7
+  size: 57987
+  hash: md5
+  path: plot-fallback.png

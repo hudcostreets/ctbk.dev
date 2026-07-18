@@ -11,33 +11,33 @@
 ## Screenshots <a id="screenshots"></a>
 [ctbk.dev]:
 
-[![Screenshot of dashboard; per-month ride counts going back to June 2013, with a 12mo rolling avg showing mostly steady growth](www/public/screenshots/ctbk-rides.png)][ctbk.dev]
+[![Screenshot of dashboard; per-month ride counts going back to June 2013, with a 12mo rolling avg showing mostly steady growth](https://ctbk.dev/screenshots/ctbk-rides.png)][ctbk.dev]
 
 ### Station/Ridership Map <a id="ctbk-stations"></a>
 [ctbk.dev/stations]:
 
-[![Map of Citi Bike stations, Hoboken NJ Transit Terminal selected, showing destinations for rides beginning there](www/public/screenshots/ctbk-stations.png)][ctbk.dev/stations]
+[![Map of Citi Bike stations, Hoboken NJ Transit Terminal selected, showing destinations for rides beginning there](https://ctbk.dev/screenshots/ctbk-stations.png)][ctbk.dev/stations]
 
 ### JC & Hoboken Only <a id="ctbk-nj"></a>
 [ctbk.dev/?r=jh][ctbk nj plot]:
 
-[![Screenshot of dashboard; per-month ride counts for Jersey City and Hoboken only, going back to June 2013, with a 12mo rolling avg showing mostly steady growth](www/public/screenshots/ctbk-nj.png)][ctbk nj plot]
+[![Screenshot of dashboard; per-month ride counts for Jersey City and Hoboken only, going back to June 2013, with a 12mo rolling avg showing mostly steady growth](https://ctbk.dev/screenshots/ctbk-nj.png)][ctbk nj plot]
 
 ### Ride Minute %'s by Gender <a id="ctbk-ride-minutes-by-gender"></a>
 [ctbk.dev?d=1406-2102&g=mf&pct&s=g&y=m][ctbk gender pct plot]:
 
-[![](www/public/screenshots/ctbk-ride-minutes-by-gender.png)][ctbk gender pct plot]
+[![](https://ctbk.dev/screenshots/ctbk-ride-minutes-by-gender.png)][ctbk gender pct plot]
 (Gender labels stopped appearing in the data in February 2021)
 
 ### Ride %'s by User Type <a id="ctbk-rides-by-user"></a>
 [ctbk.dev/?s=u&pct=][ctbk user type pct plot]:
 
-[![](www/public/screenshots/ctbk-rides-by-user.png)][ctbk user type pct plot]
+[![](https://ctbk.dev/screenshots/ctbk-rides-by-user.png)][ctbk user type pct plot]
 
 ### Total Classic / E-bike Ride Minutes <a id="ctbk-ebike-minutes"></a>
 [ctbk.dev?y=m&s=b&rt=ce&d=2002-][ctbk ebike minutes plot]:
 
-[![](www/public/screenshots/ctbk-ebike-minutes.png)][ctbk ebike minutes plot]
+[![](https://ctbk.dev/screenshots/ctbk-ebike-minutes.png)][ctbk ebike minutes plot]
 
 ### Stations by launch date <a id="stations-by-creation-date"></a>
 This is a work-in-progress; red = newer, yellow = older:
@@ -47,7 +47,7 @@ This is a work-in-progress; red = newer, yellow = older:
 ### E-bike minutes by user type <a id="ctbk-ebike-minutes-by-user"></a>
 [ctbk.dev/?y=m&s=u&rt=e&d=2002-][ctbk ebike minutes by user plot]:
 
-[![](www/public/screenshots/ctbk-ebike-minutes-by-user.png)][ctbk ebike minutes by user plot]
+[![](https://ctbk.dev/screenshots/ctbk-ebike-minutes-by-user.png)][ctbk ebike minutes by user plot]
 
 You can get some interesting upper bounds on e-bike fee revenue from this:
 - 6MM "member" e-bike minutes @ [$0.16/min][citi bike member pricing] ⟹ ≈$1MM
