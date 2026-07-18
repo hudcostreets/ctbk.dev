@@ -1,5 +1,9 @@
 # www: GH Pages → Cloudflare Workers Assets
 
+**Status: complete 2026-07-18.** ctbk.dev serves from the `ctbk-dev`
+Workers-Assets worker (custom domain attached; verified in-browser:
+SPA-fallback 200s, stubs, plots, tiles). See "Implementation notes".
+
 ## Context
 
 ctbk.dev is a static Vite SPA deployed to GH Pages via `www.yml`
@@ -82,3 +86,33 @@ assets router locally when needed.
 2. Once on Workers, `/og/*` and `/api/*` could be routed same-origin
    to the API worker (service bindings / route splits) — nice-to-have,
    separate spec.
+
+## Implementation notes (2026-07-18)
+
+- **DNS**: `ctbk.dev` was on Squarespace-managed Google Cloud DNS
+  (registrar: Squarespace) — Workers custom domains need the zone on
+  CF, so the zone moved: added in the CF dashboard, records pruned to
+  5 (apex A→GHP for the transition, `www`+`s3` CloudFront CNAMEs +
+  their 2 ACM validation records; dead `data`/`flask`/`test`/`test2`
+  and Squarespace's `_domainconnect` dropped; everything DNS-only),
+  DNSSEC disabled at Squarespace pre-move, nameservers →
+  `arturo`/`vida.ns.cloudflare.com`. Zone active ~15 min later.
+- **Custom-domain attach via dashboard, not config.** The CI token is
+  Workers/R2/D1-scoped (no zone perms): `wrangler deploy` with a
+  `routes[custom_domain]` block 403s on the workers-domains API. The
+  domain is attached once in the dashboard (which also required
+  deleting the apex A record first — the dash flow doesn't
+  auto-replace) and persists as account state; `wrangler.jsonc`
+  deliberately declares no routes so deploys never touch zone APIs.
+- **Phase C strip**: GHP deploy step, `404.html` copy, and the 5-min
+  chunk-poll smoke (→ 3-try one-shot; assets deploys are atomic)
+  removed; Slack "last deployed" query matches both old + new deploy
+  step names for compare-range continuity. Workflow renamed
+  `GitHub Pages` → `Deploy ctbk.dev`.
+- **Left for later**: delete the `ghp` branch after a bake week
+  (instant-rollback insurance: re-add the apex A `185.199.108.153` +
+  GH Pages still has the last build); `WWW_DEPLOY_KEY` checkout stays
+  (the screenshot self-commit push uses it until
+  `specs/www-screenshots-dvx.md` lands); retiring the `www`/`s3`
+  CloudFront distros (CF redirect rule / R2 custom domain) would kill
+  the ACM records too.
