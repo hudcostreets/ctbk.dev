@@ -41,7 +41,11 @@ RULE = f'{FUNC}-hourly'
 # pandas + pyarrow + numpy. Region-specific ARN (us-east-1); versions:
 # https://aws-sdk-pandas.readthedocs.io/en/stable/layers.html
 PANDAS_LAYER = 'arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python312:18'
-MEMORY_MB = 10240
+MEMORY_MB = 10240      # tick fn: accumulator path peaks ~6 GB at N=4096
+# Rebuild fn: fan-out materializers measured p95 3.95 / max 4.31 GB over
+# a full from-scratch build — 10 GB was ~2.3× oversized at the median
+# (Lambda bills memory×time; this is ~46% of the fan-out's cost).
+REBUILD_MEMORY_MB = 5376
 TIMEOUT_S = 900
 
 REPO = Path(__file__).resolve().parents[2]
@@ -128,11 +132,12 @@ def upsert_function(
     description: str,
     env_extra: dict[str, str],
     reserved: int | None,
+    memory_mb: int = MEMORY_MB,
 ) -> str:
     env = {'Variables': {k: os.environ[k] for k in ENV_KEYS} | env_extra}
     cfg = dict(
         Runtime='python3.12', Role=role_arn, Handler='handler.lambda_handler',
-        Timeout=TIMEOUT_S, MemorySize=MEMORY_MB, Layers=[PANDAS_LAYER], Environment=env,
+        Timeout=TIMEOUT_S, MemorySize=memory_mb, Layers=[PANDAS_LAYER], Environment=env,
         Description=description,
     )
     try:
@@ -202,6 +207,7 @@ def main(dry_run: bool):
         description='avail-v3 single-gap rebuild fan-out (specs/avail-v3-lambda-rebuild.md); no schedule',
         env_extra={'GC_ENABLED': '0', 'FILL_ALL': '1'},
         reserved=None,
+        memory_mb=REBUILD_MEMORY_MB,
     )
     err(f'deployed: {func_arn}')
     err(f'deployed: {rebuild_arn}')
