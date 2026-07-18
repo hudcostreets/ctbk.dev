@@ -174,3 +174,24 @@ Landed as `ctbk gbfs lambda rebuild` (nested in the existing
   scaffolds: full re-key = ~145 expected shards + ~900 scaffolds,
   wall ~1 h at `-c 48`, ~$25-40 of Lambda (scaffold fills dominate)
   — more than the §3 guess, still ≪ `e`'s hours + egress + live box.
+- **Measured (first full in-place rebuild, 2026-07-16..18)**: three
+  defects flushed out — 900s-cap timeouts (→ scaffolds, above), the
+  cross-tier whole-file `to_pylist` memory-thrash (→ streaming
+  arrow-filtered reads, `2bd60d43`), and outage-window scars bouncing
+  as permanently-unfillable `no_inputs` (the 2026-05-03 scraper gap;
+  → cover-complete + zero-rows = EMPTY, same commit). Net: ~2-2.5 h
+  driver wall at `-c 48`, ~$50 (of which ~$41 was the two pre-fix
+  timeout storms — a clean re-key from here ≈ 1.5-2 h, ~$10-15).
+  Final passes: 107 shards / 40.8 min (wrote=25, exists=81) + 8/8
+  wrote, zero bounces. Prod serving unaffected throughout.
+- **Cleanup gap**: a clean run only deletes scaffolds from ITS OWN
+  plan; scaffolds orphaned by killed/bounced runs linger once later
+  passes no longer plan those slots (86 left from this exercise —
+  unregistered, invisible, pennies). Fold into the queued R2 orphan
+  sweep, or add a `--sweep-scaffolds` mode.
+- **Future direction (not built)**: the driver's `(tier, rung)` layer
+  barriers make the coarse tail near-serial (1-2 shards/layer). A
+  per-shard dependency DAG (each shard schedulable once its cover
+  keys are fresh, ephemeral rungs chosen by cost) would overlap the
+  tail with fine-tier work — est. ~5-10% of wall at today's ladder;
+  revisit if the ladder or cadence grows.
