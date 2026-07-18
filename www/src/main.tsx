@@ -17,12 +17,13 @@ import { HomeButton, ThemeTileToggle } from "./components/TileStyleButton"
 import { useScrollToHash } from "./hooks/useScrollToHash"
 import { useGlobalStationsOmnibar } from "./hooks/useGlobalStationsOmnibar"
 import Home from "./pages/Home"
+import NotFound from "./pages/NotFound"
 import { Box } from "@mui/material"
 import { Footer } from "./components/Footer"
 
 // Cloudflare Web Analytics (RUM: page views + Core Web Vitals). Manual
-// mode — ctbk.dev is on GH Pages, not proxied through CF, so the beacon
-// reports directly to CF's collector. Prod-only: the RUM endpoint
+// mode — the beacon reports directly to CF's collector (predates the
+// Workers-Assets hosting; still fine under it). Prod-only: the RUM endpoint
 // rejects CORS preflight from origins not in the token's allowed-domains
 // list, which would spam the console on `localhost` dev.
 if (import.meta.env.PROD) {
@@ -76,6 +77,11 @@ function AppContent() {
           <Route path="/files/*" element={<Files />} />
           <Route path="/health" element={<Health />} />
           <Route path="/cells-debug" element={<CellsDebug />} />
+          {/* Catch-all: the CFW assets router SPA-fallbacks unknown paths
+              to index.html with a 200 (specs/done/www-cfw-migration.md),
+              so the router must render a real 404 page, not an empty
+              outlet. */}
+          <Route path="*" element={<NotFound />} />
         </Routes>
       </Suspense>
       <ThemeToggle onOpenShortcuts={openModal} hideThemeButton={isStationsPage}>

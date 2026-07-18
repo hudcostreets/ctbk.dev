@@ -166,6 +166,7 @@
 !src/pages/Files.tsx
 !src/pages/Health.tsx
 !src/pages/Home.tsx
+!src/pages/NotFound.tsx
 !src/pages/Pipeline.mdx
 !src/pages/StationDetail.tsx
 !src/pages/Stations.tsx
