@@ -1,4 +1,4 @@
-name: GitHub Pages
+name: Deploy ctbk.dev
 on:
   push:
     branches:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 jobs:
   build:
-    name: Build + deploy www branch to ctbk.dev via GitHub Pages
+    name: Build + deploy www branch to ctbk.dev (CF Workers Assets)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -40,10 +40,7 @@ jobs:
         run: pnpm test --reporter=list
       - name: Build
         working-directory: www
-        run: |
-          pnpm build
-          # Copy index.html to 404.html for GHP SPA routing
-          cp dist/index.html dist/404.html
+        run: pnpm build
       - name: Generate screenshots (Playwright in Docker)
         working-directory: www
         run: |
@@ -88,26 +85,14 @@ jobs:
               git push origin HEAD:main
               echo "REGENERATED=true" >> $GITHUB_OUTPUT
           fi
-      - name: Deploy to GH Pages
-        id: deploy
-        uses: JamesIves/github-pages-deploy-action@v4
-        if: github.ref == 'refs/heads/www' && steps.screenshots.outputs.REGENERATED != 'true'
-        with:
-          branch: ghp
-          folder: www/dist
-          # NOTE: `clean-exclude` was tried here to preserve stale chunks
-          # for in-flight tabs across deploys, but JamesIves passes it as
-          # `rsync --exclude` which excludes from BOTH sides — i.e. NEW
-          # chunks weren't deployed either, breaking the site. Removed.
-          # If we want stale-tab survival, do it via a post-deploy step
-          # that copies old chunks back into ghp explicitly.
-      # Dual-deploy during the CFW migration (`specs/www-cfw-migration.md`
-      # Phase B): ctbk.dev DNS still points at GH Pages; the Workers-Assets
-      # deploy tracks every release at ctbk-dev.<acct>.workers.dev until
-      # the Phase C domain flip, after which the GHP steps get stripped.
-      # AFTER the GHP step so a CF-side failure can't block the primary.
+      # Workers-Assets deploy (`specs/done/www-cfw-migration.md`): atomic
+      # manifest-based upload serving ctbk.dev via the `ctbk-dev` worker's
+      # custom domain (attached once in the dashboard — deliberately NOT
+      # declared in wrangler.jsonc, so this narrow-scope token needs no
+      # zone permissions).
       - name: Deploy to Cloudflare Workers (ctbk-dev)
-        if: steps.deploy.outcome == 'success'
+        id: deploy
+        if: github.ref == 'refs/heads/www' && steps.screenshots.outputs.REGENERATED != 'true'
         working-directory: www
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -118,18 +103,11 @@ jobs:
         if: steps.deploy.outcome == 'success'
         working-directory: www
         run: |
-          # Poll until the live `index.html` AND every chunk it
-          # references all return 200, up to 5 min. GH Pages can flip the
-          # root and the chunk tree out of sync — old `index.html` may
-          # linger briefly with stale chunk refs, or new `index.html` may
-          # serve before its new chunks propagate. Both look like a
-          # 404'd chunk to a one-shot check. Fail loudly only if the
-          # mismatch is still present after the deadline (this catches
-          # the `clean-exclude`-dropped-chunks bug from `ea82f3c0`).
-          deadline=$((SECONDS + 300))
-          chunks=
-          while [ $SECONDS -lt $deadline ]; do
-            sleep 15
+          # One-shot-ish (3 tries): Workers-Assets deploys are atomic
+          # (index + chunks flip together), unlike the GHP era's
+          # out-of-sync windows that needed a 5-min polling loop.
+          for i in 1 2 3; do
+            sleep 10
             html=$(curl -sf https://ctbk.dev/ || true)
             [ -z "$html" ] && continue
             chunks=$(echo "$html" | grep -oE 'assets/[A-Za-z0-9._/-]+\.(js|css)' | sort -u)
@@ -137,18 +115,14 @@ jobs:
             fail=0
             for c in $chunks; do
               code=$(curl -s -o /dev/null -w '%{http_code}' "https://ctbk.dev/$c")
-              [ "$code" = "200" ] || { fail=1; break; }
+              [ "$code" = "200" ] || { fail=1; echo "  $code  $c"; break; }
             done
             if [ "$fail" = "0" ]; then
               echo "smoke OK: $(echo $chunks | wc -w) chunk(s) all 200"
               exit 0
             fi
           done
-          echo 'smoke check timed out (5min); last observed chunk status:'
-          for c in $chunks; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' "https://ctbk.dev/$c")
-            echo "  $code  https://ctbk.dev/$c"
-          done
+          echo 'smoke check failed after 3 attempts'
           exit 1
 
       - name: Notify Slack — site deployed
@@ -188,15 +162,18 @@ jobs:
           # screenshot-regen branch of this workflow finishes successfully
           # but skips the Deploy step. Querying `status=success` alone
           # would pick up those no-op runs, so we additionally check each
-          # run's `Deploy to GH Pages` step conclusion.
+          # run's deploy-step conclusion.
           prev_sha = None
           runs = gh(f'/repos/{repo_slug}/actions/workflows/www.yml/runs?status=success&branch=www&per_page=10')
           for r in runs.get('workflow_runs', []):
               if str(r['id']) == run_id:
                   continue   # belt-and-suspenders; shouldn't appear
               jobs = gh(f'/repos/{repo_slug}/actions/runs/{r["id"]}/jobs')
+              # Old name kept so pre-CFW-migration runs still count as
+              # deploys when computing the compare range.
+              deploy_steps = ('Deploy to Cloudflare Workers (ctbk-dev)', 'Deploy to GH Pages')
               deployed = any(
-                  s.get('name') == 'Deploy to GH Pages' and s.get('conclusion') == 'success'
+                  s.get('name') in deploy_steps and s.get('conclusion') == 'success'
                   for j in jobs.get('jobs', [])
                   for s in j.get('steps', [])
               )

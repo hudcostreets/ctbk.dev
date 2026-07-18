@@ -14,6 +14,11 @@
     "directory": "./dist",
     "not_found_handling": "single-page-application"
   },
+  // NOTE: the `ctbk.dev` custom domain is deliberately NOT declared here
+  // (`routes` + `custom_domain`): it's attached once via the dashboard and
+  // persists as account state. Declaring it would make every `wrangler
+  // deploy` hit the workers-domains API, which the narrow-scope CI token
+  // (Workers/R2/D1, no zone perms) can't touch.
   "dev": {
     // FE dev server is 3456; wrangler = +1 per convention.
     "port": 3457
