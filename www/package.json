@@ -50,6 +50,7 @@
     "serve": "^14.2.5",
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
+    "wrangler": "^4.110.0",
     "yaml": "^2.8.3"
   },
   "scripts": {
@@ -61,13 +62,15 @@
     "build": "vite build",
     "postbuild": "node scripts/gen-station-stubs.js",
     "preview": "vite preview",
+    "preview:cf": "wrangler dev",
     "lint": "eslint .",
     "tc": "tsc",
     "scrns": "scrns -o public/screenshots -s '.plotly svg rect' -l 30000 -h localhost:3456",
     "scrns:docker": "./scripts/docker-screenshots.sh",
     "test": "playwright test",
     "test:ui": "playwright test --ui",
-    "test:bundle": "playwright test --config=playwright.bundle.config.ts"
+    "test:bundle": "playwright test --config=playwright.bundle.config.ts",
+    "deploy:cf": "pnpm run build && wrangler deploy"
   },
   "repository": {
     "type": "git",

@@ -1,0 +1,24 @@
+// ctbk.dev static site as a Workers-Assets-only worker (no `main` —
+// pure asset serving; free tier, atomic manifest deploys). See
+// `specs/www-cfw-migration.md`.
+//
+// `not_found_handling: single-page-application` serves `index.html`
+// (HTTP 200) for any path with no asset — replaces the GH Pages
+// `404.html` hack. Per-station stubs (`dist/s/<slug>/index.html`) are
+// ordinary assets and win over the fallback for crawler og meta.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ctbk-dev",
+  "compatibility_date": "2026-07-13",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+  "dev": {
+    // FE dev server is 3456; wrangler = +1 per convention.
+    "port": 3457
+  },
+  "observability": {
+    "enabled": true
+  }
+}
