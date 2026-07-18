@@ -88,6 +88,17 @@ jobs:
               git push origin HEAD:main
               echo "REGENERATED=true" >> $GITHUB_OUTPUT
           fi
+      # Dual-deploy during the CFW migration (`specs/www-cfw-migration.md`
+      # Phase B): ctbk.dev DNS still points at GH Pages; the Workers-Assets
+      # deploy tracks every release at ctbk-dev.<acct>.workers.dev until
+      # the Phase C domain flip, after which the GHP steps get stripped.
+      - name: Deploy to Cloudflare Workers (ctbk-dev)
+        if: github.ref == 'refs/heads/www' && steps.screenshots.outputs.REGENERATED != 'true'
+        working-directory: www
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm exec wrangler deploy
       - name: Deploy to GH Pages
         id: deploy
         uses: JamesIves/github-pages-deploy-action@v4
