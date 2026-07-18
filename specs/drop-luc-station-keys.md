@@ -102,6 +102,68 @@ before migrating:
    monthly GBFS churn to skip one more re-key ritual.
 5. Delete: denorm regen job, R2 denorm keys, re-key runbook, #161.
 
+## Research findings (2026-07-18, `scripts/cover-bench.py`)
+
+Registry = 2,745 stations (current denorm). **Occupancy**: uniform L13
+leaves 221 cells with >4 stations (max 28); descent to ≤4 terminates by
+L16; full cell-uniqueness never arrives (L18 still has 17 two-station
+cells — co-located docks; reinforces ID keys over deep-cell keys).
+
+**Ragged vocabularies** (descend while >T stations):
+
+| T | vocab cells | deepest | rows/bin (+2,745 ids) | vs LUC ~4,200 |
+|---|---|---|---|---|
+| 2 | 3,094 | L17 | 5,839 | +39% |
+| 4 | 1,798 | L16 | 4,543 | +8% |
+| 8 | 1,040 | L15 | 3,785 | −10% |
+
+**NTA gallery** (126 of 262 NYC NTA-2020 neighborhoods contain
+stations; optimal ± terms per region via the pos/neg DP):
+
+| T | mean | p50 | p95 | max |
+|---|---|---|---|---|
+| 2 | 9.0 | 8 | 17 | 22 |
+| 4 | 9.2 | 9 | 17 | 23 |
+| 8 | 9.9 | 9 | 19 | 25 |
+
+Term counts are nearly FLAT across T — the ± algebra compensates for
+coarser vocabularies on real region shapes (the worst case, Prospect
+Lefferts Gardens-Wingate at 22-25 terms/37 stations, is boundary
+geometry, not vocabulary depth). **Decision: T=4** (+8% rows/bin,
+p95 = 17 terms, headroom if query mixes change; T=8 is a viable
+row-saving fallback since it costs only ~+0.7 mean terms).
+
+## Build plan: from-scratch via LE, both pyramids (no `e`)
+
+Build v4 through the REAL regen paths — the ones that must keep working
+(fsck, future rebuilds, disaster recovery) — not a one-off v3
+transform. (A v3→v4 transform was considered: every station's v3 LUC
+row IS its per-station row, so v4 is derivable by rename +
+re-accumulate. Rejected: it saves only ~$5-8/45 min for avail, adds
+throwaway materializer code, and leaves the primary path unexercised.
+The v3 relationship is used as an ACCEPTANCE check instead — see below.)
+
+- **avail-v4**: the existing `ctbk gbfs lambda rebuild` fan-out with
+  the chain function swapped (registry → `[L10.. T=4 vocab cells,
+  s:<short_name>]`; `_luc_chains` and the LUC denorm die). New prefix
+  `avail-v4/`, new config `avail-v4.yaml` (same ladder). Est.
+  **~1.5-2 h / ~$10-15 at `-c 48`** (same cost class as the 2026-07
+  re-key's post-fix passes).
+- **rides-v4**: port the monthly base build to the streaming
+  accumulator pattern (iterate the normalized monthly parquet in
+  row-group batches — S3→Lambda same-region, free transfer —
+  accumulating `(key, dt, dims)` sums; RSS ≈ output shard ~1-2 GB, not
+  `e`'s 7-8 GB whole-frame path). This permanently closes "rides
+  re-keys need `e`" (`avail-v3-lambda-rebuild.md` §Q4). ~150 monthly
+  base builds × 2-5 min ≈ **$3-6** + the cascade above them.
+
+**Acceptance** (the demoted transform insight, now a cross-check of two
+independent derivations): every v4 `s:<short_name>` row must equal the
+corresponding v3 LUC row exactly (via the current denorm's cell↔station
+map — run before the next monthly churn while v3 and the denorm are
+freshly consistent); vocabulary-cell rows cross-checked by monoid rebin
+(as in the avail 1h→6h consistency probe).
+
 ## Open questions
 
 1. Key spelling for ID rows (`s:JC115` vs bare short_name) — must not
