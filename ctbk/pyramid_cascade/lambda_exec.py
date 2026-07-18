@@ -329,25 +329,50 @@ def _fill_hole_cross_tier(
     bin_ms = dur_min(tier.bin) * 60_000
     metrics = [m.name for m in pyramid.metrics]
     acc: dict[tuple[str, int], list[dict[str, int]]] = {}
+    import pyarrow.compute as pc
     for k, ranges in by_key.items():
         obj = r2.get_object(Bucket=R2_BUCKET, Key=k)
-        t = pq.read_table(io.BytesIO(obj['Body'].read()))
-        cols = {c: t.column(c).to_pylist() for c in ['s2_cell', 'dt', *metrics]}
-        for i, dt in enumerate(cols['dt']):
-            dt = int(dt)
-            if not any(lo <= dt < hi for lo, hi in ranges):
+        body = obj['Body'].read()
+        # Stream row-group batches and arrow-filter to the clip ranges:
+        # a whole-file `to_pylist` of a max-rung source (e.g. /1m@2d,
+        # ~12 M rows × 7 cols ≈ 5-7 GB of python objects) GC-thrashed
+        # the 10 GB Lambda into its 900 s timeout during the first
+        # scaffolded rebuild. Python-side work is now proportional to
+        # the CLIPPED rows, not the source file.
+        pf = pq.ParquetFile(io.BytesIO(body))
+        for batch in pf.iter_batches(columns=['s2_cell', 'dt', *metrics]):
+            dt_arr = batch.column(batch.schema.get_field_index('dt'))
+            mask = None
+            for lo, hi in ranges:
+                m = pc.and_(pc.greater_equal(dt_arr, lo), pc.less(dt_arr, hi))
+                mask = m if mask is None else pc.or_(mask, m)
+            if not pc.any(mask).as_py():
                 continue
-            key2 = (cols['s2_cell'][i], dt - dt % bin_ms)
-            hists = acc.get(key2)
-            if hists is None:
-                hists = acc[key2] = [{} for _ in metrics]
-            for mi, m in enumerate(metrics):
-                for state, n in _json.loads(cols[m][i]).items():
-                    h = hists[mi]
-                    h[state] = h.get(state, 0) + n
-        del cols, t
+            cols = batch.filter(mask).to_pydict()
+            for i, dt in enumerate(cols['dt']):
+                dt = int(dt)
+                key2 = (cols['s2_cell'][i], dt - dt % bin_ms)
+                hists = acc.get(key2)
+                if hists is None:
+                    hists = acc[key2] = [{} for _ in metrics]
+                for mi, m in enumerate(metrics):
+                    for state, n in _json.loads(cols[m][i]).items():
+                        h = hists[mi]
+                        h[state] = h.get(state, 0) + n
+            del cols
+        del pf, body
     if not acc:
-        return None
+        # Cover was complete (no `uncovered` return above) but the clip
+        # matched zero source rows: a genuine data outage window (e.g.
+        # the 2026-05-03 scraper gap — hour 00 has no raw minutes at
+        # all). "No data" is a valid, final answer — same policy as
+        # `_fill_hole_raw`'s all-missed-past-finality case. Returning
+        # None here instead bounced every rung containing such a scar
+        # as `no_inputs`, permanently unfillable.
+        return pa.table({
+            's2_cell': pa.array([], pa.string()), 'dt': pa.array([], pa.int64()),
+            **{m: pa.array([], pa.string()) for m in metrics},
+        })
     cells, dts = zip(*acc.keys())
     def dump(h: dict[str, int]) -> str:
         return _json.dumps({k: h[k] for k in sorted(h, key=int)}, separators=(',', ':'))
