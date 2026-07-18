@@ -1,5 +1,10 @@
 # www screenshots: DVX-tracked, input-gated regeneration
 
+**Status: complete 2026-07-18.** First gated run validated end-to-end
+(stale→regen→1 changed blob→pointer commit `9fd40c6`→deploy); the
+pointer-triggered follow-on run took the fresh path (no regen, no
+commit — loop terminates). HR URLs live (ctbk.dev/screenshots/…).
+
 ## Context
 
 `www.yml` regenerates homepage screenshots (Docker + Playwright,
