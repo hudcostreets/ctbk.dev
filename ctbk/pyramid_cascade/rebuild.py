@@ -44,6 +44,90 @@ TICK_FUNC = 'ctbk-avail-cascade'
 # times out at the hard 900 s cap. 720 leaves ~3.5× headroom.
 SOURCE_BIN_BUDGET = 720
 
+# Per-class cost model for `--plan` estimates (measured, 2026-07 builds):
+# raw fill 258s/720 bins; cross-tier rebin varies 0.2-0.7 s/source-bin
+# post-streaming-fix (use the middle); same-tier concats are ~seconds
+# regardless of size (I/O + sort dominated).
+RAW_S_PER_BIN = 0.36
+XTIER_S_PER_SRCBIN = 0.45
+CONCAT_S = 25.0
+LAMBDA_USD_PER_S = 10 * 0.0000166667  # 10 GB memory
+
+
+def _estimate_layer(pyramid, tier_name: str, rung: str, n: int, is_scaffold: bool) -> tuple[float, str]:
+    """(est seconds per shard, class label) for one `(tier, rung)` layer.
+    Scaffolds and each tier's smallest rung are whole-period fills (raw
+    at the finest tier, cross-tier rebin elsewhere); larger rungs concat
+    just-built same-tier tiles."""
+    from .lambda_exec import _source_tier_for
+    from .lite import dur_min
+    tier = next(t for t in pyramid.tiers if t.name == tier_name)
+    finest = min(pyramid.tiers, key=lambda t: dur_min(t.bin))
+    if not is_scaffold and rung != tier.shards[0]:
+        return CONCAT_S, 'concat'
+    if tier.name == finest.name:
+        return dur_min(rung) * RAW_S_PER_BIN, 'raw-fill'
+    src = _source_tier_for(pyramid, tier.name)
+    src_bins = dur_min(rung) // dur_min(src.bin)
+    return src_bins * XTIER_S_PER_SRCBIN, 'xtier-fill'
+
+
+def print_plan(
+    pyramid,
+    layers: list[tuple[str, str, list, bool]],
+    concurrency: int,
+    dot_path: str | None = None,
+) -> None:
+    """Per-layer plan with wall/cost estimates (layers are sequential
+    barriers, so total wall = Σ per-layer walls at the given `-c`), plus
+    an optional Graphviz DAG of the semantic dependencies: concat layers
+    depend on their tier's scaffold layer; fill layers depend on the
+    source tier's last layer (raw for the finest tier)."""
+    import math
+    from .lambda_exec import _source_tier_for
+    from .lite import dur_min
+    total_wall = total_compute = 0.0
+    rows = []
+    last_layer_of_tier: dict[str, str] = {}
+    nodes: list[tuple[str, str, float, int]] = []
+    edges: list[tuple[str, str]] = []
+    finest = min(pyramid.tiers, key=lambda t: dur_min(t.bin)).name
+    for tier, rung, batch, is_scaffold in layers:
+        per, cls = _estimate_layer(pyramid, tier, rung, len(batch), is_scaffold)
+        wall = math.ceil(len(batch) / concurrency) * per
+        compute = len(batch) * per
+        total_wall += wall
+        total_compute += compute
+        node = f'{tier}@{rung}' + (' [scaffold]' if is_scaffold else '')
+        rows.append((node, len(batch), cls, per, wall))
+        nodes.append((node, cls, compute, len(batch)))
+        if cls == 'concat':
+            dep = last_layer_of_tier.get(tier)
+        elif tier == finest:
+            dep = 'raw WAL'
+        else:
+            src = _source_tier_for(pyramid, tier)
+            dep = last_layer_of_tier.get(src.name, 'raw WAL')
+        if dep:
+            edges.append((dep, node))
+        last_layer_of_tier[tier] = node
+    err(f"{'layer':<22} {'n':>5} {'class':<11} {'s/shard':>8} {'est wall':>9}")
+    for node, n, cls, per, wall in rows:
+        err(f'{node:<22} {n:>5} {cls:<11} {per:>7.0f}s {wall:>8.0f}s')
+    err(f'plan: {sum(r[1] for r in rows)} invocations | est wall ≈ '
+        f'{total_wall / 60:.0f} min at -c {concurrency} | est compute ≈ '
+        f'{total_compute / 3600:.1f} Lambda-hrs ≈ ${total_compute * LAMBDA_USD_PER_S:.2f}')
+    if dot_path:
+        with open(dot_path, 'w') as f:
+            f.write('digraph build {\n  rankdir=LR;\n  node [shape=box, fontsize=10];\n')
+            f.write('  "raw WAL" [shape=cylinder];\n')
+            for node, cls, compute, n in nodes:
+                f.write(f'  "{node}" [label="{node}\\n{n}× {cls}, ~{compute / 60:.0f} min"];\n')
+            for a, b in edges:
+                f.write(f'  "{a}" -> "{b}";\n')
+            f.write('}\n')
+        err(f'DAG → {dot_path}')
+
 
 def fill_safe_rung(pyramid, tier) -> str:
     """Largest rung of `tier` whose whole-period fill fits
@@ -147,6 +231,7 @@ def run_rebuild(
     limit: int | None = None,
     keep_scaffolds: bool = False,
     config_name: str = 'avail',
+    dot_path: str | None = None,
 ) -> dict[str, int]:
     """Discover → layer (+ scaffolds) → fan out. Returns `{status: count}`.
 
@@ -181,9 +266,7 @@ def run_rebuild(
     err(f"rebuild: {len(gaps)} shards + {n_scaffold} scaffolds across "
         f"{len(layers)} (tier, rung) layers")
     if dry_run:
-        for tier, rung, batch, is_scaffold in layers:
-            err(f"  /{tier}@{rung}{' [scaffold]' if is_scaffold else ''}: {len(batch)} "
-                f"({batch[0].period_start.date()}..{batch[-1].period_start.date()})")
+        print_plan(pyramid, layers, concurrency, dot_path)
         return {}
 
     import boto3
@@ -238,6 +321,9 @@ def run_rebuild(
                 if st in ('error', 'no_inputs'):
                     detail = f": {r['error']}" if r.get('error') else ""
                     err(f"  ! /{g.tier}@{g.shard_dur} {g.period_start.date()} → {st}{detail}")
+                n_done = sum(layer_status.values())
+                if len(batch) > concurrency and n_done % 25 == 0:
+                    err(f"  … /{tier}@{rung}: {n_done}/{len(batch)} ({_time.time() - lt0:.0f}s)")
         err(f"  /{tier}@{rung}{' [scaffold]' if is_scaffold else ''}: {len(batch)} → "
             + ", ".join(f"{k}={v}" for k, v in sorted(layer_status.items()))
             + f" ({_time.time() - lt0:.0f}s)")

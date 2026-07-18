@@ -516,7 +516,8 @@ def gbfs_lambda_fill(config_name: str, limit: int | None, dry_run: bool, no_regi
 @option('-f', '--function', 'function_name', default=None, help='Lambda function to invoke [default: ctbk-avail-rebuild].')
 @option('-k', '--keep-scaffolds', is_flag=True, help='Leave scaffold shards on R2 after a clean run (they are unregistered; a later re-run reuses them).')
 @option('-L', '--limit', type=int, default=None, help='Stop after this many shards.')
-@option('-n', '--dry-run', is_flag=True, help='Discover + print the layer plan; invoke nothing.')
+@option('-n', '--dry-run', is_flag=True, help='Discover + print the layer plan with wall/cost estimates; invoke nothing.')
+@option('--dot', 'dot_path', default=None, help='With -n: also write a Graphviz DAG of the build plan to this path.')
 @option('-T', '--touch-tick', is_flag=True, help='First recycle the tick function\'s containers (env bump) and raise stale_before to the touch time — required for denorm re-keys, where warm ticks may keep writing tail shards with the OLD cached station-luc chains.')
 def gbfs_lambda_rebuild(
 	stale_before: str | None,
@@ -526,6 +527,7 @@ def gbfs_lambda_rebuild(
 	keep_scaffolds: bool,
 	limit: int | None,
 	dry_run: bool,
+	dot_path: str | None,
 	touch_tick: bool,
 ) -> None:
 	from ctbk.pyramid_cascade.rebuild import REBUILD_FUNC, run_rebuild
@@ -549,6 +551,7 @@ def gbfs_lambda_rebuild(
 		limit=limit,
 		keep_scaffolds=keep_scaffolds,
 		config_name=config_name,
+		dot_path=dot_path,
 	)
 
 
