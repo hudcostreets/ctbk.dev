@@ -456,6 +456,32 @@ def gbfs_r2_rm(keys: tuple[str, ...]) -> None:
 		err(f'deleted {key}')
 
 
+# ─── Station-cell vocabulary (specs/drop-luc-station-keys.md) ───────────
+
+@gbfs.group('vocab', help='Frozen ragged station-cell vocabulary for the v4 pyramids.')
+def gbfs_vocab() -> None:
+	pass
+
+
+@gbfs_vocab.command('gen', help='Generate `configs/pyramids/station-vocab.json` from the station registry (R2 denorm by default).')
+@option('-o', '--out', default=None, help='Output path [default: configs/pyramids/station-vocab.json].')
+@option('-r', '--registry', default=None, help='Local registry json (by_short_name -> {lat, lng}); default fetches `station-luc.json` from R2.')
+@option('-T', '--threshold', type=int, default=4, show_default=True, help='Descend while a cell holds more than this many stations.')
+def gbfs_vocab_gen(out: str | None, registry: str | None, threshold: int) -> None:
+	from ctbk.pyramid_cascade.vocab import build_vocab, dump_vocab
+	if registry:
+		data = json.loads(Path(registry).read_text())
+	else:
+		client, bucket = _r2_client()
+		obj = client.get_object(Bucket=bucket, Key='station-luc.json')  # type: ignore[attr-defined]
+		data = json.loads(obj['Body'].read())
+	stations = {sn: (e['lat'], e['lng']) for sn, e in data['by_short_name'].items()}
+	vocab = build_vocab(stations, threshold)
+	out_path = Path(out) if out else Path(__file__).parents[1] / 'configs/pyramids/station-vocab.json'
+	out_path.write_text(dump_vocab(vocab, threshold, len(stations)))
+	err(f'{len(vocab)} vocab cells (T={threshold}, {len(stations)} stations) → {out_path}')
+
+
 # ─── Lambda executor (specs/avail-v3-lambda-cascade.md) ────────────────
 
 LAMBDA_FUNC = 'ctbk-avail-cascade'
@@ -467,23 +493,26 @@ def gbfs_lambda() -> None:
 
 
 @gbfs_lambda.command('fill', help='Run the heavy-rung fill locally (same code path as the Lambda handler).')
+@option('-C', '--config', 'config_name', default='avail', show_default=True, help='Pyramid config basename under configs/pyramids/.')
 @option('-L', '--limit', type=int, default=None, help='Stop after this many gaps.')
 @option('-n', '--dry-run', is_flag=True, help='Discover + list gaps, write nothing.')
 @option('-R', '--no-register', is_flag=True, help='Skip D1 registration of written shards.')
-def gbfs_lambda_fill(limit: int | None, dry_run: bool, no_register: bool) -> None:
+def gbfs_lambda_fill(config_name: str, limit: int | None, dry_run: bool, no_register: bool) -> None:
 	from ctbk.pyramid_cascade.lambda_exec import run_extension_fill
-	config = Path(__file__).parents[1] / 'configs/pyramids/avail.yaml'
+	config = Path(__file__).parents[1] / f'configs/pyramids/{config_name}.yaml'
 	run_extension_fill(
 		config.read_text(),
 		fill_limit=limit,
 		dry_run=dry_run,
 		register=not no_register,
+		pyramid_name=config_name,
 	)
 
 
 @gbfs_lambda.command('rebuild', help='Fan-out bulk rebuild: discover gaps locally, sync-invoke the rebuild Lambda once per shard, layered (tier, rung) finest-first (specs/avail-v3-lambda-rebuild.md).')
 @option('-B', '--stale-before', default=None, help='Treat shards last-modified before this UTC ISO 8601 timestamp as stale — rebuild them in place.')
 @option('-c', '--concurrency', type=int, default=16, show_default=True, help='Max concurrent Lambda invocations (function is unreserved; this is the only bound).')
+@option('-C', '--config', 'config_name', default='avail', show_default=True, help='Pyramid config basename under configs/pyramids/ (also the D1 pyramid name).')
 @option('-f', '--function', 'function_name', default=None, help='Lambda function to invoke [default: ctbk-avail-rebuild].')
 @option('-k', '--keep-scaffolds', is_flag=True, help='Leave scaffold shards on R2 after a clean run (they are unregistered; a later re-run reuses them).')
 @option('-L', '--limit', type=int, default=None, help='Stop after this many shards.')
@@ -492,6 +521,7 @@ def gbfs_lambda_fill(limit: int | None, dry_run: bool, no_register: bool) -> Non
 def gbfs_lambda_rebuild(
 	stale_before: str | None,
 	concurrency: int,
+	config_name: str,
 	function_name: str | None,
 	keep_scaffolds: bool,
 	limit: int | None,
@@ -508,7 +538,7 @@ def gbfs_lambda_rebuild(
 	if sb is not None and not touch_tick:
 		err('note: -B without -T — if this rebuild follows a station-luc re-key, '
 			'warm tick containers may still write stale tail shards; consider -T')
-	config = Path(__file__).parents[1] / 'configs/pyramids/avail.yaml'
+	config = Path(__file__).parents[1] / f'configs/pyramids/{config_name}.yaml'
 	run_rebuild(
 		config.read_text(),
 		stale_before=sb,
@@ -518,6 +548,7 @@ def gbfs_lambda_rebuild(
 		dry_run=dry_run,
 		limit=limit,
 		keep_scaffolds=keep_scaffolds,
+		config_name=config_name,
 	)
 
 

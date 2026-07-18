@@ -30,7 +30,15 @@ TIME_BUDGET_S = 12 * 60
 def lambda_handler(event, context):
     from ctbk.pyramid_cascade.lambda_exec import run_extension_fill
 
-    config_yaml = (Path(__file__).parent / 'avail.yaml').read_text()
+    # `config` selects a bundled pyramid config (basename, no extension);
+    # the pyramid's D1-registry name is the config stem. The steady-state
+    # EventBridge tick sends no payload → `avail` (v3, LUC chains); v4
+    # builds send `{'config': 'avail-v4'}` (vocab chains — see
+    # `specs/drop-luc-station-keys.md`).
+    config_name = event.get('config', 'avail')
+    if not config_name.replace('-', '').isalnum():
+        raise ValueError(f'bad config name {config_name!r}')
+    config_yaml = (Path(__file__).parent / f'{config_name}.yaml').read_text()
 
     if 'gap' in event:
         # Single-gap invocation from the fan-out rebuild driver
@@ -47,6 +55,7 @@ def lambda_handler(event, context):
             # unregistered so D1-gated reads and the D1-driven GC never
             # see it; the driver deletes it after the parent layer.
             register=event.get('register', True),
+            pyramid_name=config_name,
         )
         return {
             'status': res.status,

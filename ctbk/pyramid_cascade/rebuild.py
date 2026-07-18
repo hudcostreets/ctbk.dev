@@ -146,6 +146,7 @@ def run_rebuild(
     dry_run: bool = False,
     limit: int | None = None,
     keep_scaffolds: bool = False,
+    config_name: str = 'avail',
 ) -> dict[str, int]:
     """Discover → layer (+ scaffolds) → fan out. Returns `{status: count}`.
 
@@ -198,7 +199,7 @@ def run_rebuild(
     sb_iso = stale_before.isoformat() if stale_before else None
 
     def invoke(gap, register: bool) -> dict:
-        payload: dict = {'gap': encode_gap(gap), 'register': register}
+        payload: dict = {'gap': encode_gap(gap), 'register': register, 'config': config_name}
         if sb_iso:
             payload['stale_before'] = sb_iso
         resp = lam.invoke(FunctionName=function_name,

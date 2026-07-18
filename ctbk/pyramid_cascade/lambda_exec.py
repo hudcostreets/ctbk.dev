@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import time as _time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -136,6 +137,67 @@ COARSEST_LEVEL = 10
 # never arrive; ship without it (same policy as the CFW cascade).
 RAW_FINALITY_S = 15 * 60
 
+# Chain mode: 'luc' (legacy avail-v3 — L10..LUC ancestor chains from the
+# station-luc denorm) or 'vocab' (avail-v4 — frozen ragged vocabulary +
+# `s:<short_name>` identity keys; `specs/drop-luc-station-keys.md`).
+# Selected per-run from the pyramid config's top-level `chains:` key.
+_chains_mode = 'luc'
+
+
+def parse_chains_mode(yaml_text: str) -> str:
+    return _yaml.safe_load(yaml_text).get('chains') or 'luc'
+
+
+def set_chains_mode(mode: str) -> None:
+    global _chains_mode
+    if mode not in ('luc', 'vocab'):
+        raise ValueError(f'unknown chains mode {mode!r}')
+    _chains_mode = mode
+
+
+def _chains(r2, fetched_after: datetime | None = None) -> dict[str, list[str]]:
+    return (_vocab_chains if _chains_mode == 'vocab' else _luc_chains)(r2, fetched_after)
+
+
+def _find_vocab_file() -> Path:
+    """`station-vocab.json`: at the Lambda bundle root (alongside
+    `handler.py`/`avail.yaml`) or under the repo's `configs/pyramids/`."""
+    root = Path(__file__).parents[2]
+    for p in (root / 'station-vocab.json', root / 'configs/pyramids/station-vocab.json'):
+        if p.exists():
+            return p
+    raise FileNotFoundError('station-vocab.json (bundle root or configs/pyramids/)')
+
+
+_vocab_chains_cache: tuple[datetime, dict[str, list[str]]] | None = None
+
+
+def _vocab_chains(r2, fetched_after: datetime | None = None) -> dict[str, list[str]]:
+    """UUID → [frozen-vocab ancestor cells + `s:<short_name>`]. Registry
+    (uuid ↔ short_name + lat/lng) from the same R2 denorm file as the
+    LUC path — only its stable identity fields are read; the frozen
+    vocabulary comes from the bundled `station-vocab.json`, so new
+    stations can never churn existing keys."""
+    global _vocab_chains_cache
+    if _vocab_chains_cache is not None and fetched_after is not None \
+            and _vocab_chains_cache[0] < fetched_after:
+        _vocab_chains_cache = None
+    if _vocab_chains_cache is None:
+        import json as _json
+        from .vocab import load_vocab, station_chain
+        vocab = load_vocab(_find_vocab_file())
+        obj = r2.get_object(Bucket=R2_BUCKET, Key=STATION_LUC_KEY)
+        data = _json.loads(obj['Body'].read())
+        chains: dict[str, list[str]] = {}
+        for uuid, short_name in data['by_uuid'].items():
+            e = data['by_short_name'].get(short_name)
+            if not e:
+                continue
+            chains[uuid] = station_chain(e['lat'], e['lng'], short_name, vocab)
+        _vocab_chains_cache = (datetime.now(timezone.utc), chains)
+    return _vocab_chains_cache[1]
+
+
 # (fetched_at, chains) — see `fetched_after` below.
 _luc_chains_cache: tuple[datetime, dict[str, list[str]]] | None = None
 
@@ -185,7 +247,7 @@ def _fill_hole_raw(
     import json as _json
     from datetime import timedelta
     from collections import defaultdict
-    chains = _luc_chains(r2)
+    chains = _chains(r2)
     metrics = [m.name for m in pyramid.metrics]
     accum: dict[tuple[str, int, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
     s, e = hole
@@ -510,6 +572,7 @@ def run_extension_fill(
     from .lite import r2_client
 
     now = now or datetime.now(timezone.utc)
+    set_chains_mode(parse_chains_mode(config_yaml))
     ext_by_tier = parse_lambda_shards(config_yaml)
     if not ext_by_tier:
         raise ValueError('config declares no lambda_shards')
@@ -548,7 +611,7 @@ def run_extension_fill(
         # A warm container's cached station-luc chains may predate the
         # re-key that made these shards stale; refresh before any raw
         # hole-fill expands stations through old anchors.
-        _luc_chains(r2, fetched_after=stale_before)
+        _chains(r2, fetched_after=stale_before)
     t0 = _time.time()
     results: list[MaterializeResult] = []
     for g in ext_gaps:
@@ -627,6 +690,7 @@ def run_single_gap(
     from .lite import r2_client
     from .storage import storage_from_cfg
 
+    set_chains_mode(parse_chains_mode(config_yaml))
     merged_yaml = merge_lambda_shards(config_yaml)
     cfg = parse_pyramid_yaml(merged_yaml)
     pyramid = pyramid_from_config(cfg, storage_from_cfg(cfg.storage))
@@ -634,7 +698,7 @@ def run_single_gap(
 
     r2 = r2_client()
     if stale_before is not None:
-        _luc_chains(r2, fetched_after=stale_before)
+        _chains(r2, fetched_after=stale_before)
     existing_mtimes = list_existing_with_mtime(pyramid, pyramid.storage)
     fresh, stale = split_stale(existing_mtimes, stale_before)
     err(f"single-gap /{gap.tier}@{gap.shard_dur} {gap.period_start.date()}: "

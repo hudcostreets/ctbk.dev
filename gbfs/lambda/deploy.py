@@ -56,6 +56,7 @@ CTBK_MODULES = [
     'pyramid_cascade/storage.py',
     'pyramid_cascade/d1_http.py',
     'pyramid_cascade/lambda_exec.py',
+    'pyramid_cascade/vocab.py',
     'pyramid_cascade/gc.py',
 ]
 # Pure-python site-packages to vendor (pandas/pyarrow via layer; boto3
@@ -84,6 +85,8 @@ def build_zip() -> bytes:
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
         z.write(here / 'handler.py', 'handler.py')
         z.write(REPO / 'configs/pyramids/avail.yaml', 'avail.yaml')
+        z.write(REPO / 'configs/pyramids/avail-v4.yaml', 'avail-v4.yaml')
+        z.write(REPO / 'configs/pyramids/station-vocab.json', 'station-vocab.json')
         z.writestr('ctbk/__init__.py', '')  # NOT the repo's (heavy trips-ETL imports)
         for rel in CTBK_MODULES:
             z.write(REPO / 'ctbk' / rel, f'ctbk/{rel}')
