@@ -38,53 +38,70 @@ jobs:
         env:
           CI: '1'
         run: pnpm test --reporter=list
-      - name: Build
+      # ─── Screenshots: input-gated DVX regen (specs/www-screenshots-dvx.md)
+      # Regenerate exactly when a declared dep changed since the recorded
+      # provenance (`.deps.json`), BEFORE the build consumes them — the
+      # old flow gated on output bytes (impossible for ND renders; the map
+      # + mosaic had to be exempted) and needed a self-commit + full
+      # re-run to rebuild with fresh files.
+      - name: Screenshots dep-check
+        id: scrgate
+        run: |
+          data_md5=$(awk '/md5:/{print $3; exit}' s3/ctbk/stations/ymdgtb.dvc)
+          www_tree=$(git ls-files -s -- www ':!www/public/screenshots' | git hash-object --stdin)
+          echo "data_md5=$data_md5" >> $GITHUB_OUTPUT
+          echo "www_tree=$www_tree" >> $GITHUB_OUTPUT
+          rec_data=$(jq -r '.ymdgtb_md5 // "none"' www/public/screenshots/.deps.json 2>/dev/null || echo none)
+          rec_tree=$(jq -r '.www_tree // "none"' www/public/screenshots/.deps.json 2>/dev/null || echo none)
+          if [ "$data_md5" != "$rec_data" ] || [ "$www_tree" != "$rec_tree" ]; then
+            echo "stale=true" >> $GITHUB_OUTPUT
+            echo "stale: data $rec_data -> $data_md5 | tree $rec_tree -> $www_tree"
+          else
+            echo "stale=false" >> $GITHUB_OUTPUT
+            echo "fresh (data $data_md5, tree $www_tree)"
+          fi
+      - name: Regenerate screenshots (deps changed)
+        if: steps.scrgate.outputs.stale == 'true'
         working-directory: www
-        run: pnpm build
-      - name: Generate screenshots (Playwright in Docker)
-        working-directory: www
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
         run: |
           docker build --platform linux/amd64 -f Dockerfile.screenshots -t ctbk-screenshots .
           docker run --platform linux/amd64 --name ctbk-screenshots-run ctbk-screenshots
           docker cp ctbk-screenshots-run:/app/public/screenshots/. public/screenshots/
           docker rm ctbk-screenshots-run
-      - name: Upload screenshots as artifact
-        if: github.ref != 'refs/heads/www'
-        uses: actions/upload-artifact@v4
-        with:
-          name: screenshots
-          path: www/public/screenshots/
-      - name: Compose og:image mosaic
-        working-directory: www
-        # Recomposes `ctbk-og-mosaic.jpg` from the just-regenerated
-        # screenshots (map + 2 plots). Excluded from the change-gate below
-        # (like `ctbk-stations`) because the map render varies per run —
-        # gating on it would re-trigger forever. It still ships whenever a
-        # PLOT screenshot changes (monthly data updates), riding the same
-        # commit.
-        run: |
           # ubuntu-24.04 runner images dropped ImageMagick.
           command -v magick >/dev/null || command -v convert >/dev/null \
             || sudo apt-get install -y -qq imagemagick
           bash scripts/compose-og.sh
-      - name: Push + re-run, if screenshots changed
-        if: github.ref == 'refs/heads/www'
-        id: screenshots
+          # Upload changed blobs to the DVX CA store + rewrite pointers +
+          # record this regen's deps.
+          uv run scripts/push-screenshots.py \
+            -d "${{ steps.scrgate.outputs.data_md5 }}" \
+            -t "${{ steps.scrgate.outputs.www_tree }}"
+      - name: Upload screenshots as artifact
+        if: steps.scrgate.outputs.stale == 'true' && github.ref != 'refs/heads/www'
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: www/public/screenshots/
+      - name: Commit screenshot pointers
+        if: steps.scrgate.outputs.stale == 'true' && github.ref == 'refs/heads/www'
         run: |
-          if git diff --name-only -- www/public/screenshots | grep -v -e ctbk-stations -e ctbk-og-mosaic; then
-              git add www/public/screenshots
-              git config --global user.name "GitHub Actions"
-              git config --global user.email "github@actions"
-              git commit -m "Update screenshots"
-              git pull origin www
-              echo "Pushing www"
-              git push origin HEAD:www
-              echo "Updating main branch"
-              git fetch --unshallow origin main
-              git pull origin main
-              git push origin HEAD:main
-              echo "REGENERATED=true" >> $GITHUB_OUTPUT
-          fi
+          git add www/public/screenshots
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "github@actions"
+          git commit -m "Update screenshot pointers (input-gated regen)"
+          git pull --rebase origin www
+          git push origin HEAD:www
+          git fetch --unshallow origin main || true
+          git pull --rebase origin main
+          git push origin HEAD:main
+      - name: Build
+        working-directory: www
+        run: pnpm build
       # Workers-Assets deploy (`specs/done/www-cfw-migration.md`): atomic
       # manifest-based upload serving ctbk.dev via the `ctbk-dev` worker's
       # custom domain (attached once in the dashboard — deliberately NOT
@@ -92,7 +109,7 @@ jobs:
       # zone permissions).
       - name: Deploy to Cloudflare Workers (ctbk-dev)
         id: deploy
-        if: github.ref == 'refs/heads/www' && steps.screenshots.outputs.REGENERATED != 'true'
+        if: github.ref == 'refs/heads/www'
         working-directory: www
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
