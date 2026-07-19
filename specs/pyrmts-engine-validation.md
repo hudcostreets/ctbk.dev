@@ -86,3 +86,26 @@ Wall, peak RSS, $ (if run on Batch/spot), and any content diffs → back to the 
 - `build_local` window must be fixed-width and a multiple of the base bin (`1min`) — `1d` default is the measured-good `task_size`.
 - Registration ordering: engine records after each PUT. For the validation run (JSONL manifest) this is moot; for any future real run against D1, use `pyrmts_engine.D1ShardIndex` (env: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `D1_DATABASE_ID`) — same row shape as `d1_http.register_shard`.
 - The engine's `local` executor is single-process (polars threads + source prefetch). If it disappoints on wall, profile before reaching for block-fanout — the pyrmts spec defers that deliberately.
+
+## Implementation notes (ctbk session, 2026-07-18)
+
+### (a) Local link — done
+
+`pyproject.toml` restructured per §a (plain names + `[tool.uv.sources]`), all three packages local-editable; pinned block present but commented at `5409dfc` (not yet on GitHub — commit the pyproject/uv.lock delta at cutover once pyrmts pushes; until then they ride as UCs). One extra caveat found: **`gbfs/lambda/deploy.py` vendors `pyrmts` from the venv's site-packages, and editable installs leave no `site-packages/pyrmts` dir** — swap back to pinned sources (+ `uv sync`) before any Lambda redeploy.
+
+### (b) Validation — smoke PASSED (content parity), full run blocked on engine memory
+
+Driver: `ctbk gbfs engine build|compare` (`ctbk/pyramid_cascade/engine_check.py`). Two pyramids over one storage: source keeps the real keyTemplate, target rewrites the prefix (`avail-v4-engine-check/`); ladder is `merge_lambda_shards`-merged; manifest = JSONL; D1 untouched. `compare` canonicalizes both sides via `wide_to_long` + full-column sort; when no fan-out shard exists at the exact key it falls back to a coarser same-tier tile covering the period, filtered to it (shard content is per-bin, so the restriction is exact).
+
+Smoke: `ctbk gbfs engine build -a 2d:2 -v` — `[2026-04-09, 2026-04-13)`, source `/1m@2d`, window `12h`. 8 windows, 215M source rows → 13 shards / 15 tiers (`/1m` source-skipped), wall **591 s**.
+
+Compare: **8/13 EQUAL, 0 DIFF** — `/2m@4d` + `/30m@4d` exact-key, `/3m,/5m,/10m,/15m,/1h,/2h` via covering-tile filter; remaining 5 (`/3h,/6h,/12h,/1d,/3d`) pending only because the fan-out's coarse-tail layers were still building at compare time. Full parsed-content parity between `build_local` and the completely independent Lambda python-dict materializer, on real data, across 8 tiers.
+
+### Findings for pyrmts (`specs/pyramid-build-engine.md`)
+
+1. **WIP buffer memory is the blocker — open question 4 resolves to "spill required".** The 4-day smoke reached ~**40 GB** process footprint (34 GB swap, red memory pressure; `ru_maxrss` 15.1 GB understates it — compressed/swapped pages don't count). Buffers hold the full long form of every open max-rung shard per tier, and combine can't shrink them (disjoint bins just concat). Extrapolated full-history (~102 d) buffer set is 50-70 GB+. Engine needs incremental/spilled WIP (e.g. flush long-form row-groups to scratch parquet per window, streaming-concat at shard close) before the target box (or this laptop) can run a full build.
+2. **Window < source shard_dur re-parses source shards** ⌈shard/window⌉× (12h window over 2d shards = 4× parse of every source blob). Either document "window ≥ source shard_dur" or cache the parsed frame across windows. (Choosing `window: 2d` here trades directly against finding 1.)
+3. **`row_group_size` isn't plumbed** through `build_local`'s `write_tier_parquet` call — ctbk needs per-tier `rg_size` (2048) for read-side RG pruning; engine output currently gets the writer default. Needs a per-tier (or per-call) knob before any cutover build.
+4. Wall 591 s for 4 d (flushes ≈ 182 s; remainder source parse + rebin + swap thrash). Not meaningful to extrapolate until 1-2 are fixed; content parity is the headline result.
+
+Full-range build + remaining 5 tiers' compare: rerun after pyrmts lands spill (and ideally 2-3); the driver and manifest flow are ready as-is.

@@ -579,3 +579,88 @@ def gbfs_lambda_logs(minutes: int, show_all: bool) -> None:
 			if show_all or pat.search(msg):
 				ts = datetime.fromtimestamp(ev['timestamp'] / 1000, timezone.utc).strftime('%H:%M:%S')
 				print(f'{ts} {msg[:160]}')
+
+
+# ─── pyrmts-engine validation (specs/pyrmts-engine-validation.md) ──────
+
+
+@gbfs.group('engine', help='pyrmts-engine `build_local` validation: scratch-prefix rebuilds + content compare vs the Lambda fan-out build.')
+def gbfs_engine() -> None:
+	pass
+
+
+def _engine_range(aligned: str | None, range_: str | None) -> tuple[datetime, datetime]:
+	from ctbk.pyramid_cascade.engine_check import aligned_range
+	from ctbk.pyramid_cascade.lite import AVAIL_GENESIS
+	if (aligned is None) == (range_ is None):
+		raise click.UsageError('exactly one of -a/--aligned or -r/--range is required')
+	if aligned is not None:
+		dur, _, n = aligned.partition(':')
+		return aligned_range(dur, int(n or 1))
+	from_s, _, to_s = range_.partition('/')
+	from_ = datetime.fromisoformat(from_s).replace(tzinfo=timezone.utc) if from_s else AVAIL_GENESIS
+	to = datetime.fromisoformat(to_s).replace(tzinfo=timezone.utc)
+	return from_, to
+
+
+@gbfs_engine.command('build', help='Run `build_local` over the range, writing to the scratch prefix + JSONL manifest (never serving keys, never D1).')
+@option('-a', '--aligned', default=None, help='Smoke range: DUR[:N] = first N epoch-aligned DUR periods after genesis (e.g. `16d`, `2d:4`).')
+@option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
+@option('-m', '--manifest', default=None, help='JSONL manifest path [default: tmp/engine-check-manifest.jsonl].')
+@option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
+@option('-r', '--range', 'range_', default=None, help='Half-open build range `[FROM]/TO` (UTC ISO; FROM defaults to genesis).')
+@option('-s', '--source', 'source_rung', default='1m@2d', show_default=True, help='Materialized rung to read, `tier@shard_dur`.')
+@option('-v', '--verbose', is_flag=True, help='Per-flush progress on stderr.')
+@option('-w', '--window', default='12h', show_default=True, help='Streaming window Duration (memory dial).')
+def gbfs_engine_build(
+	aligned: str | None,
+	config_name: str,
+	manifest: str | None,
+	scratch_prefix: str | None,
+	range_: str | None,
+	source_rung: str,
+	verbose: bool,
+	window: str,
+) -> None:
+	from ctbk.pyramid_cascade.engine_check import DEFAULT_MANIFEST, run_build
+	time_range = _engine_range(aligned, range_)
+	source_tier, _, source_shard = source_rung.partition('@')
+	err(f'range: {time_range[0].isoformat()} → {time_range[1].isoformat()}')
+	result = run_build(
+		config_name,
+		time_range,
+		scratch_prefix=scratch_prefix or f'{config_name}-engine-check',
+		manifest=manifest or DEFAULT_MANIFEST,
+		source_tier=source_tier,
+		source_shard=source_shard,
+		window=window,
+		verbose=verbose,
+	)
+	print(result.summary())
+
+
+@gbfs_engine.command('compare', help='Content-compare every manifest shard vs the fan-out build at the same key suffix (parsed long-form equality).')
+@option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
+@option('-d', '--detail', is_flag=True, help='Per-shard line for every diff/missing.')
+@option('-L', '--limit', type=int, default=None, help='Only compare the first N manifest keys.')
+@option('-m', '--manifest', default=None, help='JSONL manifest path [default: tmp/engine-check-manifest.jsonl].')
+@option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
+def gbfs_engine_compare(
+	config_name: str,
+	detail: bool,
+	limit: int | None,
+	manifest: str | None,
+	scratch_prefix: str | None,
+) -> None:
+	from ctbk.pyramid_cascade.engine_check import DEFAULT_MANIFEST, compare_shards
+	buckets = compare_shards(
+		config_name,
+		scratch_prefix=scratch_prefix or f'{config_name}-engine-check',
+		manifest=manifest or DEFAULT_MANIFEST,
+		limit=limit,
+		detail=detail,
+	)
+	for name, keys in buckets.items():
+		print(f'{name}: {len(keys)}')
+	if buckets['diff'] or buckets['missing']:
+		sys.exit(1)
