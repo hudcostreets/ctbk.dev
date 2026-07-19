@@ -109,3 +109,23 @@ Compare: **8/13 EQUAL, 0 DIFF** — `/2m@4d` + `/30m@4d` exact-key, `/3m,/5m,/10
 4. Wall 591 s for 4 d (flushes ≈ 182 s; remainder source parse + rebin + swap thrash). Not meaningful to extrapolate until 1-2 are fixed; content parity is the headline result.
 
 Full-range build + remaining 5 tiers' compare: rerun after pyrmts lands spill (and ideally 2-3); the driver and manifest flow are ready as-is.
+
+### pyrmts response (2026-07-18): findings 1-3 landed
+
+All three fixed in local pyrmts (editable link picks them up live; only `uv sync` needed if you want the entry-point refresh):
+
+1. **Spill**: `build_local` now routes each window's rows to per-open-shard scratch parquet files (`SpillBuffer`; appended row-groups) and streaming-combines at shard close. Peak memory ≈ one window's frames + one closing shard's long form — the 50-70 GB extrapolation becomes scratch-disk instead. New knob `spill_dir=` (default: fresh temp dir, auto-removed; pass `tmp/...` to see/keep the files on abort). Residual-tail rows are now dropped at route time instead of buffered forever.
+2. **Source re-parse**: `WideShardSource` caches parsed shards across windows (thread-safe for the prefetch pool; evicts once the cursor passes a period). Each `/1m@2d` blob parses once regardless of window size — `window: 12h` no longer costs 4× parse, so keep it (or go finer) for memory.
+3. **`row_group_size=`** on `build_local`: int for all tiers or per-tier-name mapping (`{'1m': 2048, ...}` — mirror `rg_size_for`); CLI `-g/--rg-size`.
+
+Covered by 3 new regression tests (fetch-count, spill-dir-emptied, per-tier RG sizes); the full 18-test suite incl. byte-identical window invariance runs through the spill path. Full-range build is unblocked from pyrmts's side.
+
+### Full-range results (ctbk session, 2026-07-18/19)
+
+Compare-side hardening first (ctbk `7323cdd8`): the first full-manifest compare ballooned to ~40 GB (whole 128d covering tiles long-expanded pre-filter; exact pairs fully materialized) — and the resulting memory pressure SIGKILLed the concurrently-running `build_local`. Compare now streams exact-key pairs in aligned chunks (both writers sort by the unique `(s2_cell, dt)` key, so equal content ⇒ identical row order; wide fast-path per chunk, long-normalization only when hist-JSON byte order differs) and pushes a `[start, end)` filter into covering-tile reads. 6 unit tests (`test_engine_check.py`).
+
+Full-range build (`ctbk gbfs engine build -r /2026-07-18T00:00`, source `/1m@2d`, window `12h`, per-tier `rg_size` 2048, spill to local scratch): with spill + parse cache, **memory is genuinely bounded** — RSS oscillates ~1-15 GB (idle ~1 GB between closes; spikes = single closing shard's combine), spill dir cycles 1-5 GB. Run 2 was killed externally at ~97% (cursor 2026-07-14; cause unconfirmed — no jetsam record; not the engine's fault as far as the evidence goes); its 75 completed shards were kept (determinism ⇒ valid artifacts) and run 3 relaunched for the tail + clean wall number.
+
+**Compare of the 75 run-2 shards: 75/75 EQUAL, 0 diff, 0 missing — all exact-key.** All 15 tiers, ~97% of the history, incl. 12M-row `/2m@4d` tiles and `/15m@32d`/`/3d@96d`. No covering fallback needed: the engine's expected-shard set reproduced the fan-out's min-cover keys exactly (planner agreement). Remaining coverage gap: the ~10-15 trailing/extension tiles (`/1h@128d`-class, the deepest combines) — pending run 3's completion + compare.
+
+Wall (from run 2, to ~97%): ~2h40m single-process on an M-series laptop, ~2.6-2.7 effective cores (263 min CPU / 100 min wall at the mid-point). Context for the 15-45 min target: (a) `WideShardSource` pays the hist-JSON parse tax on ~5.5B long rows of source — raw ingest won't; (b) the outer loop is serial per window and many per-tier rebins are too small to saturate polars' pool — window-level pipelining / per-tier parallelism is the engine-side lever; (c) economics already favor the engine decisively: fan-out = 3.3 h × 48 Lambdas ≈ $26-48; engine = ~2.75 h × 1 laptop ≈ $0 (~2 orders of magnitude resource-efficiency at similar wall).
