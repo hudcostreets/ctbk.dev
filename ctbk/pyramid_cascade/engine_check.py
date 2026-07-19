@@ -87,8 +87,10 @@ def run_build(
     verbose: bool = False,
 ):
     from pyrmts_engine import JsonlShardIndex, WideShardSource, build_local
+    from .config import parse_rg_sizes
     src, tgt = load_pyramids(config_name, scratch_prefix)
     source = WideShardSource(src, tier_name=source_tier, shard_dur=source_shard)
+    rg_sizes = parse_rg_sizes((CONFIG_DIR / f'{config_name}.yaml').read_text())
     result = build_local(
         tgt,
         time_range,
@@ -97,6 +99,8 @@ def run_build(
         shard_index=JsonlShardIndex(manifest),
         window=window,
         sort=['s2_cell', 'dt'],
+        row_group_size=rg_sizes,
+        spill_dir='tmp/engine-spill',
         verbose=verbose,
     )
     rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e9
@@ -104,15 +108,81 @@ def run_build(
     return result
 
 
-def canonical_long(blob: bytes, pyramid):
+def canonical_long(blob: bytes, pyramid, bin_range: tuple[int, int] | None = None):
     """Parse a wide shard to sorted long form — the comparison basis.
     Hist-JSON string bytes differ across writers (key order); parsed
-    (dims, dt, metric, state, count) rows must not."""
+    (dims, dt, metric, state, count) rows must not. `bin_range` pushes
+    a `[start_ms, end_ms)` filter into the parquet read (RG pruning) —
+    without it a 128d covering tile would materialize whole."""
     import polars as pl
     import pyarrow.parquet as pq
     from pyrmts_engine import wide_to_long
-    wide = pl.from_arrow(pq.read_table(BytesIO(blob)))
+    filters = None
+    if bin_range is not None:
+        s, e = bin_range
+        filters = [(pyramid.binCol, '>=', s), (pyramid.binCol, '<', e)]
+    wide = pl.from_arrow(pq.read_table(BytesIO(blob), filters=filters))
     return wide_to_long(wide, pyramid).sort(by=pl.all())
+
+
+def _compare_streaming(
+    eng_blob: bytes,
+    real_blob: bytes,
+    pyramid,
+    chunk_rows: int = 1 << 18,
+) -> tuple[str, str]:
+    """Compare two wide shards in aligned streaming chunks — peak memory
+    is one chunk per side (long-expanded), never the whole pair. Valid
+    because both writers sort by the same unique (s2_cell, dt) key, so
+    equal content ⇒ identical row order; the first divergent chunk
+    proves inequality. Returns (verdict, detail): verdict ∈
+    {'equal', 'empty_both', 'diff'}."""
+    import polars as pl
+    import pyarrow.parquet as pq
+    from pyrmts_engine import wide_to_long
+    pf_e = pq.ParquetFile(BytesIO(eng_blob))
+    pf_r = pq.ParquetFile(BytesIO(real_blob))
+    n_e, n_r = pf_e.metadata.num_rows, pf_r.metadata.num_rows
+    if n_e == 0 and n_r == 0:
+        return 'empty_both', ''
+    if n_e != n_r:
+        return 'diff', f'row counts: engine {n_e:,} vs real {n_r:,}'
+
+    def frames(pf):
+        for batch in pf.iter_batches(batch_size=chunk_rows):
+            yield pl.from_arrow(batch)
+
+    def fill(buf, it):
+        while buf is None or buf.height < chunk_rows:
+            nxt = next(it, None)
+            if nxt is None:
+                break
+            buf = nxt if buf is None else pl.concat([buf, nxt])
+        return buf
+
+    it_e, it_r = frames(pf_e), frames(pf_r)
+    buf_e = buf_r = None
+    offset = 0
+    while True:
+        buf_e = fill(buf_e, it_e)
+        buf_r = fill(buf_r, it_r)
+        if buf_e is None or buf_e.height == 0:
+            # Total row counts are equal, so both sides exhaust together.
+            return 'equal', ''
+        if set(buf_e.columns) != set(buf_r.columns):
+            return 'diff', f'column sets differ: {buf_e.columns} vs {buf_r.columns}'
+        n = min(buf_e.height, buf_r.height)
+        a, buf_e = buf_e.head(n), buf_e.slice(n)
+        b, buf_r = buf_r.head(n), buf_r.slice(n)
+        b = b.select(a.columns)
+        if not a.equals(b):
+            # Wide bytes differ — normalize (hist-JSON key order varies
+            # across writers) before declaring a real diff.
+            la = wide_to_long(a, pyramid).sort(by=pl.all())
+            lb = wide_to_long(b, pyramid).sort(by=pl.all())
+            if not la.equals(lb):
+                return 'diff', f'content diverges in rows [{offset}, {offset + n})'
+        offset += n
 
 
 def _covering_real_shard(src, tier: str, shard_dur: str, start_ms: int, end_ms: int):
@@ -153,7 +223,6 @@ def compare_shards(
     coarser real shard covering the period, filtered to it. Buckets:
     equal / equal_via_cover / diff / missing / empty_both."""
     import json
-    import polars as pl
     src, tgt = load_pyramids(config_name, scratch_prefix)
     storage = src.storage
     prefix = config_prefix(merge_lambda_shards((CONFIG_DIR / f'{config_name}.yaml').read_text()))
@@ -176,28 +245,31 @@ def compare_shards(
         real_blob = storage.get(real_key)
         if eng_blob is None:
             raise RuntimeError(f"manifest key missing from R2: {key}")
-        via_cover = False
-        if real_blob is None:
-            real_key, real_blob = _covering_real_shard(
-                src, rec['tier'], rec['shard_dur'], rec['period_start'], rec['period_end'])
-            via_cover = real_blob is not None
+        if real_blob is not None:
+            verdict, why = _compare_streaming(eng_blob, real_blob, src)
+            if verdict == 'diff':
+                buckets['diff'].append(real_key)
+                if detail:
+                    err(f"  DIFF {key}: {why}")
+            else:
+                buckets[verdict].append(real_key)
+            continue
+        real_key, real_blob = _covering_real_shard(
+            src, rec['tier'], rec['shard_dur'], rec['period_start'], rec['period_end'])
         if real_blob is None:
             buckets['missing'].append(key)
             if detail:
                 err(f"  MISSING {key} (no exact or covering fan-out shard)")
             continue
+        bin_range = (rec['period_start'], rec['period_end'])
         eng = canonical_long(eng_blob, tgt)
-        real = canonical_long(real_blob, src)
-        if via_cover:
-            bin_col = src.binCol
-            real = real.filter(
-                (pl.col(bin_col) >= rec['period_start']) & (pl.col(bin_col) < rec['period_end'])
-            ).sort(by=pl.all())
+        real = canonical_long(real_blob, src, bin_range=bin_range)
+        del real_blob
         if eng.height == 0 and real.height == 0:
             buckets['empty_both'].append(real_key)
         elif eng.equals(real):
-            buckets['equal_via_cover' if via_cover else 'equal'].append(real_key)
-            if detail and via_cover:
+            buckets['equal_via_cover'].append(real_key)
+            if detail:
                 err(f"  EQUAL {key} vs {real_key} (filtered)")
         else:
             buckets['diff'].append(real_key)
