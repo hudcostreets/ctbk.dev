@@ -20,6 +20,8 @@ GAP = ExpectedShard(
     shard_dur='2d',
     period_start=datetime(2026, 7, 14, tzinfo=timezone.utc),
     period_end=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    effective_start=datetime(2026, 7, 14, tzinfo=timezone.utc),
+    effective_end=datetime(2026, 7, 16, tzinfo=timezone.utc),
     key='avail-v3/1m/2d/2026-07-14.parquet',
 )
 

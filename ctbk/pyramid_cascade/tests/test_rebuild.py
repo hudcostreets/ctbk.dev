@@ -72,6 +72,7 @@ def _gap(rung: str, start: str, end: str) -> ExpectedShard:
     return ExpectedShard(
         tier='1m', shard_dur=rung,
         period_start=_dt(start), period_end=_dt(end),
+        effective_start=_dt(start), effective_end=_dt(end),
         key=_shard_key(_pyramid(), '1m', rung, _dt(start)),
     )
 

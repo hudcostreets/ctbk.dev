@@ -53,7 +53,8 @@ class TestGroupByTier:
         def shard(tier, dur, day):
             ps = datetime(2026, 7, day, tzinfo=timezone.utc)
             return ExpectedShard(tier=tier, shard_dur=dur, period_start=ps,
-                                 period_end=ps, key=f'{tier}/{dur}/{day}')
+                                 period_end=ps, effective_start=ps, effective_end=ps,
+                                 key=f'{tier}/{dur}/{day}')
         gaps = [
             shard('30m', '8d', 1), shard('30m', '32d', 2), shard('30m', '64d', 3),
             shard('1h', '8d', 4), shard('1h', '128d', 5),

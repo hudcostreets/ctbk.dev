@@ -189,7 +189,10 @@ def expand_scaffolds(
                         seen.add(key)
                         slots.append(ExpectedShard(
                             tier=tier_name, shard_dur=safe,
-                            period_start=cur, period_end=slot_end, key=key,
+                            period_start=cur, period_end=slot_end,
+                            effective_start=max(cur, AVAIL_GENESIS),
+                            effective_end=slot_end,
+                            key=key,
                         ))
                     cur = slot_end
             if slots:

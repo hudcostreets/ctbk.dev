@@ -662,12 +662,22 @@ def encode_gap(gap: ExpectedShard) -> dict:
 
 
 def decode_gap(d: dict) -> ExpectedShard:
-    """Event payload → `ExpectedShard` (inverse of `encode_gap`)."""
+    """Event payload → `ExpectedShard` (inverse of `encode_gap`).
+
+    The wire format predates (and deliberately omits) the effective
+    bounds — they're reconstructed as the genesis-clipped period, which
+    is what the materializers assumed before `ExpectedShard` grew the
+    fields (trailing-edge clipping is handled by the fill paths'
+    own head checks, not by `effective_end`)."""
+    period_start = datetime.fromisoformat(d['period_start'])
+    period_end = datetime.fromisoformat(d['period_end'])
     return ExpectedShard(
         tier=d['tier'],
         shard_dur=d['shard_dur'],
-        period_start=datetime.fromisoformat(d['period_start']),
-        period_end=datetime.fromisoformat(d['period_end']),
+        period_start=period_start,
+        period_end=period_end,
+        effective_start=max(period_start, AVAIL_GENESIS),
+        effective_end=period_end,
         key=d['key'],
     )
 
