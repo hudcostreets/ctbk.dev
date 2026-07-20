@@ -43,18 +43,30 @@ def config_prefix(config_yaml: str) -> str:
     return prefix
 
 
-def load_pyramids(config_name: str, scratch_prefix: str):
-    """(source_pyramid, target_pyramid): full ladder (`lambda_shards`
-    merged — the fan-out build materialized extension rungs too), same
-    storage, target keyed under `scratch_prefix`."""
-    config_yaml = (CONFIG_DIR / f'{config_name}.yaml').read_text()
-    merged = merge_lambda_shards(config_yaml)
+def merged_yaml(config_name: str) -> str:
+    """Full-ladder config YAML (`lambda_shards` merged — the fan-out
+    build materialized extension rungs too)."""
+    return merge_lambda_shards((CONFIG_DIR / f'{config_name}.yaml').read_text())
+
+
+def scratch_yaml(config_name: str, scratch_prefix: str) -> str:
+    """Merged-ladder YAML re-keyed under `scratch_prefix` — the config a
+    scratch build (local `run_build` or a Batch submit) consumes. Refuses
+    the real prefix so a scratch config can never point at serving keys."""
+    merged = merged_yaml(config_name)
     prefix = config_prefix(merged)
-    cfg = parse_pyramid_yaml(merged)
+    if scratch_prefix == prefix:
+        raise ValueError(f"scratch prefix {scratch_prefix!r} is the real serving prefix — refusing")
+    return merged.replace(f'{prefix}/{{tier}}', f'{scratch_prefix}/{{tier}}')
+
+
+def load_pyramids(config_name: str, scratch_prefix: str):
+    """(source_pyramid, target_pyramid): full merged ladder, same
+    storage, target keyed under `scratch_prefix`."""
+    cfg = parse_pyramid_yaml(merged_yaml(config_name))
     storage = storage_from_cfg(cfg.storage)
     src = pyramid_from_config(cfg, storage)
-    scratch_cfg = parse_pyramid_yaml(
-        merged.replace(f'{prefix}/{{tier}}', f'{scratch_prefix}/{{tier}}'))
+    scratch_cfg = parse_pyramid_yaml(scratch_yaml(config_name, scratch_prefix))
     tgt = pyramid_from_config(scratch_cfg, storage)
     return src, tgt
 

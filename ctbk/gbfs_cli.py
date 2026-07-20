@@ -664,3 +664,196 @@ def gbfs_engine_compare(
 		print(f'{name}: {len(keys)}')
 	if buckets['diff'] or buckets['missing']:
 		sys.exit(1)
+
+
+@gbfs_engine.command('config', help='Emit the merged-ladder config YAML re-keyed under the scratch prefix (what a scratch/Batch build consumes).')
+@option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
+@option('-o', '--out', default=None, help='Write to this local path instead of stdout.')
+@option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
+@option('-u', '--upload', is_flag=True, help='PUT to r2://<bucket>/<prefix>/config.yaml.')
+def gbfs_engine_config(
+	config_name: str,
+	out: str | None,
+	scratch_prefix: str | None,
+	upload: bool,
+) -> None:
+	from ctbk.pyramid_cascade.engine_check import scratch_yaml
+	prefix = scratch_prefix or f'{config_name}-engine-check'
+	yml = scratch_yaml(config_name, prefix)
+	if out:
+		Path(out).write_text(yml)
+		err(f'wrote {out}')
+	if upload:
+		client, bucket = _r2_client()
+		key = f'{prefix}/config.yaml'
+		client.put_object(Bucket=bucket, Key=key, Body=yml.encode(), ContentType='application/yaml')  # type: ignore[attr-defined]
+		err(f'→ r2://{bucket}/{key} ({len(yml):,} B)')
+	if not (out or upload):
+		print(yml, end='')
+
+
+@gbfs_engine.command('seed', help='Reset the scratch prefix for an engine build: wipe it, server-side-copy the source rung from the real prefix, upload the scratch config.')
+@option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
+@option('-n', '--dry-run', is_flag=True, help='Print planned deletes/copies without executing.')
+@option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
+@option('-s', '--source', 'source_rung', default='1m@2d', show_default=True, help='Materialized rung to seed, `tier@shard_dur`.')
+def gbfs_engine_seed(
+	config_name: str,
+	dry_run: bool,
+	scratch_prefix: str | None,
+	source_rung: str,
+) -> None:
+	from ctbk.pyramid_cascade.engine_check import config_prefix, merged_yaml, scratch_yaml
+	prefix = scratch_prefix or f'{config_name}-engine-check'
+	yml = scratch_yaml(config_name, prefix)  # also guards prefix != real
+	real = config_prefix(merged_yaml(config_name))
+	tier, _, dur = source_rung.partition('@')
+	client, bucket = _r2_client()
+	paginator = client.get_paginator('list_objects_v2')  # type: ignore[attr-defined]
+
+	def list_keys(pfx: str) -> list[str]:
+		return [
+			c['Key']
+			for page in paginator.paginate(Bucket=bucket, Prefix=pfx)
+			for c in page.get('Contents') or []
+		]
+
+	old = list_keys(f'{prefix}/')
+	src_keys = list_keys(f'{real}/{tier}/{dur}/')
+	if not src_keys:
+		raise click.ClickException(f'no source shards under {real}/{tier}/{dur}/')
+	if dry_run:
+		err(f'would delete {len(old)} keys under {prefix}/, copy {len(src_keys)} {tier}@{dur} shards, upload config')
+		return
+	for i in range(0, len(old), 1000):
+		batch = old[i:i + 1000]
+		client.delete_objects(Bucket=bucket, Delete={'Objects': [{'Key': k} for k in batch]})  # type: ignore[attr-defined]
+	err(f'deleted {len(old)} keys under {prefix}/')
+	for key in src_keys:
+		dest = key.replace(f'{real}/', f'{prefix}/', 1)
+		client.copy_object(Bucket=bucket, Key=dest, CopySource={'Bucket': bucket, 'Key': key})  # type: ignore[attr-defined]
+	err(f'copied {len(src_keys)} {tier}@{dur} shards → {prefix}/{tier}/{dur}/')
+	client.put_object(Bucket=bucket, Key=f'{prefix}/config.yaml', Body=yml.encode(), ContentType='application/yaml')  # type: ignore[attr-defined]
+	err(f'uploaded {prefix}/config.yaml')
+
+
+@gbfs_engine.command('submit', help='Submit an engine build of the scratch prefix to AWS Batch (`pyrmts-engine batch submit` passthrough with the standard ctbk args).')
+@option('-a', '--aligned', default=None, help='Smoke range: DUR[:N] = first N epoch-aligned DUR periods after genesis.')
+@option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
+@option('-e', '--env', 'envs', multiple=True, help='Extra container env var NAME=VALUE (repeatable).')
+@option('-g', '--rg-size', type=int, default=2048, show_default=True, help='Output-shard parquet row-group size.')
+@option('-M', '--memory', type=int, default=None, help='Override job memory MiB (e.g. 122880 needs -V 16).')
+@option('-n', '--dry-run', is_flag=True, help='Print the submit command without running it.')
+@option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
+@option('-r', '--range', 'range_', default=None, help='Half-open build range `[FROM]/TO` (UTC ISO; FROM defaults to genesis).')
+@option('-V', '--vcpus', type=int, default=None, help='Override job vCPUs.')
+@option('-W', '--watch', is_flag=True, help='Tail the job log stream; exit with its status.')
+@option('-w', '--window', default='12h', show_default=True, help='Streaming window Duration (memory dial).')
+@option('-x', '--source', 'source_spec', default='ctbk_engine_src:avail_1m_2d', show_default=True, help='Source factory module:attr (must exist in the job-def image).')
+def gbfs_engine_submit(
+	aligned: str | None,
+	config_name: str,
+	envs: tuple[str, ...],
+	rg_size: int,
+	memory: int | None,
+	dry_run: bool,
+	scratch_prefix: str | None,
+	range_: str | None,
+	vcpus: int | None,
+	watch: bool,
+	window: str,
+	source_spec: str,
+) -> None:
+	prefix = scratch_prefix or f'{config_name}-engine-check'
+	from_, to = _engine_range(aligned, range_)
+	bucket = os.environ.get('R2_BUCKET', 'ctbk')
+	cmd = [
+		'pyrmts-engine', 'batch', 'submit',
+		'-n', prefix,
+		'-r', f'{from_.strftime("%Y-%m-%dT%H:%M")}/{to.strftime("%Y-%m-%dT%H:%M")}',
+		'-w', window,
+		'-g', str(rg_size),
+		'-s', 's2_cell,dt',
+		'-x', source_spec,
+		'-m', f's3://{bucket}/{prefix}/manifest.jsonl',
+	]
+	if memory is not None:
+		cmd += ['-M', str(memory)]
+	if vcpus is not None:
+		cmd += ['-V', str(vcpus)]
+	for e in envs:
+		cmd += ['-e', e]
+	if watch:
+		cmd += ['-W']
+	cmd += [f's3://{bucket}/{prefix}/config.yaml']
+	if dry_run:
+		print(' '.join(cmd))
+		return
+	sys.exit(subprocess.run(cmd).returncode)
+
+
+@gbfs_engine.command('manifest', help='Summarize a build manifest (local path or `s3://` URL): shard counts per (tier, rung), period span; optionally diff key sets vs another manifest.')
+@option('-d', '--diff', 'other', default=None, help='Second manifest; report key-set differences.')
+@argument('path', metavar='PATH')
+def gbfs_engine_manifest(other: str | None, path: str) -> None:
+	def load(p: str) -> list[dict]:
+		if p.startswith('s3://'):
+			bkt, _, key = p[len('s3://'):].partition('/')
+			client, bucket = _r2_client()
+			if bkt != bucket:
+				raise click.ClickException(f'bucket {bkt!r} != configured {bucket!r}')
+			body = client.get_object(Bucket=bucket, Key=key)['Body'].read()  # type: ignore[attr-defined]
+			lines = body.decode().splitlines()
+		else:
+			lines = Path(p).read_text().splitlines()
+		return [json.loads(l) for l in lines if l.strip()]
+
+	recs = load(path)
+	by_rung = Counter((r['tier'], r['shard_dur']) for r in recs)
+	starts = [r['period_start'] for r in recs]
+	ends = [r['period_end'] for r in recs]
+	fmt = lambda ms: datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M')
+	print(f'{len(recs)} shards, periods {fmt(min(starts))} → {fmt(max(ends))}')
+	for (tier, dur), n in sorted(by_rung.items()):
+		print(f'  {tier:>4}@{dur:<5} {n}')
+	if other:
+		a = {r['key'] for r in recs}
+		b = {r['key'] for r in load(other)}
+		for label, only in [(f'only in {path}', a - b), (f'only in {other}', b - a)]:
+			print(f'{label}: {len(only)}')
+			for k in sorted(only):
+				print(f'  {k}')
+		if a != b:
+			sys.exit(1)
+
+
+@gbfs_r2.command('pq', help='Inspect a parquet object on R2: schema + row count; optionally head rows and row-group metadata (range reads, no full download).')
+@option('-m', '--metadata', 'show_meta', is_flag=True, help='Row-group count/sizes and file metadata.')
+@option('-n', '--head', 'head_n', type=int, default=0, help='Print the first N rows.')
+@argument('key', metavar='KEY')
+def gbfs_r2_pq(show_meta: bool, head_n: int, key: str) -> None:
+	import pyarrow.parquet as pq
+	import s3fs
+	acct = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
+	akid = os.environ.get('R2_ACCESS_KEY_ID')
+	sk = os.environ.get('R2_SECRET_ACCESS_KEY')
+	if not (acct and akid and sk):
+		raise click.ClickException('CLOUDFLARE_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY not set. `source .envrc`.')
+	bucket = os.environ.get('R2_BUCKET', 'ctbk')
+	fs = s3fs.S3FileSystem(
+		key=akid,
+		secret=sk,
+		endpoint_url=f'https://{acct}.r2.cloudflarestorage.com',
+	)
+	with fs.open(f'{bucket}/{key}') as f:
+		pf = pq.ParquetFile(f)
+		md = pf.metadata
+		print(f'{key}: {md.num_rows:,} rows, {md.num_row_groups} row groups')
+		print(pf.schema_arrow)
+		if show_meta:
+			for i in range(md.num_row_groups):
+				rg = md.row_group(i)
+				print(f'  rg {i}: {rg.num_rows:,} rows, {rg.total_byte_size:,} B')
+		if head_n:
+			batch = next(pf.iter_batches(batch_size=head_n))
+			print(batch.to_pandas().to_string())
