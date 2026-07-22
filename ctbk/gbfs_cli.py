@@ -746,10 +746,12 @@ def gbfs_engine_seed(
 @option('-n', '--dry-run', is_flag=True, help='Print the submit command without running it.')
 @option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
 @option('-r', '--range', 'range_', default=None, help='Half-open build range `[FROM]/TO` (UTC ISO; FROM defaults to genesis).')
+@option('-s', '--source', 'source_rung', default='1m@2d', show_default=True, help='Materialized rung to read, `tier@shard_dur` (WideShardSource `-t`/`-d`).')
+@option('-u', '--resume', is_flag=True, help='Skip shards already in the manifest (resume after a Spot reclaim).')
 @option('-V', '--vcpus', type=int, default=None, help='Override job vCPUs.')
 @option('-W', '--watch', is_flag=True, help='Tail the job log stream; exit with its status.')
 @option('-w', '--window', default='12h', show_default=True, help='Streaming window Duration (memory dial).')
-@option('-x', '--source', 'source_spec', default='ctbk_engine_src:avail_1m_2d', show_default=True, help='Source factory module:attr (must exist in the job-def image).')
+@option('-x', '--source-factory', 'source_spec', default=None, help='Source factory module:attr (needs an app-derived image; overrides -s).')
 def gbfs_engine_submit(
 	aligned: str | None,
 	config_name: str,
@@ -759,10 +761,12 @@ def gbfs_engine_submit(
 	dry_run: bool,
 	scratch_prefix: str | None,
 	range_: str | None,
+	source_rung: str,
+	resume: bool,
 	vcpus: int | None,
 	watch: bool,
 	window: str,
-	source_spec: str,
+	source_spec: str | None,
 ) -> None:
 	prefix = scratch_prefix or f'{config_name}-engine-check'
 	from_, to = _engine_range(aligned, range_)
@@ -774,9 +778,15 @@ def gbfs_engine_submit(
 		'-w', window,
 		'-g', str(rg_size),
 		'-s', 's2_cell,dt',
-		'-x', source_spec,
 		'-m', f's3://{bucket}/{prefix}/manifest.jsonl',
 	]
+	if source_spec is not None:
+		cmd += ['-x', source_spec]
+	else:
+		tier, _, dur = source_rung.partition('@')
+		cmd += ['-t', tier, '-d', dur]
+	if resume:
+		cmd += ['-u']
 	if memory is not None:
 		cmd += ['-M', str(memory)]
 	if vcpus is not None:
