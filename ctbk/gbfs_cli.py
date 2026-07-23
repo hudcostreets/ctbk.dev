@@ -739,10 +739,16 @@ def gbfs_engine_seed(
 
 @gbfs_engine.command('submit', help='Submit an engine build of the scratch prefix to AWS Batch (`pyrmts-engine batch submit` passthrough with the standard ctbk args).')
 @option('-a', '--aligned', default=None, help='Smoke range: DUR[:N] = first N epoch-aligned DUR periods after genesis.')
+@option('-b', '--mem-budget', default=None, help='Window-admission byte budget, e.g. 24g (build -b; default 70% of the cgroup limit).')
 @option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
+@option('-c', '--close-chunk', default=None, help='Target combined-long bytes per close chunk, e.g. 1g (build -c).')
 @option('-e', '--env', 'envs', multiple=True, help='Extra container env var NAME=VALUE (repeatable).')
 @option('-g', '--rg-size', type=int, default=2048, show_default=True, help='Output-shard parquet row-group size.')
+@option('-j', '--workers', type=int, default=None, help='Window-worker threads (build -j; default: job vCPUs).')
+@option('-K', '--max-inflight', type=int, default=None, help='Max windows in flight past the watermark (build -K).')
+@option('-k', '--close-workers', type=int, default=None, help='Concurrent close computations (build -C).')
 @option('-M', '--memory', type=int, default=None, help='Override job memory MiB (e.g. 122880 needs -V 16).')
+@option('-m', '--manifest', 'manifest_name', default='manifest.jsonl', show_default=True, help='Manifest object name under the scratch prefix.')
 @option('-n', '--dry-run', is_flag=True, help='Print the submit command without running it.')
 @option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
 @option('-r', '--range', 'range_', default=None, help='Half-open build range `[FROM]/TO` (UTC ISO; FROM defaults to genesis).')
@@ -754,10 +760,16 @@ def gbfs_engine_seed(
 @option('-x', '--source-factory', 'source_spec', default=None, help='Source factory module:attr (needs an app-derived image; overrides -s).')
 def gbfs_engine_submit(
 	aligned: str | None,
+	mem_budget: str | None,
 	config_name: str,
+	close_chunk: str | None,
 	envs: tuple[str, ...],
 	rg_size: int,
+	workers: int | None,
+	max_inflight: int | None,
+	close_workers: int | None,
 	memory: int | None,
+	manifest_name: str,
 	dry_run: bool,
 	scratch_prefix: str | None,
 	range_: str | None,
@@ -778,7 +790,7 @@ def gbfs_engine_submit(
 		'-w', window,
 		'-g', str(rg_size),
 		'-s', 's2_cell,dt',
-		'-m', f's3://{bucket}/{prefix}/manifest.jsonl',
+		'-m', f's3://{bucket}/{prefix}/{manifest_name}',
 	]
 	if source_spec is not None:
 		cmd += ['-x', source_spec]
@@ -787,6 +799,16 @@ def gbfs_engine_submit(
 		cmd += ['-t', tier, '-d', dur]
 	if resume:
 		cmd += ['-u']
+	if mem_budget is not None:
+		cmd += ['-b', mem_budget]
+	if workers is not None:
+		cmd += ['--workers', str(workers)]
+	if max_inflight is not None:
+		cmd += ['-K', str(max_inflight)]
+	if close_workers is not None:
+		cmd += ['-C', str(close_workers)]
+	if close_chunk is not None:
+		cmd += ['-c', close_chunk]
 	if memory is not None:
 		cmd += ['-M', str(memory)]
 	if vcpus is not None:
