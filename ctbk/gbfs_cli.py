@@ -628,6 +628,105 @@ def gbfs_lambda_logs(show_all: bool, function_name: str, minutes: int) -> None:
 				print(f'{ts} {msg[:160]}')
 
 
+# ─── Cross-pyramid API parity + latency (avail-v5 cutover) ─────────────
+
+API_URLS = {
+	'dev': 'https://ctbk-gbfs-api-dev.ryan-0dc.workers.dev',
+	'prod': 'https://ctbk-gbfs-api.ryan-0dc.workers.dev',
+}
+AVAIL_METRIC_NAMES = ('bikes', 'ebikes', 'docks', 'disabled', 'pending')
+
+
+@gbfs.command('parity', help='API-level parity + latency: query the baseline (`avail`) and candidate (`avail-v5`) pyramids over a station + coarse-cell matrix, compare series values, report timings. Station mapping: v3 `cells=<LUC L15 cell>` ≡ v5 `cells=s:<short_name>`.')
+@option('-b', '--bin-budget', type=int, default=24, show_default=True, help='Bins per query.')
+@option('-c', '--cell', 'coarse_cells', multiple=True, help='Coarse vocab cell to compare on both pyramids (repeatable) [default: 3 built-ins].')
+@option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='dev', show_default=True)
+@option('-n', '--num-stations', type=int, default=8, show_default=True, help='Deterministic sample size from the station registry.')
+@option('-r', '--range', 'range_', default=None, help='`FROM/TO` UTC ISO [default: the last closed UTC day].')
+@option('-R', '--reducer', default='mean', show_default=True)
+@option('-t', '--tolerance', type=float, default=1e-9, show_default=True, help='Max abs value diff treated as equal.')
+def gbfs_parity(
+	bin_budget: int,
+	coarse_cells: tuple[str, ...],
+	env_name: str,
+	num_stations: int,
+	range_: str | None,
+	reducer: str,
+	tolerance: float,
+) -> None:
+	import time as _time
+	base = API_URLS[env_name]
+	if range_:
+		from_s, _, to_s = range_.partition('/')
+	else:
+		day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
+		from_s, to_s = f'{day}T00:00:00Z', (datetime.fromisoformat(day) + timedelta(days=1)).strftime('%Y-%m-%dT00:00:00Z')
+
+	def q(pyramid: str, cells: str) -> tuple[dict[int, dict[str, float]], float]:
+		url = (f'{base}/api/avail-v3?from={from_s}&to={to_s}&bin_budget={bin_budget}'
+			   f'&reducer={reducer}&cells={cells}'
+			   + (f'&pyramid={pyramid}' if pyramid != 'avail' else ''))
+		t0 = _time.time()
+		req = _urlrequest.Request(url, headers={'User-Agent': 'ctbk-parity/1.0'})
+		with _urlrequest.urlopen(req, timeout=60) as resp:
+			body = json.loads(resp.read())
+		wall = _time.time() - t0
+		out: dict[int, dict[str, float]] = {}
+		for rec in body.get('records', []):
+			out[rec['dt']] = {m: rec.get(m) for m in AVAIL_METRIC_NAMES}
+		return out, wall
+
+	def diff(a: dict, b: dict) -> tuple[int, float, int]:
+		"""(mismatched values, max abs diff, bins only on one side)."""
+		mism, mx = 0, 0.0
+		for dt in a.keys() & b.keys():
+			for m in AVAIL_METRIC_NAMES:
+				va, vb = a[dt][m], b[dt][m]
+				if va is None or vb is None:
+					if va != vb:
+						mism += 1
+					continue
+				d = abs(va - vb)
+				mx = max(mx, d)
+				if d > tolerance:
+					mism += 1
+		return mism, mx, len(a.keys() ^ b.keys())
+
+	client, bucket = _r2_client()
+	luc = json.loads(client.get_object(Bucket=bucket, Key='station-luc.json')['Body'].read())  # type: ignore[attr-defined]
+	active = sorted(sn for sn, e in luc['by_short_name'].items() if e.get('active'))
+	step = max(1, len(active) // num_stations)
+	sample = active[::step][:num_stations]
+
+	walls: dict[str, list[float]] = {'avail': [], 'avail-v5': []}
+	failures = 0
+	print(f'range {from_s}/{to_s} · {len(sample)} stations · reducer={reducer} · env={env_name}')
+	for sn in sample:
+		cell = luc['by_short_name'][sn]['cell']
+		a, wa = q('avail', cell)
+		b, wb = q('avail-v5', f's:{sn}')
+		walls['avail'].append(wa)
+		walls['avail-v5'].append(wb)
+		mism, mx, lonely = diff(a, b)
+		ok = mism == 0 and lonely == 0
+		failures += 0 if ok else 1
+		print(f'  {"✓" if ok else "✗"} s:{sn:<10} bins {len(a)}/{len(b)}  mismatches {mism}  maxΔ {mx:.2e}  lonely {lonely}  ({wa:.2f}s vs {wb:.2f}s)')
+	for cell in coarse_cells or ('89c2454', '89c245', '89c25c4'):
+		a, wa = q('avail', cell)
+		b, wb = q('avail-v5', cell)
+		walls['avail'].append(wa)
+		walls['avail-v5'].append(wb)
+		mism, mx, lonely = diff(a, b)
+		ok = mism == 0 and lonely == 0
+		failures += 0 if ok else 1
+		print(f'  {"✓" if ok else "✗"} cell {cell:<8} bins {len(a)}/{len(b)}  mismatches {mism}  maxΔ {mx:.2e}  lonely {lonely}  ({wa:.2f}s vs {wb:.2f}s)')
+	for name, ws in walls.items():
+		ws = sorted(ws)
+		p50, p95 = ws[len(ws) // 2], ws[min(len(ws) - 1, int(len(ws) * 0.95))]
+		print(f'latency {name}: p50 {p50:.2f}s  p95 {p95:.2f}s  n={len(ws)}')
+	sys.exit(1 if failures else 0)
+
+
 # ─── pyrmts-engine validation (specs/pyrmts-engine-validation.md) ──────
 
 

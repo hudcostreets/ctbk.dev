@@ -96,6 +96,15 @@ export const TIERS: Tier[] = [
 ];
 
 const KEY_TEMPLATE = 'avail-v3/{tier}/{shard}/{period}.parquet';
+
+/** Serveable pyramids: `?pyramid=` values → (D1 registry name, key
+ *  template). Same ladder/genesis; v5 is the engine-backfilled,
+ *  vocab-keyed successor (`specs/avail-v5-stack.md`) — served behind
+ *  the explicit param during burn-in, default unchanged. */
+const PYRAMIDS: Record<string, { name: string; keyTemplate: string }> = {
+	'avail': { name: 'avail', keyTemplate: KEY_TEMPLATE },
+	'avail-v5': { name: 'avail-v5', keyTemplate: 'avail-v5/{tier}/{shard}/{period}.parquet' },
+};
 const RESOLUTIONS = [15, 14, 13, 12, 11, 10];
 
 /** avail-v3 genesis: earliest 5-min-aligned UTC timestamp intersecting any
@@ -104,14 +113,14 @@ const RESOLUTIONS = [15, 14, 13, 12, 11, 10];
  *  both workers so cover math agrees on the closed-history region. */
 export const AVAIL_GENESIS = new Date('2026-04-07T01:15:00Z');
 
-function makeBaseProps(bucket: R2Bucket): Omit<GeoPyramid, 'dims'> {
+function makeBaseProps(bucket: R2Bucket, keyTemplate: string = KEY_TEMPLATE): Omit<GeoPyramid, 'dims'> {
 	return {
 		storage: parquetBackend(retryingStorage(r2Storage(bucket))),
 		// Unified `{tier}/{shard}/{period}` template per unified-shard-ladder
 		// (pyrmts spec). Per-tier `shards: [...]` arrays above declare each
 		// tier's full duration ladder; the planner picks largest-shard-first
 		// per cursor position via the cursor-aware walk.
-		keyTemplate: KEY_TEMPLATE,
+		keyTemplate,
 		axis: 'time',
 		binCol: 'dt',
 		metrics: METRICS.map((name) => ({ name, monoid: 'histogram' as const })),
@@ -122,14 +131,14 @@ function makeBaseProps(bucket: R2Bucket): Omit<GeoPyramid, 'dims'> {
 
 /** Rollup pyramid — empty `dims` so `stitch` collapses cells, leaving
  *  one row per (dt) summed across the bbox/cells covering set. */
-export function availV3Pyramid(bucket: R2Bucket): GeoPyramid {
-	return { ...makeBaseProps(bucket), dims: [] };
+export function availV3Pyramid(bucket: R2Bucket, keyTemplate?: string): GeoPyramid {
+	return { ...makeBaseProps(bucket, keyTemplate), dims: [] };
 }
 
 /** Per-cell pyramid — adds `s2_cell` to dims so stitch preserves
  *  cell-level breakdown. */
-export function availV3CellsPyramid(bucket: R2Bucket): GeoPyramid {
-	return { ...makeBaseProps(bucket), dims: [{ name: 's2_cell', type: 'string' }] };
+export function availV3CellsPyramid(bucket: R2Bucket, keyTemplate?: string): GeoPyramid {
+	return { ...makeBaseProps(bucket, keyTemplate), dims: [{ name: 's2_cell', type: 'string' }] };
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -260,9 +269,9 @@ function getShardIndex(db: D1Database): ShardIndex {
 	return _shardIndex;
 }
 
-async function loadWatermarks(db: D1Database): Promise<Record<string, Date>> {
+async function loadWatermarks(db: D1Database, pyramidName: string = PYRAMID_NAME): Promise<Record<string, Date>> {
 	try {
-		const map = await getShardIndex(db).getWatermarks(PYRAMID_NAME);
+		const map = await getShardIndex(db).getWatermarks(pyramidName);
 		return Object.fromEntries(map);
 	} catch {
 		// On any D1 fetch failure, return empty (no watermark gating).
@@ -284,12 +293,13 @@ interface EarliestCache {
 	map: Record<string, Date>;
 	ts: number;
 }
-let _earliestCache: EarliestCache | null = null;
+const _earliestCaches = new Map<string, EarliestCache>();
 
-async function loadEarliestPerShard(db: D1Database): Promise<Record<string, Date>> {
+async function loadEarliestPerShard(db: D1Database, pyramidName: string = PYRAMID_NAME): Promise<Record<string, Date>> {
 	const now = Date.now();
-	if (_earliestCache && (now - _earliestCache.ts) < WATERMARK_CACHE_TTL_MS) {
-		return _earliestCache.map;
+	const cached = _earliestCaches.get(pyramidName);
+	if (cached && (now - cached.ts) < WATERMARK_CACHE_TTL_MS) {
+		return cached.map;
 	}
 	try {
 		// D1 column is still `cadence` pre-P3 rename. Legacy canonical
@@ -301,7 +311,7 @@ async function loadEarliestPerShard(db: D1Database): Promise<Record<string, Date
 			 FROM pyramid_shards
 			 WHERE pyramid = ?
 			 GROUP BY tier, cadence`
-		).bind(PYRAMID_NAME).all<{ tier: string; cadence: string; earliest_ms: number }>();
+		).bind(pyramidName).all<{ tier: string; cadence: string; earliest_ms: number }>();
 		const largestPerTier: Record<string, string> = Object.fromEntries(
 			TIERS.map((t) => [t.name, t.shards[t.shards.length - 1]!])
 		);
@@ -311,10 +321,10 @@ async function loadEarliestPerShard(db: D1Database): Promise<Record<string, Date
 			if (!shardDur) continue;  // unknown tier; skip
 			map[`${row.tier}@${shardDur}`] = new Date(row.earliest_ms);
 		}
-		_earliestCache = { map, ts: now };
+		_earliestCaches.set(pyramidName, { map, ts: now });
 		return map;
 	} catch {
-		_earliestCache = { map: {}, ts: now };
+		_earliestCaches.set(pyramidName, { map: {}, ts: now });
 		return {};
 	}
 }
@@ -359,6 +369,7 @@ async function serveGeoReduced(
 	db: D1Database,
 	request: Request,
 	cors: string | null,
+	pyramidName: string = PYRAMID_NAME,
 ): Promise<Response> {
 	const url = new URL(request.url);
 	const from = parseInstant(url.searchParams.get('from'));
@@ -412,14 +423,14 @@ async function serveGeoReduced(
 	// `pyramid-cascade`-emitted manifest watermark (latest complete shard
 	// end), then walks finer tiers to fill the post-watermark tail.
 	// Empty `watermarks` = trust all shards (legacy behavior pre-manifest).
-	const watermarks = await loadWatermarks(db);
+	const watermarks = await loadWatermarks(db, pyramidName);
 
 	// Per-(tier, cadence) earliest gating: forward-rolling /1m partials
 	// (#130) only have coverage from the cascade's first write onward.
 	// pyrmts #135 (`earliestPerShard`) gates per-entry without cross-
 	// tier propagation, so old queries fall through cleanly to /2m+
 	// canonical. Source from D1 `MIN(period_start) GROUP BY tier, cadence`.
-	const earliestPerShard = await loadEarliestPerShard(db);
+	const earliestPerShard = await loadEarliestPerShard(db, pyramidName);
 
 	// pickTier doesn't know about `earliestPerShard` — it picks the
 	// finest tier that fits the bin budget without considering whether
@@ -454,7 +465,7 @@ async function serveGeoReduced(
 	// The windowed listShards is a per-request D1 query (pushdown WHERE on
 	// the (pyramid, tier, period_start) index); D1 errors propagate as
 	// 500s — an empty inventory would silently serve empty charts.
-	const registeredShards = await getShardIndex(db).listShards(PYRAMID_NAME, { range: { from, to } });
+	const registeredShards = await getShardIndex(db).listShards(pyramidName, { range: { from, to } });
 
 	// `outputCells: {res, cells}` path bypasses `pickResolution`. See
 	// `pyrmts/specs/done/plan-geo-query-precomputed-cover.md`.
@@ -524,12 +535,25 @@ async function serveGeoReduced(
 	}), { headers });
 }
 
+/** `?pyramid=` override (burn-in canary): select a serving pyramid from
+ *  `PYRAMIDS`; absent → the default (`avail`). Unknown value → null
+ *  (caller 400s). */
+function pyramidParam(request: Request): { name: string; keyTemplate: string } | null {
+	const v = new URL(request.url).searchParams.get('pyramid');
+	if (v === null) return PYRAMIDS[PYRAMID_NAME]!;
+	return PYRAMIDS[v] ?? null;
+}
+
 /** HTTP handler for `/api/avail-v3` — v3 rollup over bbox (S2-keyed). */
 export async function serveAvailV3(bucket: R2Bucket, db: D1Database, request: Request, corsOrigin: string): Promise<Response> {
-	return serveGeoReduced(availV3Pyramid(bucket), bucket, db, request, corsOrigin || null);
+	const p = pyramidParam(request);
+	if (p === null) return errorResponse(400, 'unknown pyramid', corsOrigin || null);
+	return serveGeoReduced(availV3Pyramid(bucket, p.keyTemplate), bucket, db, request, corsOrigin || null, p.name);
 }
 
 /** HTTP handler for `/api/avail-v3/cells` — v3 per-cell rows preserved. */
 export async function serveAvailV3Cells(bucket: R2Bucket, db: D1Database, request: Request, corsOrigin: string): Promise<Response> {
-	return serveGeoReduced(availV3CellsPyramid(bucket), bucket, db, request, corsOrigin || null);
+	const p = pyramidParam(request);
+	if (p === null) return errorResponse(400, 'unknown pyramid', corsOrigin || null);
+	return serveGeoReduced(availV3CellsPyramid(bucket, p.keyTemplate), bucket, db, request, corsOrigin || null, p.name);
 }
