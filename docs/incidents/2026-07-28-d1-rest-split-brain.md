@@ -39,6 +39,15 @@ Repeat observations with distinct `written_at` values: 17:16:41 (`1785259000987`
 - A registry-driven GC was disabled for the duration (deletions decided from a divergent row view could destroy real objects).
 - **Durable fix**: shard registrations re-routed through a narrow authenticated endpoint on our Worker, writing D1 via the *binding* — immune to REST routing. REST is no longer on the Lambda write path.
 
+## Update (~20:20 UTC): the split is entry-colo-dependent, not REST-specific
+
+We deployed a workaround routing the Lambda's registrations through **our own Worker's D1 *binding*** (narrow authenticated endpoint). Result:
+
+- Laptop → Worker `/api/registry` → binding write: **lands**, visible to laptop REST + wrangler + binding reads (round-trip verified, `registered: 1`).
+- Lambda → same Worker endpoint, same secret (explicit `via proxy` branch logging): HTTP 200, `registered: 1` — row **absent** from the majority view (e.g. `avail-v5/1m/5min/2026-07-28T20-10.parquet`, 20:16:47 UTC).
+
+Since the Worker executes at the **caller's entry colo**, this rules out the REST API as the faulty layer: requests entering Cloudflare from the Lambda's egress path (AWS us-east-1) reach a **divergent D1 Durable Object instance even through the Workers binding**, while requests entering from our EWR-adjacent path reach the true instance. i.e. two live instances of one D1 database, selected by network entry point, both acking writes durably. This supersedes the "REST split-brain" framing in the title — it's a D1 DO-layer split.
+
 ## Open questions for Cloudflare
 
 1. What backend does `served_by: v3-prod` name, and can two of them durably hold divergent states for one database uuid?

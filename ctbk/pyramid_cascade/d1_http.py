@@ -32,6 +32,42 @@ def d1_query(
     return _d1_query(sql, params, database_id=_db(database_id))
 
 
+def _proxy() -> tuple[str, str] | None:
+    """(url, secret) of the worker registry proxy, when configured.
+    The proxy writes via the worker's D1 *binding* — the workaround for
+    the 2026-07-28 D1 REST split-brain (Lambda-originated REST writes
+    landing in a divergent copy; the binding stayed truthful)."""
+    url = os.environ.get('CTBK_REGISTRY_URL')
+    secret = os.environ.get('CTBK_REGISTRY_SECRET')
+    return (url, secret) if url and secret else None
+
+
+def _proxy_post(body: dict) -> dict:
+    import json as _json
+    import urllib.request
+    url, secret = _proxy()  # type: ignore[misc]
+    req = urllib.request.Request(
+        f'{url}/api/registry', data=_json.dumps(body).encode(),
+        headers={
+            'Authorization': f'Bearer {secret}',
+            'Content-Type': 'application/json',
+            # CF bot-filtering 403s default urllib UAs (same lesson as the
+            # parity harness).
+            'User-Agent': 'ctbk-cascade-lambda/1.0',
+        })
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        import json as _j
+        return _j.loads(resp.read())
+
+
+def registered_keys(pyramid: str) -> set[str]:
+    """All registered keys for `pyramid` — via the proxy when configured
+    (consistent binding view), else D1 REST."""
+    if _proxy():
+        return set(_proxy_post({'op': 'existing_keys', 'pyramid': pyramid})['keys'])
+    return {r['key'] for r in d1_query('SELECT key FROM pyramid_shards WHERE pyramid = ?', [pyramid])}
+
+
 def register_shard(
     *,
     pyramid: str,
@@ -43,15 +79,23 @@ def register_shard(
     written_at_ms: int,
 ) -> None:
     """INSERT OR REPLACE one row into `pyramid_shards` — same shape the
-    CFW cascade and `emit_d1_insert_sql` write."""
-    _register_shard(
-        pyramid=pyramid,
-        tier=tier,
-        shard_dur=shard_dur,
-        period_start_ms=period_start_ms,
-        period_end_ms=period_end_ms,
-        key=key,
-        written_at_ms=written_at_ms,
-        database_id=_db(None),
-    )
-    err(f'  d1: registered {key}')
+    CFW cascade and `emit_d1_insert_sql` write. Routed via the worker
+    registry proxy when configured (see `_proxy`)."""
+    if _proxy():
+        _proxy_post({'op': 'register', 'rows': [{
+            'pyramid': pyramid, 'tier': tier, 'shard_dur': shard_dur,
+            'period_start': period_start_ms, 'period_end': period_end_ms,
+            'key': key, 'written_at': written_at_ms,
+        }]})
+    else:
+        _register_shard(
+            pyramid=pyramid,
+            tier=tier,
+            shard_dur=shard_dur,
+            period_start_ms=period_start_ms,
+            period_end_ms=period_end_ms,
+            key=key,
+            written_at_ms=written_at_ms,
+            database_id=_db(None),
+        )
+    err(f'  d1: registered {key} via {"proxy" if _proxy() else "rest"}')

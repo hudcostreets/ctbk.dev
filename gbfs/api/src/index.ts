@@ -44,6 +44,13 @@ interface Env {
 	/** Optional — when present, the scheduled handler posts threshold-breach
 	 *  alerts to Slack (`#ctbk-bot`). Absent ⇒ alerts disabled. */
 	SLACK_BOT_TOKEN?: string;
+	/** Bearer secret for `POST /api/registry` (shard-registration proxy:
+	 *  the cascade Lambdas write D1 through this worker's *binding*
+	 *  because the CF D1 REST API exhibited split-brain routing on
+	 *  2026-07-28 — Lambda-originated writes landing in a divergent copy.
+	 *  The binding has been consistently truthful throughout). Absent ⇒
+	 *  route disabled. */
+	REGISTRY_SECRET?: string;
 	/** Workers Analytics Engine dataset for per-request perf telemetry.
 	 *  Configured in `wrangler.toml` `[[analytics_engine_datasets]]`.
 	 *  `writeDataPoint({ blobs, doubles, indexes })`:
@@ -1122,6 +1129,40 @@ export default {
 		// compute takes ~7 s of R2 listings + D1 scans. `?live=1` forces a
 		// recompute (which also refreshes the cache). Stale/missing cache
 		// falls back to live compute transparently.
+		// Shard-registration proxy for the cascade Lambdas (see
+		// `Env.REGISTRY_SECRET`). Deliberately narrow: register rows +
+		// list registered keys — no general SQL surface.
+		if (url.pathname === '/api/registry' && request.method === 'POST') {
+			if (!env.REGISTRY_SECRET) return errorResponse('registry proxy disabled', 404, env);
+			const auth = request.headers.get('Authorization') ?? '';
+			if (auth !== `Bearer ${env.REGISTRY_SECRET}`) return errorResponse('unauthorized', 403, env);
+			try {
+				const body = await request.json<{ op: string; pyramid?: string; rows?: {
+					pyramid: string; tier: string; shard_dur: string;
+					period_start: number; period_end: number; key: string; written_at: number;
+				}[] }>();
+				if (body.op === 'existing_keys') {
+					if (!body.pyramid) return errorResponse('pyramid required', 400, env);
+					const rs = await env.DB.prepare(
+						'SELECT key FROM pyramid_shards WHERE pyramid = ?').bind(body.pyramid).all<{ key: string }>();
+					return jsonResponse({ keys: (rs.results ?? []).map((r) => r.key) }, env);
+				}
+				if (body.op === 'register') {
+					const rows = body.rows ?? [];
+					const stmt = env.DB.prepare(
+						'INSERT OR REPLACE INTO pyramid_shards '
+						+ '(pyramid, tier, shard_dur, period_start, period_end, key, written_at) '
+						+ 'VALUES (?, ?, ?, ?, ?, ?, ?)');
+					await env.DB.batch(rows.map((r) => stmt.bind(
+						r.pyramid, r.tier, r.shard_dur, r.period_start, r.period_end, r.key, r.written_at)));
+					return jsonResponse({ registered: rows.length }, env);
+				}
+				return errorResponse(`unknown op ${body.op}`, 400, env);
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'registry proxy failed', 500, env);
+			}
+		}
+
 		if (url.pathname === '/api/health') {
 			try {
 				const live = url.searchParams.get('live') === '1';

@@ -558,11 +558,9 @@ def _reconcile_registrations(
     storage-based discovery sees the key and never re-fills, while
     D1-gated serving never sees the shard. One SELECT per tick closes
     that window. Best-effort: a D1 outage must not block the fill."""
-    from .d1_http import d1_query, register_shard
+    from .d1_http import register_shard, registered_keys
     try:
-        rows = d1_query(
-            'SELECT key FROM pyramid_shards WHERE pyramid = ?', [pyramid_name])
-        registered = {r['key'] for r in rows}
+        registered = registered_keys(pyramid_name)
     except Exception as e:
         err(f'  reconcile: D1 read failed ({e}); skipping this tick')
         return
@@ -582,14 +580,6 @@ def _reconcile_registrations(
         )
     if stranded:
         err(f'  reconcile: re-registered {len(stranded)} present-but-unregistered shards')
-        # TEMP diagnostic (2026-07-28): rows re-registered every tick keep
-        # vanishing — read one back in the same invocation to split
-        # "write never lands" from "deleted between ticks".
-        probe = stranded[0].key
-        back = d1_query(
-            'SELECT key, written_at FROM pyramid_shards WHERE pyramid = ? AND key = ?',
-            [pyramid_name, probe])
-        err(f'  reconcile: read-back {probe}: {back or "MISSING IMMEDIATELY"}')
 
 
 def run_extension_fill(

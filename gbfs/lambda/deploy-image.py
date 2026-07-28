@@ -48,6 +48,9 @@ MEMORY_MB = 10240
 REBUILD_MEMORY_MB = 5376
 TIMEOUT_S = 900
 ENV_KEYS = ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_API_TOKEN']
+# Registry-proxy config (D1 via the api worker's binding — the CF D1
+# REST split-brain workaround); included when present in the deploy env.
+OPTIONAL_ENV = ['CTBK_REGISTRY_URL', 'CTBK_REGISTRY_SECRET']
 
 CTBK_MODULES = [
     'pyramid_cascade/__init__.py',
@@ -122,7 +125,9 @@ def recreate_function(
     reserved: int | None,
     memory_mb: int,
 ) -> str:
-    env = {'Variables': {k: os.environ[k] for k in ENV_KEYS} | env_extra}
+    env = {'Variables': {k: os.environ[k] for k in ENV_KEYS}
+           | {k: os.environ[k] for k in OPTIONAL_ENV if k in os.environ}
+           | env_extra}
     try:
         existing = lam.get_function(FunctionName=name)['Configuration']
         if existing.get('PackageType') == 'Image':
