@@ -80,6 +80,7 @@ export interface PyramidCoverSegment {
 	end: string;        // ISO (exclusive)
 	shardDur: string;
 	status: 'present' | 'pending' | 'missing';
+	key?: string;       // R2 object key (present segments — /files click-through)
 }
 
 /** Per-tier min-cover status. `complete` iff no cover slot is MISSING
@@ -538,6 +539,7 @@ async function pyramidCover(
 				end: slot.periodEnd.toISOString(),
 				shardDur: String(slot.shardDur),
 				status,
+				...(status === 'present' ? { key: slot.key } : {}),
 			});
 		}
 

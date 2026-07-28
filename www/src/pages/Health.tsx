@@ -49,6 +49,7 @@ interface PyramidCoverSegment {
   end: string
   shardDur: string
   status: 'present' | 'pending' | 'missing'
+  key?: string
 }
 interface PyramidTierCoverStatus {
   tier: string
@@ -506,18 +507,21 @@ function CoverBars({ pyramid }: { pyramid: PyramidCoverStatus }) {
               {t.segments.map((s, i) => {
                 const l = pct(Date.parse(s.start))
                 const r = pct(Date.parse(s.end))
-                return (
+                const seg = (
                   <div
-                    key={i}
-                    title={`/${t.tier}@${s.shardDur} ${s.start.slice(0, 16).replace('T', ' ')} → ${s.end.slice(0, 16).replace('T', ' ')} UTC — ${s.status}`}
+                    title={`/${t.tier}@${s.shardDur} ${s.start.slice(0, 16).replace('T', ' ')} → ${s.end.slice(0, 16).replace('T', ' ')} UTC — ${s.status}${s.key ? ' — click to preview' : ''}`}
                     style={{
                       position: 'absolute', top: 0, bottom: 0,
                       left: `${l}%`, width: `${Math.max(0, r - l)}%`,
                       background: SEGMENT_COLORS[s.status],
                       boxShadow: 'inset 1px 0 0 rgba(255,255,255,0.85)',
+                      ...(s.key ? { cursor: 'pointer' } : {}),
                     }}
                   />
                 )
+                // Present segments deep-link into the /files browser's
+                // parquet viewer (paginated table of the R2 object).
+                return s.key ? <Link key={i} to={`/files/${s.key}`}>{seg}</Link> : <span key={i}>{seg}</span>
               })}
             </div>
           </div>
