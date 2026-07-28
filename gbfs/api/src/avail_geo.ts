@@ -38,12 +38,15 @@ import { parquetBackend, CachedShardIndex, type ShardIndex } from 'pyrmts';
 import { r2Storage, D1ShardIndex } from 'pyrmts-cfw';
 import { retryingStorage } from './r2_retry';
 import {
+	buildVocabGraph,
 	filterCellsAndRes,
 	planGeoQueryFromInventory,
 	s2Index,
+	vocabCover,
 	type BBox,
 	type GeoPyramid,
 } from 'pyrmts-geo';
+import stationVocab from '../../../configs/pyramids/station-vocab.json';
 
 const METRICS = ['bikes', 'ebikes', 'docks', 'disabled', 'pending'] as const;
 type Metric = typeof METRICS[number];
@@ -329,6 +332,52 @@ async function loadEarliestPerShard(db: D1Database, pyramidName: string = PYRAMI
 	}
 }
 
+// ─── avail-v5 vocab covers (bbox → frozen-vocabulary terms) ───────────
+//
+// v5 rows live only at the frozen station-cell vocabulary + `s:<name>`
+// identity keys (drop-LUC). `v5BBoxCover` maps a bbox to the exact
+// positive-only cover: registry stations inside the bbox → `vocabCover`
+// (pyrmts-geo ± DP, complement branch disabled — avail's histogram path
+// does no sign-flip arithmetic). Graph + registry cached per isolate
+// with a TTL (registry churns rarely); failures aren't cached.
+
+interface V5Vocab {
+	graph: ReturnType<typeof buildVocabGraph>;
+	stations: { key: string; lat: number; lng: number }[];
+}
+let _v5Vocab: { value: Promise<V5Vocab>; ts: number } | null = null;
+const V5_VOCAB_TTL_MS = 10 * 60_000;
+
+function loadV5Vocab(bucket: R2Bucket): Promise<V5Vocab> {
+	const now = Date.now();
+	if (_v5Vocab && now - _v5Vocab.ts < V5_VOCAB_TTL_MS) return _v5Vocab.value;
+	const value = (async (): Promise<V5Vocab> => {
+		const obj = await bucket.get('station-luc.json');
+		if (!obj) throw new Error('station-luc.json not found on R2');
+		const luc = await obj.json<{ by_short_name: Record<string, { cell: string; lat: number; lng: number }> }>();
+		const leaves: { key: string; cell: string }[] = [];
+		const stations: V5Vocab['stations'] = [];
+		for (const [sn, e] of Object.entries(luc.by_short_name)) {
+			leaves.push({ key: `s:${sn}`, cell: e.cell });
+			stations.push({ key: `s:${sn}`, lat: e.lat, lng: e.lng });
+		}
+		const graph = buildVocabGraph(s2Index, (stationVocab as { cells: string[] }).cells, leaves);
+		return { graph, stations };
+	})();
+	_v5Vocab = { value, ts: now };
+	value.catch(() => { _v5Vocab = null; });
+	return value;
+}
+
+async function v5BBoxCover(bucket: R2Bucket, bbox: BBox): Promise<string[]> {
+	const { graph, stations } = await loadV5Vocab(bucket);
+	const wanted = stations
+		.filter((s) => s.lat >= bbox.minLat && s.lat <= bbox.maxLat && s.lng >= bbox.minLng && s.lng <= bbox.maxLng)
+		.map((s) => s.key);
+	if (wanted.length === 0) return [];
+	return vocabCover(graph, wanted, { positiveOnly: true }).include;
+}
+
 function parseBBox(s: string | null): BBox | null {
 	if (s === null) return null;
 	const parts = s.split(',').map((x) => Number(x.trim()));
@@ -384,7 +433,7 @@ async function serveGeoReduced(
 
 	// Optional caller-supplied cover. When present, `bbox` is unused.
 	const cellsRaw = url.searchParams.get('cells');
-	const userCells = cellsRaw
+	let userCells = cellsRaw
 		? cellsRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
 		: null;
 	if (userCells !== null && userCells.length === 0) {
@@ -395,9 +444,27 @@ async function serveGeoReduced(
 		? cellsExcludeRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
 		: [];
 
-	const bbox = userCells === null ? parseBBox(url.searchParams.get('bbox')) : null;
+	let bbox = userCells === null ? parseBBox(url.searchParams.get('bbox')) : null;
 	if (userCells === null && bbox === null) {
 		return errorResponse(400, 'either `bbox` or `cells` is required', cors);
+	}
+
+	// avail-v5 stores rows only at its frozen vocabulary (S2 cells +
+	// `s:<short_name>` identity keys), so a raw `minimalCover` bbox cover
+	// emits cells that match no rows — a silent undercount. Convert the
+	// bbox to a vocab cover (positive-only: exact union, no histogram
+	// sign-flips — `specs/drop-luc-station-keys.md`) and continue down the
+	// explicit-cells path, whose include-set filter + RG prune both match
+	// stored keys exactly.
+	if (bbox !== null && pyramidName !== PYRAMID_NAME) {
+		const include = await v5BBoxCover(bucket, bbox);
+		if (include.length === 0) {
+			const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+			if (cors) headers['Access-Control-Allow-Origin'] = cors;
+			return new Response(JSON.stringify({ records: [], reducer: url.searchParams.get('reducer') ?? DEFAULT_REDUCER, plan: null }), { headers });
+		}
+		userCells = include;
+		bbox = null;
 	}
 
 	const reducerRaw = url.searchParams.get('reducer') ?? DEFAULT_REDUCER;
@@ -412,11 +479,15 @@ async function serveGeoReduced(
 	// sentinel ("don't filter rows by exact level"). Avail's exact-match
 	// filter below doesn't actually use `outputRes` but the plan response
 	// carries it so the FE knows what was used.
+	// Identity keys (`s:<name>`) aren't S2 tokens — exclude them from
+	// level derivation and force the mixed-cover sentinel when present.
+	const nonIdCells = userCells !== null ? userCells.filter((c) => !c.startsWith('s:')) : [];
+	const hasIdKeys = userCells !== null && nonIdCells.length !== userCells.length;
 	const userCoverLevels = userCells !== null
-		? Array.from(new Set(userCells.map((c) => index.cellLevel(c))))
+		? Array.from(new Set(nonIdCells.map((c) => index.cellLevel(c))))
 		: [];
 	const userOutputRes = userCells !== null
-		? (userCoverLevels.length > 1 || userCellsExclude.length > 0 ? -1 : userCoverLevels[0]!)
+		? (hasIdKeys || userCoverLevels.length > 1 || userCellsExclude.length > 0 ? -1 : userCoverLevels[0]!)
 		: null;
 
 	// Watermark fall-through: the planner clips each tier to its
