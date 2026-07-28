@@ -1,53 +1,27 @@
-"""Auxiliary config parsing — picks per-tier extras out of the YAML that
-pyrmts's `parse_pyramid_yaml` doesn't preserve.
+"""Per-tier config extras — now first-class in pyrmts (`Tier.rg_size`,
+ops-adoption phase 1); this module keeps the dict-shaped view ctbk call
+sites consume and the built-in 2048 default (ctbk policy — pyrmts
+leaves unset tiers as `None` = writer heuristic).
 
-For now: per-tier row-group size (`rg_size`), with an optional
-`defaults.rg_size` and a per-tier override. Future: per-tier compression
-codec, sort overrides, etc.
+The former `base:`-block handling was dropped: no ctbk config declares
+one (pyrmts models tiers only).
 """
 from __future__ import annotations
-
-from typing import Any
-
-import yaml as _yaml
 
 
 DEFAULT_RG_SIZE = 2048
 
 
 def parse_rg_sizes(yaml_text: str) -> dict[str, int]:
-    """Return `{tier_name: rg_size}` for every tier declared in the YAML.
-
-    Resolution order per tier:
-      1. The tier's own `rg_size:` field (if set).
-      2. `defaults.rg_size` (if set).
-      3. The built-in `DEFAULT_RG_SIZE` (2048).
-
-    The `base:` block (when present) is treated as a tier too, so its
-    `rg_size` participates.
-    """
-    raw: Any = _yaml.safe_load(yaml_text)
-    if not isinstance(raw, dict):
-        return {}
-    default_rg = int((raw.get('defaults') or {}).get('rg_size', DEFAULT_RG_SIZE))
-
-    out: dict[str, int] = {}
-
-    base = raw.get('base') or {}
-    if isinstance(base, dict):
-        name = base.get('name') or base.get('tier')
-        if isinstance(name, str):
-            out[name] = int(base.get('rg_size', default_rg))
-
-    for tier_cfg in raw.get('tiers') or []:
-        if not isinstance(tier_cfg, dict):
-            continue
-        name = tier_cfg.get('name')
-        if not isinstance(name, str):
-            continue
-        out[name] = int(tier_cfg.get('rg_size', default_rg))
-
-    return out
+    """`{tier_name: rg_size}` for every declared tier, resolved
+    tier-`rg_size:` > `defaults.rg_size` (both via pyrmts) >
+    `DEFAULT_RG_SIZE`."""
+    from pyrmts import parse_pyramid_yaml
+    cfg = parse_pyramid_yaml(yaml_text)
+    return {
+        t.name: (t.rg_size if t.rg_size is not None else DEFAULT_RG_SIZE)
+        for t in cfg.tiers
+    }
 
 
 def rg_size_for(rg_sizes: dict[str, int] | None, tier_name: str) -> int:

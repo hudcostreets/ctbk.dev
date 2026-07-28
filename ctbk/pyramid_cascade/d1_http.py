@@ -1,24 +1,24 @@
-"""D1 access over Cloudflare's REST API.
-
-The Python cascade paths historically emitted a SQL file for
-`wrangler d1 execute` (see `materialize.emit_d1_insert_sql`) — fine for
-interactive backfills, unusable in a Lambda. This module talks to
-`POST /client/v4/accounts/{acct}/d1/database/{db}/query` directly.
+"""D1 access — thin wrapper over `pyrmts.d1` (moved upstream,
+ops-adoption phase 1: pyrmts `specs/pyrmts-ops-adoption.md`). ctbk
+residue kept here: the `ctbk-gbfs` database-id default and the
+per-registration stderr log line (the library stays silent).
 
 Env: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (D1 edit scope),
 optional `D1_DATABASE_ID` (defaults to the `ctbk-gbfs` database).
 """
 from __future__ import annotations
 
-import json
 import os
-import urllib.request
-from urllib.error import HTTPError
 
+from pyrmts.d1 import d1_query as _d1_query, register_shard as _register_shard
 from utz import err
 
 # `ctbk-gbfs` (gbfs/api wrangler.toml `DB` binding).
 DEFAULT_DATABASE_ID = 'd5746734-70ba-46aa-8780-be09e4837f0b'
+
+
+def _db(database_id: str | None) -> str:
+    return database_id or os.environ.get('D1_DATABASE_ID', DEFAULT_DATABASE_ID)
 
 
 def d1_query(
@@ -29,24 +29,7 @@ def d1_query(
 ) -> list[dict]:
     """Run one statement; return its result rows. Raises on any error
     (HTTP or D1-level) — callers treat registration as must-succeed."""
-    acct = os.environ['CLOUDFLARE_ACCOUNT_ID']
-    token = os.environ['CLOUDFLARE_API_TOKEN']
-    db = database_id or os.environ.get('D1_DATABASE_ID', DEFAULT_DATABASE_ID)
-    url = f'https://api.cloudflare.com/client/v4/accounts/{acct}/d1/database/{db}/query'
-    body = json.dumps({'sql': sql, 'params': params or []}).encode()
-    req = urllib.request.Request(url, data=body, headers={
-        'Authorization': f'Bearer {token}',
-        'Content-Type': 'application/json',
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            payload = json.loads(resp.read())
-    except HTTPError as e:
-        raise RuntimeError(f'D1 HTTP {e.code}: {e.read().decode(errors="replace")[:300]}') from e
-    if not payload.get('success'):
-        raise RuntimeError(f'D1 query failed: {json.dumps(payload.get("errors"))[:300]}')
-    results = payload['result']
-    return results[0].get('results', []) if results else []
+    return _d1_query(sql, params, database_id=_db(database_id))
 
 
 def register_shard(
@@ -61,10 +44,14 @@ def register_shard(
 ) -> None:
     """INSERT OR REPLACE one row into `pyramid_shards` — same shape the
     CFW cascade and `emit_d1_insert_sql` write."""
-    d1_query(
-        'INSERT OR REPLACE INTO pyramid_shards '
-        '(pyramid, tier, shard_dur, period_start, period_end, key, written_at) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [pyramid, tier, shard_dur, period_start_ms, period_end_ms, key, written_at_ms],
+    _register_shard(
+        pyramid=pyramid,
+        tier=tier,
+        shard_dur=shard_dur,
+        period_start_ms=period_start_ms,
+        period_end_ms=period_end_ms,
+        key=key,
+        written_at_ms=written_at_ms,
+        database_id=_db(None),
     )
     err(f'  d1: registered {key}')
