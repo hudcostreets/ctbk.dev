@@ -812,7 +812,7 @@ def gbfs_engine_seed(
 @option('-n', '--dry-run', is_flag=True, help='Print the submit command without running it.')
 @option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
 @option('-r', '--range', 'range_', default=None, help='Half-open build range `[FROM]/TO` (UTC ISO; FROM defaults to genesis).')
-@option('-s', '--source', 'source_rung', default='1m@2d', show_default=True, help='Materialized rung to read, `tier@shard_dur` (WideShardSource `-t`/`-d`).')
+@option('-s', '--source', 'source_rung', default='1m', show_default=True, help='Source tier, `tier` (min-cover: read the tier as stored) or `tier@shard_dur` (pin one rung, e.g. seeded scratch).')
 @option('-u', '--resume', is_flag=True, help='Skip shards already in the manifest (resume after a Spot reclaim).')
 @option('-V', '--vcpus', type=int, default=None, help='Override job vCPUs.')
 @option('-W', '--watch', is_flag=True, help='Tail the job log stream; exit with its status.')
@@ -865,7 +865,9 @@ def gbfs_engine_submit(
 		cmd += ['-x', source_spec]
 	else:
 		tier, _, dur = source_rung.partition('@')
-		cmd += ['-t', tier, '-d', dur]
+		cmd += ['-t', tier]
+		if dur:
+			cmd += ['-d', dur]
 	if resume:
 		cmd += ['-u']
 	if mem_budget is not None:
