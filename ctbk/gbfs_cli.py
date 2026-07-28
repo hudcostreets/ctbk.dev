@@ -802,7 +802,7 @@ def gbfs_engine_seed(
 @option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
 @option('-c', '--close-chunk', default=None, help='Target combined-long bytes per close chunk, e.g. 1g (build -c).')
 @option('-e', '--env', 'envs', multiple=True, help='Extra container env var NAME=VALUE (repeatable).')
-@option('-F', '--fill', is_flag=True, help='Declarative gap-fill: diff expected min-cover vs actual storage, build only missing (build -F; range optional, defaults genesis→now). See pyrmts specs/engine-fill-mode.md.')
+@option('-f', '--fill', is_flag=True, help='Declarative gap-fill: diff expected min-cover vs actual storage, build only missing (build -f; range optional, defaults genesis→now). See pyrmts specs/engine-fill-mode.md.')
 @option('-g', '--rg-size', type=int, default=2048, show_default=True, help='Output-shard parquet row-group size.')
 @option('-j', '--workers', type=int, default=None, help='Window-worker threads (build -j; default: job vCPUs).')
 @option('-K', '--max-inflight', type=int, default=None, help='Max windows in flight past the watermark (build -K).')
@@ -852,12 +852,15 @@ def gbfs_engine_submit(
 		'-m', f's3://{bucket}/{prefix}/{manifest_name}',
 	]
 	if fill and aligned is None and range_ is None:
-		cmd += ['-F']
+		# Genesis→now defaulting is ctbk's job — the engine has no genesis
+		# knowledge and keeps `-r` required even under `-f`.
+		from ctbk.pyramid_cascade.lite import AVAIL_GENESIS
+		from_, to = AVAIL_GENESIS, datetime.now(timezone.utc)
 	else:
 		from_, to = _engine_range(aligned, range_)
-		cmd += ['-r', f'{from_.strftime("%Y-%m-%dT%H:%M")}/{to.strftime("%Y-%m-%dT%H:%M")}']
-		if fill:
-			cmd += ['-F']
+	cmd += ['-r', f'{from_.strftime("%Y-%m-%dT%H:%M")}/{to.strftime("%Y-%m-%dT%H:%M")}']
+	if fill:
+		cmd += ['-f']
 	if source_spec is not None:
 		cmd += ['-x', source_spec]
 	else:

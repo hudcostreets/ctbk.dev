@@ -76,6 +76,26 @@ interface PyramidCoverStatus {
   allComplete: boolean
 }
 type PyramidsHealth = PyramidCoverStatus[]
+interface BuildLayer {
+  tier: string
+  rung: string
+  scaffold: boolean
+  n: number
+  done?: number
+  wallS?: number
+  status?: Record<string, number>
+}
+interface BuildProgress {
+  pyramid: string
+  driver: string
+  startedAt: string
+  updatedAt?: string
+  status: 'running' | 'done' | 'bounced'
+  plan: { layers: number; invocations: number; scaffolds: number }
+  byStatus: Record<string, number>
+  layers: BuildLayer[]
+  currentLayer: BuildLayer | null
+}
 interface HealthSnapshot {
   generatedAt: number
   feed: FeedHealth
@@ -83,10 +103,14 @@ interface HealthSnapshot {
   cascade: CascadeHealth
   pyramids: PyramidsHealth
   tripdata: TripdataHealth | null
+  builds?: BuildProgress[]
 }
 
 async function fetchHealth(): Promise<HealthSnapshot> {
-  const res = await fetch(`${API_BASE}/api/health`)
+  // `?live=1` forwards to the API's cache-bypass (live recompute) — for
+  // verifying snapshot-shape changes before the prod cron picks them up.
+  const live = new URLSearchParams(window.location.search).get('live')
+  const res = await fetch(`${API_BASE}/api/health${live === '1' ? '?live=1' : ''}`)
   if (!res.ok) throw new Error(`health: ${res.status}`)
   return res.json()
 }
@@ -126,6 +150,7 @@ export default function Health() {
       <TripdataSection tripdata={data.tripdata} />
       <FeedSection feed={data.feed} />
       <CompactionsSection compactions={data.compactions} />
+      <BuildsSection builds={data.builds} />
       <PyramidsSection pyramids={data.pyramids} />
       <CascadeSection cascade={data.cascade} />
       <BrowseSection feed={data.feed} compactions={data.compactions} />
@@ -290,6 +315,52 @@ function CompactionsSection({ compactions }: { compactions: CompactionHealth }) 
         />
       </div>
     </Section>
+  )
+}
+
+function BuildsSection({ builds }: { builds: BuildProgress[] | undefined }) {
+  if (!builds || builds.length === 0) return null
+  return (
+    <Section title="Pyramid builds">
+      {builds.map((b) => <BuildCard key={`${b.pyramid}-${b.startedAt}`} build={b} />)}
+    </Section>
+  )
+}
+
+function BuildCard({ build }: { build: BuildProgress }) {
+  const done = Object.values(build.byStatus ?? {}).reduce((a, n) => a + n, 0)
+  const total = build.plan?.invocations ?? 0
+  const frac = total > 0 ? done / total : 0
+  const wrote = build.byStatus?.wrote ?? 0
+  const errors = (build.byStatus?.error ?? 0) + (build.byStatus?.no_inputs ?? 0)
+  const updatedSec = build.updatedAt ? Math.floor(Date.parse(build.updatedAt) / 1000) : null
+  const color = build.status === 'done' ? '#2e7d32' : build.status === 'bounced' ? '#c62828' : '#1565c0'
+  const cur = build.currentLayer
+  return (
+    <div style={{ marginBottom: '1em' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.8em', marginBottom: '0.3em' }}>
+        <span style={{ fontWeight: 600, fontSize: '1.05em' }}>{build.pyramid}</span>
+        <span style={{ fontSize: '0.8em', opacity: 0.7 }}>{build.driver}</span>
+        <span style={{
+          fontSize: '0.75em', fontWeight: 600, color: '#fff', background: color,
+          borderRadius: '0.6em', padding: '0.1em 0.6em', textTransform: 'uppercase',
+        }}>{build.status}</span>
+        <span style={{ fontSize: '0.85em', opacity: 0.8 }}>
+          {done}/{total} invocations ({fmtPct(done, total)}) · {wrote} wrote
+          {errors > 0 ? ` · ${errors} bounced` : ''}
+        </span>
+        {updatedSec !== null && (
+          <span style={{ fontSize: '0.8em', opacity: 0.6 }}>updated {fmtAge(updatedSec)}</span>
+        )}
+      </div>
+      <div style={{ height: 8, borderRadius: 4, background: 'var(--bar-bg, #e0e0e044)', overflow: 'hidden' }}>
+        <div style={{ width: `${Math.min(100, 100 * frac).toFixed(1)}%`, height: '100%', background: color }} />
+      </div>
+      <div style={{ marginTop: '0.25em', fontSize: '0.8em', opacity: 0.75 }}>
+        {build.layers.length}/{build.plan?.layers ?? '?'} layers done
+        {cur ? <> · current: <code>/{cur.tier}@{cur.rung}</code>{cur.scaffold ? ' [scaffold]' : ''} ({cur.done ?? 0}/{cur.n})</> : null}
+      </div>
+    </div>
   )
 }
 

@@ -7,7 +7,7 @@
  *
  * See `specs/gbfs-health-page.md` for the surfaced shape.
  */
-import { floorToSpan, listExpectedShards, parseDuration, type Pyramid } from 'pyrmts';
+import { floorToSpan, listExpectedShards, parseDuration, type Pyramid, type Tier } from 'pyrmts';
 
 interface R2Object {
 	key: string;
@@ -125,6 +125,31 @@ const PENDING_GRACE_MS = 10 * 60_000;
 /** Recency of `s3://tripdata` — the upstream Citi Bike monthly publish.
  *  Sourced from `tripdata/latest.json` in R2, refreshed every `tripdata.yml`
  *  run (independent of whether new files were imported). */
+/** Driver-written build-progress doc (`gbfs/build-progress/<pyramid>.json`,
+ *  see `ctbk/pyramid_cascade/rebuild.py` `_Progress`). Loose typing on
+ *  purpose — the FE renders what's present. */
+export interface BuildLayer {
+	tier: string;
+	rung: string;
+	scaffold: boolean;
+	n: number;
+	done?: number;
+	wallS?: number;
+	status?: Record<string, number>;
+}
+
+export interface BuildProgress {
+	pyramid: string;
+	driver: string;
+	startedAt: string;
+	updatedAt?: string;
+	status: 'running' | 'done' | 'bounced';
+	plan: { layers: number; invocations: number; scaffolds: number };
+	byStatus: Record<string, number>;
+	layers: BuildLayer[];
+	currentLayer: BuildLayer | null;
+}
+
 export interface TripdataHealth {
 	generatedAt: string | null;          // ISO-8601 from the refresher
 	latestZip: string | null;            // e.g. "JC-202604-citibike-tripdata.zip"
@@ -140,6 +165,7 @@ export interface HealthSnapshot {
 	cascade: CascadeHealth;
 	pyramids: PyramidsHealth;
 	tripdata: TripdataHealth | null;
+	builds?: BuildProgress[];
 }
 
 /** UTC-date + minute helpers — avoid Date methods that pull in locale. */
@@ -379,8 +405,33 @@ export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth>
 		// Fall through with default.
 	}
 
-	const PYRAMID = 'avail';
 	const { TIERS, AVAIL_GENESIS } = await import('./avail_geo');
+	const out: PyramidsHealth = [];
+	for (const [name, keyPrefix] of HEALTH_PYRAMIDS) {
+		const cover = await pyramidCover(db, name, keyPrefix, shardCol, TIERS, AVAIL_GENESIS);
+		if (cover) out.push(cover);
+	}
+	return out;
+}
+
+/** Registry pyramids surfaced on /health: (D1 `pyramid` name, R2 key
+ *  prefix). v3 + v5 share the TIERS ladder (identical merged rung sets);
+ *  dormant avail-v4 is intentionally omitted (superseded by v5). */
+const HEALTH_PYRAMIDS: [name: string, keyPrefix: string][] = [
+	['avail', 'avail-v3'],
+	['avail-v5', 'avail-v5'],
+];
+
+/** Cover status for one registry pyramid. Null when D1 is unavailable
+ *  or the pyramid has no rows yet (hidden rather than all-missing). */
+async function pyramidCover(
+	db: D1Database,
+	PYRAMID: string,
+	keyPrefix: string,
+	shardCol: string,
+	TIERS: Tier[],
+	AVAIL_GENESIS: Date,
+): Promise<PyramidCoverStatus | null> {
 	const largestPerTier: Record<string, string> = Object.fromEntries(
 		TIERS.map((t) => [t.name, t.shards[t.shards.length - 1]!])
 	);
@@ -397,9 +448,10 @@ export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth>
 		const s = await db.prepare(shardSql).bind(PYRAMID).all<ShardRow>();
 		shardRows = s.results ?? [];
 	} catch {
-		// D1 unavailable — return empty.
-		return [];
+		// D1 unavailable.
+		return null;
 	}
+	if (shardRows.length === 0) return null;
 
 	// Translate legacy canonical sentinel rows: '' → tier's largest shard.
 	const norm = (tier: string, sd: string): string =>
@@ -426,7 +478,7 @@ export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth>
 	// stub to shut the compiler up.
 	const pyramid = {
 		tiers: TIERS,
-		keyTemplate: 'avail-v3/{tier}/{shard}/{period}.parquet',
+		keyTemplate: `${keyPrefix}/{tier}/{shard}/{period}.parquet`,
 	} as unknown as Pyramid;
 	const expected = listExpectedShards(pyramid, { from: AVAIL_GENESIS, to: now });
 	const expectedByTier = new Map<string, typeof expected>();
@@ -521,7 +573,7 @@ export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth>
 		});
 	}
 
-	return [{
+	return {
 		name: PYRAMID,
 		genesis: AVAIL_GENESIS.toISOString(),
 		now: now.toISOString(),
@@ -530,7 +582,7 @@ export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth>
 		totalPending,
 		totalStale,
 		allComplete: totalMissing === 0,
-	}];
+	};
 }
 
 export async function getTripdataHealth(r2: HealthR2): Promise<TripdataHealth | null> {
@@ -546,16 +598,39 @@ export async function getTripdataHealth(r2: HealthR2): Promise<TripdataHealth | 
 	};
 }
 
+/** Recent driver build-progress docs (running builds first, then most
+ *  recently updated; anything idle > 7 days is dropped). */
+export async function getBuildsHealth(r2: HealthR2): Promise<BuildProgress[]> {
+	const listing = await r2.list({ prefix: 'gbfs/build-progress/', limit: 20 });
+	const out: BuildProgress[] = [];
+	for (const o of listing.objects) {
+		const obj = await r2.get(o.key);
+		if (!obj) continue;
+		try {
+			const doc = await obj.json<BuildProgress>();
+			const updated = Date.parse(doc.updatedAt ?? doc.startedAt ?? '');
+			if (Number.isFinite(updated) && Date.now() - updated < 7 * 86_400_000) out.push(doc);
+		} catch {
+			// Malformed doc — skip.
+		}
+	}
+	out.sort((a, b) =>
+		Number(b.status === 'running') - Number(a.status === 'running')
+		|| Date.parse(b.updatedAt ?? '0') - Date.parse(a.updatedAt ?? '0'));
+	return out;
+}
+
 export async function getHealthSnapshot(
 	r2: HealthR2,
 	db?: D1Database,
 ): Promise<HealthSnapshot> {
-	const [feed, compactions, cascade, pyramids, tripdata] = await Promise.all([
+	const [feed, compactions, cascade, pyramids, tripdata, builds] = await Promise.all([
 		getFeedHealth(r2),
 		getCompactionHealth(r2),
 		getCascadeHealth(r2),
 		db ? getPyramidsHealth(db) : Promise.resolve<PyramidsHealth>([]),
 		getTripdataHealth(r2),
+		getBuildsHealth(r2),
 	]);
 	return {
 		generatedAt: Math.floor(Date.now() / 1000),
@@ -564,6 +639,7 @@ export async function getHealthSnapshot(
 		cascade,
 		pyramids,
 		tripdata,
+		builds,
 	};
 }
 

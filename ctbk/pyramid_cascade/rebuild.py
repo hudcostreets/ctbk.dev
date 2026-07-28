@@ -223,6 +223,49 @@ def touch_tick_function(function_name: str = TICK_FUNC) -> datetime:
     return ts
 
 
+class _Progress:
+    """Best-effort build-progress JSON on R2 (`gbfs/build-progress/
+    <pyramid>.json`) — feeds the /health builds card. Written at layer
+    boundaries + intra-layer checkpoints; a PUT failure warns once and
+    disables itself (progress reporting must never fail a rebuild)."""
+
+    def __init__(self, config_name: str, layers: list) -> None:
+        from .lite import R2_BUCKET, r2_client
+        self.key = f'gbfs/build-progress/{config_name}.json'
+        self.bucket = R2_BUCKET
+        self.r2 = r2_client()
+        self.enabled = True
+        self.started_at = datetime.now(timezone.utc).isoformat()
+        self.doc: dict = {
+            'pyramid': config_name,
+            'driver': 'lambda-fanout',
+            'startedAt': self.started_at,
+            'status': 'running',
+            'plan': {
+                'layers': len(layers),
+                'invocations': sum(len(b) for _, _, b, _ in layers),
+                'scaffolds': sum(len(b) for _, _, b, s in layers if s),
+            },
+            'byStatus': {},
+            'layers': [],       # completed layers: {tier, rung, scaffold, n, wallS, status}
+            'currentLayer': None,
+        }
+
+    def write(self, **updates) -> None:
+        if not self.enabled:
+            return
+        self.doc.update(updates)
+        self.doc['updatedAt'] = datetime.now(timezone.utc).isoformat()
+        try:
+            self.r2.put_object(
+                Bucket=self.bucket, Key=self.key,
+                Body=json.dumps(self.doc).encode(), ContentType='application/json',
+            )
+        except Exception as e:
+            self.enabled = False
+            err(f'  (build-progress writes disabled: {e})')
+
+
 def run_rebuild(
     config_yaml: str,
     *,
@@ -299,6 +342,8 @@ def run_rebuild(
     scaffold_keys: set[str] = set()
     done = 0
     t0 = _time.time()
+    progress = _Progress(config_name, layers)
+    progress.write()
     for tier, rung, batch, is_scaffold in layers:
         if limit is not None:
             if done >= limit:
@@ -309,6 +354,8 @@ def run_rebuild(
             scaffold_keys.update(g.key for g in batch)
         lt0 = _time.time()
         layer_status: dict[str, int] = {}
+        cur = {'tier': tier, 'rung': rung, 'scaffold': is_scaffold, 'n': len(batch), 'done': 0}
+        progress.write(currentLayer=cur)
         with ThreadPoolExecutor(max_workers=min(concurrency, len(batch))) as pool:
             futs = {pool.submit(invoke, g, not is_scaffold): g for g in batch}
             for fut in as_completed(futs):
@@ -327,14 +374,22 @@ def run_rebuild(
                 n_done = sum(layer_status.values())
                 if len(batch) > concurrency and n_done % 25 == 0:
                     err(f"  … /{tier}@{rung}: {n_done}/{len(batch)} ({_time.time() - lt0:.0f}s)")
+                    cur['done'] = n_done
+                    progress.write(byStatus=dict(by_status))
         err(f"  /{tier}@{rung}{' [scaffold]' if is_scaffold else ''}: {len(batch)} → "
             + ", ".join(f"{k}={v}" for k, v in sorted(layer_status.items()))
             + f" ({_time.time() - lt0:.0f}s)")
+        progress.doc['layers'].append({
+            'tier': tier, 'rung': rung, 'scaffold': is_scaffold, 'n': len(batch),
+            'wallS': round(_time.time() - lt0, 1), 'status': dict(layer_status),
+        })
+        progress.write(currentLayer=None, byStatus=dict(by_status))
     err(f"rebuild: {done} shards in {(_time.time() - t0) / 60:.1f} min: "
         + (", ".join(f"{k}={v}" for k, v in sorted(by_status.items())) or "nothing to do"))
 
     bounced = (bool(by_status.get('no_inputs') or by_status.get('error'))
                or (limit is not None and done >= limit))
+    progress.write(status='bounced' if bounced else 'done', byStatus=dict(by_status))
     if bounced:
         err("some shards bounced — re-run the same command to retry "
             "(discovery skips completed shards; scaffolds kept for reuse)")
