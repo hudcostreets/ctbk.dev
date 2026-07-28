@@ -30,6 +30,12 @@ from click import command, option
 err = lambda *a: print(*a, file=sys.stderr)
 
 FUNC = 'ctbk-avail-cascade'
+# v5 tick: same zip/handler, EventBridge Input pins `config=avail-v5` —
+# the engine-backfilled successor pyramid (`specs/avail-v5-stack.md`).
+# Separate function so its reserved=1 tick can't contend with v3's, and
+# burn-in failures stay isolated.
+V5_FUNC = 'ctbk-avail-cascade-v5'
+V5_RULE = f'{V5_FUNC}-tick'
 # Same zip, no schedule, UNRESERVED concurrency: invoked per-gap by the
 # `ctbk gbfs lambda rebuild` fan-out driver (whose `-c` is the bound) —
 # see `specs/avail-v3-lambda-rebuild.md`. Separate function because
@@ -90,6 +96,7 @@ def build_zip() -> bytes:
         z.write(here / 'handler.py', 'handler.py')
         z.write(REPO / 'configs/pyramids/avail.yaml', 'avail.yaml')
         z.write(REPO / 'configs/pyramids/avail-v4.yaml', 'avail-v4.yaml')
+        z.write(REPO / 'configs/pyramids/avail-v5.yaml', 'avail-v5.yaml')
         z.write(REPO / 'configs/pyramids/station-vocab.json', 'station-vocab.json')
         z.writestr('ctbk/__init__.py', '')  # NOT the repo's (heavy trips-ETL imports)
         for rel in CTBK_MODULES:
@@ -157,7 +164,17 @@ def upsert_function(
     return lam.get_function(FunctionName=name)['Configuration']['FunctionArn']
 
 
-def upsert_schedule(events, lam, func_arn: str) -> None:
+def upsert_schedule(
+    events,
+    lam,
+    func_arn: str,
+    *,
+    func_name: str = FUNC,
+    rule: str = RULE,
+    rate: str | None = None,
+    input_json: str | None = None,
+    description: str = 'avail-v3 cascade fill',
+) -> None:
     # FILL_ALL (P2 steady state, the default): fire at :01/:06/:11/… —
     # the smallest shard anywhere in the ladder spans 5 min, so that's
     # the work cadence; the +1-min phase lets the poller land each
@@ -165,22 +182,27 @@ def upsert_schedule(events, lam, func_arn: str) -> None:
     # hole and defers a full cycle). FILL_ALL=0 (extensions-only +
     # hourly) is the rollback to the era when the CFW still ran the
     # sub-day cascade.
-    rate = 'cron(1/5 * * * ? *)' if os.environ.get('FILL_ALL', '1') == '1' else 'rate(1 hour)'
-    rule_arn = events.put_rule(Name=RULE, ScheduleExpression=rate, State='ENABLED',
-                               Description='avail-v3 cascade fill')['RuleArn']
-    events.put_targets(Rule=RULE, Targets=[{'Id': 'fn', 'Arn': func_arn}])
+    if rate is None:
+        rate = 'cron(1/5 * * * ? *)' if os.environ.get('FILL_ALL', '1') == '1' else 'rate(1 hour)'
+    rule_arn = events.put_rule(Name=rule, ScheduleExpression=rate, State='ENABLED',
+                               Description=description)['RuleArn']
+    target = {'Id': 'fn', 'Arn': func_arn}
+    if input_json is not None:
+        target['Input'] = input_json
+    events.put_targets(Rule=rule, Targets=[target])
     try:
-        lam.add_permission(FunctionName=FUNC, StatementId='events-invoke',
+        lam.add_permission(FunctionName=func_name, StatementId='events-invoke',
                            Action='lambda:InvokeFunction', Principal='events.amazonaws.com',
                            SourceArn=rule_arn)
     except lam.exceptions.ResourceConflictException:
         pass
-    err(f'schedule {RULE}: {rate}')
+    err(f'schedule {rule}: {rate}' + (f' input={input_json}' if input_json else ''))
 
 
 @command()
+@option('-5', '--v5-only', is_flag=True, help='Deploy only the v5 tick function + schedule; leave the serving v3 functions untouched.')
 @option('-n', '--dry-run', is_flag=True, help='Build the zip and report its size; no AWS calls.')
-def main(dry_run: bool):
+def main(v5_only: bool, dry_run: bool):
     missing = [k for k in ENV_KEYS if k not in os.environ]
     if not dry_run and missing:
         raise SystemExit(f'missing env: {missing} (source .envrc)')
@@ -191,14 +213,33 @@ def main(dry_run: bool):
     sess = boto3.Session()
     role_arn = upsert_role(sess.client('iam'))
     lam = sess.client('lambda')
-    func_arn = upsert_function(
+    if not v5_only:
+        func_arn = upsert_function(
+            lam, role_arn, blob,
+            name=FUNC,
+            description='avail-v3 heavy-rung cascade (specs/avail-v3-lambda-cascade.md P1)',
+            env_extra={'GC_ENABLED': '1', 'FILL_ALL': os.environ.get('FILL_ALL', '1')},
+            reserved=1,
+        )
+        upsert_schedule(sess.client('events'), lam, func_arn)
+    v5_arn = upsert_function(
         lam, role_arn, blob,
-        name=FUNC,
-        description='avail-v3 heavy-rung cascade (specs/avail-v3-lambda-cascade.md P1)',
-        env_extra={'GC_ENABLED': '1', 'FILL_ALL': os.environ.get('FILL_ALL', '1')},
+        name=V5_FUNC,
+        description='avail-v5 cascade tick (engine-backfilled successor; specs/avail-v5-stack.md)',
+        env_extra={'GC_ENABLED': '1', 'FILL_ALL': '1'},
         reserved=1,
     )
-    upsert_schedule(sess.client('events'), lam, func_arn)
+    # +3-min phase: offset from the v3 tick's :01/:06/… so the two
+    # reserved=1 functions' R2/D1 traffic interleaves rather than spikes.
+    upsert_schedule(
+        sess.client('events'), lam, v5_arn,
+        func_name=V5_FUNC, rule=V5_RULE, rate='cron(3/5 * * * ? *)',
+        input_json='{"config": "avail-v5"}',
+        description='avail-v5 cascade fill',
+    )
+    err(f'deployed: {v5_arn}')
+    if v5_only:
+        return
     # GC_ENABLED=0: only the scheduled tick should sweep — a stray {}
     # invocation of the rebuild function must not race a second GC.
     rebuild_arn = upsert_function(

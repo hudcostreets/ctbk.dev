@@ -1,0 +1,94 @@
+# ctbk avail-v5 pyramid config: identical ladder/metrics/vocab to
+# avail-v4, re-keyed under `avail-v5/` — the engine-backfilled,
+# Lambda-maintained successor stack (see `specs/avail-v5-stack.md`).
+#
+# Same ladder/metrics as avail-v3, but rows key by the FROZEN ragged
+# station-cell vocabulary (`station-vocab.json`, T=4) + one
+# `s:<short_name>` identity row per station — no LUC, no relational
+# churn, no re-keys. `chains: vocab` selects the vocabulary chain
+# builder in `pyramid_cascade` (default is the legacy LUC chains).
+chains: vocab
+
+storage:
+  type: s3
+  bucket: ctbk
+  key: "avail-v5/{tier}/{shard}/{period}.parquet"
+
+# Per-tier row-group size. Default 2k rows: keeps single-cell scans tight
+# (~1 RG-hit per shard, ~30 KB data scan) while footer overhead stays
+# manageable. Override per-tier with `rg_size: N` on a tier entry.
+defaults:
+  rg_size: 2048
+
+axis: time
+binCol: dt
+
+dims:
+  - { name: s2_cell, type: string }
+
+metrics:
+  - { name: bikes,    monoid: histogram }
+  - { name: ebikes,   monoid: histogram }
+  - { name: docks,    monoid: histogram }
+  - { name: disabled, monoid: histogram }
+  - { name: pending,  monoid: histogram }
+
+# Tiers in canonical (finest → coarsest) order.
+#
+# Ladder design principles:
+# - All fixed-duration (no calendar `mo`/`y` units, even at the
+#   largest rung). Sidesteps month-length variance, keeps every rung's
+#   duration a clean multiple of the tier's bin.
+# - Adjacent rungs within a tier have ratio ≤ 3×. Smaller jumps bound
+#   the CFW cascade CPU cost — each rung's write reads at most 2-3
+#   feeder shards from the rung below.
+# - Sub-day rungs follow the base-60 chain (5m, 10m, 30m, 1h, 3h, 6h,
+#   12h, 1d). Day-and-above rungs follow powers-of-2 (1d, 2d, 4d, 8d,
+#   16d, 32d, 64d, 128d, 256d, 512d, 1024d, 2048d). Powers-of-2 gives
+#   uniform SUF=2 without the arbitrary "why 30d not 32d" of the prior
+#   ladder. Both chains satisfy pyrmts's integer-divisibility
+#   requirement for `gap-discovery.largestFittingRung`.
+# - Each tier caps at `N ≤ 960` (where `N = shardDur / bin` = dt-bucket
+#   count per shard), so no single write exceeds ~17s wall clock — safe
+#   under CFW's 30s CPU cap. Under a same-tier DAG cascade
+#   (`writeShard: /tier@N ← /tier@(N-1) × k`), this bounds per-node cost.
+#   Above `N=960` gets built offline via `ctbk pyramid-cascade` on `e`.
+# - Smallest rung K = bins-per-shard at the finest rung: 3-5 depending
+#   on tier (smaller K acceptable when it keeps the ladder cleaner).
+# - Boundaries are UTC-anchored (`epoch + k × shard_dur`), DST-immune.
+#   Multi-day shards land at UTC midnight; day-of-week alignment isn't
+#   preserved except for 7d-multiples (which stay Thursday-aligned
+#   since epoch is a Thursday).
+#
+# Note: pyrmts duration format uses `min` (not `m`) for minutes — `m`
+# is reserved for months. Tier `name` keeps the short `m` (e.g. `1m`,
+# `2m`) for readability; `bin`/`shards` use canonical
+# `min`/`h`/`d`/`y`.
+#
+# `lambda_shards`: per-tier ladder EXTENSION rungs owned by the AWS
+# Lambda executor (see specs/avail-v3-lambda-cascade.md). The CFW reads
+# only `shards` (its N ≤ 960 budget); the Lambda plans against
+# `shards + lambda_shards` (N ≤ 4096 — bounded by the accumulator
+# materializer's ~375 B/output-row in a 10 GB Lambda). Each list
+# continues its tier's `shards` divisibility chain.
+tiers:
+  - { name: 1m,  bin: 1min,  shards: [5min, 10min, 30min, 1h, 3h, 6h, 12h], lambda_shards: [1d, 2d] }
+  - { name: 2m,  bin: 2min,  shards: [10min, 30min, 1h, 3h, 6h, 12h, 1d], lambda_shards: [2d, 4d] }
+  - { name: 3m,  bin: 3min,  shards: [15min, 30min, 1h, 3h, 6h, 12h, 1d, 2d], lambda_shards: [4d, 8d] }
+  - { name: 5m,  bin: 5min,  shards: [15min, 30min, 1h, 3h, 6h, 12h, 1d, 2d], lambda_shards: [4d, 8d] }
+  - { name: 10m, bin: 10min, shards: [30min, 1h, 3h, 6h, 12h, 1d, 2d, 4d], lambda_shards: [8d, 16d] }
+  - { name: 15m, bin: 15min, shards: [1h, 3h, 6h, 12h, 1d, 2d, 4d, 8d], lambda_shards: [16d, 32d] }
+  - { name: 30m, bin: 30min, shards: [2h, 6h, 12h, 1d, 2d, 4d, 8d, 16d], lambda_shards: [32d, 64d] }
+  - { name: 1h,  bin: 1h,    shards: [3h, 6h, 12h, 1d, 2d, 4d, 8d, 16d, 32d], lambda_shards: [64d, 128d] }
+  - { name: 2h,  bin: 2h,    shards: [6h, 12h, 1d, 2d, 4d, 8d, 16d, 32d, 64d], lambda_shards: [128d, 256d] }
+  - { name: 3h,  bin: 3h,    shards: [12h, 1d, 2d, 4d, 8d, 16d, 32d, 64d], lambda_shards: [128d, 256d, 512d] }
+  - { name: 6h,  bin: 6h,    shards: [1d, 2d, 4d, 8d, 16d, 32d, 64d, 128d], lambda_shards: [256d, 512d, 1024d] }
+  - { name: 12h, bin: 12h,   shards: [2d, 4d, 8d, 16d, 32d, 64d, 128d, 256d], lambda_shards: [512d, 1024d, 2048d] }
+  - { name: 1d,  bin: 1d,    shards: [4d, 8d, 16d, 32d, 64d, 128d, 256d, 512d], lambda_shards: [1024d, 2048d] }
+  - { name: 3d,  bin: 3d,    shards: [12d, 24d, 48d, 96d, 192d, 384d, 768d, 1536d], lambda_shards: [3072d] }
+  - { name: 7d,  bin: 7d,    shards: [28d, 56d, 112d, 224d, 448d, 896d, 1792d, 3584d], lambda_shards: [7168d] }
+
+geo:
+  cellCol: s2_cell
+  # S2 levels (canonical pyrmts order: finest → coarsest)
+  resolutions: [15, 14, 13, 12, 11, 10]

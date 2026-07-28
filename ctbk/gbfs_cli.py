@@ -419,20 +419,63 @@ def gbfs_r2_ls(
 		print(f'{sz:>12}  {k}' if show_size else k)
 
 
-@gbfs_r2.command('cp', help='Server-side copy KEY to DEST key (same bucket).')
+@gbfs_r2.command('cp', help='Server-side copy KEY to DEST key (same bucket). With -r, KEY/DEST are prefixes: copy every key under KEY to the same suffix under DEST.')
 @option('-f', '--force', is_flag=True, help='Overwrite DEST if it already exists.')
+@option('-j', '--jobs', type=int, default=16, show_default=True, help='Concurrent copies (recursive mode).')
+@option('-n', '--dry-run', is_flag=True, help='List planned copies without executing (recursive mode).')
+@option('-r', '--recursive', is_flag=True, help='Prefix mode: copy all keys under KEY prefix to DEST prefix.')
 @argument('key', metavar='KEY')
 @argument('dest', metavar='DEST')
-def gbfs_r2_cp(force: bool, key: str, dest: str) -> None:
+def gbfs_r2_cp(
+	force: bool,
+	jobs: int,
+	dry_run: bool,
+	recursive: bool,
+	key: str,
+	dest: str,
+) -> None:
 	client, bucket = _r2_client()
-	if not force:
-		try:
-			client.head_object(Bucket=bucket, Key=dest)  # type: ignore[attr-defined]
-			raise click.ClickException(f'{dest} exists (use -f to overwrite)')
-		except client.exceptions.ClientError:  # type: ignore[attr-defined]
+	if not recursive:
+		if not force:
+			try:
+				client.head_object(Bucket=bucket, Key=dest)  # type: ignore[attr-defined]
+				raise click.ClickException(f'{dest} exists (use -f to overwrite)')
+			except client.exceptions.ClientError:  # type: ignore[attr-defined]
+				pass
+		client.copy_object(Bucket=bucket, Key=dest, CopySource={'Bucket': bucket, 'Key': key})  # type: ignore[attr-defined]
+		err(f'{key} → {dest}')
+		return
+	from concurrent.futures import ThreadPoolExecutor
+	src_pfx, dst_pfx = key.rstrip('/') + '/', dest.rstrip('/') + '/'
+	paginator = client.get_paginator('list_objects_v2')  # type: ignore[attr-defined]
+	def list_keys(pfx: str) -> set[str]:
+		return {
+			c['Key']
+			for page in paginator.paginate(Bucket=bucket, Prefix=pfx)
+			for c in page.get('Contents') or []
+		}
+	src_keys = sorted(list_keys(src_pfx))
+	if not src_keys:
+		raise click.ClickException(f'no keys under {src_pfx}')
+	existing = set() if force else list_keys(dst_pfx)
+	plan = [
+		(k, dst_pfx + k[len(src_pfx):])
+		for k in src_keys
+		if force or dst_pfx + k[len(src_pfx):] not in existing
+	]
+	skipped = len(src_keys) - len(plan)
+	if dry_run:
+		for s, d in plan[:20]:
+			err(f'  {s} → {d}')
+		err(f'would copy {len(plan)} keys ({skipped} already exist)')
+		return
+	def cp(pair: tuple[str, str]) -> None:
+		s, d = pair
+		client.copy_object(Bucket=bucket, Key=d, CopySource={'Bucket': bucket, 'Key': s})  # type: ignore[attr-defined]
+	with ThreadPoolExecutor(max_workers=jobs) as pool:
+		for _ in pool.map(cp, plan):
 			pass
-	client.copy_object(Bucket=bucket, Key=dest, CopySource={'Bucket': bucket, 'Key': key})  # type: ignore[attr-defined]
-	err(f'{key} → {dest}')
+	err(f'copied {len(plan)} keys {src_pfx} → {dst_pfx} ({skipped} already existed)')
 
 
 @gbfs_r2.command('put', help='Upload a local file to an R2 key.')
@@ -555,25 +598,29 @@ def gbfs_lambda_rebuild(
 	)
 
 
-@gbfs_lambda.command('invoke', help='Async-invoke the Lambda (fire one fill run now instead of waiting for the hourly cron).')
-def gbfs_lambda_invoke() -> None:
+@gbfs_lambda.command('invoke', help='Async-invoke the Lambda (fire one fill run now instead of waiting for the cron tick).')
+@option('-C', '--config', 'config_name', default=None, help='Pyramid config payload (e.g. avail-v5) [default: none → handler default `avail`].')
+@option('-f', '--function', 'function_name', default=LAMBDA_FUNC, show_default=True, help='Lambda function name.')
+def gbfs_lambda_invoke(config_name: str | None, function_name: str) -> None:
 	import boto3
+	payload = json.dumps({'config': config_name}).encode() if config_name else b'{}'
 	resp = boto3.client('lambda').invoke(
-		FunctionName=LAMBDA_FUNC, InvocationType='Event', Payload=b'{}')
+		FunctionName=function_name, InvocationType='Event', Payload=payload)
 	print(f"status: {resp['StatusCode']}")
 
 
 @gbfs_lambda.command('logs', help='Recent CloudWatch log lines (filtered to fill activity).')
-@option('-m', '--minutes', type=int, default=30, show_default=True, help='Look-back window.')
 @option('-a', '--all', 'show_all', is_flag=True, help='All lines, not just fill summaries/writes/errors.')
-def gbfs_lambda_logs(minutes: int, show_all: bool) -> None:
+@option('-f', '--function', 'function_name', default=LAMBDA_FUNC, show_default=True, help='Lambda function name (log group /aws/lambda/<name>).')
+@option('-m', '--minutes', type=int, default=30, show_default=True, help='Look-back window.')
+def gbfs_lambda_logs(show_all: bool, function_name: str, minutes: int) -> None:
 	import re
 	import boto3
 	logs = boto3.client('logs')
 	start = int((datetime.now(timezone.utc) - timedelta(minutes=minutes)).timestamp() * 1000)
 	pat = re.compile(r'fillable gaps|extension fill|wrote \(|no_inputs|ERROR|Task timed|REPORT')
 	paginator = logs.get_paginator('filter_log_events')
-	for page in paginator.paginate(logGroupName=f'/aws/lambda/{LAMBDA_FUNC}', startTime=start):
+	for page in paginator.paginate(logGroupName=f'/aws/lambda/{function_name}', startTime=start):
 		for ev in page['events']:
 			msg = ev['message'].rstrip()
 			if show_all or pat.search(msg):
@@ -666,20 +713,32 @@ def gbfs_engine_compare(
 		sys.exit(1)
 
 
-@gbfs_engine.command('config', help='Emit the merged-ladder config YAML re-keyed under the scratch prefix (what a scratch/Batch build consumes).')
+@gbfs_engine.command('config', help='Emit the merged-ladder config YAML re-keyed under the scratch prefix (what a scratch/Batch build consumes). With -R, emit it at its own real prefix (standing up a new prod pyramid).')
 @option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
 @option('-o', '--out', default=None, help='Write to this local path instead of stdout.')
 @option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
+@option('-R', '--real', is_flag=True, help='No re-key: merged config at the config\'s own prefix (refused for the live-serving pyramid).')
 @option('-u', '--upload', is_flag=True, help='PUT to r2://<bucket>/<prefix>/config.yaml.')
 def gbfs_engine_config(
 	config_name: str,
 	out: str | None,
 	scratch_prefix: str | None,
+	real: bool,
 	upload: bool,
 ) -> None:
-	from ctbk.pyramid_cascade.engine_check import scratch_yaml
-	prefix = scratch_prefix or f'{config_name}-engine-check'
-	yml = scratch_yaml(config_name, prefix)
+	from ctbk.pyramid_cascade.engine_check import config_prefix, merged_yaml, scratch_yaml
+	if real:
+		# The tick Lambda + FE currently serve `avail` (v3); a real-prefix
+		# config for it would let a Batch build overwrite serving keys.
+		if config_name == 'avail':
+			raise click.ClickException('refusing -R for the live-serving pyramid (avail)')
+		if scratch_prefix is not None:
+			raise click.UsageError('-R and -p are mutually exclusive')
+		yml = merged_yaml(config_name)
+		prefix = config_prefix(yml)
+	else:
+		prefix = scratch_prefix or f'{config_name}-engine-check'
+		yml = scratch_yaml(config_name, prefix)
 	if out:
 		Path(out).write_text(yml)
 		err(f'wrote {out}')
@@ -824,22 +883,61 @@ def gbfs_engine_submit(
 	sys.exit(subprocess.run(cmd).returncode)
 
 
+def _load_manifest(path: str) -> list[dict]:
+	"""JSONL manifest records from a local path or `s3://` URL (ctbk R2 bucket)."""
+	if path.startswith('s3://'):
+		bkt, _, key = path[len('s3://'):].partition('/')
+		client, bucket = _r2_client()
+		if bkt != bucket:
+			raise click.ClickException(f'bucket {bkt!r} != configured {bucket!r}')
+		body = client.get_object(Bucket=bucket, Key=key)['Body'].read()  # type: ignore[attr-defined]
+		lines = body.decode().splitlines()
+	else:
+		lines = Path(path).read_text().splitlines()
+	return [json.loads(l) for l in lines if l.strip()]
+
+
+@gbfs_engine.command('register', help='Register manifest shards in the D1 `pyramid_shards` registry (INSERT OR REPLACE; idempotent). Complements the cascade Lambda, which registers its own writes.')
+@option('-b', '--batch-size', type=int, default=12, show_default=True, help='Rows per D1 statement.')
+@option('-n', '--dry-run', is_flag=True, help='Print row count + a sample; no D1 writes.')
+@option('-P', '--pyramid', 'pyramid_name', default=None, help='Registry pyramid name [default: each record\'s own `pyramid` field].')
+@argument('manifest', metavar='MANIFEST')
+def gbfs_engine_register(
+	batch_size: int,
+	dry_run: bool,
+	pyramid_name: str | None,
+	manifest: str,
+) -> None:
+	from ctbk.pyramid_cascade.d1_http import d1_query
+	recs = []
+	seen = set()
+	for r in _load_manifest(manifest):
+		if r['key'] not in seen:
+			seen.add(r['key'])
+			recs.append(r)
+	if dry_run:
+		names = Counter(pyramid_name or r['pyramid'] for r in recs)
+		print(f'{len(recs)} shards → pyramid_shards as {dict(names)}')
+		return
+	cols = '(pyramid, tier, shard_dur, period_start, period_end, key, written_at)'
+	for i in range(0, len(recs), batch_size):
+		chunk = recs[i:i + batch_size]
+		placeholders = ', '.join(['(?, ?, ?, ?, ?, ?, ?)'] * len(chunk))
+		params: list = []
+		for r in chunk:
+			params += [
+				pyramid_name or r['pyramid'], r['tier'], r['shard_dur'],
+				r['period_start'], r['period_end'], r['key'], r['written_at'],
+			]
+		d1_query(f'INSERT OR REPLACE INTO pyramid_shards {cols} VALUES {placeholders}', params)
+		err(f'  registered {i + len(chunk)}/{len(recs)}')
+
+
 @gbfs_engine.command('manifest', help='Summarize a build manifest (local path or `s3://` URL): shard counts per (tier, rung), period span; optionally diff key sets vs another manifest.')
 @option('-d', '--diff', 'other', default=None, help='Second manifest; report key-set differences.')
 @argument('path', metavar='PATH')
 def gbfs_engine_manifest(other: str | None, path: str) -> None:
-	def load(p: str) -> list[dict]:
-		if p.startswith('s3://'):
-			bkt, _, key = p[len('s3://'):].partition('/')
-			client, bucket = _r2_client()
-			if bkt != bucket:
-				raise click.ClickException(f'bucket {bkt!r} != configured {bucket!r}')
-			body = client.get_object(Bucket=bucket, Key=key)['Body'].read()  # type: ignore[attr-defined]
-			lines = body.decode().splitlines()
-		else:
-			lines = Path(p).read_text().splitlines()
-		return [json.loads(l) for l in lines if l.strip()]
-
+	load = _load_manifest
 	recs = load(path)
 	by_rung = Counter((r['tier'], r['shard_dur']) for r in recs)
 	starts = [r['period_start'] for r in recs]
