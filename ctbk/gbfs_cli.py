@@ -802,6 +802,7 @@ def gbfs_engine_seed(
 @option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
 @option('-c', '--close-chunk', default=None, help='Target combined-long bytes per close chunk, e.g. 1g (build -c).')
 @option('-e', '--env', 'envs', multiple=True, help='Extra container env var NAME=VALUE (repeatable).')
+@option('-F', '--fill', is_flag=True, help='Declarative gap-fill: diff expected min-cover vs actual storage, build only missing (build -F; range optional, defaults genesis→now). See pyrmts specs/engine-fill-mode.md.')
 @option('-g', '--rg-size', type=int, default=2048, show_default=True, help='Output-shard parquet row-group size.')
 @option('-j', '--workers', type=int, default=None, help='Window-worker threads (build -j; default: job vCPUs).')
 @option('-K', '--max-inflight', type=int, default=None, help='Max windows in flight past the watermark (build -K).')
@@ -823,6 +824,7 @@ def gbfs_engine_submit(
 	config_name: str,
 	close_chunk: str | None,
 	envs: tuple[str, ...],
+	fill: bool,
 	rg_size: int,
 	workers: int | None,
 	max_inflight: int | None,
@@ -840,17 +842,22 @@ def gbfs_engine_submit(
 	source_spec: str | None,
 ) -> None:
 	prefix = scratch_prefix or f'{config_name}-engine-check'
-	from_, to = _engine_range(aligned, range_)
 	bucket = os.environ.get('R2_BUCKET', 'ctbk')
 	cmd = [
 		'pyrmts-engine', 'batch', 'submit',
 		'-n', prefix,
-		'-r', f'{from_.strftime("%Y-%m-%dT%H:%M")}/{to.strftime("%Y-%m-%dT%H:%M")}',
 		'-w', window,
 		'-g', str(rg_size),
 		'-s', 's2_cell,dt',
 		'-m', f's3://{bucket}/{prefix}/{manifest_name}',
 	]
+	if fill and aligned is None and range_ is None:
+		cmd += ['-F']
+	else:
+		from_, to = _engine_range(aligned, range_)
+		cmd += ['-r', f'{from_.strftime("%Y-%m-%dT%H:%M")}/{to.strftime("%Y-%m-%dT%H:%M")}']
+		if fill:
+			cmd += ['-F']
 	if source_spec is not None:
 		cmd += ['-x', source_spec]
 	else:
