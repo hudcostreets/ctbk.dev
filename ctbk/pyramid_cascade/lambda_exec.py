@@ -582,6 +582,14 @@ def _reconcile_registrations(
         )
     if stranded:
         err(f'  reconcile: re-registered {len(stranded)} present-but-unregistered shards')
+        # TEMP diagnostic (2026-07-28): rows re-registered every tick keep
+        # vanishing — read one back in the same invocation to split
+        # "write never lands" from "deleted between ticks".
+        probe = stranded[0].key
+        back = d1_query(
+            'SELECT key, written_at FROM pyramid_shards WHERE pyramid = ? AND key = ?',
+            [pyramid_name, probe])
+        err(f'  reconcile: read-back {probe}: {back or "MISSING IMMEDIATELY"}')
 
 
 def run_extension_fill(

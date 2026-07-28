@@ -598,6 +598,43 @@ def gbfs_lambda_rebuild(
 	)
 
 
+@gbfs_lambda.command('reconcile', help='Run the registration reconcile locally (laptop → true D1 primary): register expected∩storage shards missing from the registry. Containment for the 2026-07-28 D1 REST split-brain (Lambda-side writes forked).')
+@option('-C', '--config', 'config_name', default='avail-v5', show_default=True, help='Pyramid config basename (also the D1 pyramid name).')
+@option('-n', '--dry-run', is_flag=True, help='Print stranded keys; no writes.')
+def gbfs_lambda_reconcile(config_name: str, dry_run: bool) -> None:
+	from pyrmts import parse_pyramid_yaml, pyramid_from_config
+	from ctbk.pyramid_cascade.d1_http import d1_query, register_shard
+	from ctbk.pyramid_cascade.engine_check import merged_yaml
+	from ctbk.pyramid_cascade.fsck import discover_gaps
+	from ctbk.pyramid_cascade.lite import AVAIL_GENESIS
+	from ctbk.pyramid_cascade.storage import storage_from_cfg
+	cfg = parse_pyramid_yaml(merged_yaml(config_name))
+	pyramid = pyramid_from_config(cfg, storage_from_cfg(cfg.storage))
+	now = datetime.now(timezone.utc)
+	_gaps, existing, expected_by_tier = discover_gaps(pyramid, (AVAIL_GENESIS, now))
+	registered = {r['key'] for r in d1_query('SELECT key FROM pyramid_shards WHERE pyramid = ?', [config_name])}
+	stranded = [
+		e for shards in expected_by_tier.values() for e in shards
+		if e.key in existing and e.key not in registered
+	]
+	if dry_run:
+		for e in stranded:
+			print(e.key)
+		err(f'{len(stranded)} stranded ({config_name})')
+		return
+	for e in stranded:
+		register_shard(
+			pyramid=config_name,
+			tier=e.tier,
+			shard_dur=e.shard_dur,
+			period_start_ms=int(e.period_start.timestamp() * 1000),
+			period_end_ms=int(e.period_end.timestamp() * 1000),
+			key=e.key,
+			written_at_ms=int(now.timestamp() * 1000),
+		)
+	print(f'{config_name}: re-registered {len(stranded)}')
+
+
 @gbfs_lambda.command('invoke', help='Async-invoke the Lambda (fire one fill run now instead of waiting for the cron tick).')
 @option('-C', '--config', 'config_name', default=None, help='Pyramid config payload (e.g. avail-v5) [default: none → handler default `avail`].')
 @option('-f', '--function', 'function_name', default=LAMBDA_FUNC, show_default=True, help='Lambda function name.')

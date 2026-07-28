@@ -86,7 +86,12 @@ def lambda_handler(event, context):
     frequent = os.environ.get('FILL_ALL') == '1'
     if os.environ.get('GC_ENABLED') == '1' and (not frequent or datetime.now(timezone.utc).minute < 5):
         from ctbk.pyramid_cascade.gc import gc_sweep
-        r = gc_sweep(config_yaml)
+        # `pyramid_name` MUST match the config: gc reads rows for
+        # `pyramid_name` but computes expected cover from `config_yaml` —
+        # mismatched (the pre-2026-07-28 default `'avail'` under the v5
+        # tick) it deletes the OTHER pyramid's objects+rows as
+        # "not in cover".
+        r = gc_sweep(config_yaml, pyramid_name=config_name)
         gc = {'eligible': r.eligible, 'deleted': r.deleted, 'skipped': r.skipped}
 
     return {'filled': by_status, 'total': len(results), 'gc': gc}
