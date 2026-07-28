@@ -7,7 +7,15 @@
  *
  * See `specs/gbfs-health-page.md` for the surfaced shape.
  */
-import { floorToSpan, listExpectedShards, parseDuration, type Pyramid, type Tier } from 'pyrmts';
+import type { Pyramid, Storage, Tier } from 'pyrmts';
+import {
+	computeAndStoreSnapshot,
+	getBuildsHealth as cfwGetBuildsHealth,
+	pyramidCover as cfwPyramidCover,
+	readCachedSnapshot,
+	type BuildProgress,
+	type PyramidCoverStatus,
+} from 'pyrmts-cfw';
 
 interface R2Object {
 	key: string;
@@ -59,97 +67,20 @@ export interface CascadeHealth {
 	expectedCells: Array<{ agg: string; cons: string; deployed: boolean }>;
 }
 
-/** Per-rung slot in a tier's current min-cover of `[genesis, now)`. In
- *  equilibrium each tier's min-cover is mostly max-rung tiles filling the
- *  closed-history region `[genesis, floor(now, max_rung))`, plus a small
- *  "dust" of finer-rung tiles filling `[floor(now, max_rung), now)`. A rung
- *  entry counts how many shards the min-cover places at that rung and how
- *  many actually exist in the ShardIndex. */
-export interface PyramidCoverRung {
-	shardDur: string;
-	role: 'max' | 'dust';
-	expected: number;   // shards the min-cover requires at this rung
-	present: number;    // of those, how many are in D1
-	pending: number;    // missing but only just closed (within grace) — cron will land them
-}
-
-/** One min-cover slot, for the timeline-bar rendering. Slots are emitted
- *  per-shard (not coalesced) so tile boundaries are visible in the bar. */
-export interface PyramidCoverSegment {
-	start: string;      // ISO
-	end: string;        // ISO (exclusive)
-	shardDur: string;
-	status: 'present' | 'pending' | 'missing';
-	key?: string;       // R2 object key (present segments — /files click-through)
-}
-
-/** Per-tier min-cover status. `complete` iff no cover slot is MISSING
- *  (pending slots — just-closed, within the write-lag grace window —
- *  don't break completeness; they flap red otherwise on every rung
- *  boundary until the next cron tick writes them). */
-export interface PyramidTierCoverStatus {
-	tier: string;
-	bin: string;
-	maxRung: string;
-	rungs: PyramidCoverRung[];               // ordered oldest → newest
-	segments: PyramidCoverSegment[];         // ordered oldest → newest
-	totalExpected: number;
-	totalPresent: number;
-	totalPending: number;
-	complete: boolean;
-	firstMissingPeriod: string | null;       // ISO of oldest MISSING cover shard, if any
-	lastMaxBoundary: string;                 // ISO of floor(now, max_rung) — dust head
-	dustAgeSec: number;                      // now - lastMaxBoundary, in seconds
-	staleShardCount: number;                 // present shards NOT in current min-cover
-}
-
-/** Per-pyramid roll-up. `allComplete` iff every tier's min-cover is satisfied. */
-export interface PyramidCoverStatus {
-	name: string;            // 'avail' / 'rides' etc.
-	genesis: string;         // ISO — cover computed over [genesis, now)
-	now: string;             // ISO snapshot time
-	tiers: PyramidTierCoverStatus[];
-	totalMissing: number;    // sum of MISSING (not pending) across tiers
-	totalPending: number;
-	totalStale: number;      // sum of staleShardCount across tiers
-	allComplete: boolean;
-}
+// Pyramid-cover + build-progress health types and logic moved upstream
+// (ops-adoption phase 4: pyrmts `specs/pyrmts-ops-adoption.md`) —
+// re-exported so consumers (Health.tsx via the snapshot shape, alerts)
+// keep importing from here.
+export type {
+	BuildLayer,
+	BuildProgress,
+	PyramidCoverRung,
+	PyramidCoverSegment,
+	PyramidCoverStatus,
+	PyramidTierCoverStatus,
+} from 'pyrmts-cfw';
 
 export type PyramidsHealth = PyramidCoverStatus[];
-
-/** A cover slot whose period closed within this window and hasn't been
- *  written yet counts as `pending`, not `missing` — the /5m cron writes
- *  just-closed rungs within a tick or two. Without this grace, every rung
- *  boundary flaps the tier red for ~1-2 min. */
-const PENDING_GRACE_MS = 10 * 60_000;
-
-/** Recency of `s3://tripdata` — the upstream Citi Bike monthly publish.
- *  Sourced from `tripdata/latest.json` in R2, refreshed every `tripdata.yml`
- *  run (independent of whether new files were imported). */
-/** Driver-written build-progress doc (`gbfs/build-progress/<pyramid>.json`,
- *  see `ctbk/pyramid_cascade/rebuild.py` `_Progress`). Loose typing on
- *  purpose — the FE renders what's present. */
-export interface BuildLayer {
-	tier: string;
-	rung: string;
-	scaffold: boolean;
-	n: number;
-	done?: number;
-	wallS?: number;
-	status?: Record<string, number>;
-}
-
-export interface BuildProgress {
-	pyramid: string;
-	driver: string;
-	startedAt: string;
-	updatedAt?: string;
-	status: 'running' | 'done' | 'bounced';
-	plan: { layers: number; invocations: number; scaffolds: number };
-	byStatus: Record<string, number>;
-	layers: BuildLayer[];
-	currentLayer: BuildLayer | null;
-}
 
 export interface TripdataHealth {
 	generatedAt: string | null;          // ISO-8601 from the refresher
@@ -423,8 +354,8 @@ const HEALTH_PYRAMIDS: [name: string, keyPrefix: string][] = [
 	['avail-v5', 'avail-v5'],
 ];
 
-/** Cover status for one registry pyramid. Null when D1 is unavailable
- *  or the pyramid has no rows yet (hidden rather than all-missing). */
+/** Cover status for one registry pyramid — `pyrmts-cfw`'s
+ *  `pyramidCover` with ctbk's key template + genesis threading. */
 async function pyramidCover(
 	db: D1Database,
 	PYRAMID: string,
@@ -433,158 +364,11 @@ async function pyramidCover(
 	TIERS: Tier[],
 	AVAIL_GENESIS: Date,
 ): Promise<PyramidCoverStatus | null> {
-	const largestPerTier: Record<string, string> = Object.fromEntries(
-		TIERS.map((t) => [t.name, t.shards[t.shards.length - 1]!])
-	);
-
-	// All shard rows for this pyramid. ~5-10k rows for avail-v3 today; well
-	// within a single D1 query.
-	type ShardRow = { tier: string; sd: string; period_start: number };
-	const shardSql =
-		`SELECT tier, ${shardCol} AS sd, period_start ` +
-		`FROM pyramid_shards WHERE pyramid = ?`;
-
-	let shardRows: ShardRow[] = [];
-	try {
-		const s = await db.prepare(shardSql).bind(PYRAMID).all<ShardRow>();
-		shardRows = s.results ?? [];
-	} catch {
-		// D1 unavailable.
-		return null;
-	}
-	if (shardRows.length === 0) return null;
-
-	// Translate legacy canonical sentinel rows: '' → tier's largest shard.
-	const norm = (tier: string, sd: string): string =>
-		sd === '' ? (largestPerTier[tier] ?? sd) : sd;
-
-	// Index: `tier\x00shardDur\x00periodStartMs` → present.
-	const presentKey = (tier: string, sd: string, periodStartMs: number) =>
-		`${tier}\x00${sd}\x00${periodStartMs}`;
-	const present = new Set<string>();
-	const presentByTier: Record<string, number> = {};
-	for (const r of shardRows) {
-		const sd = norm(r.tier, r.sd);
-		present.add(presentKey(r.tier, sd, r.period_start));
-		presentByTier[r.tier] = (presentByTier[r.tier] ?? 0) + 1;
-	}
-
-	// Min-cover of [genesis, now] per tier via pyrmts. `listExpectedShards`
-	// returns max-rung tiles filling the closed-history region + dust rungs
-	// for the trailing partial-max window. We infer `role` from the shardDur
-	// (max iff === tier's largest rung).
-	const now = new Date();
-	// pyrmts's Pyramid requires more fields for full query use, but
-	// listExpectedShards only reads `.tiers` and `.keyTemplate`. Cast the
-	// stub to shut the compiler up.
 	const pyramid = {
 		tiers: TIERS,
 		keyTemplate: `${keyPrefix}/{tier}/{shard}/{period}.parquet`,
 	} as unknown as Pyramid;
-	const expected = listExpectedShards(pyramid, { from: AVAIL_GENESIS, to: now });
-	const expectedByTier = new Map<string, typeof expected>();
-	for (const e of expected) {
-		const list = expectedByTier.get(e.tier) ?? [];
-		list.push(e);
-		expectedByTier.set(e.tier, list);
-	}
-
-	const tiers: PyramidTierCoverStatus[] = [];
-	let totalMissing = 0;
-	let totalPending = 0;
-	let totalStale = 0;
-
-	for (const t of TIERS) {
-		const maxRung = t.shards[t.shards.length - 1]!;
-		const maxSpan = parseDuration(maxRung);
-		const lastMaxBoundary = floorToSpan(now, maxSpan);
-		const cover = expectedByTier.get(t.name) ?? [];
-
-		// Aggregate by rung (preserving order of first appearance in cover).
-		const rungOrder: string[] = [];
-		const rungAgg: Record<string, { expected: number; present: number; pending: number; role: 'max' | 'dust' }> = {};
-		const segments: PyramidCoverSegment[] = [];
-		let firstMissingPeriod: string | null = null;
-		let coverPresent = 0;
-		let coverPending = 0;
-
-		for (const slot of cover) {
-			const role: 'max' | 'dust' = slot.shardDur === maxRung ? 'max' : 'dust';
-			if (!(slot.shardDur in rungAgg)) {
-				rungOrder.push(slot.shardDur);
-				rungAgg[slot.shardDur] = { expected: 0, present: 0, pending: 0, role };
-			}
-			const agg = rungAgg[slot.shardDur]!;
-			agg.expected += 1;
-			const key = presentKey(t.name, slot.shardDur, slot.periodStart.getTime());
-			let status: PyramidCoverSegment['status'];
-			if (present.has(key)) {
-				status = 'present';
-				agg.present += 1;
-				coverPresent += 1;
-			} else if (slot.periodEnd.getTime() > now.getTime() - PENDING_GRACE_MS) {
-				status = 'pending';
-				agg.pending += 1;
-				coverPending += 1;
-			} else {
-				status = 'missing';
-				if (firstMissingPeriod === null) {
-					firstMissingPeriod = slot.periodStart.toISOString();
-				}
-			}
-			// Clip the head tile to genesis so the bar's x-domain is exact.
-			const segStart = slot.effectiveStart > slot.periodStart ? slot.effectiveStart : slot.periodStart;
-			segments.push({
-				start: segStart.toISOString(),
-				end: slot.periodEnd.toISOString(),
-				shardDur: String(slot.shardDur),
-				status,
-				...(status === 'present' ? { key: slot.key } : {}),
-			});
-		}
-
-		const rungs: PyramidCoverRung[] = rungOrder.map((sd) => ({
-			shardDur: sd,
-			role: rungAgg[sd]!.role,
-			expected: rungAgg[sd]!.expected,
-			present: rungAgg[sd]!.present,
-			pending: rungAgg[sd]!.pending,
-		}));
-		const totalExpected = cover.length;
-		const tierMissing = totalExpected - coverPresent - coverPending;
-		const staleShardCount = Math.max(0, (presentByTier[t.name] ?? 0) - coverPresent);
-
-		totalMissing += tierMissing;
-		totalPending += coverPending;
-		totalStale += staleShardCount;
-
-		tiers.push({
-			tier: t.name,
-			bin: String(t.bin),
-			maxRung,
-			rungs,
-			segments,
-			totalExpected,
-			totalPresent: coverPresent,
-			totalPending: coverPending,
-			complete: tierMissing === 0,
-			firstMissingPeriod,
-			lastMaxBoundary: lastMaxBoundary.toISOString(),
-			dustAgeSec: Math.floor((now.getTime() - lastMaxBoundary.getTime()) / 1000),
-			staleShardCount,
-		});
-	}
-
-	return {
-		name: PYRAMID,
-		genesis: AVAIL_GENESIS.toISOString(),
-		now: now.toISOString(),
-		tiers,
-		totalMissing,
-		totalPending,
-		totalStale,
-		allComplete: totalMissing === 0,
-	};
+	return cfwPyramidCover(db, pyramid, { name: PYRAMID, genesis: AVAIL_GENESIS, shardCol });
 }
 
 export async function getTripdataHealth(r2: HealthR2): Promise<TripdataHealth | null> {
@@ -600,26 +384,37 @@ export async function getTripdataHealth(r2: HealthR2): Promise<TripdataHealth | 
 	};
 }
 
-/** Recent driver build-progress docs (running builds first, then most
- *  recently updated; anything idle > 7 days is dropped). */
+/** `pyrmts.Storage` view of a `HealthR2` binding — enough surface for
+ *  `pyrmts-cfw`'s JSON-doc helpers (get/put/list; the byte payloads are
+ *  all JSON, so the encode round-trip through `json()` is lossless).
+ *  `head`/`getRange` are unused by those helpers. */
+function healthR2Storage(r2: HealthR2): Storage {
+	return {
+		async get(key) {
+			const obj = await r2.get(key);
+			if (!obj) return null;
+			return new TextEncoder().encode(JSON.stringify(await obj.json()));
+		},
+		async put(key, bytes) {
+			if (r2.put) await r2.put(key, new TextDecoder().decode(bytes));
+		},
+		async *list(prefix) {
+			let cursor: string | undefined;
+			do {
+				const page = await r2.list({ prefix, cursor, limit: 1000 });
+				for (const o of page.objects) yield o.key;
+				cursor = page.truncated ? page.cursor : undefined;
+			} while (cursor);
+		},
+		head() { throw new Error('healthR2Storage: head unsupported'); },
+		getRange() { throw new Error('healthR2Storage: getRange unsupported'); },
+	};
+}
+
+/** Recent driver build-progress docs — `pyrmts-cfw`'s `getBuildsHealth`
+ *  over the ctbk progress prefix. */
 export async function getBuildsHealth(r2: HealthR2): Promise<BuildProgress[]> {
-	const listing = await r2.list({ prefix: 'gbfs/build-progress/', limit: 20 });
-	const out: BuildProgress[] = [];
-	for (const o of listing.objects) {
-		const obj = await r2.get(o.key);
-		if (!obj) continue;
-		try {
-			const doc = await obj.json<BuildProgress>();
-			const updated = Date.parse(doc.updatedAt ?? doc.startedAt ?? '');
-			if (Number.isFinite(updated) && Date.now() - updated < 7 * 86_400_000) out.push(doc);
-		} catch {
-			// Malformed doc — skip.
-		}
-	}
-	out.sort((a, b) =>
-		Number(b.status === 'running') - Number(a.status === 'running')
-		|| Date.parse(b.updatedAt ?? '0') - Date.parse(a.updatedAt ?? '0'));
-	return out;
+	return cfwGetBuildsHealth(healthR2Storage(r2), { prefix: 'gbfs/build-progress/' });
 }
 
 export async function getHealthSnapshot(
@@ -657,14 +452,14 @@ export const HEALTH_SNAPSHOT_KEY = 'health/snapshot.json';
  *  cadence so a single missed tick doesn't blow the fast path. */
 export const HEALTH_SNAPSHOT_MAX_AGE_S = 300;
 
-/** Compute the snapshot and persist it to R2 (cron path). */
+/** Compute the snapshot and persist it to R2 (cron path) — `pyrmts-cfw`'s
+ *  snapshot-cache pattern. */
 export async function computeAndStoreHealthSnapshot(
 	r2: HealthR2,
 	db?: D1Database,
 ): Promise<HealthSnapshot> {
-	const snapshot = await getHealthSnapshot(r2, db);
-	if (r2.put) await r2.put(HEALTH_SNAPSHOT_KEY, JSON.stringify(snapshot));
-	return snapshot;
+	return computeAndStoreSnapshot(
+		healthR2Storage(r2), HEALTH_SNAPSHOT_KEY, () => getHealthSnapshot(r2, db));
 }
 
 /** Read the cron-refreshed snapshot if it's fresh; null → caller computes
@@ -672,9 +467,6 @@ export async function computeAndStoreHealthSnapshot(
 export async function readCachedHealthSnapshot(
 	r2: HealthR2,
 ): Promise<HealthSnapshot | null> {
-	const obj = await r2.get(HEALTH_SNAPSHOT_KEY);
-	if (!obj) return null;
-	const snapshot = await obj.json<HealthSnapshot>();
-	const ageS = Math.floor(Date.now() / 1000) - (snapshot.generatedAt ?? 0);
-	return ageS <= HEALTH_SNAPSHOT_MAX_AGE_S ? snapshot : null;
+	return readCachedSnapshot<HealthSnapshot>(
+		healthR2Storage(r2), HEALTH_SNAPSHOT_KEY, HEALTH_SNAPSHOT_MAX_AGE_S);
 }
