@@ -287,7 +287,7 @@ def build_lambda_app(
     import os
     from pyrmts_ops import LambdaApp
     from pyrmts_ops.gc import D1GcRegistry
-    from .d1_http import ProxyShardIndex, _db
+    from .d1_http import _db
     from .gc import RAW_PREFIX
 
     pyramid, r2, raw_fill = _build_context(config_yaml)
@@ -298,7 +298,13 @@ def build_lambda_app(
         pyramid=pyramid,
         pyramid_name=pyramid_name,
         genesis=AVAIL_GENESIS,
-        shard_index=ProxyShardIndex(pyramid_name),
+        # No registration from the Lambda: the api worker's cron is the
+        # sole registrar (expected-cover ∩ R2 − registered, ≤1 min lag),
+        # so the Lambda is a pure R2 compute node — no D1 write path, no
+        # split-brain exposure. Correctness: GC grace (15 min) exceeds
+        # registration lag, so a not-yet-registered coarse tile's finer
+        # tiles keep serving until its row lands.
+        shard_index=None,
         raw_fill=raw_fill,
         sort=AVAIL_SORT,
         fill_all=os.environ.get('FILL_ALL') == '1',

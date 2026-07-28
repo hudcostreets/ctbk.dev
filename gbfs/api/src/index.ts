@@ -1198,8 +1198,9 @@ export default {
 				const entry = {
 					colo: cf.colo, ip: request.headers.get('CF-Connecting-IP'),
 					asn: cf.asn, asOrganization: cf.asOrganization,
+					ray: request.headers.get('cf-ray'),
 				};
-				console.log(`registry: op=${body.op} colo=${entry.colo} ip=${entry.ip} asn=${entry.asn} (${entry.asOrganization})`);
+				console.log(`registry: op=${body.op} colo=${entry.colo} ray=${entry.ray} ip=${entry.ip} asn=${entry.asn} (${entry.asOrganization})`);
 				if (body.op === 'existing_keys') {
 					if (!body.pyramid) return errorResponse('pyramid required', 400, env);
 					const rs = await env.DB.prepare(

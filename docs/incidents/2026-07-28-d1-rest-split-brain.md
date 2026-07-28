@@ -36,7 +36,7 @@ Repeat observations with distinct `written_at` values: 17:16:41 (`1785259000987`
 
 - No serving impact: the read path uses the Workers **binding**, which stayed consistent with the majority view throughout.
 - Registry writes from the affected Lambda were stranded in the divergent copy (~190 rows repeatedly re-registered by an in-function reconcile, all into the wrong store); an external (laptop-side) reconcile kept the true store current every 15 min until a Worker-cron reconcile replaced it (below).
-- A registry-driven GC was disabled for the duration (deletions decided from a divergent row view could destroy real objects).
+- A registry-driven GC was disabled for the duration. The precise hazard is an asymmetry the split creates: object deletion is **global** (R2 is one store) but row deletion is **per-instance** — a GC run whose registry view is the divergent instance deletes the R2 object plus *that instance's* row, leaving the true registry with a dangling registration that serves 404s indefinitely (the reconcile won't re-register a key outside the expected cover — that's why GC chose it). Late GC is harmless (storage cost only); split-view GC is not.
 - **Durable fix — self-healing reconcile in the Worker cron** (`gbfs/api` `scheduled()`, every minute): registers any expected-min-cover shard that exists on R2 (HEAD-verified) but is missing from `pyramid_shards`. Shard *objects* are the source of truth and R2 never forked, so this closes the loop entirely inside Cloudflare with no external driver — and permanently closes the write-then-die registration window too. Verified: a tick's stranded tip row landed in the true store ≤1 min after registration.
   - Cron executions are themselves colo-variable: fork-side runs see the fork's stale registry and harmlessly back-fill the *fork* (observed: 186/180 avail-v3 rows "re-registered" that truth already had — insert-only, truth untouched). Truth-side runs do the real work. The recurring bulk-strand log lines double as a live fork indicator; when they stop, the split has healed.
 - The Lambda's registrations were also re-routed through a narrow authenticated Worker endpoint (D1 *binding* write path) — which proved the fork is below the API surface (see the colo update below) but does not dodge it; the cron reconcile is what guarantees truth convergence.
@@ -81,6 +81,24 @@ and a register of avail-v5/1m/5min/2026-07-28T20-50.parquet acked
 ```
 
 The truthful (EWR-entry) requests' meta, same window: `served_by: "v3-prod"`, colo `ORD`, `served_by_primary: true`, `size_after: 876544` — with **322** rows, and the IAD-acked key absent. Identical backend labels, identical reported DB size, divergent contents, both self-identifying as the ORD primary. This is not a mislabeled read replica: Cloudflare's own response metadata asserts primary on both sides of the fork.
+
+## Correlation IDs
+
+Truth-side samples (laptop REST, ~22:05 UTC 2026-07-28, both returning the majority view, `served_by_colo: ORD`):
+
+- `cf-ray: a227b83e7f3d18ad-EWR`
+- `cf-ray: a227b83ffaa8ffd0-EWR`
+
+Divergent-side events for edge-log correlation (Workers-binding path via `ctbk-gbfs-api.ryan-0dc.workers.dev`, entry colo **IAD**, client IP `98.92.67.143`, AS14618):
+
+- ~20:41–20:43 UTC: 4× `POST /api/registry` `op=existing_keys` returning **330** rows (majority view: 322) + 1× `op=register` of `avail-v5/1m/5min/2026-07-28T20-40.parquet` acked (`rows_written: 1`) into the divergent copy — its `meta` claiming `served_by: v3-prod / ORD / served_by_primary: true`.
+- 20:16:47 and 20:26:34 UTC: registers of `avail-v5/1m/5min/2026-07-28T20-10.parquet` / `…T20-20.parquet`, HTTP 200, absent from the majority view.
+
+(We no longer generate divergent-side traffic: the affected Lambda's registry client was removed entirely — see below — so fresh IAD-side rays would require temporarily restoring a probe. Happy to on request.)
+
+## Resolution on our side: registrations are now single-writer + fully derived
+
+Beyond containment, the design was changed so the split can no longer affect correctness: the Lambda no longer writes the registry **at all** (pure R2 compute node — no D1 client, no CF API token on the write path). The Worker cron is the sole registrar, deriving rows as `expected-min-cover ∩ exists-on-R2 − registered` every minute. Since the registry is now a pure function of R2 state (which never forked), **any** D1 instance converges to the same derived content within ~1–2 min of the cron reaching it — a reader landing on either side of a split sees correct (at worst ≤2-min-stale) covers. The remaining exposure is CF-internal only: which instance survives, and whether acked writes to the discarded one matter to other customers.
 
 ## Open questions for Cloudflare
 
