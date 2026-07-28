@@ -66,7 +66,7 @@ class TestCompareStreaming:
 
     def test_row_count_mismatch(self, pyramid):
         assert _compare_streaming(blob(ROWS), blob(ROWS[:3]), pyramid, chunk_rows=2) == \
-            ('diff', 'row counts: engine 4 vs real 3')
+            ('diff', 'row counts: 4 vs 3')
 
     def test_empty_both(self, pyramid):
         assert _compare_streaming(blob([]), blob([]), pyramid) == ('empty_both', '')

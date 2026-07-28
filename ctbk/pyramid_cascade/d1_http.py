@@ -68,6 +68,32 @@ def registered_keys(pyramid: str) -> set[str]:
     return {r['key'] for r in d1_query('SELECT key FROM pyramid_shards WHERE pyramid = ?', [pyramid])}
 
 
+class ProxyShardIndex:
+    """`pyrmts_engine.shard_index.ShardIndex` protocol over this module's
+    proxy-aware `register_shard`/`registered_keys` — so consolidate-path
+    registrations route through the worker-binding proxy when configured
+    (the 2026-07-28 split-brain workaround), not upstream's direct-REST
+    `D1ShardIndex`. `md5`/`n_bytes` are dropped: the `pyramid_shards`
+    table doesn't carry them."""
+
+    def __init__(self, pyramid_name: str) -> None:
+        self.pyramid_name = pyramid_name
+
+    def record_shard(self, rec) -> None:
+        register_shard(
+            pyramid=rec.pyramid,
+            tier=rec.tier,
+            shard_dur=rec.shard_dur,
+            period_start_ms=rec.period_start_ms,
+            period_end_ms=rec.period_end_ms,
+            key=rec.key,
+            written_at_ms=rec.written_at_ms,
+        )
+
+    def existing_keys(self) -> set[str]:
+        return registered_keys(self.pyramid_name)
+
+
 def register_shard(
     *,
     pyramid: str,

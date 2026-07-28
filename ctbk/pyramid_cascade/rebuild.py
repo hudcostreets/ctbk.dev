@@ -1,269 +1,46 @@
-"""Fan-out bulk rebuilds via single-gap Lambda invocations.
-
-`specs/avail-v3-lambda-rebuild.md`: stale-content re-keys (e.g. a
-station-luc denorm change) invalidate every shard built before the
-re-key. Serial in-Lambda filling can't cover a full-ladder rebuild
-(~150 shards × 1-4 min ≫ the 12-min budget), and `e` costs hours of
-16-core wall time plus a live box. Instead: discover gaps locally
-(~seconds), then invoke the schedule-less `ctbk-avail-rebuild` function
-once per gap — concurrency bounded only by the driver's thread pool.
-
-Invocations are SYNCHRONOUS (`RequestResponse` from a thread pool)
-rather than the async+poll sketch in the spec: the driver learns each
-shard's exact status from the invoke response — no D1/R2 completion
-polling, and no Lambda-service async retries that could double-invoke.
-
-Layering: gaps are grouped by `(tier, rung)` in dependency order
-(finest tier first, smallest rung first) with a barrier between
-layers. Rung barriers matter within a tier: `materialize_extension_shard`
-tiles a gap from same-tier SUB-rung shards, so rebuilding `/1m@5min`
-first (from raw) lets `/1m@10min`+ concat just-rebuilt tiles instead of
-re-reading the raw WAL per rung. A layer-order violation is safe but
-wasteful — a missing source bounces `no_inputs` and a re-run picks it
-up (discovery sees fresh mtimes; completed shards skip).
+"""Fan-out bulk rebuilds — thin wrapper over `pyrmts_ops.run_rebuild`
+(moved upstream, ops-adoption phase 3: pyrmts `specs/pyrmts-ops-adoption.md`;
+originally `specs/done/avail-v3-lambda-rebuild.md`). ctbk residue: the
+function names, the `gbfs/build-progress/` prefix, the avail genesis, and
+the measured 2026-07 cost model (which upstream also carries as defaults).
 """
 from __future__ import annotations
 
-import json
-import time as _time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime
 
-from utz import err
+from pyrmts import Pyramid
+from pyrmts.types import Tier
+from pyrmts_ops import FanoutConfig
+from pyrmts_ops import run_rebuild as _run_rebuild
+from pyrmts_ops.rebuild import expand_scaffolds as _expand_scaffolds
+from pyrmts_ops.rebuild import fill_safe_rung as _fill_safe_rung
 
 from .lite import AVAIL_GENESIS
 
 REBUILD_FUNC = 'ctbk-avail-rebuild'
 TICK_FUNC = 'ctbk-avail-cascade'
-
-# Max whole-period fill size per invocation, in SOURCE bins (raw minutes
-# for the finest tier; source-tier bins elsewhere). A rebuilt-from-scratch
-# max-rung shard has no fresh sub-rungs to concat (GC swept them long
-# ago), so its build degenerates to a full-period raw/cross-tier fill —
-# measured in-Lambda: /1m@12h (720 raw minutes) = 258 s; /1m@2d (2880)
-# times out at the hard 900 s cap. 720 leaves ~3.5× headroom.
 SOURCE_BIN_BUDGET = 720
-
-# Per-class cost model for `--plan` estimates (measured, 2026-07 builds):
-# raw fill 258s/720 bins; cross-tier rebin varies 0.2-0.7 s/source-bin
-# post-streaming-fix (use the middle); same-tier concats are ~seconds
-# regardless of size (I/O + sort dominated).
-RAW_S_PER_BIN = 0.36
-XTIER_S_PER_SRCBIN = 0.45
-CONCAT_S = 25.0
-LAMBDA_USD_PER_S = 10 * 0.0000166667  # 10 GB memory
+PROGRESS_PREFIX = 'gbfs/build-progress/'
 
 
-def _estimate_layer(pyramid, tier_name: str, rung: str, n: int, is_scaffold: bool) -> tuple[float, str]:
-    """(est seconds per shard, class label) for one `(tier, rung)` layer.
-    Scaffolds and each tier's smallest rung are whole-period fills (raw
-    at the finest tier, cross-tier rebin elsewhere); larger rungs concat
-    just-built same-tier tiles."""
-    from .lambda_exec import _source_tier_for
-    from .lite import dur_min
-    tier = next(t for t in pyramid.tiers if t.name == tier_name)
-    finest = min(pyramid.tiers, key=lambda t: dur_min(t.bin))
-    if not is_scaffold and rung != tier.shards[0]:
-        return CONCAT_S, 'concat'
-    if tier.name == finest.name:
-        return dur_min(rung) * RAW_S_PER_BIN, 'raw-fill'
-    src = _source_tier_for(pyramid, tier.name)
-    src_bins = dur_min(rung) // dur_min(src.bin)
-    return src_bins * XTIER_S_PER_SRCBIN, 'xtier-fill'
+def _fanout_config(function_name: str = REBUILD_FUNC) -> FanoutConfig:
+    return FanoutConfig(
+        function_name=function_name,
+        tick_function=TICK_FUNC,
+        progress_prefix=PROGRESS_PREFIX,
+        source_bin_budget=SOURCE_BIN_BUDGET,
+    )
 
 
-def print_plan(
-    pyramid,
-    layers: list[tuple[str, str, list, bool]],
-    concurrency: int,
-    dot_path: str | None = None,
-) -> None:
-    """Per-layer plan with wall/cost estimates (layers are sequential
-    barriers, so total wall = Σ per-layer walls at the given `-c`), plus
-    an optional Graphviz DAG of the semantic dependencies: concat layers
-    depend on their tier's scaffold layer; fill layers depend on the
-    source tier's last layer (raw for the finest tier)."""
-    import math
-    from .lambda_exec import _source_tier_for
-    from .lite import dur_min
-    total_wall = total_compute = 0.0
-    rows = []
-    last_layer_of_tier: dict[str, str] = {}
-    nodes: list[tuple[str, str, float, int]] = []
-    edges: list[tuple[str, str]] = []
-    finest = min(pyramid.tiers, key=lambda t: dur_min(t.bin)).name
-    for tier, rung, batch, is_scaffold in layers:
-        per, cls = _estimate_layer(pyramid, tier, rung, len(batch), is_scaffold)
-        wall = math.ceil(len(batch) / concurrency) * per
-        compute = len(batch) * per
-        total_wall += wall
-        total_compute += compute
-        node = f'{tier}@{rung}' + (' [scaffold]' if is_scaffold else '')
-        rows.append((node, len(batch), cls, per, wall))
-        nodes.append((node, cls, compute, len(batch)))
-        if cls == 'concat':
-            dep = last_layer_of_tier.get(tier)
-        elif tier == finest:
-            dep = 'raw WAL'
-        else:
-            src = _source_tier_for(pyramid, tier)
-            dep = last_layer_of_tier.get(src.name, 'raw WAL')
-        if dep:
-            edges.append((dep, node))
-        last_layer_of_tier[tier] = node
-    err(f"{'layer':<22} {'n':>5} {'class':<11} {'s/shard':>8} {'est wall':>9}")
-    for node, n, cls, per, wall in rows:
-        err(f'{node:<22} {n:>5} {cls:<11} {per:>7.0f}s {wall:>8.0f}s')
-    err(f'plan: {sum(r[1] for r in rows)} invocations | est wall ≈ '
-        f'{total_wall / 60:.0f} min at -c {concurrency} | est compute ≈ '
-        f'{total_compute / 3600:.1f} Lambda-hrs ≈ ${total_compute * LAMBDA_USD_PER_S:.2f}')
-    if dot_path:
-        with open(dot_path, 'w') as f:
-            f.write('digraph build {\n  rankdir=LR;\n  node [shape=box, fontsize=10];\n')
-            f.write('  "raw WAL" [shape=cylinder];\n')
-            for node, cls, compute, n in nodes:
-                f.write(f'  "{node}" [label="{node}\\n{n}× {cls}, ~{compute / 60:.0f} min"];\n')
-            for a, b in edges:
-                f.write(f'  "{a}" -> "{b}";\n')
-            f.write('}\n')
-        err(f'DAG → {dot_path}')
+def fill_safe_rung(pyramid: Pyramid, tier: Tier) -> str:
+    return _fill_safe_rung(pyramid, tier, source_bin_budget=SOURCE_BIN_BUDGET)
 
 
-def fill_safe_rung(pyramid, tier) -> str:
-    """Largest rung of `tier` whose whole-period fill fits
-    `SOURCE_BIN_BUDGET` — the scaffold rung for bigger siblings."""
-    from .lambda_exec import _source_tier_for
-    from .lite import dur_min
-    src = _source_tier_for(pyramid, tier.name)
-    src_bin = dur_min(src.bin) if src is not None else 1  # finest tier fills from raw minutes
-    fits = [r for r in tier.shards if dur_min(r) // src_bin <= SOURCE_BIN_BUDGET]
-    if not fits:
-        raise ValueError(f"tier {tier.name}: no rung fits {SOURCE_BIN_BUDGET} source bins")
-    return max(fits, key=dur_min)
-
-
-def expand_scaffolds(
-    pyramid,
-    layers: list[tuple[str, str, list]],
-) -> list[tuple[str, str, list, bool]]:
-    """Insert scaffold layers so no invocation's fill exceeds the budget.
-
-    For each tier, rungs above its fill-safe rung F get a preceding
-    layer of F-sized shards tiling their gap periods (epoch-aligned; gap
-    periods are F-aligned by the divisibility chain). The big rungs then
-    concat 2-16 fresh F-tiles instead of raw/cross-tier-filling their
-    whole period. Scaffolds are deduped across the tier's big rungs.
-
-    Scaffolds are real in-ladder shards but are invoked with
-    `register=False`: `gc_sweep` is D1-driven, so unregistered keys
-    can't be GC'd mid-rebuild (the hourly sweep would otherwise see a
-    same-tier covering parent — the STALE max-rung shard — and delete a
-    scaffold before its parent concat runs); D1-gated reads never see
-    them either. The driver deletes them after a clean run; a bounced
-    run keeps them, and the re-run reuses them (fresh mtimes → picked
-    up by the in-Lambda listing, 'exists'-skipped as scaffold targets).
-
-    Returns `(tier, rung, batch, is_scaffold)` layers in fill order.
-    """
-    from datetime import timedelta
-    from pyrmts import ExpectedShard
-    from .lambda_exec import _shard_key
-    from .lite import dur_min
-
-    tiers = {t.name: t for t in pyramid.tiers}
-    out: list[tuple[str, str, list, bool]] = []
-    scaffolded: dict[str, set[str]] = {}  # tier -> scaffold keys already planned
-    for tier_name, rung, batch in layers:
-        tier = tiers[tier_name]
-        safe = fill_safe_rung(pyramid, tier)
-        if dur_min(rung) > dur_min(safe):
-            dur = timedelta(minutes=dur_min(safe))
-            seen = scaffolded.setdefault(tier_name, set())
-            slots: list[ExpectedShard] = []
-            for gap in batch:
-                cur = gap.period_start
-                while cur < gap.period_end:
-                    slot_end = cur + dur
-                    key = _shard_key(pyramid, tier_name, safe, cur)
-                    if slot_end > AVAIL_GENESIS and key not in seen:
-                        seen.add(key)
-                        slots.append(ExpectedShard(
-                            tier=tier_name, shard_dur=safe,
-                            period_start=cur, period_end=slot_end,
-                            effective_start=max(cur, AVAIL_GENESIS),
-                            effective_end=slot_end,
-                            key=key,
-                        ))
-                    cur = slot_end
-            if slots:
-                out.append((tier_name, safe, slots, True))
-        out.append((tier_name, rung, batch, False))
-    return out
-
-
-def touch_tick_function(function_name: str = TICK_FUNC) -> datetime:
-    """Recycle the steady-state tick function's execution environments
-    by bumping a no-op env var (`DENORM_REV`). Warm containers cache the
-    station-luc chains per process (`_luc_chains`); after a denorm
-    re-key they'd keep writing tail shards with the OLD anchors — with
-    fresh mtimes, invisible to any `stale_before`. Returns the update's
-    completion time: the earliest instant from which all tick writes are
-    known to use the new denorm (the correct effective `stale_before`)."""
-    import boto3
-    lam = boto3.client('lambda')
-    cfg = lam.get_function_configuration(FunctionName=function_name)
-    env = cfg['Environment']['Variables']
-    env['DENORM_REV'] = datetime.now(timezone.utc).isoformat()
-    lam.update_function_configuration(
-        FunctionName=function_name, Environment={'Variables': env})
-    lam.get_waiter('function_updated').wait(FunctionName=function_name)
-    ts = datetime.now(timezone.utc)
-    err(f"touched {function_name} (DENORM_REV={env['DENORM_REV']}) — "
-        f"effective stale_before {ts.isoformat()}")
-    return ts
-
-
-class _Progress:
-    """Best-effort build-progress JSON on R2 (`gbfs/build-progress/
-    <pyramid>.json`) — feeds the /health builds card. Written at layer
-    boundaries + intra-layer checkpoints; a PUT failure warns once and
-    disables itself (progress reporting must never fail a rebuild)."""
-
-    def __init__(self, config_name: str, layers: list) -> None:
-        from .lite import R2_BUCKET, r2_client
-        self.key = f'gbfs/build-progress/{config_name}.json'
-        self.bucket = R2_BUCKET
-        self.r2 = r2_client()
-        self.enabled = True
-        self.started_at = datetime.now(timezone.utc).isoformat()
-        self.doc: dict = {
-            'pyramid': config_name,
-            'driver': 'lambda-fanout',
-            'startedAt': self.started_at,
-            'status': 'running',
-            'plan': {
-                'layers': len(layers),
-                'invocations': sum(len(b) for _, _, b, _ in layers),
-                'scaffolds': sum(len(b) for _, _, b, s in layers if s),
-            },
-            'byStatus': {},
-            'layers': [],       # completed layers: {tier, rung, scaffold, n, wallS, status}
-            'currentLayer': None,
-        }
-
-    def write(self, **updates) -> None:
-        if not self.enabled:
-            return
-        self.doc.update(updates)
-        self.doc['updatedAt'] = datetime.now(timezone.utc).isoformat()
-        try:
-            self.r2.put_object(
-                Bucket=self.bucket, Key=self.key,
-                Body=json.dumps(self.doc).encode(), ContentType='application/json',
-            )
-        except Exception as e:
-            self.enabled = False
-            err(f'  (build-progress writes disabled: {e})')
+def expand_scaffolds(pyramid: Pyramid, layers: list) -> list:
+    return _expand_scaffolds(
+        pyramid, layers,
+        genesis=AVAIL_GENESIS, source_bin_budget=SOURCE_BIN_BUDGET,
+    )
 
 
 def run_rebuild(
@@ -279,131 +56,21 @@ def run_rebuild(
     config_name: str = 'avail',
     dot_path: str | None = None,
 ) -> dict[str, int]:
-    """Discover → layer (+ scaffolds) → fan out. Returns `{status: count}`.
-
-    Idempotent + resumable: a re-run's discovery sees fresh mtimes and
-    'exists'-skips completed shards; a killed driver loses nothing
-    (per-shard D1 registration happens inside each invocation), and
-    leftover scaffolds get reused then cleaned by the re-run."""
-    from pyrmts import parse_pyramid_yaml, pyramid_from_config
-    from .fsck import discover_gaps, group_by_tier_rung
-    from .lambda_exec import encode_gap, merge_lambda_shards
+    from pyrmts import merge_lambda_shards, parse_pyramid_yaml, pyramid_from_config
     from .storage import storage_from_cfg
 
-    if touch_tick:
-        if dry_run:
-            err('(dry-run: skipping tick touch; planning with stale_before=now)')
-            ts = datetime.now(timezone.utc)
-        else:
-            ts = touch_tick_function()
-        stale_before = ts if stale_before is None else max(stale_before, ts)
-
-    now = datetime.now(timezone.utc)
-    merged_yaml = merge_lambda_shards(config_yaml)
-    cfg = parse_pyramid_yaml(merged_yaml)
+    cfg = merge_lambda_shards(parse_pyramid_yaml(config_yaml))
     pyramid = pyramid_from_config(cfg, storage_from_cfg(cfg.storage))
-    gaps, _existing, expected_by_tier = discover_gaps(
-        pyramid, (AVAIL_GENESIS, now), stale_before=stale_before)
-    # Trailing max-shards whose notional period ends pre-genesis can
-    # never exist (same exclusion as `run_extension_fill`).
-    gaps = [g for g in gaps if g.period_end > AVAIL_GENESIS]
-    layers = expand_scaffolds(pyramid, group_by_tier_rung(gaps))
-    n_scaffold = sum(len(b) for _, _, b, s in layers if s)
-    err(f"rebuild: {len(gaps)} shards + {n_scaffold} scaffolds across "
-        f"{len(layers)} (tier, rung) layers")
-    if dry_run:
-        print_plan(pyramid, layers, concurrency, dot_path)
-        return {}
-
-    import boto3
-    from botocore.config import Config
-    lam = boto3.client('lambda', config=Config(
-        connect_timeout=10,
-        read_timeout=920,  # ≥ the function's 900 s timeout
-        max_pool_connections=concurrency + 4,
-        # No transport-level retries: a read timeout must not re-invoke
-        # a shard build (idempotent, but doubles the work).
-        retries={'mode': 'standard', 'max_attempts': 1},
-    ))
-    sb_iso = stale_before.isoformat() if stale_before else None
-
-    def invoke(gap, register: bool) -> dict:
-        payload: dict = {'gap': encode_gap(gap), 'register': register, 'config': config_name}
-        if sb_iso:
-            payload['stale_before'] = sb_iso
-        resp = lam.invoke(FunctionName=function_name,
-                          Payload=json.dumps(payload).encode())
-        body = json.loads(resp['Payload'].read() or b'null')
-        if resp.get('FunctionError'):
-            return {'status': 'error', 'error': json.dumps(body)[:300]}
-        return body or {'status': 'error', 'error': 'empty invoke response'}
-
-    by_status: dict[str, int] = {}
-    scaffold_keys: set[str] = set()
-    done = 0
-    t0 = _time.time()
-    progress = _Progress(config_name, layers)
-    progress.write()
-    for tier, rung, batch, is_scaffold in layers:
-        if limit is not None:
-            if done >= limit:
-                err(f"  hit --limit {limit}; stopping")
-                break
-            batch = batch[:limit - done]
-        if is_scaffold:
-            scaffold_keys.update(g.key for g in batch)
-        lt0 = _time.time()
-        layer_status: dict[str, int] = {}
-        cur = {'tier': tier, 'rung': rung, 'scaffold': is_scaffold, 'n': len(batch), 'done': 0}
-        progress.write(currentLayer=cur)
-        with ThreadPoolExecutor(max_workers=min(concurrency, len(batch))) as pool:
-            futs = {pool.submit(invoke, g, not is_scaffold): g for g in batch}
-            for fut in as_completed(futs):
-                g = futs[fut]
-                try:
-                    r = fut.result()
-                except Exception as e:
-                    r = {'status': 'error', 'error': str(e)}
-                st = r.get('status') or 'error'
-                layer_status[st] = layer_status.get(st, 0) + 1
-                by_status[st] = by_status.get(st, 0) + 1
-                done += 1
-                if st in ('error', 'no_inputs'):
-                    detail = f": {r['error']}" if r.get('error') else ""
-                    err(f"  ! /{g.tier}@{g.shard_dur} {g.period_start.date()} → {st}{detail}")
-                n_done = sum(layer_status.values())
-                if len(batch) > concurrency and n_done % 25 == 0:
-                    err(f"  … /{tier}@{rung}: {n_done}/{len(batch)} ({_time.time() - lt0:.0f}s)")
-                    cur['done'] = n_done
-                    progress.write(byStatus=dict(by_status))
-        err(f"  /{tier}@{rung}{' [scaffold]' if is_scaffold else ''}: {len(batch)} → "
-            + ", ".join(f"{k}={v}" for k, v in sorted(layer_status.items()))
-            + f" ({_time.time() - lt0:.0f}s)")
-        progress.doc['layers'].append({
-            'tier': tier, 'rung': rung, 'scaffold': is_scaffold, 'n': len(batch),
-            'wallS': round(_time.time() - lt0, 1), 'status': dict(layer_status),
-        })
-        progress.write(currentLayer=None, byStatus=dict(by_status))
-    err(f"rebuild: {done} shards in {(_time.time() - t0) / 60:.1f} min: "
-        + (", ".join(f"{k}={v}" for k, v in sorted(by_status.items())) or "nothing to do"))
-
-    bounced = (bool(by_status.get('no_inputs') or by_status.get('error'))
-               or (limit is not None and done >= limit))
-    progress.write(status='bounced' if bounced else 'done', byStatus=dict(by_status))
-    if bounced:
-        err("some shards bounced — re-run the same command to retry "
-            "(discovery skips completed shards; scaffolds kept for reuse)")
-    # Expected-cover keys are never scaffolds to clean: a scaffold slot
-    # coinciding with an expected shard was rebuilt (and registered) in
-    # its own earlier layer and must stay.
-    expected_keys = {e.key for batch in expected_by_tier.values() for e in batch}
-    to_clean = sorted(scaffold_keys - expected_keys)
-    if to_clean and not bounced and not keep_scaffolds:
-        from .lite import R2_BUCKET, r2_client
-        r2 = r2_client()
-        for key in to_clean:
-            r2.delete_object(Bucket=R2_BUCKET, Key=key)
-        err(f"cleaned {len(to_clean)} scaffold keys")
-    elif to_clean:
-        err(f"kept {len(to_clean)} scaffold keys (unregistered; reused by a re-run)")
-    return by_status
+    return _run_rebuild(
+        pyramid,
+        genesis=AVAIL_GENESIS,
+        pyramid_name=config_name,
+        cfg=_fanout_config(function_name),
+        stale_before=stale_before,
+        touch_tick=touch_tick,
+        concurrency=concurrency,
+        dry_run=dry_run,
+        limit=limit,
+        keep_scaffolds=keep_scaffolds,
+        dot_path=dot_path,
+    )
