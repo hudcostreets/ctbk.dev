@@ -546,6 +546,44 @@ def materialize_extension_shard(
     )
 
 
+def _reconcile_registrations(
+    expected_by_tier: dict,
+    existing: set[str],
+    pyramid_name: str,
+    now: datetime,
+) -> None:
+    """Re-register expected shards that exist on storage but are absent
+    from D1. A write-then-die (e.g. the 15-min timeout landing between an
+    R2 put and its registration) strands an unregistered object forever:
+    storage-based discovery sees the key and never re-fills, while
+    D1-gated serving never sees the shard. One SELECT per tick closes
+    that window. Best-effort: a D1 outage must not block the fill."""
+    from .d1_http import d1_query, register_shard
+    try:
+        rows = d1_query(
+            'SELECT key FROM pyramid_shards WHERE pyramid = ?', [pyramid_name])
+        registered = {r['key'] for r in rows}
+    except Exception as e:
+        err(f'  reconcile: D1 read failed ({e}); skipping this tick')
+        return
+    stranded = [
+        e for shards in expected_by_tier.values() for e in shards
+        if e.key in existing and e.key not in registered
+    ]
+    for e in stranded:
+        register_shard(
+            pyramid=pyramid_name,
+            tier=e.tier,
+            shard_dur=e.shard_dur,
+            period_start_ms=int(e.period_start.timestamp() * 1000),
+            period_end_ms=int(e.period_end.timestamp() * 1000),
+            key=e.key,
+            written_at_ms=int(now.timestamp() * 1000),
+        )
+    if stranded:
+        err(f'  reconcile: re-registered {len(stranded)} present-but-unregistered shards')
+
+
 def run_extension_fill(
     config_yaml: str,
     *,
@@ -584,6 +622,8 @@ def run_extension_fill(
 
     gaps, existing, _expected = discover_gaps(
         pyramid, (AVAIL_GENESIS, now), stale_before=stale_before)
+    if register and not dry_run:
+        _reconcile_registrations(_expected, existing, pyramid_name, now)
     # Any gap with same-tier sub-rungs to build from is ours — extension
     # rungs by design, but also in-ladder rungs the CFW couldn't produce
     # (e.g. `too_large` bounces: /3m@2d's ragged 95 MB plan). Gaps at a
