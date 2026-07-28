@@ -466,6 +466,7 @@ import {
 	type Side,
 } from './planQuery';
 import { binAndAggregate } from './bin';
+import { listExpectedShards, type Pyramid } from 'pyrmts';
 import {
 	AVAIL_RAW_PROJECTION,
 	aggregateTotals,
@@ -1110,6 +1111,55 @@ async function executeRidesQuery(
 	return { rows: slice, totalRows, page: q.page, pageSize: q.pageSize };
 }
 
+/** Pyramids whose registrations the cron reconciles: D1 pyramid name →
+ *  R2 key prefix. */
+const RECONCILE_PYRAMIDS: [string, string][] = [
+	['avail', 'avail-v3/'],
+	['avail-v5', 'avail-v5/'],
+];
+
+/** Register expected-cover shards that exist on R2 but are missing from
+ *  `pyramid_shards`: expected(min-cover of [genesis, now)) − registered,
+ *  HEAD-verified on R2. Same semantics as the Python-side
+ *  `reconcile_registrations` — expected-cover-filtered, so rebuild
+ *  scaffolds (deliberately unregistered sub-rung tiles) are never
+ *  registered. The candidate set is tiny (rolling tip gaps + stranded
+ *  rows), so this is a few HEADs per minute, not a full LIST. */
+async function reconcileRegistry(env: Env): Promise<void> {
+	const { TIERS, AVAIL_GENESIS } = await import('./avail_geo');
+	const now = new Date();
+	for (const [pyramid, prefix] of RECONCILE_PYRAMIDS) {
+		// listExpectedShards only reads `.tiers` and `.keyTemplate` (same
+		// stub-cast as health.ts's pyramidCover).
+		const pyr = {
+			tiers: TIERS,
+			keyTemplate: `${prefix}{tier}/{shard}/{period}.parquet`,
+		} as unknown as Pyramid;
+		const expected = listExpectedShards(pyr, { from: AVAIL_GENESIS, to: now });
+		const rs = await env.DB.prepare(
+			'SELECT key FROM pyramid_shards WHERE pyramid = ?').bind(pyramid).all<{ key: string }>();
+		const registered = new Set((rs.results ?? []).map((r) => r.key));
+		const candidates = expected.filter((e) => !registered.has(e.key));
+		const stranded = [];
+		for (const e of candidates) {
+			if (await env.R2.head(e.key)) stranded.push(e);
+		}
+		if (!stranded.length) continue;
+		const stmt = env.DB.prepare(
+			'INSERT OR REPLACE INTO pyramid_shards '
+			+ '(pyramid, tier, shard_dur, period_start, period_end, key, written_at) '
+			+ 'VALUES (?, ?, ?, ?, ?, ?, ?)');
+		const nowMs = Date.now();
+		for (let i = 0; i < stranded.length; i += 40) {
+			await env.DB.batch(stranded.slice(i, i + 40).map((e) => stmt.bind(
+				pyramid, e.tier, String(e.shardDur),
+				e.periodStart.getTime(), e.periodEnd.getTime(), e.key, nowMs)));
+		}
+		console.log(`registry-reconcile: ${pyramid}: registered ${stranded.length} stranded `
+			+ `(${stranded.slice(0, 5).map((e) => e.key).join(', ')}${stranded.length > 5 ? ', …' : ''})`);
+	}
+}
+
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
@@ -1141,11 +1191,22 @@ export default {
 					pyramid: string; tier: string; shard_dur: string;
 					period_start: number; period_end: number; key: string; written_at: number;
 				}[] }>();
+				// 2026-07-28 D1 split-brain forensics: the worker executes at the
+				// caller's entry colo, so this names which colo/egress-IP the
+				// (possibly divergent) binding request runs from.
+				const cf: any = (request as any).cf ?? {};
+				const entry = {
+					colo: cf.colo, ip: request.headers.get('CF-Connecting-IP'),
+					asn: cf.asn, asOrganization: cf.asOrganization,
+				};
+				console.log(`registry: op=${body.op} colo=${entry.colo} ip=${entry.ip} asn=${entry.asn} (${entry.asOrganization})`);
 				if (body.op === 'existing_keys') {
 					if (!body.pyramid) return errorResponse('pyramid required', 400, env);
 					const rs = await env.DB.prepare(
 						'SELECT key FROM pyramid_shards WHERE pyramid = ?').bind(body.pyramid).all<{ key: string }>();
-					return jsonResponse({ keys: (rs.results ?? []).map((r) => r.key) }, env);
+					const meta: any = (rs as any).meta ?? {};
+					console.log(`registry: existing_keys n=${rs.results?.length ?? 0} d1_meta=${JSON.stringify(meta)}`);
+					return jsonResponse({ keys: (rs.results ?? []).map((r) => r.key), entry, d1: meta }, env);
 				}
 				if (body.op === 'register') {
 					const rows = body.rows ?? [];
@@ -1153,9 +1214,11 @@ export default {
 						'INSERT OR REPLACE INTO pyramid_shards '
 						+ '(pyramid, tier, shard_dur, period_start, period_end, key, written_at) '
 						+ 'VALUES (?, ?, ?, ?, ?, ?, ?)');
-					await env.DB.batch(rows.map((r) => stmt.bind(
+					const results = await env.DB.batch(rows.map((r) => stmt.bind(
 						r.pyramid, r.tier, r.shard_dur, r.period_start, r.period_end, r.key, r.written_at)));
-					return jsonResponse({ registered: rows.length }, env);
+					const meta: any = (results[0] as any)?.meta ?? {};
+					console.log(`registry: register n=${rows.length} keys=${rows.map((r) => r.key).join(',')} d1_meta=${JSON.stringify(meta)}`);
+					return jsonResponse({ registered: rows.length, entry, d1: meta }, env);
 				}
 				return errorResponse(`unknown op ${body.op}`, 400, env);
 			} catch (err: any) {
@@ -1649,9 +1712,20 @@ export default {
 	},
 
 	/** Scheduled handler — every-minute cron: refresh the /api/health
-	 *  snapshot cache, then evaluate Slack alert rules (idempotent —
-	 *  only posts on state change). */
+	 *  snapshot cache, reconcile shard registrations, then evaluate Slack
+	 *  alert rules (idempotent — only posts on state change). */
 	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+		// Registration reconcile: register any ladder shard that exists on
+		// R2 but is missing from `pyramid_shards`. Shard *objects* are the
+		// source of truth (R2 is never forked); registration rows can go
+		// missing via write-then-die or the 2026-07-28 D1 split-brain
+		// (Lambda-entry-colo writes landing in a divergent DO instance).
+		// Running here — inside CF, on the binding path that serves reads —
+		// makes the stack self-healing with no external driver.
+		ctx.waitUntil(
+			reconcileRegistry(env)
+				.catch((err) => console.error('registry-reconcile cron error:', err?.message ?? err)),
+		);
 		// Refresh the /api/health snapshot cache (~7 s of R2 listings + D1
 		// scans, off the request path). Runs every minute; the route serves
 		// the cached object in ~100 ms.

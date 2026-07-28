@@ -35,9 +35,11 @@ Repeat observations with distinct `written_at` values: 17:16:41 (`1785259000987`
 ## Impact & remediation
 
 - No serving impact: the read path uses the Workers **binding**, which stayed consistent with the majority view throughout.
-- Registry writes from the affected Lambda were stranded in the divergent copy (~190 rows repeatedly re-registered by an in-function reconcile, all into the wrong store); an external (laptop-side) reconcile kept the true store current every 15 min.
+- Registry writes from the affected Lambda were stranded in the divergent copy (~190 rows repeatedly re-registered by an in-function reconcile, all into the wrong store); an external (laptop-side) reconcile kept the true store current every 15 min until a Worker-cron reconcile replaced it (below).
 - A registry-driven GC was disabled for the duration (deletions decided from a divergent row view could destroy real objects).
-- **Durable fix**: shard registrations re-routed through a narrow authenticated endpoint on our Worker, writing D1 via the *binding* — immune to REST routing. REST is no longer on the Lambda write path.
+- **Durable fix — self-healing reconcile in the Worker cron** (`gbfs/api` `scheduled()`, every minute): registers any expected-min-cover shard that exists on R2 (HEAD-verified) but is missing from `pyramid_shards`. Shard *objects* are the source of truth and R2 never forked, so this closes the loop entirely inside Cloudflare with no external driver — and permanently closes the write-then-die registration window too. Verified: a tick's stranded tip row landed in the true store ≤1 min after registration.
+  - Cron executions are themselves colo-variable: fork-side runs see the fork's stale registry and harmlessly back-fill the *fork* (observed: 186/180 avail-v3 rows "re-registered" that truth already had — insert-only, truth untouched). Truth-side runs do the real work. The recurring bulk-strand log lines double as a live fork indicator; when they stop, the split has healed.
+- The Lambda's registrations were also re-routed through a narrow authenticated Worker endpoint (D1 *binding* write path) — which proved the fork is below the API surface (see the colo update below) but does not dodge it; the cron reconcile is what guarantees truth convergence.
 
 ## Update (~20:20 UTC): the split is entry-colo-dependent, not REST-specific
 
@@ -47,6 +49,38 @@ We deployed a workaround routing the Lambda's registrations through **our own Wo
 - Lambda → same Worker endpoint, same secret (explicit `via proxy` branch logging): HTTP 200, `registered: 1` — row **absent** from the majority view (e.g. `avail-v5/1m/5min/2026-07-28T20-10.parquet`, 20:16:47 UTC).
 
 Since the Worker executes at the **caller's entry colo**, this rules out the REST API as the faulty layer: requests entering Cloudflare from the Lambda's egress path (AWS us-east-1) reach a **divergent D1 Durable Object instance even through the Workers binding**, while requests entering from our EWR-adjacent path reach the true instance. i.e. two live instances of one D1 database, selected by network entry point, both acking writes durably. This supersedes the "REST split-brain" framing in the title — it's a D1 DO-layer split.
+
+## Update (~20:35 UTC): selector is narrower than "AWS us-east-1 entry"
+
+Third vantage point: an EC2 instance in **the same region as the affected Lambda** (us-east-1) ran the identical REST probe. Result: **it sees the true state** — row count and tip rows byte-identical to the laptop view, `served_by: v3-prod ENAM ORD`. So region-of-entry alone does not select the divergent instance; the distinguishing attribute is something narrower about the Lambda's egress path (specific egress IP prefix / ASN sub-block / anycast route to a particular CF PoP).
+
+Same window, clean fresh-write probe (checked seconds after registration, before any external reconcile could mask it): Lambda `via proxy` registration of `avail-v5/1m/5min/2026-07-28T20-30.parquet` → **absent from the true view**. The split remained active.
+
+Also noted: the laptop's REST `served_by_colo` moved **EWR → ORD** during this window with no state divergence — so DO re-homing/colo drift is happening live without healing the Lambda-path fork.
+
+Forensics added: the Worker registry endpoint now logs `request.cf.colo`, `CF-Connecting-IP`, and ASN for each proxied registration, plus the D1 binding's own query `meta` — to name the entry colo whose binding requests reach the divergent instance.
+
+## Update (~20:45 UTC): divergent entry colo is IAD — same Worker, same binding, forked by entry colo
+
+`wrangler tail` across a tick (~20:41–20:43 UTC), all requests hitting the **identical Worker route + D1 binding** (`POST /api/registry`):
+
+| entry colo | client | egress IP / ASN | `existing_keys` count | fresh IAD-registered key visible? |
+|---|---|---|---|---|
+| **IAD** | Lambda (us-east-1) | 98.92.67.143 / AS14618 (Amazon NoVA) | **329 → 330** (its own `register` of `…T20-40.parquet` immediately readable) | in its own view, yes |
+| **EWR** | laptop, ~2 min later | 207.251.102.109 / AS8002 | **322**, `served_by: v3-prod`, colo ORD, `served_by_primary: true` | **no** |
+
+Same code path, same database UUID, divergent row sets, keyed purely on `request.cf.colo` of the caller — the Worker at IAD resolves the D1 Durable Object to a different (stale-then-divergent) instance than the Worker at EWR. Note the EC2 probe above egressed from us-east-1 as well but used the REST API (`api.cloudflare.com` anycast) and reached truth — so even within "requests originating in AWS us-east-1," the fork tracks which CF PoP the specific route lands on, and IAD's Workers-binding path is the affected one.
+
+**Both sides claim to be the same primary.** The divergent (IAD-entry) requests' D1 result `meta`, captured ~20:51–20:53 UTC:
+
+```
+served_by: "v3-prod", served_by_region: "ENAM", served_by_colo: "ORD",
+served_by_primary: true, size_after: 876544 — with 330 rows returned,
+and a register of avail-v5/1m/5min/2026-07-28T20-50.parquet acked
+(changes: 1, rows_written: 1)
+```
+
+The truthful (EWR-entry) requests' meta, same window: `served_by: "v3-prod"`, colo `ORD`, `served_by_primary: true`, `size_after: 876544` — with **322** rows, and the IAD-acked key absent. Identical backend labels, identical reported DB size, divergent contents, both self-identifying as the ORD primary. This is not a mislabeled read replica: Cloudflare's own response metadata asserts primary on both sides of the fork.
 
 ## Open questions for Cloudflare
 
