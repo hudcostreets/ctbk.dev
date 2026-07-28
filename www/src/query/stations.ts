@@ -280,6 +280,14 @@ export function useStationLuc(): UseQueryResult<StationLuc> {
  *  station isn't in the denorm (rare — usually means the station was
  *  decommissioned before the window-union snapshot range, or the LUC
  *  denorm is stale). */
+/** avail-v5 identity key for a GBFS uuid: `s:<short_name>` (drop-LUC
+ *  serving — one identity row per station, no LUC cell indirection). */
+export function stationKeyForUuid(luc: StationLuc | undefined, gbfsId: string | null | undefined): string | null {
+  if (!luc || !gbfsId) return null
+  const shortName = luc.by_uuid[gbfsId]
+  return shortName ? `s:${shortName}` : null
+}
+
 export function lucEntryForUuid(luc: StationLuc | undefined, gbfsId: string | null | undefined): StationLucEntry | null {
   if (!luc || !gbfsId) return null
   const shortName = luc.by_uuid[gbfsId]
@@ -339,15 +347,18 @@ function durationToS(dur: string | undefined): number | null {
 }
 
 const stationAvailV3Key = (gbfsId: string, fromS: number, toS: number, binBudget: number) =>
-  ['station-avail-v3', gbfsId, fromS, toS, `bb${binBudget}`] as const
+  ['station-avail-v5', gbfsId, fromS, toS, `bb${binBudget}`] as const
 
 const stationAvailV3Fn = async (
-  gbfsId: string, luc: StationLucEntry, fromS: number, toS: number, binBudget: number, capacityHint: number | null,
+  gbfsId: string, sKey: string, fromS: number, toS: number, binBudget: number, capacityHint: number | null,
 ): Promise<StationRangeResponse & { binS: number }> => {
   const fromIso = new Date(fromS * 1000).toISOString()
   const toIso   = new Date(toS   * 1000).toISOString()
   const url = new URL(`${API_BASE}/api/avail-v3`)
-  url.searchParams.set('cells', luc.cell)
+  // avail-v5 identity row (`s:<short_name>`) — fixes the LUC re-key
+  // drift that leaves many stations' current cells empty in avail-v3.
+  url.searchParams.set('cells', sKey)
+  url.searchParams.set('pyramid', 'avail-v5')
   url.searchParams.set('from', fromIso)
   url.searchParams.set('to', toIso)
   url.searchParams.set('bin_budget', String(binBudget))
@@ -385,13 +396,13 @@ export function useStationAvailabilityV3(
   liveRefresh: boolean = false,
 ) {
   const lucQ = useStationLuc()
-  const luc = lucEntryForUuid(lucQ.data, gbfsId)
+  const sKey = stationKeyForUuid(lucQ.data, gbfsId)
   const binS = binOverrideS ?? pickAvailBinAuto(toS - fromS, viewportPx)
   const binBudget = Math.max(1, Math.ceil((toS - fromS) / binS))
   return useQuery<StationRangeResponse & { binS: number }>({
     queryKey: stationAvailV3Key(gbfsId ?? '', fromS, toS, binBudget),
-    enabled: !!gbfsId && !!luc,
-    queryFn: () => stationAvailV3Fn(gbfsId!, luc!, fromS, toS, binBudget, capacityHint),
+    enabled: !!gbfsId && !!sKey,
+    queryFn: () => stationAvailV3Fn(gbfsId!, sKey!, fromS, toS, binBudget, capacityHint),
     placeholderData: (prev, prevQuery) => {
       if (!prev || !prevQuery) return undefined
       const prevGbfsId = (prevQuery.queryKey as readonly unknown[])[1]
@@ -497,16 +508,17 @@ export function useAvailabilityOverviewV3(
   agg: 'mean' | 'min' | 'max' | 'p05' | 'p25' | 'p50' | 'p75' | 'p95' = 'mean',
 ) {
   const lucQ = useStationLuc()
-  const luc = lucEntryForUuid(lucQ.data, gbfsId)
+  const sKey = stationKeyForUuid(lucQ.data, gbfsId)
   const binBudget = Math.max(1, Math.ceil((toS - fromS) / binS))
   return useQuery<AvailabilityOverviewResponse>({
-    queryKey: ['availability-overview-v3', gbfsId, fromS, toS, binS, metric, agg],
-    enabled: !!gbfsId && !!luc && fromS < toS && binS >= 3600,
+    queryKey: ['availability-overview-v5', gbfsId, fromS, toS, binS, metric, agg],
+    enabled: !!gbfsId && !!sKey && fromS < toS && binS >= 3600,
     queryFn: async () => {
       const fromIso = new Date(fromS * 1000).toISOString()
       const toIso   = new Date(toS   * 1000).toISOString()
       const url = new URL(`${API_BASE}/api/avail-v3`)
-      url.searchParams.set('cells', luc!.cell)
+      url.searchParams.set('cells', sKey!)
+      url.searchParams.set('pyramid', 'avail-v5')
       url.searchParams.set('from', fromIso)
       url.searchParams.set('to', toIso)
       url.searchParams.set('bin_budget', String(binBudget))
