@@ -637,7 +637,8 @@ API_URLS = {
 AVAIL_METRIC_NAMES = ('bikes', 'ebikes', 'docks', 'disabled', 'pending')
 
 
-@gbfs.command('parity', help='API-level parity + latency: query the baseline (`avail`) and candidate (`avail-v5`) pyramids over a station + coarse-cell matrix, compare series values, report timings. Station mapping: v3 `cells=<LUC L15 cell>` ≡ v5 `cells=s:<short_name>`.')
+@gbfs.command('parity', help='API-level parity + latency: query the baseline (`avail`) and candidate (`avail-v5`) pyramids over a station + coarse-cell matrix, compare series values, report timings. Station mapping: v3 `cells=<LUC L15 cell>` ≡ v5 `cells=s:<short_name>`. `-B` adds v5 bbox-exactness cases (bbox rollup ≡ rollup of its stations\' identity keys).')
+@option('-B', '--bbox', 'bboxes', multiple=True, help='v5 bbox exactness case, `minLat,minLng,maxLat,maxLng` (repeatable) [default: one Bay Ridge box].')
 @option('-b', '--bin-budget', type=int, default=24, show_default=True, help='Bins per query.')
 @option('-c', '--cell', 'coarse_cells', multiple=True, help='Coarse vocab cell to compare on both pyramids (repeatable) [default: 3 built-ins].')
 @option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='dev', show_default=True)
@@ -646,6 +647,7 @@ AVAIL_METRIC_NAMES = ('bikes', 'ebikes', 'docks', 'disabled', 'pending')
 @option('-R', '--reducer', default='mean', show_default=True)
 @option('-t', '--tolerance', type=float, default=1e-9, show_default=True, help='Max abs value diff treated as equal.')
 def gbfs_parity(
+	bboxes: tuple[str, ...],
 	bin_budget: int,
 	coarse_cells: tuple[str, ...],
 	env_name: str,
@@ -654,6 +656,7 @@ def gbfs_parity(
 	reducer: str,
 	tolerance: float,
 ) -> None:
+	import random
 	import time as _time
 	base = API_URLS[env_name]
 	if range_:
@@ -662,9 +665,12 @@ def gbfs_parity(
 		day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
 		from_s, to_s = f'{day}T00:00:00Z', (datetime.fromisoformat(day) + timedelta(days=1)).strftime('%Y-%m-%dT00:00:00Z')
 
-	def q(pyramid: str, cells: str) -> tuple[dict[int, dict[str, float]], float]:
+	def q(pyramid: str, cells: str | None, bbox: str | None = None) -> tuple[dict[int, dict[str, float]], float]:
+		sel = f'cells={cells}' if cells is not None else f'bbox={bbox}'
+		# `cb=`: /api/avail-v3 responses are CF-cached 24h immutable — every
+		# probe must cache-bust or it compares stale entries.
 		url = (f'{base}/api/avail-v3?from={from_s}&to={to_s}&bin_budget={bin_budget}'
-			   f'&reducer={reducer}&cells={cells}'
+			   f'&reducer={reducer}&{sel}&cb={random.randrange(1 << 30)}'
 			   + (f'&pyramid={pyramid}' if pyramid != 'avail' else ''))
 		t0 = _time.time()
 		req = _urlrequest.Request(url, headers={'User-Agent': 'ctbk-parity/1.0'})
@@ -711,6 +717,22 @@ def gbfs_parity(
 		ok = mism == 0 and lonely == 0
 		failures += 0 if ok else 1
 		print(f'  {"✓" if ok else "✗"} s:{sn:<10} bins {len(a)}/{len(b)}  mismatches {mism}  maxΔ {mx:.2e}  lonely {lonely}  ({wa:.2f}s vs {wb:.2f}s)')
+	for bb in bboxes or ('40.60,-74.05,40.62,-74.02',):
+		# v5 bbox exactness: the bbox's vocab cover must serve exactly the
+		# union of its stations' identity rows (cell rows ≡ Σ member
+		# stations by construction — same monoid).
+		mn_lat, mn_lng, mx_lat, mx_lng = (float(x) for x in bb.split(','))
+		wanted = sorted(
+			sn for sn, e in luc['by_short_name'].items()
+			if mn_lat <= e['lat'] <= mx_lat and mn_lng <= e['lng'] <= mx_lng
+		)
+		a, wa = q('avail-v5', None, bbox=bb)
+		b, wb = q('avail-v5', ','.join(f's:{sn}' for sn in wanted))
+		walls['avail-v5'] += [wa, wb]
+		mism, mx, lonely = diff(a, b)
+		ok = mism == 0 and lonely == 0
+		failures += 0 if ok else 1
+		print(f'  {"✓" if ok else "✗"} bbox {bb} ({len(wanted)} stations)  bins {len(a)}/{len(b)}  mismatches {mism}  maxΔ {mx:.2e}  lonely {lonely}  ({wa:.2f}s vs {wb:.2f}s)')
 	for cell in coarse_cells or ('89c2454', '89c245', '89c25c4'):
 		a, wa = q('avail', cell)
 		b, wb = q('avail-v5', cell)
