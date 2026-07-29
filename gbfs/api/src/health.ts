@@ -20,6 +20,7 @@ import {
 interface R2Object {
 	key: string;
 	uploaded: Date;
+	size?: number;
 }
 
 interface R2ListResult {
@@ -325,7 +326,7 @@ interface RawTripdataSummary {
  *
  *  D1 column compatibility: pre-P3 the column is `cadence`; post-P3 it's
  *  `shard_dur`. Probe schema once and substitute. */
-export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth> {
+export async function getPyramidsHealth(db: D1Database, r2?: HealthR2): Promise<PyramidsHealth> {
 	// Probe which column name the D1 schema uses (P3 transition).
 	let shardCol = 'shard_dur';
 	try {
@@ -341,9 +342,35 @@ export async function getPyramidsHealth(db: D1Database): Promise<PyramidsHealth>
 	const out: PyramidsHealth = [];
 	for (const [name, keyPrefix] of HEALTH_PYRAMIDS) {
 		const cover = await pyramidCover(db, name, keyPrefix, shardCol, TIERS, AVAIL_GENESIS);
-		if (cover) out.push(cover);
+		if (!cover) continue;
+		if (r2) await annotateSegmentBytes(r2, keyPrefix, cover);
+		out.push(cover);
 	}
 	return out;
+}
+
+/** Attach R2 object sizes to present cover segments (tooltip fodder on
+ *  the /health timeline bars): one paginated LIST per pyramid prefix,
+ *  joined by key. Best-effort — a LIST failure leaves segments bare. */
+async function annotateSegmentBytes(
+	r2: HealthR2,
+	keyPrefix: string,
+	cover: PyramidCoverStatus,
+): Promise<void> {
+	try {
+		const { objects } = await listAll(r2, `${keyPrefix}/`, 10);
+		const sizes = new Map(objects.map((o) => [o.key, o.size]));
+		for (const t of cover.tiers) {
+			for (const s of t.segments) {
+				if (s.key !== undefined) {
+					const size = sizes.get(s.key);
+					if (size !== undefined) (s as { bytes?: number }).bytes = size;
+				}
+			}
+		}
+	} catch {
+		// Sizes are decoration; never fail the snapshot over them.
+	}
 }
 
 /** Registry pyramids surfaced on /health: (D1 `pyramid` name, R2 key
@@ -425,7 +452,7 @@ export async function getHealthSnapshot(
 		getFeedHealth(r2),
 		getCompactionHealth(r2),
 		getCascadeHealth(r2),
-		db ? getPyramidsHealth(db) : Promise.resolve<PyramidsHealth>([]),
+		db ? getPyramidsHealth(db, r2) : Promise.resolve<PyramidsHealth>([]),
 		getTripdataHealth(r2),
 		getBuildsHealth(r2),
 	]);

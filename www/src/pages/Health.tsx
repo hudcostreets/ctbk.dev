@@ -4,6 +4,8 @@
  *  See `specs/gbfs-health-page.md`. */
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
+import { Tooltip } from '@mui/material'
+import type { CSSProperties } from 'react'
 
 // Default to prod worker so `pnpm dev` works without a local api.
 // Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
@@ -50,6 +52,7 @@ interface PyramidCoverSegment {
   shardDur: string
   status: 'present' | 'pending' | 'missing'
   key?: string
+  bytes?: number      // R2 object size (snapshot enrichment; present segments)
 }
 interface PyramidTierCoverStatus {
   tier: string
@@ -328,6 +331,11 @@ function BuildsSection({ builds }: { builds: BuildProgress[] | undefined }) {
   )
 }
 
+/** Terminal builds older than this render as a dim one-line history
+ *  entry — a day-old BOUNCED banner reads as a live alarm when in fact
+ *  the steady-state tick already superseded whatever bounced. */
+const BUILD_STALE_MS = 6 * 3600_000
+
 function BuildCard({ build }: { build: BuildProgress }) {
   const done = Object.values(build.byStatus ?? {}).reduce((a, n) => a + n, 0)
   const total = build.plan?.invocations ?? 0
@@ -337,6 +345,19 @@ function BuildCard({ build }: { build: BuildProgress }) {
   const updatedSec = build.updatedAt ? Math.floor(Date.parse(build.updatedAt) / 1000) : null
   const color = build.status === 'done' ? '#2e7d32' : build.status === 'bounced' ? '#c62828' : '#1565c0'
   const cur = build.currentLayer
+  const stale = build.status !== 'running'
+    && updatedSec !== null && Date.now() - updatedSec * 1000 > BUILD_STALE_MS
+  if (stale) {
+    return (
+      <div style={{ marginBottom: '0.4em', fontSize: '0.85em', opacity: 0.55, display: 'flex', gap: '0.6em', alignItems: 'baseline' }}>
+        <span style={{ fontWeight: 600 }}>{build.pyramid}</span>
+        <span>{build.driver}</span>
+        <span style={{ color, fontWeight: 600, textTransform: 'uppercase', fontSize: '0.85em' }}>{build.status}</span>
+        <span>{done}/{total} · {wrote} wrote{errors > 0 ? ` · ${errors} bounced` : ''}</span>
+        <span>{fmtAge(updatedSec)}</span>
+      </div>
+    )
+  }
   return (
     <div style={{ marginBottom: '1em' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.8em', marginBottom: '0.3em' }}>
@@ -375,9 +396,25 @@ function PyramidsSection({ pyramids }: { pyramids: PyramidsHealth | undefined })
       </Section>
     )
   }
+  // Prod-default pyramid (avail-v5) first, full-size; superseded ones
+  // collapse into <details> below it.
+  const ordered = [...pyramids].sort((a, b) =>
+    Number(b.name === 'avail-v5') - Number(a.name === 'avail-v5'))
+  const [primary, ...legacy] = ordered
   return (
     <Section title="Pyramid min-cover status">
-      {pyramids.map((p) => <PyramidCoverGrid key={p.name} pyramid={p} />)}
+      {primary && <PyramidCoverGrid pyramid={primary} />}
+      {legacy.map((p) => (
+        <details key={p.name} style={{ marginBottom: '0.8em' }}>
+          <summary style={{ cursor: 'pointer', opacity: 0.75, fontSize: '0.9em' }}>
+            <code>{p.name}</code> (legacy{p.name === 'avail' ? ' v3' : ''} — superseded by the prod default) ·{' '}
+            {p.allComplete ? 'complete' : `${p.totalMissing} missing`}
+          </summary>
+          <div style={{ marginTop: '0.6em' }}>
+            <PyramidCoverGrid pyramid={p} />
+          </div>
+        </details>
+      ))}
       <div style={{ marginTop: '0.6em', fontSize: '0.8em', opacity: 0.7, lineHeight: 1.5 }}>
         Equilibrium per tier = <em>min-cover</em> of{' '}
         <code>[genesis, now)</code>: mostly max-rung tiles filling{' '}
@@ -448,6 +485,88 @@ const SEGMENT_COLORS: Record<PyramidCoverSegment['status'], string> = {
   missing: '#e05252',
 }
 
+/** Cross-hatch for bar regions where no shard is expected (the tail
+ *  shorter than the tier's smallest rung — finer tiers cover it). */
+const HATCH_BG = 'repeating-linear-gradient(45deg, transparent 0 3px, rgba(127,127,127,0.35) 3px 4px)'
+
+const DUR_UNIT_MIN: Record<string, number> = { min: 1, h: 60, d: 1440 }
+
+/** Fixed-width duration (`1min` / `12h` / `16d`) → minutes; null on
+ *  anything else (calendar units never appear in the avail ladders). */
+function durMin(d: string): number | null {
+  const m = /^(\d+)(min|h|d)$/.exec(d)
+  return m ? Number(m[1]) * DUR_UNIT_MIN[m[2]] : null
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1000) return `${n} B`
+  const units = ['kB', 'MB', 'GB']
+  let v = n / 1000
+  for (const u of units) {
+    if (v < 1000) return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${u}`
+    v /= 1000
+  }
+  return `${v.toFixed(1)} TB`
+}
+
+/** Lazy shard parquet metadata (row/RG counts) — fetched on first
+ *  tooltip open via ranged reads of the parquet footer, cached forever
+ *  (shards are immutable). */
+function useShardMeta(key: string | undefined) {
+  return useQuery({
+    queryKey: ['shard-meta', key],
+    enabled: !!key,
+    staleTime: Infinity,
+    retry: 1,
+    queryFn: async () => {
+      const [{ asyncBufferFromStore }, { HttpStore }, { parquetMetadataAsync }] = await Promise.all([
+        import('@rdub/file-tree/react'),
+        import('@rdub/file-tree/stores/http'),
+        import('hyparquet'),
+      ])
+      const store = HttpStore(`${API_BASE}/api/files`)
+      const file = await asyncBufferFromStore(store, key!)
+      const md = await parquetMetadataAsync(file)
+      return { rows: Number(md.num_rows), rowGroups: md.row_groups.length, bytes: file.byteLength }
+    },
+  })
+}
+
+const TIP_ROW: CSSProperties = { display: 'flex', gap: '0.7em', justifyContent: 'space-between' }
+
+/** Tooltip body for one cover slot: rung + span + status, #bins, size,
+ *  and (lazily) row/row-group counts read from the parquet footer. */
+function ShardTip({ tier, seg }: { tier: PyramidTierCoverStatus; seg: PyramidCoverSegment }) {
+  const meta = useShardMeta(seg.key)
+  const bin = durMin(tier.bin)
+  const dur = durMin(seg.shardDur)
+  const bins = bin && dur ? Math.round(dur / bin) : null
+  const span = `${seg.start.slice(0, 16).replace('T', ' ')} → ${seg.end.slice(0, 16).replace('T', ' ')} UTC`
+  return (
+    <div style={{ fontSize: '0.95em', fontVariantNumeric: 'tabular-nums', minWidth: '15em' }}>
+      <div style={{ fontWeight: 600, marginBottom: '0.2em' }}>
+        <code>/{tier.tier}@{seg.shardDur}</code>{' · '}{seg.status}
+      </div>
+      <div style={{ opacity: 0.85, marginBottom: '0.35em' }}>{span}</div>
+      {bins !== null && <div style={TIP_ROW}><span>bins</span><span>{bins.toLocaleString()}</span></div>}
+      {seg.bytes !== undefined && <div style={TIP_ROW}><span>size</span><span>{fmtBytes(seg.bytes)}</span></div>}
+      {seg.key && (
+        meta.data ? (
+          <>
+            <div style={TIP_ROW}><span>rows</span><span>{meta.data.rows.toLocaleString()}</span></div>
+            <div style={TIP_ROW}><span>row groups</span><span>{meta.data.rowGroups.toLocaleString()}</span></div>
+          </>
+        ) : meta.isError ? (
+          <div style={{ opacity: 0.6 }}>rows: unavailable</div>
+        ) : (
+          <div style={{ opacity: 0.6 }}>reading footer…</div>
+        )
+      )}
+      {seg.key && <div style={{ opacity: 0.6, marginTop: '0.35em' }}>click to preview</div>}
+    </div>
+  )
+}
+
 /** Per-tier horizontal timeline bars over `[genesis, now]`: one bar per
  *  tier, one box per min-cover slot (so tile boundaries are visible),
  *  green/grey/red for present/pending/missing, hairline gaps between
@@ -498,40 +617,53 @@ function CoverBars({ pyramid }: { pyramid: PyramidCoverStatus }) {
             }} />
           ))}
         </div>
-        {pyramid.tiers.map((t) => (
-          <div key={t.tier} style={{ display: 'flex', alignItems: 'center', marginBottom: 3 }}>
-            <div style={{ width: LABEL_W, flexShrink: 0, fontFamily: 'monospace', fontSize: '0.85em', opacity: 0.8 }}>
-              /{t.tier}
+        {pyramid.tiers.map((t) => {
+          const lastEnd = t.segments.reduce((mx, s) => Math.max(mx, Date.parse(s.end)), t0)
+          const tailL = pct(lastEnd)
+          return (
+            <div key={t.tier} style={{ display: 'flex', alignItems: 'center', marginBottom: 3 }}>
+              <div style={{ width: LABEL_W, flexShrink: 0, fontFamily: 'monospace', fontSize: '0.85em', opacity: 0.8 }}>
+                /{t.tier}
+              </div>
+              <div style={{ position: 'relative', flex: 1, height: 13, background: 'rgba(127,127,127,0.12)', borderRadius: 2, overflow: 'hidden' }}>
+                {/* No-shard-expected tail (shorter than this tier's smallest rung). */}
+                {tailL < 100 && (
+                  <div style={{
+                    position: 'absolute', top: 0, bottom: 0,
+                    left: `${tailL}%`, right: 0,
+                    background: HATCH_BG,
+                  }} />
+                )}
+                {t.segments.map((s, i) => {
+                  const l = pct(Date.parse(s.start))
+                  const r = pct(Date.parse(s.end))
+                  const seg = (
+                    <Tooltip title={<ShardTip tier={t} seg={s} />} placement="top" arrow enterDelay={150}>
+                      <div
+                        style={{
+                          position: 'absolute', top: 0, bottom: 0,
+                          left: `${l}%`, width: `${Math.max(0, r - l)}%`,
+                          background: SEGMENT_COLORS[s.status],
+                          boxShadow: 'inset 1px 0 0 rgba(255,255,255,0.85)',
+                          ...(s.key ? { cursor: 'pointer' } : {}),
+                        }}
+                      />
+                    </Tooltip>
+                  )
+                  // Present segments deep-link into the /files browser's
+                  // parquet viewer (paginated table of the R2 object).
+                  return s.key ? <Link key={i} to={`/files/${s.key}`}>{seg}</Link> : <span key={i}>{seg}</span>
+                })}
+              </div>
             </div>
-            <div style={{ position: 'relative', flex: 1, height: 13, background: 'rgba(127,127,127,0.12)', borderRadius: 2, overflow: 'hidden' }}>
-              {t.segments.map((s, i) => {
-                const l = pct(Date.parse(s.start))
-                const r = pct(Date.parse(s.end))
-                const seg = (
-                  <div
-                    title={`/${t.tier}@${s.shardDur} ${s.start.slice(0, 16).replace('T', ' ')} → ${s.end.slice(0, 16).replace('T', ' ')} UTC — ${s.status}${s.key ? ' — click to preview' : ''}`}
-                    style={{
-                      position: 'absolute', top: 0, bottom: 0,
-                      left: `${l}%`, width: `${Math.max(0, r - l)}%`,
-                      background: SEGMENT_COLORS[s.status],
-                      boxShadow: 'inset 1px 0 0 rgba(255,255,255,0.85)',
-                      ...(s.key ? { cursor: 'pointer' } : {}),
-                    }}
-                  />
-                )
-                // Present segments deep-link into the /files browser's
-                // parquet viewer (paginated table of the R2 object).
-                return s.key ? <Link key={i} to={`/files/${s.key}`}>{seg}</Link> : <span key={i}>{seg}</span>
-              })}
-            </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.2em 1.2em', marginTop: '0.3em', marginLeft: LABEL_W, fontSize: '0.8em', opacity: 0.75 }}>
         <span><Swatch color={SEGMENT_COLORS.present} /> present</span>
         <span><Swatch color={SEGMENT_COLORS.pending} /> pending (just closed; cron writes shortly)</span>
         <span><Swatch color={SEGMENT_COLORS.missing} /> missing</span>
-        <span><Swatch color="rgba(127,127,127,0.12)" /> tail shorter than this tier's smallest rung (finer tiers cover it)</span>
+        <span><Swatch color={HATCH_BG} /> no shard expected (tail shorter than this tier's smallest rung; finer tiers cover it)</span>
       </div>
     </div>
   )

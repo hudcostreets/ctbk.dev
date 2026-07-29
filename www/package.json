@@ -12,7 +12,7 @@
     "@mdx-js/rollup": "^3.1.1",
     "@mui/material": "^6.1.9",
     "@rdub/base": "0.7.9",
-    "@rdub/file-tree": "https://github.com/runsascoded/file-tree#d3476b0d2cb398197f3a1383f41fe3b0216be39f",
+    "@rdub/file-tree": "https://github.com/runsascoded/file-tree#5731bbe913f3d7a1656867f99bda6ddec121057b",
     "@rdub/icons": "0.1.0",
     "@tanstack/react-query": "^5.99.2",
     "bootstrap": "^4.6.2",
