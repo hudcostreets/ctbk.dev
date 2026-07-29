@@ -1,6 +1,6 @@
 # avail-v5: engine-backfilled, Lambda-maintained successor stack
 
-Status: **converged; burn-in** (2026-07-28T12:30Z). Stand up `avail-v5/` as a fully separate pyramid stack — Batch-engine backfill + minutely cascade-Lambda tick — burn it in alongside the serving stack, then cut the FE/BE over via the D1 registry (pyramid-name flip). Rollback = flip back.
+Status: **DEFAULT — cut over** (2026-07-29T02:30Z: `DEFAULT_PYRAMID = 'avail-v5'`, parity- and CIC-verified; v3 addressable via `?pyramid=avail` until retirement). Previously: converged; burn-in (2026-07-28T12:30Z). Stand up `avail-v5/` as a fully separate pyramid stack — Batch-engine backfill + minutely cascade-Lambda tick — burn it in alongside the serving stack, then cut the FE/BE over via the D1 registry (pyramid-name flip). Rollback = flip back.
 
 Convergence log: backfill (genesis→07-18, byte-identical to the engine-check proofs) + fan-out rebuild (partial; stopped in favor of engine `-f`) + engine `-f` fill (24 shards / 4.8 min, single-rung source) + tick catch-up → expected cover complete at 12:29Z; a min-cover-source `-f` re-run confirmed **0 missing in 0.7 s** (free no-op). Steady state: tick holds a ~5-gap rolling tip frontier; engine `-f` (min-cover source, `-t 1m`, no `-d`) is the on-demand/cron bulk healer. Cold-hole doctrine going forward: fan-out for 1m-tier raw only (until engine raw-ingest), engine `-f` for everything above, tick for the tip.
 

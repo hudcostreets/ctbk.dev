@@ -703,7 +703,10 @@ def gbfs_parity(
 		from_s, to_s = f'{day}T00:00:00Z', (datetime.fromisoformat(day) + timedelta(days=1)).strftime('%Y-%m-%dT00:00:00Z')
 
 	def q(pyramid: str, cells: str | None, bbox: str | None = None) -> tuple[dict[int, dict[str, float]], float]:
-		sel = f'cells={cells}' if cells is not None else f'bbox={bbox}'
+		from urllib.parse import quote
+		# Identity keys embed raw short_names (spaces, `&`, …) — must be
+		# percent-encoded or urllib rejects the URL outright.
+		sel = f'cells={quote(cells, safe=",:._-")}' if cells is not None else f'bbox={bbox}'
 		# `cb=`: /api/avail-v3 responses are CF-cached 24h immutable — every
 		# probe must cache-bust or it compares stale entries.
 		url = (f'{base}/api/avail-v3?from={from_s}&to={to_s}&bin_budget={bin_budget}'

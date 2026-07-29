@@ -492,7 +492,7 @@ import { R2Store } from '@rdub/file-tree/stores/r2';
 import { createHandlers } from '@rdub/file-tree/server';
 import { computeAndStoreHealthSnapshot, readCachedHealthSnapshot } from './health';
 import { runAlerts } from './alerts';
-import { serveAvailV3, serveAvailV3Cells } from './avail_geo';
+import { DEFAULT_PYRAMID, serveAvailV3, serveAvailV3Cells } from './avail_geo';
 import { serveRidesV1, serveRidesV1Cells, serveRidesV2, serveRidesV2Cells, serveRidesV3, serveRidesV3Cells } from './rides_v1';
 import { withR2Retry } from './r2_retry';
 
@@ -1273,7 +1273,13 @@ export default {
 					request = new Request(url.toString(), request);
 				}
 			}
-			const cacheKey = new Request(url.toString(), { method: 'GET' });
+			// Fold the RESOLVED pyramid into the cache key: implicit-default
+			// requests then rotate to fresh entries when `DEFAULT_PYRAMID`
+			// flips (otherwise the old default's 24h-immutable payloads keep
+			// serving under the unchanged URL key).
+			const cacheUrl = new URL(url.toString());
+			if (!cacheUrl.searchParams.has('pyramid')) cacheUrl.searchParams.set('pyramid', DEFAULT_PYRAMID);
+			const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
 			const hit = await cache.match(cacheKey);
 			if (hit) {
 				const headers = new Headers(hit.headers);

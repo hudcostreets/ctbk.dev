@@ -101,13 +101,19 @@ export const TIERS: Tier[] = [
 const KEY_TEMPLATE = 'avail-v3/{tier}/{shard}/{period}.parquet';
 
 /** Serveable pyramids: `?pyramid=` values → (D1 registry name, key
- *  template). Same ladder/genesis; v5 is the engine-backfilled,
- *  vocab-keyed successor (`specs/avail-v5-stack.md`) — served behind
- *  the explicit param during burn-in, default unchanged. */
-const PYRAMIDS: Record<string, { name: string; keyTemplate: string }> = {
+ *  template, key style). Same ladder/genesis; v5 is the
+ *  engine-backfilled, vocab-keyed successor (`specs/avail-v5-stack.md`)
+ *  and the default since the 2026-07-29 cutover; v3 (`avail`) stays
+ *  addressable behind the explicit param until retirement. */
+const PYRAMIDS: Record<string, { name: string; keyTemplate: string; vocab?: boolean }> = {
 	'avail': { name: 'avail', keyTemplate: KEY_TEMPLATE },
-	'avail-v5': { name: 'avail-v5', keyTemplate: 'avail-v5/{tier}/{shard}/{period}.parquet' },
+	'avail-v5': { name: 'avail-v5', keyTemplate: 'avail-v5/{tier}/{shard}/{period}.parquet', vocab: true },
 };
+
+/** The pyramid served when `?pyramid=` is absent. Also folded into the
+ *  edge-cache key (`index.ts`) so flipping this constant rotates cache
+ *  entries instead of serving the old default's cached payloads. */
+export const DEFAULT_PYRAMID = 'avail-v5';
 const RESOLUTIONS = [15, 14, 13, 12, 11, 10];
 
 /** avail-v3 genesis: earliest 5-min-aligned UTC timestamp intersecting any
@@ -449,14 +455,16 @@ async function serveGeoReduced(
 		return errorResponse(400, 'either `bbox` or `cells` is required', cors);
 	}
 
-	// avail-v5 stores rows only at its frozen vocabulary (S2 cells +
-	// `s:<short_name>` identity keys), so a raw `minimalCover` bbox cover
-	// emits cells that match no rows — a silent undercount. Convert the
-	// bbox to a vocab cover (positive-only: exact union, no histogram
-	// sign-flips — `specs/drop-luc-station-keys.md`) and continue down the
-	// explicit-cells path, whose include-set filter + RG prune both match
-	// stored keys exactly.
-	if (bbox !== null && pyramidName !== PYRAMID_NAME) {
+	// Vocab-keyed pyramids (v5) store rows only at their frozen
+	// vocabulary (S2 cells + `s:<short_name>` identity keys), so a raw
+	// `minimalCover` bbox cover emits cells that match no rows — a
+	// silent undercount. Convert the bbox to a vocab cover
+	// (positive-only: exact union, no histogram sign-flips —
+	// `specs/drop-luc-station-keys.md`) and continue down the
+	// explicit-cells path, whose include-set filter + RG prune both
+	// match stored keys exactly. Keyed on the registry's `vocab` flag,
+	// NOT on default-ness — the default has flipped before.
+	if (bbox !== null && PYRAMIDS[pyramidName]?.vocab) {
 		const include = await v5BBoxCover(bucket, bbox);
 		if (include.length === 0) {
 			const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -606,12 +614,11 @@ async function serveGeoReduced(
 	}), { headers });
 }
 
-/** `?pyramid=` override (burn-in canary): select a serving pyramid from
- *  `PYRAMIDS`; absent → the default (`avail`). Unknown value → null
- *  (caller 400s). */
+/** `?pyramid=` override: select a serving pyramid from `PYRAMIDS`;
+ *  absent → `DEFAULT_PYRAMID`. Unknown value → null (caller 400s). */
 function pyramidParam(request: Request): { name: string; keyTemplate: string } | null {
 	const v = new URL(request.url).searchParams.get('pyramid');
-	if (v === null) return PYRAMIDS[PYRAMID_NAME]!;
+	if (v === null) return PYRAMIDS[DEFAULT_PYRAMID]!;
 	return PYRAMIDS[v] ?? null;
 }
 
