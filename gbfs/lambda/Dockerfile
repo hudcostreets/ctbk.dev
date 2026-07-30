@@ -10,8 +10,13 @@
 FROM public.ecr.aws/lambda/python:3.12-arm64
 
 COPY wheels/ /tmp/wheels/
+# pyarrow pinned: unpinned builds picked up 25.0.0, whose parallel
+# parquet-decode kernels SIGSEGV on Lambda Graviton (2026-07-29 incident;
+# every tile-merge died with Runtime.ExitError until
+# ARROW_USER_SIMD_LEVEL=NONE was set on the functions). 22.0.0 is the
+# validated dev/writer version.
 RUN pip install --no-cache-dir \
-    polars pyarrow pandas numpy pyyaml s2cell utz \
+    polars pyarrow==22.0.0 pandas numpy pyyaml s2cell utz \
     /tmp/wheels/*.whl \
     && rm -rf /tmp/wheels
 
