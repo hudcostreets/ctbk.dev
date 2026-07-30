@@ -28,6 +28,7 @@ dependencies = [
     "pyrmts",
     "pyrmts_geo",
     "pyrmts-engine",
+    "pyrmts-ops",
     "python-dateutil>=2.9.0.post0",
     "s2cell>=1.8.0",
     "s3fs>=2025.5.1",
@@ -38,9 +39,10 @@ dependencies = [
 
 [tool.uv.sources]
 # Pinned (default):
-pyrmts        = { git = "https://github.com/runsascoded/pyrmts.git", rev = "7fad0f5", subdirectory = "python/pyrmts" }
-pyrmts_geo    = { git = "https://github.com/runsascoded/pyrmts.git", rev = "7fad0f5", subdirectory = "python/pyrmts_geo" }
-pyrmts-engine = { git = "https://github.com/runsascoded/pyrmts.git", rev = "7fad0f5", subdirectory = "python/pyrmts_engine" }
+pyrmts        = { git = "https://github.com/runsascoded/pyrmts.git", rev = "3073c60", subdirectory = "python/pyrmts" }
+pyrmts_geo    = { git = "https://github.com/runsascoded/pyrmts.git", rev = "3073c60", subdirectory = "python/pyrmts_geo" }
+pyrmts-engine = { git = "https://github.com/runsascoded/pyrmts.git", rev = "3073c60", subdirectory = "python/pyrmts_engine" }
+pyrmts-ops    = { git = "https://github.com/runsascoded/pyrmts.git", rev = "3073c60", subdirectory = "python/pyrmts_ops" }
 # Local (dev) — swap all three together (the Python `pds l`): from ctbk, the
 # `pyrmts` entry here is what resolves `pyrmts-engine`'s own `pyrmts` dep (its
 # workspace source only applies inside the pyrmts repo). Don't commit this
@@ -49,6 +51,7 @@ pyrmts-engine = { git = "https://github.com/runsascoded/pyrmts.git", rev = "7fad
 # pyrmts        = { path = "/Users/ryan/c/pyrmts/python/pyrmts", editable = true }
 # pyrmts_geo    = { path = "/Users/ryan/c/pyrmts/python/pyrmts_geo", editable = true }
 # pyrmts-engine = { path = "/Users/ryan/c/pyrmts/python/pyrmts_engine", editable = true }
+# pyrmts-ops    = { path = "/Users/ryan/c/pyrmts/python/pyrmts_ops", editable = true }
 
 [project.scripts]
 ctbk = "ctbk.cli.main:main"
