@@ -31,6 +31,7 @@ function snap(overrides: Partial<HealthSnapshot> = {}): HealthSnapshot {
 				time: '11:59',
 				uploadedAt: '2026-05-24T11:59:00.000Z',
 			},
+			drift: null,
 			todayCount: 720,
 			todayExpected: 721,
 			last7Days: [],

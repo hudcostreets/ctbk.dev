@@ -11,8 +11,15 @@ import type { CSSProperties } from 'react'
 // Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
 
+interface FeedDrift {
+  latestS: number
+  ts: number
+  polledAt: number
+  series: Array<[number, number]>  // [polled_at epoch s, drift s], ≤24h, oldest first
+}
 interface FeedHealth {
   latestPoll: { key: string; date: string; time: string; uploadedAt: string } | null
+  drift: FeedDrift | null
   todayCount: number
   todayExpected: number
   last7Days: Array<{ date: string; count: number; expected: number }>
@@ -246,9 +253,38 @@ function TripdataSection({ tripdata }: { tripdata: TripdataHealth | null }) {
   )
 }
 
+function quantile(sorted: number[], q: number): number {
+  if (!sorted.length) return 0
+  const i = Math.min(sorted.length - 1, Math.floor(q * sorted.length))
+  return sorted[i]
+}
+
+/** Tiny inline sparkline of `[t, v]` points (drift seconds over 24h). */
+function DriftSparkline({ series }: { series: Array<[number, number]> }) {
+  const W = 180, H = 34, PAD = 2
+  if (series.length < 2) return null
+  const ts = series.map(([t]) => t)
+  const vs = series.map(([, v]) => v)
+  const [t0, t1] = [Math.min(...ts), Math.max(...ts)]
+  const vMax = Math.max(60, ...vs)  // floor the scale at 60s so quiet days don't look noisy
+  const x = (t: number) => PAD + ((t - t0) / Math.max(1, t1 - t0)) * (W - 2 * PAD)
+  const y = (v: number) => H - PAD - (Math.max(0, v) / vMax) * (H - 2 * PAD)
+  const path = series.map(([t, v], i) => `${i ? 'L' : 'M'}${x(t).toFixed(1)},${y(v).toFixed(1)}`).join(' ')
+  return (
+    <Tooltip title={`feed drift over last 24h (${series.length} polls); scale max ${vMax}s`} arrow>
+      <svg width={W} height={H} style={{ display: 'block', opacity: 0.9 }}>
+        <line x1={PAD} x2={W - PAD} y1={y(60)} y2={y(60)} stroke="#888" strokeDasharray="3 3" strokeWidth={0.5} />
+        <path d={path} fill="none" stroke="#6699cc" strokeWidth={1.2} />
+      </svg>
+    </Tooltip>
+  )
+}
+
 function FeedSection({ feed }: { feed: FeedHealth }) {
   const todayPct = feed.todayCount / feed.todayExpected
   const ok = todayPct >= 0.98
+  const drift = feed.drift
+  const driftSorted = drift ? [...drift.series.map(([, v]) => v)].sort((a, b) => a - b) : []
   return (
     <Section title="Feed (per-minute WAL polls)">
       <div style={{ display: 'flex', gap: '2em', alignItems: 'baseline', flexWrap: 'wrap' }}>
@@ -264,6 +300,19 @@ function FeedSection({ feed }: { feed: FeedHealth }) {
           sub={fmtPct(feed.todayCount, feed.todayExpected)}
           status={ok ? 'ok' : 'warn'}
         />
+        {drift && (
+          <Tooltip title="poll wall-clock minus the feed's own last_updated — how stale the GBFS payload was when we fetched it" arrow>
+            <span>
+              <Stat
+                label="Feed drift"
+                value={`${drift.latestS}s`}
+                sub={driftSorted.length ? `24h p50 ${quantile(driftSorted, 0.5)}s · p95 ${quantile(driftSorted, 0.95)}s` : ''}
+                status={drift.latestS < 120 ? 'ok' : drift.latestS < 300 ? 'warn' : 'bad'}
+              />
+            </span>
+          </Tooltip>
+        )}
+        {drift && <DriftSparkline series={drift.series} />}
       </div>
       <div style={{ marginTop: '0.6em' }}>
         <table style={{ borderCollapse: 'collapse', fontSize: '0.9em' }}>

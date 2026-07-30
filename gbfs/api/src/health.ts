@@ -43,8 +43,24 @@ export interface HealthR2 {
 	put?(key: string, value: string): Promise<unknown>;
 }
 
+/** Feed-staleness drift: how far the feed's own `last_updated` lagged our
+ *  poll wall-clock, for the latest poll plus a rolling 24h series (older
+ *  history is derivable from the daily compaction parquets, which carry
+ *  `ts` + `polled_at` per row). */
+export interface FeedDrift {
+	/** `polled_at - ts` of the latest WAL record, seconds. */
+	latestS: number;
+	/** Feed `last_updated` (epoch s) of the latest WAL record. */
+	ts: number;
+	/** Poll wall-clock (epoch s) of the latest WAL record. */
+	polledAt: number;
+	/** `[polled_at epoch s, drift s]` points, ≤24h old, oldest first. */
+	series: Array<[number, number]>;
+}
+
 export interface FeedHealth {
 	latestPoll: { key: string; date: string; time: string; uploadedAt: string } | null;
+	drift: FeedDrift | null;
 	todayCount: number;
 	todayExpected: number;
 	last7Days: Array<{ date: string; count: number; expected: number }>;
@@ -192,7 +208,37 @@ export async function getFeedHealth(r2: HealthR2): Promise<FeedHealth> {
 		}),
 	);
 
-	return { latestPoll, todayCount, todayExpected, last7Days: counts };
+	const drift = latestPoll ? await getFeedDrift(r2, latestPoll.key) : null;
+
+	return { latestPoll, drift, todayCount, todayExpected, last7Days: counts };
+}
+
+const FEED_DRIFT_KEY = 'health/feed-drift.json';
+const FEED_DRIFT_WINDOW_S = 24 * 3600;
+
+/** Read the latest WAL record's `{ts, polled_at}`, fold the point into the
+ *  rolling 24h series doc, and return both. Append is keyed on `polled_at`
+ *  so re-computes (cron + on-demand snapshot refreshes) are idempotent; a
+ *  concurrent lost-update just drops one point, which the next poll re-adds. */
+async function getFeedDrift(r2: HealthR2, latestKey: string): Promise<FeedDrift | null> {
+	const obj = await r2.get(latestKey);
+	if (!obj) return null;
+	const rec = await obj.json<{ ts?: number; polled_at?: number }>();
+	if (typeof rec.ts !== 'number' || typeof rec.polled_at !== 'number') return null;
+	const latestS = rec.polled_at - rec.ts;
+
+	const prev = await r2.get(FEED_DRIFT_KEY);
+	let series: Array<[number, number]> = prev
+		? await prev.json<Array<[number, number]>>()
+		: [];
+	const cutoff = rec.polled_at - FEED_DRIFT_WINDOW_S;
+	series = series.filter(([t]) => t >= cutoff);
+	if (!series.length || series[series.length - 1][0] < rec.polled_at) {
+		series.push([rec.polled_at, latestS]);
+		if (r2.put) await r2.put(FEED_DRIFT_KEY, JSON.stringify(series));
+	}
+
+	return { latestS, ts: rec.ts, polledAt: rec.polled_at, series };
 }
 
 export async function getCompactionHealth(r2: HealthR2): Promise<CompactionHealth> {
