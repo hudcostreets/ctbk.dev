@@ -9,7 +9,9 @@
  *
  * Schema (v1; see specs/avail-perf-pass.md § "Monoid schema"):
  *   station_id : STRING       sort key — enables row-group prune
- *   dt         : INT64        floor(polled_at / 60) * 60
+ *   dt         : INT64        floor(ts / 60) * 60 — the feed's `last_updated`
+ *                             (LU) minute, NOT the poll minute (see
+ *                             specs/lu-attribution.md; flipped 2026-08-03)
  *   <m>_n      : INT32        count (=1 at cons=1m)
  *   <m>_sum    : DOUBLE       sum
  *   <m>_sum_sq : DOUBLE       sum of squares (for variance)
@@ -32,6 +34,9 @@ export interface StationStatus {
 	is_renting: number;
 	is_returning: number;
 	last_reported: number;
+	/** 2.3-feed extra, compacted to {vehicle_type_id: count}. WAL-only —
+	 *  not a minute-shard parquet column. */
+	vehicle_types_available?: Record<string, number>;
 }
 
 export interface MinuteRecord {
@@ -61,7 +66,7 @@ export function buildMinuteShard(record: MinuteRecord): ColumnSource[] {
 		a.station_id < b.station_id ? -1 : a.station_id > b.station_id ? 1 : 0,
 	);
 	const n = stations.length;
-	const dt = BigInt(Math.floor(record.polled_at / 60) * 60);
+	const dt = BigInt(Math.floor(record.ts / 60) * 60);
 
 	const stationIds: string[] = new Array(n);
 	const dts: bigint[] = new Array(n);

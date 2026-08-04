@@ -1,12 +1,14 @@
 /**
  * GBFS station status poller — Cloudflare Worker with cron trigger.
  *
- * Fetches Citi Bike station_status.json every minute, writes per-minute
- * JSON snapshots to R2. Daily compaction to parquet is handled by GHA
- * (gbfs-compact.yml) using compact-r2.py.
+ * Samples Citi Bike station_status.json every few seconds within each
+ * minute tick, writing a JSON snapshot whenever the feed's
+ * `last_updated` (LU) advances — WAL keys and `dt` attribution both use
+ * the LU minute (specs/lu-attribution.md). Daily compaction to parquet
+ * is handled by GHA (gbfs-compact.yml) using compact-r2.py.
  *
  * R2 layout:
- *   gbfs/status/YYYY-MM-DD/HH-MM.json     — per-minute WAL snapshots (JSON)
+ *   gbfs/status/YYYY-MM-DD/HH-MM.json     — per-LU-minute WAL snapshots (JSON)
  *   gbfs/heartbeat/YYYY-MM-DD/HH-MM.txt   — cron-fire trace (3 bytes/tick)
  *   gbfs/info/YYYY-MM-DD.json             — daily station_information
  *
@@ -23,8 +25,20 @@
  * Schema/monoid helpers live in `gbfs/lib/avail-monoid.ts`.
  */
 
-const STATUS_URL = 'https://gbfs.lyft.com/gbfs/1.1/bkn/en/station_status.json';
+// 2.3 for status: its CDN surfaces a new `last_updated` ~3-5s after the
+// origin stamps it, vs the 1.1 URL's free-running ~60s cache (probe data
+// in specs/lu-attribution.md). Info stays on 1.1 for now — its daily
+// archive has downstream parsers and no freshness pressure; flip it
+// deliberately, not as a side effect.
+const STATUS_URL = 'https://gbfs.lyft.com/gbfs/2.3/bkn/en/station_status.json';
 const INFO_URL = 'https://gbfs.lyft.com/gbfs/1.1/bkn/en/station_information.json';
+
+// Sub-minute sampling: LU advances every ~60s (stamped ~:05 past the
+// minute, visible on the 2.3 CDN ~5s later); sampling every 6s for ~57s
+// per cron tick catches each new LU ~≤10s after its stamp. Only LU
+// *changes* are written, so steady-state R2 writes stay ~1/min.
+const SAMPLE_INTERVAL_MS = 6_000;
+const SAMPLE_WINDOW_MS = 57_000;
 
 const KEEP_COLS = [
 	'station_id',
@@ -70,29 +84,76 @@ function slimStation(s: Record<string, unknown>): StationStatus {
 	for (const col of KEEP_COLS) {
 		slim[col] = s[col] ?? 0;
 	}
+	// 2.3 extra: per-type counts, compacted [{vehicle_type_id, count}] →
+	// {id: count}. Inert for the minute-shard parquet (fixed columns);
+	// recorded in the WAL for future per-type granularity.
+	const vt = s['vehicle_types_available'];
+	if (Array.isArray(vt)) {
+		const m: Record<string, number> = {};
+		for (const v of vt as { vehicle_type_id: string; count: number }[]) {
+			m[v.vehicle_type_id] = v.count;
+		}
+		slim['vehicle_types_available'] = m;
+	}
 	return slim as unknown as StationStatus;
 }
 
-async function pollStatus(bucket: R2Bucket): Promise<void> {
-	const now = new Date();
+// Last LU written by this isolate. Cold starts reset it to 0 — the next
+// sample then re-writes its LU's key, which is idempotent (same key,
+// same content mod `polled_at`).
+let lastLu = 0;
+
+/** One sample: fetch the feed; if its LU is new, write the WAL record
+ *  under the LU's minute key (`floor(LU/60)` — attribution and key agree;
+ *  see specs/lu-attribution.md). Returns the LU when a write happened. */
+async function sampleStatus(bucket: R2Bucket): Promise<number | null> {
+	const polledAt = Math.floor(Date.now() / 1000);
 	const resp = await fetch(STATUS_URL);
 	if (!resp.ok) throw new Error(`station_status fetch failed: ${resp.status}`);
 
 	const data = (await resp.json()) as StatusResponse;
-	const ts = data.last_updated;
-	const stations = data.data.stations.map(slimStation);
+	const lu = data.last_updated;
+	if (lu <= lastLu) return null;
 
+	const stations = data.data.stations.map(slimStation);
 	const record: MinuteRecord = {
-		ts,
-		polled_at: Math.floor(now.getTime() / 1000),
+		ts: lu,
+		polled_at: polledAt,
 		stations,
 	};
 
-	const jsonKey = `gbfs/status/${utcDateStr(now)}/${utcTimeStr(now)}.json`;
+	const luDate = new Date(lu * 1000);
+	const jsonKey = `gbfs/status/${utcDateStr(luDate)}/${utcTimeStr(luDate)}.json`;
 	await bucket.put(jsonKey, JSON.stringify(record), {
 		httpMetadata: { contentType: 'application/json' },
 	});
-	console.log(`Polled ${stations.length} stations, ts=${ts} → ${jsonKey}`);
+	lastLu = lu;
+	console.log(`Polled ${stations.length} stations, LU=${lu} (+${polledAt - lu}s) → ${jsonKey}`);
+	return lu;
+}
+
+/** Cron-tick body: sample every SAMPLE_INTERVAL_MS across the minute,
+ *  writing only on LU change. Individual fetch failures are logged and
+ *  skipped — the next sample (or tick) retries. */
+async function pollStatus(bucket: R2Bucket): Promise<void> {
+	const t0 = Date.now();
+	let writes = 0;
+	let samples = 0;
+	let lastErr: unknown = null;
+	while (Date.now() - t0 < SAMPLE_WINDOW_MS) {
+		samples++;
+		try {
+			if ((await sampleStatus(bucket)) !== null) writes++;
+		} catch (e) {
+			lastErr = e;
+			console.warn(`sample ${samples} failed: ${e}`);
+		}
+		const next = t0 + samples * SAMPLE_INTERVAL_MS;
+		const wait = next - Date.now();
+		if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+	}
+	if (writes === 0 && lastErr !== null) throw lastErr;
+	console.log(`tick: ${samples} samples, ${writes} LU writes`);
 }
 
 async function pollInfo(bucket: R2Bucket): Promise<void> {
@@ -137,9 +198,10 @@ export default {
 	async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		if (url.pathname === '/poll') {
-			await pollStatus(env.BUCKET);
+			// Single sample (not the full minute loop) — manual poke.
+			const lu = await sampleStatus(env.BUCKET);
 			await pollInfo(env.BUCKET);
-			return new Response('OK\n');
+			return new Response(lu === null ? 'OK (LU unchanged, no write)\n' : `OK (wrote LU ${lu})\n`);
 		}
 		return new Response('GBFS poller.\n  GET /poll — trigger poll\n');
 	},

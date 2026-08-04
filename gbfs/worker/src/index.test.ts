@@ -44,14 +44,14 @@ describe('buildMinuteShard', () => {
 		expect(ids).toEqual(['A', 'M', 'Z']);
 	});
 
-	test('dt = floor(polled_at / 60) * 60', () => {
+	test('dt = floor(ts / 60) * 60 — LU minute, NOT poll minute', () => {
 		const cols = buildMinuteShard({
-			ts: 1700000000,
-			polled_at: 1700000125, // 2:05.125 past minute → floor to 2 min past epoch-rounded
+			ts: 1700000065, // LU, :25 past its minute (1700000040)
+			polled_at: 1700000125, // polled 60s later (drift) — must not affect dt
 			stations: [station('A')],
 		});
 		const dt = cols.find((c) => c.name === 'dt')!.data;
-		expect(dt).toEqual([BigInt(1700000100)]); // 1700000125 - 25 = 1700000100
+		expect(dt).toEqual([BigInt(1700000040)]); // floor(LU/60)*60 — NOT the poll minute (1700000100)
 	});
 
 	test('per-metric values mapped from GBFS source columns', () => {

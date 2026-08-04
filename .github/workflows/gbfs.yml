@@ -8,6 +8,7 @@ on:
       - 'gbfs/api/**'
       - 'gbfs/compactor/**'
       - 'gbfs/cascade/**'
+      - 'gbfs/lib/**'
       - '.github/workflows/gbfs.yml'
   workflow_dispatch:
     inputs:
@@ -33,16 +34,21 @@ jobs:
         id: filter
         with:
           filters: |
+            # gbfs/lib is bundled (not a published dep) — every worker that
+            # imports ../lib must redeploy when it changes.
             worker:
               - 'gbfs/worker/**'
+              - 'gbfs/lib/**'
             loader:
               - 'gbfs/loader/**'
+              - 'gbfs/lib/**'
             api:
               - 'gbfs/api/**'
             compactor:
               - 'gbfs/compactor/**'
             cascade:
               - 'gbfs/cascade/**'
+              - 'gbfs/lib/**'
 
   deploy:
     needs: detect-changes

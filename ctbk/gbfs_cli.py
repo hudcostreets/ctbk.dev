@@ -1160,3 +1160,141 @@ def gbfs_r2_pq(show_meta: bool, head_n: int, key: str) -> None:
 		if head_n:
 			batch = next(pf.iter_batches(batch_size=head_n))
 			print(batch.to_pandas().to_string())
+
+
+# ─── feed subgroup ──────────────────────────────────────────────────────
+#
+# Upstream-feed characterization: how often does `last_updated` (LU)
+# advance, how stale is the content we receive (CDN cache behavior), and
+# is same-LU content byte-identical? Feeds the LU-attribution migration
+# (`specs/lu-attribution.md`): using LU as time-of-record instead of the
+# poller's wall clock.
+
+# What the poller (`gbfs/worker`) fetches:
+FEED_STATUS_URL = 'https://gbfs.lyft.com/gbfs/1.1/bkn/en/station_status.json'
+FEED_STATUS_URL_23 = 'https://gbfs.lyft.com/gbfs/2.3/bkn/en/station_status.json'
+
+# Response headers worth recording per sample (CDN provenance / cache age).
+_FEED_HDRS = [
+	'age', 'cache-control', 'cf-cache-status', 'date', 'etag',
+	'last-modified', 'via', 'x-amz-cf-id', 'x-amz-cf-pop', 'x-cache',
+]
+
+
+@gbfs.group('feed', help='Upstream GBFS feed probes: `last_updated` cadence, cache behavior, content identity.')
+def gbfs_feed() -> None:
+	pass
+
+
+@gbfs_feed.command('probe', help='Sample the feed every INTERVAL seconds for DURATION seconds; one JSON line per sample on stdout.')
+@option('-d', '--duration', type=float, default=900., show_default=True, help='Total probe wall-clock seconds.')
+@option('-i', '--interval', type=float, default=5., show_default=True, help='Seconds between samples (fixed grid from start).')
+@option('-n', '--no-cache', 'no_cache', is_flag=True, help='Send `Cache-Control: no-cache` (compare vs default CDN behavior).')
+@option('-u', '--url', default=FEED_STATUS_URL, show_default=True, help='Feed URL (see also the 2.3 variant).')
+def gbfs_feed_probe(
+	duration: float,
+	interval: float,
+	no_cache: bool,
+	url: str,
+) -> None:
+	import hashlib
+	import time as _time
+
+	t0 = _time.time()
+	k = 0
+	n_err = 0
+	while True:
+		target = t0 + k * interval
+		now = _time.time()
+		if target - t0 > duration:
+			break
+		if target > now:
+			_time.sleep(target - now)
+		k += 1
+		req = _urlrequest.Request(url)
+		if no_cache:
+			req.add_header('Cache-Control', 'no-cache')
+		t_req = _time.time()
+		try:
+			with _urlrequest.urlopen(req, timeout=20) as resp:
+				body = resp.read()
+				hdrs = {h: resp.headers.get(h) for h in _FEED_HDRS if resp.headers.get(h) is not None}
+		except (HTTPError, URLError, OSError) as e:
+			n_err += 1
+			err(f'sample {k}: fetch failed: {e}')
+			continue
+		t_resp = _time.time()
+		d = json.loads(body)
+		stations = d.get('data', {}).get('stations', [])
+		canon = json.dumps(
+			sorted(stations, key=lambda s: s.get('station_id', '')),
+			sort_keys=True, separators=(',', ':'),
+		).encode()
+		print(json.dumps({
+			't': round(t_req, 3),
+			'rt_ms': round((t_resp - t_req) * 1000),
+			'lu': d.get('last_updated'),
+			'ttl': d.get('ttl'),
+			'n': len(stations),
+			'body_md5': hashlib.md5(body).hexdigest(),
+			'stations_md5': hashlib.md5(canon).hexdigest(),
+			'hdrs': hdrs,
+		}), flush=True)
+	err(f'{k} samples attempted, {n_err} failed')
+
+
+@gbfs_feed.command('stats', help='Analyze `feed probe` JSONL: LU cadence, detection latency, same-LU content identity, cache headers.')
+@argument('paths', nargs=-1, required=True)
+def gbfs_feed_stats(paths: tuple[str, ...]) -> None:
+	from statistics import mean, median
+
+	for path in paths:
+		with (sys.stdin if path == '-' else open(path)) as f:
+			samples = [json.loads(line) for line in f if line.strip()]
+		if not samples:
+			err(f'{path}: no samples')
+			continue
+		samples.sort(key=lambda s: s['t'])
+		span = samples[-1]['t'] - samples[0]['t']
+		print(f'── {path}: {len(samples)} samples over {span / 60:.1f} min')
+
+		# LU timeline: first/last sighting per distinct LU, in time order.
+		lus: list[dict] = []
+		for s in samples:
+			if not lus or lus[-1]['lu'] != s['lu']:
+				lus.append({'lu': s['lu'], 't_first': s['t'], 't_last': s['t'], 'md5s': set(), 'body_md5s': set()})
+			lus[-1]['t_last'] = s['t']
+			lus[-1]['md5s'].add(s['stations_md5'])
+			lus[-1]['body_md5s'].add(s['body_md5'])
+
+		deltas = [b['lu'] - a['lu'] for a, b in zip(lus, lus[1:])]
+		if deltas:
+			regress = sum(1 for d in deltas if d < 0)
+			print(f'  distinct LUs: {len(lus)}; cadence (s): min={min(deltas)} p50={median(deltas)} mean={mean(deltas):.1f} max={max(deltas)}'
+				+ (f'; {regress} REGRESSIONS (LU went backwards)' if regress else ''))
+		lat = [u['t_first'] - u['lu'] for u in lus[1:]]  # skip first (LU predates probe start)
+		if lat:
+			lat_s = sorted(lat)
+			print(f'  detection latency (first-seen − LU, s): min={lat_s[0]:.1f} p50={lat_s[len(lat_s) // 2]:.1f} p95={lat_s[int(len(lat_s) * .95)]:.1f} max={lat_s[-1]:.1f}')
+
+		multi = [u for u in lus if len(u['md5s']) > 1]
+		multi_body = [u for u in lus if len(u['body_md5s']) > 1]
+		print(f'  same-LU content: {len(multi)} of {len(lus)} LUs had >1 distinct stations_md5'
+			+ f' ({len(multi_body)} >1 body_md5)')
+		for u in multi[:5]:
+			print(f'    LU {u["lu"]} ({datetime.fromtimestamp(u["lu"], tz=timezone.utc):%H:%M:%S}Z): {len(u["md5s"])} station-payload variants')
+
+		hdr_counts: Counter = Counter()
+		ages: list[float] = []
+		for s in samples:
+			h = s.get('hdrs', {})
+			for key in ('x-cache', 'cf-cache-status'):
+				if key in h:
+					hdr_counts[f'{key}: {h[key]}'] += 1
+			if 'age' in h:
+				ages.append(float(h['age']))
+		for hv, n in hdr_counts.most_common():
+			print(f'  {hv}: {n}')
+		if ages:
+			ages.sort()
+			print(f'  Age header (s): min={ages[0]:.0f} p50={ages[len(ages) // 2]:.0f} max={ages[-1]:.0f}')
