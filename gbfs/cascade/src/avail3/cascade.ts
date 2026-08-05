@@ -424,12 +424,14 @@ const MAX_TILES = 32;
  *  outage, where anything beyond it defers to the offline fsck. */
 const MAX_RAW_FILL_MIN = 30;
 
-/** How long after a minute passes before its raw-WAL parquet is treated
- *  as final. The poller writes within seconds of each minute; past this
- *  window a missing minute was a missed poll and will never arrive, so
- *  consolidations ship without it instead of wedging on
- *  `present < expected` forever. */
-const RAW_FINALITY_MS = 15 * 60_000;
+/** Anti-race damper for the currently-closing period: a WAL put can be
+ *  seconds in flight, so a hole younger than this defers one tick.
+ *  Beyond it, ship with whatever minutes exist — an absent minute is
+ *  just absent (patchy raw data is an invariant), and a datum that
+ *  lands late repairs built shards via the invalidation journal
+ *  (`specs/shard-invalidation-adoption.md`) rather than a wait/skip
+ *  heuristic. Same policy as the Lambda's `CRON_JITTER_GRACE_S`. */
+const CRON_JITTER_GRACE_MS = 120_000;
 
 /** Greedy largest-first tiling of `[effStartMs, effEndMs)` from EXISTING
  *  same-tier shards at rungs finer than the target. At each position,
@@ -541,17 +543,18 @@ async function writeSameTierCascade(
 			}
 			for (const [s, e] of holes) {
 				const { rows, present, expected } = await readRawRows(r2, luc, s, e);
-				if (present < expected && e > Date.now() - RAW_FINALITY_MS) {
-					// Recent hole: the poller may still land these minutes —
-					// retry on a later tick rather than shipping holes.
+				if (present < expected && e > Date.now() - CRON_JITTER_GRACE_MS) {
+					// Hole in the currently-closing period: the WAL put may
+					// be in flight — retry on a later tick.
 					inputsExpected += expected;
 					inputsPresent += present;
 					return { status: 'no_inputs', key, inputsPresent, inputsExpected };
 				}
-				// Past the finality window, a missing raw minute was a missed
-				// poll and will never arrive (prod: WAL minute 14:58 on
-				// 2026-07-10 wedged `/1m@3h` + every downstream tier). Count
-				// only the minutes that exist so the rung ships + registers.
+				// Past the grace window, build with what exists (prod: WAL
+				// minute 14:58 on 2026-07-10 wedged `/1m@3h` + every tier
+				// downstream under the old strict check). A late-landing
+				// minute repairs via the invalidation journal. Count only
+				// the minutes that exist so the rung ships + registers.
 				inputsExpected += present;
 				inputsPresent += present;
 				if (rows.length > 0) {

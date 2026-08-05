@@ -1,6 +1,12 @@
 # Shard invalidation, ctbk side: triggers, cache versioning, `RAW_FINALITY_S` retirement
 
-Status: **open** (2026-07-30). Engine spec: pyrmts `specs/shard-invalidation.md` (journal + fsck-rebuild mechanics live there; this spec is the consumer wiring). Context: the poller-flakiness decision is **accept** — CFW `* * * * *` cron sheds ~1-4% of minutes; downstream must be robust to patchy raw data as an invariant, and repairs (when a datum *does* land late) should be event-driven rather than gated on the 15-minute wait/skip heuristic.
+Status: **implemented, pending deploy + soak** (2026-08-05; spec 2026-07-30). Engine spec: pyrmts `specs/shard-invalidation.md` (journal + fsck-rebuild mechanics live there — implemented, R2 If-Match live-smoke green 2026-08-05, consumed via the `ce770e7` pin; `run_extension_fill(honor_invalidations=True)` is the upstream default, so the Lambda fill ticks consume the journal as soon as the image bakes the new pin).
+
+Implemented (2026-08-05):
+
+- **CLI**: `ctbk gbfs invalidate [-C avail-v5] FROM TO` appends to the pyramid's journal via `pyrmts_engine.invalidation.invalidate` (etag-CAS'd); `-l/--list` prints the journal.
+- **Cache versioning**: `repairGeneration(bucket, pyramid)` in `gbfs/api/src/avail_geo.ts` — the journal object's R2 **mtime** (not etag: an emptied journal's content is identical across repair cycles, so etag-keying would resurrect pre-repair entries) folded into the `/api/avail-v3` cache key as `gen=`, next to the resolved-`pyramid` fold. In-isolate 60s TTL bounds the HEAD. Journalless pyramids pin `gen=0`; totals/rides adopt the same helper if/when their pyramids get journals (totals' availability arm is legacy/zero-traffic, slated for removal).
+- **Finality flip**: `RAW_FINALITY_S`/`RAW_FINALITY_MS` (15 min) → `CRON_JITTER_GRACE_S`/`_MS` (120 s) in `lambda_exec.py` + `cascade.ts`; the wait-branch survives only as the anti-race damper for the currently-closing period. The "declare lost" concept is gone — late data repairs via the journal. Context: the poller-flakiness decision is **accept** — CFW `* * * * *` cron sheds ~1-4% of minutes; downstream must be robust to patchy raw data as an invariant, and repairs (when a datum *does* land late) should be event-driven rather than gated on the 15-minute wait/skip heuristic.
 
 ## Trigger surfaces
 
@@ -30,7 +36,7 @@ With invalidation live end-to-end:
 3. Flip: shrink `RAW_FINALITY_S` → `CRON_JITTER_GRACE_S=120` in `lambda_exec.py` + the CFW cascade; delete the skip-vs-wait branch in favor of build-always.
 4. Soak a week; verify a synthetic repair end-to-end (delete a WAL minute from a test window, rebuild, re-add, invalidate, confirm byte-convergence to the never-deleted build).
 
-## Related facts (established 2026-07-30, recorded here so the spec is self-contained)
+## Related facts (2026-07-30, updated 2026-08-05)
 
-- WAL keys AND data attribution both use poll wall-clock (`buildMinuteShard`: `dt = floor(polled_at/60)*60`); the feed's `last_updated` (`ts`) is stored alongside but unused for binning. Feed drift (`polled_at − ts`) is now surfaced on `/health` (latest + rolling 24h) and derivable historically from the daily compaction parquets (`ts` + `polled_at` columns). If drift proves material (p95 ≫ 60s), re-attributing `dt` to `floor(ts/60)` is a data-level change requiring a full rebuild for consistency — decide after observing the drift series; do not mix attributions across eras.
+- ~~WAL keys AND data attribution both use poll wall-clock~~ **Superseded**: the drift question resolved in favor of LU attribution (`specs/lu-attribution.md`) — poller v2 (2026-08-04 cutover) keys WAL minutes by `last_updated` and `buildMinuteShard` attributes `dt = floor(ts/60)*60`; `polled_at` is operational metadata. Pre-cutover history re-attributes in the avail-v6 regen (engine raw-ingest accepted 2026-08-05, pyrmts `specs/engine-raw-ingest.md`).
 - Read path never touches raw WAL minutes: now-touching queries clamp `to` to the last closed 5-min boundary and cover the tail with `@5min+` rungs; the live edge rides `/api/stations/:id/today`.

@@ -59,6 +59,12 @@ def scratch_yaml(config_name: str, scratch_prefix: str) -> str:
     return merged.replace(f'{prefix}/{{tier}}', f'{scratch_prefix}/{{tier}}')
 
 
+def load_pyramid(config_name: str):
+    """The full merged-ladder pyramid at its real serving prefix."""
+    cfg = parse_pyramid_yaml(merged_yaml(config_name))
+    return pyramid_from_config(cfg, storage_from_cfg(cfg.storage))
+
+
 def load_pyramids(config_name: str, scratch_prefix: str):
     """(source_pyramid, target_pyramid): full merged ladder, same
     storage, target keyed under `scratch_prefix`."""

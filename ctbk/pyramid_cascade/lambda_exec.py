@@ -91,9 +91,14 @@ def merge_lambda_shards(yaml_text: str) -> str:
 RAW_MINUTE_PREFIX = 'gbfs/avail/agg=1m/cons=1m'
 STATION_LUC_KEY = 'station-luc.json'
 COARSEST_LEVEL = 10
-# Past this age a missing raw WAL minute was a missed poll and will
-# never arrive; ship without it (same policy as the CFW cascade).
-RAW_FINALITY_S = 15 * 60
+# Anti-race damper for the currently-closing period: a WAL put can be
+# seconds in flight, so a missing minute younger than this defers the
+# build one tick. Beyond it, build with whatever minutes exist — an
+# absent minute is just absent (patchy raw data is an invariant), and a
+# datum that lands late repairs via the invalidation journal
+# (`specs/shard-invalidation-adoption.md`) instead of a wait/skip
+# heuristic. Same policy as the CFW cascade's `CRON_JITTER_GRACE_MS`.
+CRON_JITTER_GRACE_S = 120
 
 # Chain mode: 'luc' (legacy avail-v3 — L10..LUC ancestor chains from the
 # station-luc denorm) or 'vocab' (avail-v4 — frozen ragged vocabulary +
@@ -199,9 +204,10 @@ def _fill_hole_raw(
 ) -> pa.Table | None:
     """Finest-tier hole-fill from the raw per-minute WAL: LUC-expand each
     station observation, accumulate histograms per (cell, dt, metric).
-    Missing minutes past `RAW_FINALITY_S` are skipped (missed polls);
-    a RECENT missing minute returns None (retry once the poller lands
-    it). Mirrors the CFW's `readRawRows` + finality policy."""
+    Builds with whatever minutes exist; only a missing minute younger
+    than `CRON_JITTER_GRACE_S` returns None (retry next run — the WAL
+    put may be in flight). Late-landing data repairs built shards via
+    the invalidation journal. Mirrors the CFW's `readRawRows` policy."""
     import json as _json
     from datetime import timedelta
     from collections import defaultdict
@@ -216,8 +222,8 @@ def _fill_hole_raw(
         try:
             obj = r2.get_object(Bucket=R2_BUCKET, Key=key)
         except r2.exceptions.ClientError:
-            if (now - cur).total_seconds() < RAW_FINALITY_S:
-                return None  # poller may still land it — retry next run
+            if (now - cur).total_seconds() < CRON_JITTER_GRACE_S:
+                return None  # WAL put may be in flight — retry next run
             cur += timedelta(minutes=1)
             continue
         saw_any = True

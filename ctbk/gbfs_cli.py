@@ -789,6 +789,41 @@ def gbfs_parity(
 	sys.exit(1 if failures else 0)
 
 
+# ─── shard invalidation (specs/shard-invalidation-adoption.md) ─────────
+
+
+@gbfs.command('invalidate', help='Append a repair interval `[FROM, TO)` (UTC ISO) to the pyramid\'s R2 invalidation journal; the next extension-fill tick rebuilds every overlapping built shard in place (fine→coarse, re-registered). With -l, just print the journal.')
+@option('-C', '--config', 'config_name', default='avail-v5', show_default=True, help='Pyramid config basename under configs/pyramids/.')
+@option('-l', '--list', 'list_only', is_flag=True, help='Print current journal entries; no append.')
+@argument('from_', metavar='FROM', required=False)
+@argument('to', metavar='TO', required=False)
+def gbfs_invalidate(
+	config_name: str,
+	list_only: bool,
+	from_: str | None,
+	to: str | None,
+) -> None:
+	from pyrmts_engine.invalidation import invalidate, journal_key, load_invalidations
+	from ctbk.pyramid_cascade.engine_check import load_pyramid
+	pyramid = load_pyramid(config_name)
+	if list_only:
+		if from_ is not None or to is not None:
+			raise click.UsageError('-l/--list takes no FROM/TO arguments')
+		entries, _ = load_invalidations(pyramid)
+		for e in entries:
+			print(f'[{e.start.isoformat()}, {e.end.isoformat()}) requested_at={e.requested_at.isoformat()}')
+		err(f'{journal_key(pyramid)}: {len(entries)} entries')
+		return
+	if from_ is None or to is None:
+		raise click.UsageError('FROM and TO are required (or use -l/--list)')
+	def parse_utc(s: str) -> datetime:
+		d = datetime.fromisoformat(s)
+		return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
+	interval = (parse_utc(from_), parse_utc(to))
+	n = invalidate(pyramid, interval)
+	err(f'{journal_key(pyramid)}: appended [{interval[0].isoformat()}, {interval[1].isoformat()}) — {n} entries pending repair')
+
+
 # ─── pyrmts-engine validation (specs/pyrmts-engine-validation.md) ──────
 
 

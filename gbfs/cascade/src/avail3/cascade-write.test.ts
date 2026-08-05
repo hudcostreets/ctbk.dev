@@ -6,7 +6,7 @@
 // materializes (a closing rung's LAST constituent closes and is
 // superseded in the same tick), so every consolidation wedged with
 // `no_inputs` from the first 10min rung on up.
-import { describe, test, expect } from 'vitest';
+import { afterEach, describe, test, expect, vi } from 'vitest';
 import { parquetWriteBuffer } from 'hyparquet-writer';
 import type { Duration, ExpectedShard } from 'pyrmts';
 import { planDustTiling, writeShard, shardKey } from './cascade';
@@ -160,11 +160,12 @@ describe('writeShard same-tier consolidation', () => {
 	});
 
 	test('/1m old empty hole → ships tile-only (missed polls are final)', async () => {
-		// Raw minutes past RAW_FINALITY_MS that don't exist were missed
-		// polls and will never arrive — the rung must ship without them
-		// rather than wedge forever (prod: WAL minute 2026-07-10T14:58
-		// was never scraped; the strict present<expected check wedged
-		// `/1m@3h/2026-07-10T12` and every tier downstream of it).
+		// Raw minutes past CRON_JITTER_GRACE_MS that don't exist are just
+		// absent — the rung must ship without them rather than wedge
+		// (prod: WAL minute 2026-07-10T14:58 was never scraped; the
+		// strict present<expected check wedged `/1m@3h/2026-07-10T12`
+		// and every tier downstream of it). If one ever lands late, the
+		// invalidation journal repairs the built shards.
 		const r2 = makeR2();
 		const S = ms('2026-07-09T00:30:00Z');  // historical → past finality
 		const tileRows = [0, 1, 2, 3, 4].map((i) => availRow('aa', S + i * MIN, { 5: 1 }));
@@ -206,11 +207,16 @@ describe('writeShard same-tier consolidation', () => {
 		]);
 	});
 
-	test('/1m recent hole with missing raw minute → no_inputs (poller may catch up)', async () => {
+	afterEach(() => vi.useRealTimers());
+
+	test('/1m recent hole with missing raw minute → no_inputs (WAL put may be in flight)', async () => {
 		const r2 = makeR2();
-		// Period ending "now": the missing minutes are within the finality
-		// window, so the rung retries instead of shipping a holed shard.
-		const S = Math.floor(Date.now() / (10 * MIN)) * 10 * MIN - 10 * MIN;
+		// Pin "now" 30s after the period closes: the missing minutes are
+		// inside `CRON_JITTER_GRACE_MS`, so the rung retries instead of
+		// shipping a holed shard.
+		const S = ms('2026-07-09T00:30:00Z');
+		vi.useFakeTimers();
+		vi.setSystemTime(S + 10 * MIN + 30_000);
 		await writeShardRows(r2 as never, shardKey('1m', '5min', new Date(S)),
 			[availRow('aa', S, { 5: 1 })]);
 		// No raw minutes for [S+5min, S+10min).

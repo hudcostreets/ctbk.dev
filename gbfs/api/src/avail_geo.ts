@@ -114,6 +114,29 @@ const PYRAMIDS: Record<string, { name: string; keyTemplate: string; vocab?: bool
  *  edge-cache key (`index.ts`) so flipping this constant rotates cache
  *  entries instead of serving the old default's cached payloads. */
 export const DEFAULT_PYRAMID = 'avail-v5';
+
+/** Repair-generation edge-cache versioning
+ *  (`specs/shard-invalidation-adoption.md`): past-window responses stay
+ *  long-TTL/immutable, but their cache key folds in the mtime of the
+ *  pyramid's R2 invalidation journal (`<prefix>/_invalidations.json`),
+ *  so every journal write — the append on `ctbk gbfs invalidate`, and
+ *  the fill driver's prune once repairs land — rotates every affected
+ *  key. mtime, not etag: the journal is emptied in place after repairs,
+ *  and an emptied journal's CONTENT (hence etag) is identical across
+ *  repair cycles — etag-keying would resurrect pre-repair cache entries
+ *  on the second cycle. Unrepaired pyramids (no journal) pin gen '0'.
+ *  The in-isolate TTL cache bounds the R2 HEAD to ~1/min/isolate. */
+const repairGenCache = new Map<string, { gen: string; at: number }>();
+const REPAIR_GEN_TTL_MS = 60_000;
+export async function repairGeneration(bucket: R2Bucket, pyramid: string): Promise<string> {
+	const now = Date.now();
+	const hit = repairGenCache.get(pyramid);
+	if (hit && now - hit.at < REPAIR_GEN_TTL_MS) return hit.gen;
+	const head = await bucket.head(`${pyramid}/_invalidations.json`);
+	const gen = head ? String(head.uploaded.getTime()) : '0';
+	repairGenCache.set(pyramid, { gen, at: now });
+	return gen;
+}
 const RESOLUTIONS = [15, 14, 13, 12, 11, 10];
 
 /** avail-v3 genesis: earliest 5-min-aligned UTC timestamp intersecting any
