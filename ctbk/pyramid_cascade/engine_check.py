@@ -82,13 +82,21 @@ def run_build(
     manifest: str,
     source_tier: str = '1m',
     source_shard: str = '2d',
+    raw: bool = False,
     window: str = '12h',
     verbose: bool = False,
 ):
     from pyrmts_engine import JsonlShardIndex, WideShardSource, build_local
     from .config import parse_rg_sizes
     src, tgt = load_pyramids(config_name, scratch_prefix)
-    source = WideShardSource(src, tier_name=source_tier, shard_dur=source_shard)
+    if raw:
+        from .lambda_exec import _chains, parse_chains_mode, set_chains_mode
+        from .lite import r2_client
+        from .raw_source import DailyStatusSource
+        set_chains_mode(parse_chains_mode(merged_yaml(config_name)))
+        source = DailyStatusSource(src, _chains(r2_client()))
+    else:
+        source = WideShardSource(src, tier_name=source_tier, shard_dur=source_shard)
     rg_sizes = parse_rg_sizes((CONFIG_DIR / f'{config_name}.yaml').read_text())
     result = build_local(
         tgt,

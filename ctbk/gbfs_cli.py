@@ -817,7 +817,7 @@ def _engine_range(aligned: str | None, range_: str | None) -> tuple[datetime, da
 @option('-m', '--manifest', default=None, help='JSONL manifest path [default: tmp/engine-check-manifest.jsonl].')
 @option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
 @option('-r', '--range', 'range_', default=None, help='Half-open build range `[FROM]/TO` (UTC ISO; FROM defaults to genesis).')
-@option('-s', '--source', 'source_rung', default='1m@2d', show_default=True, help='Materialized rung to read, `tier@shard_dur`.')
+@option('-s', '--source', 'source_rung', default='1m@2d', show_default=True, help='Materialized rung to read, `tier@shard_dur` — or `raw` to build from the daily status parquets (LU-attributed; engine writes every rung incl. /1m).')
 @option('-v', '--verbose', is_flag=True, help='Per-flush progress on stderr.')
 @option('-w', '--window', default='12h', show_default=True, help='Streaming window Duration (memory dial).')
 def gbfs_engine_build(
@@ -832,15 +832,15 @@ def gbfs_engine_build(
 ) -> None:
 	from ctbk.pyramid_cascade.engine_check import DEFAULT_MANIFEST, run_build
 	time_range = _engine_range(aligned, range_)
-	source_tier, _, source_shard = source_rung.partition('@')
+	raw = source_rung == 'raw'
+	source_tier, _, source_shard = ('', '', '') if raw else source_rung.partition('@')
 	err(f'range: {time_range[0].isoformat()} → {time_range[1].isoformat()}')
 	result = run_build(
 		config_name,
 		time_range,
 		scratch_prefix=scratch_prefix or f'{config_name}-engine-check',
 		manifest=manifest or DEFAULT_MANIFEST,
-		source_tier=source_tier,
-		source_shard=source_shard,
+		**({'raw': True} if raw else {'source_tier': source_tier, 'source_shard': source_shard}),
 		window=window,
 		verbose=verbose,
 	)
