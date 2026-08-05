@@ -96,6 +96,13 @@ def compact(date_str: str):
         for s in record['stations']:
             s['ts'] = ts
             s['polled_at'] = polled_at
+            # Poller v2 (2026-08-04+) records per-type counts as a dict;
+            # serialize deterministically — a dict-valued column would make
+            # parquet schema inference vary by day (nulls pre-v2, per-station
+            # key variance after).
+            vt = s.get('vehicle_types_available')
+            if vt is not None:
+                s['vehicle_types_available'] = json.dumps(vt, sort_keys=True, separators=(',', ':'))
             rows.append(s)
 
     df = pd.DataFrame(rows)
