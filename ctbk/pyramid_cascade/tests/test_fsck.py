@@ -84,33 +84,22 @@ def pyramid() -> Pyramid:
 
 
 class _MtimeStorage(MemStorage):
-    """MemStorage exposing the S3-paginator surface that
-    `list_existing_with_mtime` duck-types on (`_client` + `bucket`),
-    with per-key mtimes."""
+    """MemStorage with caller-pinned per-key mtimes (overriding the
+    real-clock mtimes MemStorage tracks), so `stale_before` cutoffs can
+    be exercised against a fixed history."""
 
     def __init__(self, mtimes: dict[str, datetime]):
         super().__init__()
-        self.bucket = 'test'
-        self._mtimes = mtimes
+        # NB: not `_mtimes` — MemStorage tracks real-clock mtimes there.
+        self._pinned = mtimes
         for key in mtimes:
             self.put(key, b'x')
-        storage = self
 
-        class _Paginator:
-            def paginate(self, Bucket: str, Prefix: str):
-                contents = [
-                    {'Key': k, 'LastModified': m}
-                    for k, m in storage._mtimes.items()
-                    if k.startswith(Prefix)
-                ]
-                yield {'Contents': contents}
-
-        class _Client:
-            def get_paginator(self, name: str):
-                assert name == 'list_objects_v2'
-                return _Paginator()
-
-        self._client = _Client()
+    def list_with_mtime(self, prefix: str):
+        return [
+            (k, m) for k, m in sorted(self._pinned.items())
+            if k.startswith(prefix)
+        ]
 
 
 def _expected_keys(pyramid: Pyramid, time_range) -> list[str]:

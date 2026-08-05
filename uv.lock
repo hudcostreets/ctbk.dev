@@ -713,10 +713,10 @@ requires-dist = [
     { name = "plotly", specifier = ">=6.1.2" },
     { name = "polars", specifier = ">=1.41.0" },
     { name = "pyarrow", specifier = "==22.0.0" },
-    { name = "pyrmts", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=7899829" },
-    { name = "pyrmts-engine", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_engine&rev=7899829" },
-    { name = "pyrmts-geo", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_geo&rev=7899829" },
-    { name = "pyrmts-ops", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_ops&rev=7899829" },
+    { name = "pyrmts", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=ce770e7" },
+    { name = "pyrmts-engine", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_engine&rev=ce770e7" },
+    { name = "pyrmts-geo", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_geo&rev=ce770e7" },
+    { name = "pyrmts-ops", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_ops&rev=ce770e7" },
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
     { name = "s2cell", specifier = ">=1.8.0" },
     { name = "s3fs", specifier = ">=2025.5.1" },
@@ -2692,7 +2692,7 @@ wheels = [
 [[package]]
 name = "pyrmts"
 version = "0.0.0"
-source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=7899829#7899829fe34e67831f29944a3bdbd0f57ac314ae" }
+source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=ce770e7#ce770e7dffbdc2df99db6a14a3c8d14cacb3e13a" }
 dependencies = [
     { name = "pyarrow" },
     { name = "pyyaml" },
@@ -2701,7 +2701,7 @@ dependencies = [
 [[package]]
 name = "pyrmts-engine"
 version = "0.0.0"
-source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_engine&rev=7899829#7899829fe34e67831f29944a3bdbd0f57ac314ae" }
+source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_engine&rev=ce770e7#ce770e7dffbdc2df99db6a14a3c8d14cacb3e13a" }
 dependencies = [
     { name = "click" },
     { name = "polars" },
@@ -2711,7 +2711,7 @@ dependencies = [
 [[package]]
 name = "pyrmts-geo"
 version = "0.0.0"
-source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_geo&rev=7899829#7899829fe34e67831f29944a3bdbd0f57ac314ae" }
+source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_geo&rev=ce770e7#ce770e7dffbdc2df99db6a14a3c8d14cacb3e13a" }
 dependencies = [
     { name = "h3" },
     { name = "pyrmts" },
@@ -2720,7 +2720,7 @@ dependencies = [
 [[package]]
 name = "pyrmts-ops"
 version = "0.0.0"
-source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_ops&rev=7899829#7899829fe34e67831f29944a3bdbd0f57ac314ae" }
+source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_ops&rev=ce770e7#ce770e7dffbdc2df99db6a14a3c8d14cacb3e13a" }
 dependencies = [
     { name = "pyrmts" },
     { name = "pyrmts-engine" },
