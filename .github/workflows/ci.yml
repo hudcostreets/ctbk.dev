@@ -43,14 +43,75 @@ jobs:
               echo "Month $ym already processed; nothing to do"
               exit 0
             fi
+            echo "ym=$ym" >> "$GITHUB_OUTPUT"
+            # NYC + JC zips publish independently (e.g. 202607: JC landed
+            # 2026-08-06, NYC later); `ctbk norm create` needs both. An
+            # incomplete month is an expected transient — annotate + notify
+            # and defer (the daily sync re-triggers when the rest arrives)
+            # instead of failing on a FileNotFoundError deep in `norm`.
+            missing=""
+            ls "s3/tripdata/${ym}-"*.zip.dvc >/dev/null 2>&1 || missing="NYC"
+            ls "s3/tripdata/JC-${ym}"*.zip.dvc >/dev/null 2>&1 || missing="${missing:+$missing,}JC"
+            if [ -n "$missing" ]; then
+              echo "missing=$missing" >> "$GITHUB_OUTPUT"
+              echo "::warning title=Tripdata month $ym incomplete::$missing zip(s) not yet published for $ym. Deferring processing; the daily sync will re-trigger this workflow when the missing region(s) arrive."
+              exit 0
+            fi
             echo "args=update -S -ccda $ym" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: astral-sh/setup-uv@v6
-        if: steps.args.outputs.args
+        if: steps.args.outputs.args || steps.args.outputs.missing
         with:
           python-version: '3.12'
           enable-cache: true
+
+      - name: Notify Slack — month incomplete
+        if: steps.args.outputs.missing
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          YM: ${{ steps.args.outputs.ym }}
+          MISSING: ${{ steps.args.outputs.missing }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          uv run --no-project --with 'thrds==0.4.0' --python 3.12 python - <<'PY'
+          import os
+          from thrds import SlackClient
+          ym, missing, run_url = os.environ['YM'], os.environ['MISSING'], os.environ['RUN_URL']
+          SlackClient(
+              token=os.environ['SLACK_BOT_TOKEN'],
+              channel='C0B5MKF28NP',
+              username='ctbk-bot',
+              icon_emoji=':bike:',
+          ).post(
+              f":hourglass_flowing_sand: *tripdata {ym} incomplete* — {missing} zip(s) not yet published; "
+              f"processing deferred until the month completes (daily sync will re-trigger). <{run_url}|run>"
+          )
+          PY
+
+      - name: Notify Slack — processing started
+        id: slack_start
+        if: steps.args.outputs.args
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          ARGS: ${{ steps.args.outputs.args }}
+          YM: ${{ steps.args.outputs.ym }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          uv run --no-project --with 'thrds==0.4.0' --python 3.12 python - <<'PY'
+          import os
+          from thrds import SlackClient
+          ym = os.environ.get('YM') or '?'
+          args, run_url = os.environ['ARGS'], os.environ['RUN_URL']
+          msg = SlackClient(
+              token=os.environ['SLACK_BOT_TOKEN'],
+              channel='C0B5MKF28NP',
+              username='ctbk-bot',
+              icon_emoji=':bike:',
+          ).post(f":inbox_tray: *Processing new tripdata month {ym}* (`ctbk {args}`)… <{run_url}|run>")
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'ts={msg.id}\n')
+          PY
 
       - name: Sync deps + activate venv
         if: steps.args.outputs.args
@@ -93,3 +154,31 @@ jobs:
       - name: Deploy to www branch
         if: steps.args.outputs.args
         run: git push origin HEAD:www
+
+      - name: Notify Slack — outcome
+        if: always() && steps.slack_start.outputs.ts
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          YM: ${{ steps.args.outputs.ym }}
+          STATUS: ${{ job.status }}
+          THREAD_TS: ${{ steps.slack_start.outputs.ts }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          uv run --no-project --with 'thrds==0.4.0' --python 3.12 python - <<'PY'
+          import os
+          from thrds import SlackClient
+          ym = os.environ.get('YM') or '?'
+          ok = os.environ['STATUS'] == 'success'
+          run_url = os.environ['RUN_URL']
+          text = (
+              f":white_check_mark: *tripdata {ym} processed* — pushed to `www` (site deploy follows)"
+              if ok else
+              f":x: *tripdata {ym} processing failed* — <{run_url}|logs>"
+          )
+          SlackClient(
+              token=os.environ['SLACK_BOT_TOKEN'],
+              channel='C0B5MKF28NP',
+              username='ctbk-bot',
+              icon_emoji=':bike:',
+          ).post(text, thread_id=os.environ['THREAD_TS'])
+          PY
