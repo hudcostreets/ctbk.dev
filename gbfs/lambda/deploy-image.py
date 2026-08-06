@@ -183,7 +183,11 @@ def ensure_schedule(events, lam, func_arn: str, *, func_name: str, rule: str, ra
         target['Input'] = input_json
     events.put_targets(Rule=rule, Targets=[target])
     try:
-        lam.add_permission(FunctionName=func_name, StatementId='events-invoke',
+        # Per-rule statement id: a constant id here silently no-ops for
+        # every rule after the first (the conflict pass-through), leaving
+        # later rules without invoke permission — EventBridge fires, the
+        # Lambda rejects (bit the v6 tick, 2026-08-06).
+        lam.add_permission(FunctionName=func_name, StatementId=f'invoke-{rule}',
                            Action='lambda:InvokeFunction', Principal='events.amazonaws.com',
                            SourceArn=rule_arn)
     except lam.exceptions.ResourceConflictException:
