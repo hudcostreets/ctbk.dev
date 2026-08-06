@@ -3,6 +3,7 @@ import { useAction } from 'use-kbd'
 import { useQuery } from '@tanstack/react-query'
 import { Box, Button, Chip, Dialog, DialogContent, DialogTitle, IconButton, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material'
 import { dbgClear, dbgReqs, dbgSubscribe, dbgVersion, type DbgReq } from '../lib/dbg'
+import { FLAGS, useFlagsController } from '../contexts/FlagsContext'
 import { stationsApi } from '../query/stations'
 
 const { round } = Math
@@ -82,6 +83,9 @@ export function DbgPanel() {
 function DbgBody() {
   useSyncExternalStore(dbgSubscribe, dbgVersion)
   const reqs = dbgReqs()
+  const { flags, setFlag, resetFlag } = useFlagsController()
+  const availPyramid = flags.availPyramid
+  const pyramidOptions = FLAGS.availPyramid.options as readonly string[]
   const healthQ = useQuery<HealthSnapshot>({
     queryKey: ['dbg-health'],
     staleTime: 60_000,
@@ -95,22 +99,38 @@ function DbgBody() {
   const summary = summarize(reqs)
   return (
     <>
-      <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Pyramids</Typography>
+      <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+        Pyramids{' '}
+        <Typography component="span" variant="caption" color="text.secondary">
+          (click to pin the avail chart to a pyramid; click again to unpin —
+          pinned: {availPyramid === 'default' ? 'none (server default)' : availPyramid})
+        </Typography>
+      </Typography>
       {h ? (
         <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 2 }}>
-          {h.pyramids.map((p) => (
-            <Chip
-              key={p.name}
-              size="small"
-              variant={p.name === h.defaultPyramid ? 'filled' : 'outlined'}
-              color={p.allComplete ? 'success' : 'warning'}
-              label={
-                `${p.name}${p.name === h.defaultPyramid ? ' (default)' : ''} · `
-                + (p.allComplete ? 'complete' : `${p.totalMissing} missing`)
-                + (p.totalStale > 0 ? ` · ${p.totalStale} stale` : '')
-              }
-            />
-          ))}
+          {[...h.pyramids].sort((a, b) => b.name.localeCompare(a.name)).map((p) => {
+            // Only vocab pyramids (availPyramid flag options) are pinnable:
+            // the chart queries `s:` identity keys, which legacy `avail`
+            // (LUC-cell-keyed) doesn't store.
+            const pinnable = pyramidOptions.includes(p.name)
+            const pinned = availPyramid === p.name
+            return (
+              <Chip
+                key={p.name}
+                size="small"
+                variant={pinned || (availPyramid === 'default' && p.name === h.defaultPyramid) ? 'filled' : 'outlined'}
+                color={p.allComplete ? 'success' : 'warning'}
+                onClick={pinnable
+                  ? () => (pinned ? resetFlag('availPyramid') : setFlag('availPyramid', p.name as typeof availPyramid))
+                  : undefined}
+                label={
+                  `${p.name}${p.name === h.defaultPyramid ? ' (default)' : ''}${pinned ? ' 📌' : ''} · `
+                  + (p.allComplete ? 'complete' : `${p.totalMissing} missing`)
+                  + (p.totalStale > 0 ? ` · ${p.totalStale} stale` : '')
+                }
+              />
+            )
+          })}
         </Box>
       ) : (
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>

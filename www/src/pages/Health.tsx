@@ -446,26 +446,30 @@ function PyramidsSection({ pyramids, defaultPyramid }: { pyramids: PyramidsHealt
       </Section>
     )
   }
-  // Prod-default pyramid first, full-size; everything non-default-served
-  // (legacy + burn-in successors alike) collapses into <details> below it.
+  // Prod-default pyramid full-size; non-default pyramids collapse into
+  // <details> — burn-in successors ABOVE the primary (they're what's
+  // coming next), legacy below. Version ordering rides the lexical name
+  // ('avail' < 'avail-v5' < 'avail-v6').
   const dflt = defaultPyramid ?? 'avail-v5'
-  const ordered = [...pyramids].sort((a, b) =>
-    Number(b.name === dflt) - Number(a.name === dflt))
-  const [primary, ...others] = ordered
+  const primary = pyramids.find((p) => p.name === dflt)
+  const successors = pyramids.filter((p) => p.name > dflt).sort((a, b) => b.name.localeCompare(a.name))
+  const legacy = pyramids.filter((p) => p.name !== dflt && p.name <= dflt)
+  const collapsed = (p: PyramidCoverStatus, label: string) => (
+    <details key={p.name} style={{ marginBottom: '0.8em' }}>
+      <summary style={{ cursor: 'pointer', opacity: 0.75, fontSize: '0.9em' }}>
+        <code>{p.name}</code> ({label}) ·{' '}
+        {p.allComplete ? 'complete' : `${p.totalMissing} missing`}
+      </summary>
+      <div style={{ marginTop: '0.6em' }}>
+        <PyramidCoverGrid pyramid={p} />
+      </div>
+    </details>
+  )
   return (
     <Section title="Pyramid min-cover status">
+      {successors.map((p) => collapsed(p, 'successor — burn-in'))}
       {primary && <PyramidCoverGrid pyramid={primary} />}
-      {others.map((p) => (
-        <details key={p.name} style={{ marginBottom: '0.8em' }}>
-          <summary style={{ cursor: 'pointer', opacity: 0.75, fontSize: '0.9em' }}>
-            <code>{p.name}</code> (non-default) ·{' '}
-            {p.allComplete ? 'complete' : `${p.totalMissing} missing`}
-          </summary>
-          <div style={{ marginTop: '0.6em' }}>
-            <PyramidCoverGrid pyramid={p} />
-          </div>
-        </details>
-      ))}
+      {legacy.map((p) => collapsed(p, 'legacy'))}
       <div style={{ marginTop: '0.6em', fontSize: '0.8em', opacity: 0.7, lineHeight: 1.5 }}>
         Equilibrium per tier = <em>min-cover</em> of{' '}
         <code>[genesis, now)</code>: mostly max-rung tiles filling{' '}
