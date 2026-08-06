@@ -1,6 +1,8 @@
 # Shard invalidation, ctbk side: triggers, cache versioning, `RAW_FINALITY_S` retirement
 
-Status: **implemented, pending deploy + soak** (2026-08-05; spec 2026-07-30). Engine spec: pyrmts `specs/shard-invalidation.md` (journal + fsck-rebuild mechanics live there — implemented, R2 If-Match live-smoke green 2026-08-05, consumed via the `ce770e7` pin; `run_extension_fill(honor_invalidations=True)` is the upstream default, so the Lambda fill ticks consume the journal as soon as the image bakes the new pin).
+Status: **deployed, synthetic-repair E2E green; soaking** (2026-08-05; spec 2026-07-30).
+
+**Synthetic repair E2E (2026-08-05, prod `avail-v5`)** — sequencing step 4, passed on all criteria: `ctbk gbfs invalidate 2026-08-01T12:00 2026-08-01T12:01` appended at 23:30:54Z; the next v5 tick (:33) rebuilt all 13 overlapping shards in place, fine→coarse (`/1m@2d` 23:33:59 → `/1d@4d` 23:36:14), **every etag byte-identical** to pre-repair (byte-convergence: same inputs → same bytes); journal pruned to `[]` at 23:36:18 (4s after the coarsest rebuild; ~5.5 min append→pruned end-to-end); edge cache rotated (pre-invalidate cached window → MISS under the new `gen`, re-request HIT, content byte-equal); `/health` clean (`totalMissing=0`). Remaining: passive week-long soak under the 2-min grace. Engine spec: pyrmts `specs/shard-invalidation.md` (journal + fsck-rebuild mechanics live there — implemented, R2 If-Match live-smoke green 2026-08-05, consumed via the `ce770e7` pin; `run_extension_fill(honor_invalidations=True)` is the upstream default, so the Lambda fill ticks consume the journal as soon as the image bakes the new pin).
 
 Implemented (2026-08-05):
 
