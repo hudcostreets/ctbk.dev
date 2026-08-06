@@ -1116,6 +1116,7 @@ async function executeRidesQuery(
 const RECONCILE_PYRAMIDS: [string, string][] = [
 	['avail', 'avail-v3/'],
 	['avail-v5', 'avail-v5/'],
+	['avail-v6', 'avail-v6/'],
 ];
 
 /** Register expected-cover shards that exist on R2 but are missing from
@@ -1699,7 +1700,7 @@ export default {
 		if (url.pathname.startsWith('/api/files/')) {
 			const handlers = createHandlers(
 				R2Store(env.R2, {
-					prefixes: ['gbfs/', 'avail/', 'avail-v3/', 'avail-v5/'],
+					prefixes: ['gbfs/', 'avail/', 'avail-v3/', 'avail-v5/', 'avail-v6/'],
 					publicBaseUrl: env.R2_PUBLIC_BASE_URL,
 					presign: {
 						endpoint: env.R2_S3_ENDPOINT,

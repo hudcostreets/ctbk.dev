@@ -113,6 +113,9 @@ export interface HealthSnapshot {
 	compactions: CompactionHealth;
 	cascade: CascadeHealth;
 	pyramids: PyramidsHealth;
+	/** The pyramid `/api/avail-v3` serves when no `?pyramid=` is given —
+	 *  the FE renders it full-size and collapses the rest. */
+	defaultPyramid?: string;
 	tripdata: TripdataHealth | null;
 	builds?: BuildProgress[];
 }
@@ -420,11 +423,12 @@ async function annotateSegmentBytes(
 }
 
 /** Registry pyramids surfaced on /health: (D1 `pyramid` name, R2 key
- *  prefix). v3 + v5 share the TIERS ladder (identical merged rung sets);
- *  dormant avail-v4 is intentionally omitted (superseded by v5). */
+ *  prefix). v3 + v5 + v6 share the TIERS ladder (identical merged rung
+ *  sets); dormant avail-v4 is intentionally omitted (superseded by v5). */
 const HEALTH_PYRAMIDS: [name: string, keyPrefix: string][] = [
 	['avail', 'avail-v3'],
 	['avail-v5', 'avail-v5'],
+	['avail-v6', 'avail-v6'],
 ];
 
 /** Cover status for one registry pyramid — `pyrmts-cfw`'s
@@ -502,12 +506,14 @@ export async function getHealthSnapshot(
 		getTripdataHealth(r2),
 		getBuildsHealth(r2),
 	]);
+	const { DEFAULT_PYRAMID } = await import('./avail_geo');
 	return {
 		generatedAt: Math.floor(Date.now() / 1000),
 		feed,
 		compactions,
 		cascade,
 		pyramids,
+		defaultPyramid: DEFAULT_PYRAMID,
 		tripdata,
 		builds,
 	};

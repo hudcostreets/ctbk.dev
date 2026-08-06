@@ -113,6 +113,7 @@ interface HealthSnapshot {
   compactions: CompactionHealth
   cascade: CascadeHealth
   pyramids: PyramidsHealth
+  defaultPyramid?: string
   tripdata: TripdataHealth | null
   builds?: BuildProgress[]
 }
@@ -162,7 +163,7 @@ export default function Health() {
       <FeedSection feed={data.feed} />
       <CompactionsSection compactions={data.compactions} />
       <BuildsSection builds={data.builds} />
-      <PyramidsSection pyramids={data.pyramids} />
+      <PyramidsSection pyramids={data.pyramids} defaultPyramid={data.defaultPyramid} />
       <CascadeSection cascade={data.cascade} />
       <BrowseSection feed={data.feed} compactions={data.compactions} />
       <FooterMeta generatedAt={data.generatedAt} />
@@ -435,7 +436,7 @@ function BuildCard({ build }: { build: BuildProgress }) {
   )
 }
 
-function PyramidsSection({ pyramids }: { pyramids: PyramidsHealth | undefined }) {
+function PyramidsSection({ pyramids, defaultPyramid }: { pyramids: PyramidsHealth | undefined, defaultPyramid?: string }) {
   if (!pyramids || pyramids.length === 0) {
     return (
       <Section title="Pyramid min-cover status">
@@ -445,18 +446,19 @@ function PyramidsSection({ pyramids }: { pyramids: PyramidsHealth | undefined })
       </Section>
     )
   }
-  // Prod-default pyramid (avail-v5) first, full-size; superseded ones
-  // collapse into <details> below it.
+  // Prod-default pyramid first, full-size; everything non-default-served
+  // (legacy + burn-in successors alike) collapses into <details> below it.
+  const dflt = defaultPyramid ?? 'avail-v5'
   const ordered = [...pyramids].sort((a, b) =>
-    Number(b.name === 'avail-v5') - Number(a.name === 'avail-v5'))
-  const [primary, ...legacy] = ordered
+    Number(b.name === dflt) - Number(a.name === dflt))
+  const [primary, ...others] = ordered
   return (
     <Section title="Pyramid min-cover status">
       {primary && <PyramidCoverGrid pyramid={primary} />}
-      {legacy.map((p) => (
+      {others.map((p) => (
         <details key={p.name} style={{ marginBottom: '0.8em' }}>
           <summary style={{ cursor: 'pointer', opacity: 0.75, fontSize: '0.9em' }}>
-            <code>{p.name}</code> (legacy{p.name === 'avail' ? ' v3' : ''} — superseded by the prod default) ·{' '}
+            <code>{p.name}</code> (non-default) ·{' '}
             {p.allComplete ? 'complete' : `${p.totalMissing} missing`}
           </summary>
           <div style={{ marginTop: '0.6em' }}>
