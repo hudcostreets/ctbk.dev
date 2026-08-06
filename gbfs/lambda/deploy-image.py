@@ -63,7 +63,7 @@ CTBK_MODULES = [
     'pyramid_cascade/vocab.py',
     'pyramid_cascade/gc.py',
 ]
-CONFIGS = ['avail.yaml', 'avail-v4.yaml', 'avail-v5.yaml', 'station-vocab.json']
+CONFIGS = ['avail.yaml', 'avail-v4.yaml', 'avail-v5.yaml', 'avail-v6.yaml', 'station-vocab.json']
 
 
 def stage_context() -> Path:
@@ -216,6 +216,12 @@ def main(v5_only: bool, build_only: bool):
     ensure_schedule(events, lam, v5_arn, func_name=V5_FUNC, rule=f'{V5_FUNC}-tick',
                     rate='cron(3/5 * * * ? *)', input_json='{"config": "avail-v5"}',
                     description='avail-v5 cascade fill')
+    # v6 tick rides the same (config-driven) function; the offset minute +
+    # reserved=1 serialize it behind the v5 tick. Both run until cutover
+    # (default flip + v5 GC), then the v5 rule is deleted.
+    ensure_schedule(events, lam, v5_arn, func_name=V5_FUNC, rule='ctbk-avail-cascade-v6-tick',
+                    rate='cron(4/5 * * * ? *)', input_json='{"config": "avail-v6"}',
+                    description='avail-v6 cascade fill (LU-attributed successor)')
     err(f'deployed: {v5_arn}')
     if v5_only:
         return

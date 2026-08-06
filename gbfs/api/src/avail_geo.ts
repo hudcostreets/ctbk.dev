@@ -108,6 +108,10 @@ const KEY_TEMPLATE = 'avail-v3/{tier}/{shard}/{period}.parquet';
 const PYRAMIDS: Record<string, { name: string; keyTemplate: string; vocab?: boolean }> = {
 	'avail': { name: 'avail', keyTemplate: KEY_TEMPLATE },
 	'avail-v5': { name: 'avail-v5', keyTemplate: 'avail-v5/{tier}/{shard}/{period}.parquet', vocab: true },
+	// LU-attributed successor (engine raw-ingest regen, `specs/lu-attribution.md`);
+	// same frozen-vocab keys as v5. Addressable behind the explicit param
+	// during burn-in; default flip is the cutover step.
+	'avail-v6': { name: 'avail-v6', keyTemplate: 'avail-v6/{tier}/{shard}/{period}.parquet', vocab: true },
 };
 
 /** The pyramid served when `?pyramid=` is absent. Also folded into the
