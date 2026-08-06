@@ -12,6 +12,7 @@ import { queryClient } from "./query/client"
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext"
 import { FlagsProvider } from "./contexts/FlagsContext"
 import { FlagsPanel } from "./components/FlagsPanel"
+import { DbgPanel } from "./components/DbgPanel"
 import { ThemeToggle } from "./components/ThemeToggle"
 import { HomeButton, ThemeTileToggle } from "./components/TileStyleButton"
 import { useScrollToHash } from "./hooks/useScrollToHash"
@@ -101,6 +102,7 @@ function AppContent() {
       <LookupModal />
       <SequenceModal />
       <FlagsPanel />
+      <DbgPanel />
     </>
   )
 }

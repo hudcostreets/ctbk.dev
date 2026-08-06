@@ -1322,6 +1322,14 @@ export default {
 					: 'public, max-age=300';
 				const headers = new Headers(resp.headers);
 				headers.set('Cache-Control', cacheControl);
+				// Debug/metrics surface (www's DbgPanel): which pyramid the
+				// request resolved to (implicit-default included) + worker
+				// wall time. Cache HITs replay the stored values — right,
+				// since X-Cache distinguishes. Expose-Headers is required
+				// for the cross-origin FE to read any of these.
+				headers.set('X-Pyramid', cacheUrl.searchParams.get('pyramid')!);
+				headers.set('Server-Timing', `worker;dur=${Math.round(performance.now() - tStart)}`);
+				headers.set('Access-Control-Expose-Headers', 'X-Cache, X-Pyramid, Server-Timing');
 				resp = new Response(resp.body, { status: resp.status, headers });
 				ctx.waitUntil(cache.put(cacheKey, resp.clone()));
 			}

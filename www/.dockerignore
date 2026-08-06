@@ -54,6 +54,7 @@
 !public/plots/rides_by_user_type.png
 !public/plots/rides_by_user_type_pct.json
 !public/plots/rides_by_user_type_pct.png
+!public/screenshots/.deps.json
 !public/screenshots/.gitignore
 !public/screenshots/ctbk-ebike-minutes-by-user.png.dvc
 !public/screenshots/ctbk-ebike-minutes.png.dvc
@@ -102,6 +103,7 @@
 !scripts/gen-station-stubs.js
 !scripts/gen-station-urls.js
 !scripts/gen-ymdgtb-index.js
+!scripts/push-screenshots.py
 !scrns.config.json
 !src/chart/YmrgtbChart.tsx
 !src/chart/ymrgtb-layout.ts
@@ -110,6 +112,7 @@
 !src/components/BinSelect.tsx
 !src/components/Checkbox.tsx
 !src/components/Checklist.tsx
+!src/components/DbgPanel.tsx
 !src/components/FlagsPanel.tsx
 !src/components/Footer.module.css
 !src/components/Footer.tsx
@@ -162,6 +165,7 @@
 !src/hooks/useStationsKeyboardShortcuts.ts
 !src/hooks/useStationsOmnibarEndpoint.ts
 !src/index.module.css
+!src/lib/dbg.ts
 !src/main.tsx
 !src/mdx.d.ts
 !src/pages/CellsDebug.tsx

@@ -7,6 +7,8 @@
  *   of window size (the worker handles tier selection: mo1/d1/h1/raw).
  */
 import { keepPreviousData, type QueryClient, useQuery, type UseQueryResult } from '@tanstack/react-query'
+import { useFlag } from '../contexts/FlagsContext'
+import { dbgFetch } from '../lib/dbg'
 
 // Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
@@ -56,7 +58,7 @@ export interface StationRangeResponse {
 
 const stationInfoKey = (id: string) => ['station-info', id] as const
 const stationInfoFn = async (id: string): Promise<StationInfo | null> => {
-  const res = await fetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/info`)
+  const res = await dbgFetch(`${API_BASE}/api/stations/${encodeURIComponent(id)}/info`)
   if (!res.ok) return null
   return res.json()
 }
@@ -193,7 +195,7 @@ const stationAvailFn = async (
   url.searchParams.set('filter.station_id', gbfsId)
   url.searchParams.set('agg', 'mean')
   url.searchParams.set('bin', String(binS))
-  const res = await fetch(url.toString())
+  const res = await dbgFetch(url.toString())
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const data = await res.json() as { rows: AvailabilityOverviewRow[] }
   return {
@@ -346,11 +348,11 @@ function durationToS(dur: string | undefined): number | null {
   return Number(m[1]) * mult
 }
 
-const stationAvailV3Key = (gbfsId: string, fromS: number, toS: number, binBudget: number) =>
-  ['station-avail-v5', gbfsId, fromS, toS, `bb${binBudget}`] as const
+const stationAvailV3Key = (gbfsId: string, fromS: number, toS: number, binBudget: number, pyramid: string) =>
+  ['station-avail-v5', gbfsId, fromS, toS, `bb${binBudget}`, pyramid] as const
 
 const stationAvailV3Fn = async (
-  gbfsId: string, sKey: string, fromS: number, toS: number, binBudget: number, capacityHint: number | null,
+  gbfsId: string, sKey: string, fromS: number, toS: number, binBudget: number, capacityHint: number | null, pyramid: string,
 ): Promise<StationRangeResponse & { binS: number }> => {
   const fromIso = new Date(fromS * 1000).toISOString()
   const toIso   = new Date(toS   * 1000).toISOString()
@@ -358,12 +360,14 @@ const stationAvailV3Fn = async (
   // avail-v5 identity row (`s:<short_name>`) — fixes the LUC re-key
   // drift that leaves many stations' current cells empty in avail-v3.
   url.searchParams.set('cells', sKey)
-  url.searchParams.set('pyramid', 'avail-v5')
+  // `availPyramid` flag: 'default' omits the param (worker resolves
+  // `DEFAULT_PYRAMID`); explicit values pin a pyramid.
+  if (pyramid !== 'default') url.searchParams.set('pyramid', pyramid)
   url.searchParams.set('from', fromIso)
   url.searchParams.set('to', toIso)
   url.searchParams.set('bin_budget', String(binBudget))
   url.searchParams.set('reducer', 'mean')
-  const res = await fetch(url.toString())
+  const res = await dbgFetch(url.toString())
   if (!res.ok) throw new Error(`avail-v3: HTTP ${res.status}`)
   const data = await res.json() as AvailV3Response
   // The planner reports the bin it actually served (`outputBin`, a pyrmts
@@ -397,12 +401,13 @@ export function useStationAvailabilityV3(
 ) {
   const lucQ = useStationLuc()
   const sKey = stationKeyForUuid(lucQ.data, gbfsId)
+  const pyramid = useFlag('availPyramid')
   const binS = binOverrideS ?? pickAvailBinAuto(toS - fromS, viewportPx)
   const binBudget = Math.max(1, Math.ceil((toS - fromS) / binS))
   return useQuery<StationRangeResponse & { binS: number }>({
-    queryKey: stationAvailV3Key(gbfsId ?? '', fromS, toS, binBudget),
+    queryKey: stationAvailV3Key(gbfsId ?? '', fromS, toS, binBudget, pyramid),
     enabled: !!gbfsId && !!sKey,
-    queryFn: () => stationAvailV3Fn(gbfsId!, sKey!, fromS, toS, binBudget, capacityHint),
+    queryFn: () => stationAvailV3Fn(gbfsId!, sKey!, fromS, toS, binBudget, capacityHint, pyramid),
     placeholderData: (prev, prevQuery) => {
       if (!prev || !prevQuery) return undefined
       const prevGbfsId = (prevQuery.queryKey as readonly unknown[])[1]
@@ -486,7 +491,7 @@ export function useAvailabilityOverview(
       url.searchParams.set('filter.station_id', gbfsId!)
       url.searchParams.set('agg', agg)
       url.searchParams.set('bin', String(binS))
-      const res = await fetch(url.toString())
+      const res = await dbgFetch(url.toString())
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       return res.json()
     },
@@ -509,21 +514,22 @@ export function useAvailabilityOverviewV3(
 ) {
   const lucQ = useStationLuc()
   const sKey = stationKeyForUuid(lucQ.data, gbfsId)
+  const pyramid = useFlag('availPyramid')
   const binBudget = Math.max(1, Math.ceil((toS - fromS) / binS))
   return useQuery<AvailabilityOverviewResponse>({
-    queryKey: ['availability-overview-v5', gbfsId, fromS, toS, binS, metric, agg],
+    queryKey: ['availability-overview-v5', gbfsId, fromS, toS, binS, metric, agg, pyramid],
     enabled: !!gbfsId && !!sKey && fromS < toS && binS >= 3600,
     queryFn: async () => {
       const fromIso = new Date(fromS * 1000).toISOString()
       const toIso   = new Date(toS   * 1000).toISOString()
       const url = new URL(`${API_BASE}/api/avail-v3`)
       url.searchParams.set('cells', sKey!)
-      url.searchParams.set('pyramid', 'avail-v5')
+      if (pyramid !== 'default') url.searchParams.set('pyramid', pyramid)
       url.searchParams.set('from', fromIso)
       url.searchParams.set('to', toIso)
       url.searchParams.set('bin_budget', String(binBudget))
       url.searchParams.set('reducer', agg)
-      const res = await fetch(url.toString())
+      const res = await dbgFetch(url.toString())
       if (!res.ok) throw new Error(`avail-v3: HTTP ${res.status}`)
       const data = await res.json() as AvailV3Response
       // Map the wide-format avail-v3 records to the tall AvailabilityOverviewRow
