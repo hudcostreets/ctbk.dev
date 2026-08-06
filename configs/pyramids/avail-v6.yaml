@@ -1,0 +1,63 @@
+# ctbk avail-v6 pyramid config: identical ladder/metrics/vocab to
+# avail-v5, re-keyed under `avail-v6/` — the LU-attributed successor
+# (see `specs/lu-attribution.md` + pyrmts `specs/engine-raw-ingest.md`).
+#
+# The v6 delta is data-level only: every row's `dt` derives from the
+# feed's `last_updated` (`floor(ts/60)`) instead of the poll minute —
+# uniformly across history, erasing the poller-v2 era seam
+# (2026-08-04T02:58Z). Built by the engine directly from the daily
+# status parquets (`gbfs/status/<date>.parquet`) via `DailyStatusSource`
+# (`ctbk gbfs engine submit -x ctbk_engine_src:avail_daily_status`) —
+# no Lambda fan-out phase; keys are the same frozen ragged vocabulary +
+# `s:<short_name>` identity rows as v5.
+chains: vocab
+
+storage:
+  type: s3
+  bucket: ctbk
+  key: "avail-v6/{tier}/{shard}/{period}.parquet"
+
+# Per-tier row-group size. Default 2k rows: keeps single-cell scans tight
+# (~1 RG-hit per shard, ~30 KB data scan) while footer overhead stays
+# manageable. Override per-tier with `rg_size: N` on a tier entry.
+defaults:
+  rg_size: 2048
+
+axis: time
+binCol: dt
+
+dims:
+  - { name: s2_cell, type: string }
+
+metrics:
+  - { name: bikes,    monoid: histogram }
+  - { name: ebikes,   monoid: histogram }
+  - { name: docks,    monoid: histogram }
+  - { name: disabled, monoid: histogram }
+  - { name: pending,  monoid: histogram }
+
+# Tiers in canonical (finest → coarsest) order — same ladder as
+# avail-v5 (see that config for the design rationale: base-60 sub-day
+# chain, powers-of-2 day+ chain, N ≤ 960 CFW budget, `lambda_shards`
+# extension rungs owned by the Lambda executor).
+tiers:
+  - { name: 1m,  bin: 1min,  shards: [5min, 10min, 30min, 1h, 3h, 6h, 12h], lambda_shards: [1d, 2d] }
+  - { name: 2m,  bin: 2min,  shards: [10min, 30min, 1h, 3h, 6h, 12h, 1d], lambda_shards: [2d, 4d] }
+  - { name: 3m,  bin: 3min,  shards: [15min, 30min, 1h, 3h, 6h, 12h, 1d, 2d], lambda_shards: [4d, 8d] }
+  - { name: 5m,  bin: 5min,  shards: [15min, 30min, 1h, 3h, 6h, 12h, 1d, 2d], lambda_shards: [4d, 8d] }
+  - { name: 10m, bin: 10min, shards: [30min, 1h, 3h, 6h, 12h, 1d, 2d, 4d], lambda_shards: [8d, 16d] }
+  - { name: 15m, bin: 15min, shards: [1h, 3h, 6h, 12h, 1d, 2d, 4d, 8d], lambda_shards: [16d, 32d] }
+  - { name: 30m, bin: 30min, shards: [2h, 6h, 12h, 1d, 2d, 4d, 8d, 16d], lambda_shards: [32d, 64d] }
+  - { name: 1h,  bin: 1h,    shards: [3h, 6h, 12h, 1d, 2d, 4d, 8d, 16d, 32d], lambda_shards: [64d, 128d] }
+  - { name: 2h,  bin: 2h,    shards: [6h, 12h, 1d, 2d, 4d, 8d, 16d, 32d, 64d], lambda_shards: [128d, 256d] }
+  - { name: 3h,  bin: 3h,    shards: [12h, 1d, 2d, 4d, 8d, 16d, 32d, 64d], lambda_shards: [128d, 256d, 512d] }
+  - { name: 6h,  bin: 6h,    shards: [1d, 2d, 4d, 8d, 16d, 32d, 64d, 128d], lambda_shards: [256d, 512d, 1024d] }
+  - { name: 12h, bin: 12h,   shards: [2d, 4d, 8d, 16d, 32d, 64d, 128d, 256d], lambda_shards: [512d, 1024d, 2048d] }
+  - { name: 1d,  bin: 1d,    shards: [4d, 8d, 16d, 32d, 64d, 128d, 256d, 512d], lambda_shards: [1024d, 2048d] }
+  - { name: 3d,  bin: 3d,    shards: [12d, 24d, 48d, 96d, 192d, 384d, 768d, 1536d], lambda_shards: [3072d] }
+  - { name: 7d,  bin: 7d,    shards: [28d, 56d, 112d, 224d, 448d, 896d, 1792d, 3584d], lambda_shards: [7168d] }
+
+geo:
+  cellCol: s2_cell
+  # S2 levels (canonical pyrmts order: finest → coarsest)
+  resolutions: [15, 14, 13, 12, 11, 10]
