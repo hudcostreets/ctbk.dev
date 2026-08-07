@@ -1,6 +1,6 @@
 # rides-v5: engine-built rides pyramids (drop-LUC keys, fixed-duration ladder)
 
-Status: **draft** (2026-08-06). Successor to `rides-v3` bundling the two standing migrations, per `specs/lu-attribution.md` §Sequencing and `specs/drop-luc-station-keys.md`: station-ID (`s:<short_name>`) keys + frozen vocab cells, and the v5-style stack (YAML ladder config, pyrmts-engine Batch build, D1 `pyramid_shards` registry, `/health` cover, reconcile, GC). Supersedes the drop-LUC spec's "rides-v4" Lambda-streaming plan — the engine + Batch pipeline (proven by avail-v5/v6) replaces it.
+Status: **built + registered, serving deploying** (2026-08-07). Both anchors Batch-built full-history in one pass each (start: 2,390 windows / 1.89B source rows → 243 shards / 14.1GB, 20 min; end: 243 shards / 14.2GB, 16 min; Fargate Spot 16 vCPU), 243/243 registered per anchor in D1. Acceptance: 5/5 scratch month×anchor samples (201306, 201907, 202605, 202606 start; 202606 end) byte-equal to rides-v3 via the registry map — the runs caught the v3 `canon.get(sid, sid)` identity-fallback rule and era-varying parquet dtypes (both fixed in `MonthlyRidesSource`), plus a stale `normalized/` plain-key S3 mirror (refreshed server-side from the DVC store, all 157 months). Deferred: ci.yml monthly-extension hook (GHA IAM Batch-submit perms unverified; interim = manual `ctbk gbfs engine submit -f` per anchor after each monthly ingest, + `ctbk gbfs invalidate` on the previous month's tail for start-anchor spillback). Originally drafted 2026-08-06. Successor to `rides-v3` bundling the two standing migrations, per `specs/lu-attribution.md` §Sequencing and `specs/drop-luc-station-keys.md`: station-ID (`s:<short_name>`) keys + frozen vocab cells, and the v5-style stack (YAML ladder config, pyrmts-engine Batch build, D1 `pyramid_shards` registry, `/health` cover, reconcile, GC). Supersedes the drop-LUC spec's "rides-v4" Lambda-streaming plan — the engine + Batch pipeline (proven by avail-v5/v6) replaces it.
 
 ## What changes vs rides-v3
 
@@ -14,16 +14,15 @@ Status: **draft** (2026-08-06). Successor to `rides-v3` bundling the two standin
 
 Two pyramids per the existing model: `rides-v5/start/…` and `rides-v5/end/…` (anchor = which end of the ride the time+station key comes from).
 
-## Long-form mapping (sum monoid, no pyrmts changes)
+## Long-form mapping (native `sum` monoid — no pyrmts changes)
 
-Engine long-form contract: `(dims…, binCol ms Int64, metric Enum, state Int32, count Float64)`; merge = group-sum. Rides metrics are all sums, so:
+The engine already supports scalar monoids first-class (`pyrmts_engine/longform.py`): for a `sum` metric `m`, the long `metric` column takes the *state-column names* `m_n`/`m_sum`/`m_sumsq` (three long rows per group), `state` is null, `count` carries the value, and merge stays the uniform group-by-sum. So:
 
-- dims: `cell` (vocab cell or `s:` key), `gender` ∈ {M, F, U}, `user_type` ∈ {Subscriber, Customer}, `bike_type` ∈ {classic, electric, …}
-- `metric` ∈ {`rides`, `dur_s`, `dur_s2`} — count, Σ duration_s, Σ duration_s² (mean/σ derivable at read time, matching rides-v3's `count_n/duration_sum/duration_sumsq` triplet)
-- `state` = 0 constant (histogram axis unused; the monoid degenerates to plain sums)
-- `count` = the value
+- dims: `cell` (vocab cell or `s:` key), `gender` ∈ {male, female, unknown}, `user_type`, `bike_type`
+- metrics config: `[{name: count, monoid: sum}, {name: duration, monoid: sum}]` — wide output columns `{count,duration}×{n,sum,sumsq}`, byte-compatible with rides-v3's `MONOID_COLS`
+- `duration` value = ride seconds; `count` value = 1 (its `_n` ≡ `_sum` ≡ `_sumsq`, kept for v3 schema symmetry)
 
-Rebinning/consolidation is the same group-sum the avail engine already does; no engine changes expected. Serving decodes the metric triplet back to the v3 column shape so `rides_v1.ts` needs only key-template + variant plumbing, not a new reader.
+Serving reuses the existing wide reader; `rides_v1.ts` needs only key-template + variant plumbing.
 
 ## Source tiles: monthly normalized parquets
 
