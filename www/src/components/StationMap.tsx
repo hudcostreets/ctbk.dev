@@ -66,12 +66,18 @@ function getMetersPerPixel(map: L.Map): number {
   return metersPerDegree * degreesPerPixel
 }
 
+/** Ring color for multi-select (`pinnedIds`) stations — matches neither
+ *  theme's hover-selected color, readable on light + dark tiles. */
+const MULTI_PIN_COLOR = '#e91e63'
+
 function StationMarkers({
   stations,
   selectedId,
   setSelectedId,
   pinnedId,
   onPin,
+  pinnedIds,
+  onTogglePin,
   onMarkerHover,
   pairCounts,
   colors,
@@ -83,6 +89,8 @@ function StationMarkers({
   setSelectedId?: (id: string | undefined) => void
   pinnedId?: string
   onPin?: (id: string | undefined) => void
+  pinnedIds?: readonly string[]
+  onTogglePin?: (id: string) => void
   onMarkerHover?: (id: string) => void
   pairCounts?: StationPairCounts | null
   colors: TileColors
@@ -234,8 +242,10 @@ function StationMarkers({
           // a clickable radius of at least HIT_RADIUS_PX. Carries the
           // eventHandlers + tooltip.
           const eventHandlers: Record<string, () => void> = {}
-          if (onPin || setSelectedId) {
-            eventHandlers.click = () => (onPin ?? setSelectedId)?.(id)
+          if (onTogglePin || onPin || setSelectedId) {
+            // Multi-select mode (`onTogglePin`): clicks toggle set membership;
+            // hover still drives the transient selection highlight.
+            eventHandlers.click = () => onTogglePin ? onTogglePin(id) : (onPin ?? setSelectedId)?.(id)
           }
           if (onMarkerHover || (hoverToSelect && setSelectedId)) {
             eventHandlers.mouseover = () => {
@@ -269,7 +279,35 @@ function StationMarkers({
         })}
       </Pane>
     )
-  }, [stations, selectedId, setSelectedId, onPin, onMarkerHover, colors, stationColors, hoverToSelect, isPinned, hitRadius])
+  }, [stations, selectedId, setSelectedId, onPin, onTogglePin, onMarkerHover, colors, stationColors, hoverToSelect, isPinned, hitRadius])
+
+  // Multi-select rings: one non-interactive ring per pinned station. Sits
+  // above base circles so membership reads at a glance; clicks pass through
+  // to the hit circles (which toggle membership off).
+  const multiPinRings = useMemo(() => {
+    if (!pinnedIds || pinnedIds.length === 0) return null
+    return (
+      <Pane name="multi-pins" className={css.selected}>
+        {pinnedIds.map((id) => {
+          const st = stations[id]
+          if (!st) return null
+          const dataRadius = sqrt(st.ends)
+          const radius = max(isNaN(dataRadius) ? 0 : dataRadius, hitRadius)
+          return (
+            <Circle
+              key={`pin-${id}`}
+              center={{ lat: st.lat, lng: st.lng }}
+              color={MULTI_PIN_COLOR}
+              fillOpacity={0}
+              radius={radius}
+              weight={3}
+              interactive={false}
+            />
+          )
+        })}
+      </Pane>
+    )
+  }, [pinnedIds, stations, hitRadius])
 
   // Permanent tooltip on the destination station while hovering an edge that
   // ends there. Anchored at the dst's lat/lng with a tiny invisible Circle
@@ -296,7 +334,7 @@ function StationMarkers({
     )
   }, [hoveredEdgeDstId, stations])
 
-  return <>{selectedCircle}{lines}{circles}{edgeDstTooltip}</>
+  return <>{selectedCircle}{lines}{circles}{multiPinRings}{edgeDstTooltip}</>
 }
 
 /** Sync map view to URL state (or via callbacks). */
@@ -349,6 +387,11 @@ export interface StationMapProps {
    *  expected to toggle / update `pinnedId`. If omitted, clicks
    *  fall back to `setSelectedId`. */
   onPin?: (id: string | undefined) => void
+  /** Multi-select mode: ids in the current selection set, rendered with a
+   *  ring overlay. When `onTogglePin` is provided, circle clicks toggle
+   *  membership instead of the `onPin`/`setSelectedId` behavior. */
+  pinnedIds?: readonly string[]
+  onTogglePin?: (id: string) => void
   /** Fired ~80ms after the cursor settles on a circle. Use to warm
    *  caches for an imminent click (e.g. prefetch the station-detail
    *  data the click will navigate to). */
@@ -385,6 +428,8 @@ export default function StationMap({
   setSelectedId,
   pinnedId,
   onPin,
+  pinnedIds,
+  onTogglePin,
   onMarkerHover,
   pairCounts,
   stationColors,
@@ -433,6 +478,8 @@ export default function StationMap({
         setSelectedId={setSelectedId}
         pinnedId={pinnedId}
         onPin={onPin}
+        pinnedIds={pinnedIds}
+        onTogglePin={onTogglePin}
         onMarkerHover={onMarkerHover}
         pairCounts={pairCounts}
         colors={colors}

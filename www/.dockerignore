@@ -135,6 +135,9 @@
 !src/components/StationMap.tsx
 !src/components/StationMapEmbed.tsx
 !src/components/StationPies.tsx
+!src/components/StationRidesChart.tsx
+!src/components/StationRidesPanel.module.css
+!src/components/StationRidesPanel.tsx
 !src/components/StationSearch.module.css
 !src/components/StationSearch.tsx
 !src/components/StationTripsChart.tsx
@@ -177,6 +180,7 @@
 !src/pages/StationDetail.tsx
 !src/pages/Stations.tsx
 !src/query/client.ts
+!src/query/ridesMulti.ts
 !src/query/ridesTable.ts
 !src/query/ridesV1.ts
 !src/query/rollups.ts

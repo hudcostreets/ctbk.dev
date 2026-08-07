@@ -7,6 +7,7 @@ import { SpeedDial, useHotkeysContext } from 'use-kbd'
 import StationMap, {
   type Stations, type StationPairCounts, TILE_COLORS, resolveTileStyle,
 } from '../components/StationMap'
+import StationRidesPanel from '../components/StationRidesPanel'
 import { RangeWidthControl } from '../components/RangeWidthControl'
 import { useTheme } from '../contexts/ThemeContext'
 import { useStationsKeyboardShortcuts } from '../hooks/useStationsKeyboardShortcuts'
@@ -26,6 +27,13 @@ const DEFAULT_PIES_DURATION = 30 * DAY_MS
 const sideParam: Param<'start' | 'end' | 'both'> = {
   encode: (v) => (v === 'both' ? undefined : v === 'start' ? 's' : 'e'),
   decode: (raw) => (raw === 's' ? 'start' : raw === 'e' ? 'end' : 'both'),
+}
+
+/** URL codec for the multi-select station set (`?sel=`): comma-joined
+ *  short_names, order-preserving (selection order = chip order). */
+const selParam: Param<string[]> = {
+  encode: (v) => (v.length ? v.join(',') : undefined),
+  decode: (raw) => (raw ? raw.split(',').filter(Boolean) : []),
 }
 
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -104,6 +112,12 @@ export default function Stations() {
   // start- or end-side trips only (default both).
   const [api] = useUrlState('api', boolParam)
   const [side, setSide] = useUrlState('side', sideParam)
+  // Multi-select station set: click circles to toggle membership; the rides
+  // panel below the map plots the set's starts/ends via `/api/rides-v5`.
+  const [sel, setSel] = useUrlState('sel', selParam)
+  const togglePin = useCallback((id: string) => {
+    setSel(sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id])
+  }, [sel, setSel])
 
   // One-time legacy URL migration: ?lat=&lng=&z= → ?ll=lat+lng+zoom.
   // Each migrate callback reassembles the full `LLZ` from current URL
@@ -314,6 +328,8 @@ export default function Stations() {
           stations={effectiveStations ?? {}}
           selectedId={selectedId}
           setSelectedId={setSelectedId}
+          pinnedIds={sel}
+          onTogglePin={togglePin}
           pairCounts={pairCounts}
           stationColors={stationColors}
           center={[view.lat, view.lng]}
@@ -388,6 +404,14 @@ export default function Stations() {
           )}
         </div>
       </main>
+      {sel.length > 0 && stations && (
+        <StationRidesPanel
+          shortNames={sel}
+          stations={stations}
+          onRemove={(id) => setSel(sel.filter((x) => x !== id))}
+          onClear={() => setSel([])}
+        />
+      )}
       {stations && <SpeedDial ariaLabel="Search stations" />}
     </div>
   )

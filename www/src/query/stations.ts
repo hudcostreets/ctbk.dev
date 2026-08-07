@@ -11,7 +11,7 @@ import { useFlag } from '../contexts/FlagsContext'
 import { dbgFetch } from '../lib/dbg'
 
 // Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
+export const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
 
 export interface StationInfo {
   short_name: string
@@ -340,7 +340,7 @@ function availV3RowsToAvailabilityRows(
 
 /** Parse a pyrmts Duration string (`1min` / `30min` / `1h` / `3d`) to
  *  seconds; null on anything unrecognized. */
-function durationToS(dur: string | undefined): number | null {
+export function durationToS(dur: string | undefined): number | null {
   if (!dur) return null
   const m = /^(\d+)(min|h|d|w|y)$/.exec(dur)
   if (!m) return null
