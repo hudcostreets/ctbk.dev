@@ -17,7 +17,14 @@ function isTransient(err: unknown): boolean {
 	const msg = err instanceof Error ? err.message : String(err);
 	return msg.includes('(10001)')
 		|| msg.includes('internal error')
-		|| msg.includes('Please try again');
+		|| msg.includes('Please try again')
+		// R2 `get(key, {range})` intermittently returns null for keys that
+		// verifiably exist (observed 2026-08-07: rides-v5 shards present on
+		// R2 + registered in D1, ~3/8 requests failing). Inventory-driven
+		// serving only fetches registered shards, so not-found is far more
+		// likely R2 flaking than a real gap — retry; a genuinely-missing
+		// shard just burns two quick retries before the same 500.
+		|| msg.includes('object not found');
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
