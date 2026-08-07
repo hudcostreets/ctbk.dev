@@ -21,12 +21,8 @@ async function waitForStations(page: Page) {
   }, { timeout: 15_000 })
 }
 
-/**
- * Select the largest (most-trafficked) station by clicking its bounding
- * midpoint. Returns its bounding box (viewport-relative) for later
- * operations (e.g. moving the mouse away from it).
- */
-async function selectBiggestStation(page: Page): Promise<{ x: number; y: number }> {
+/** Viewport midpoint of the largest (most-trafficked) visible station. */
+async function biggestStation(page: Page): Promise<{ x: number; y: number }> {
   const coords = await page.evaluate(() => {
     // L.Circle renders to `<path>` with the SVG renderer. Pick the one with
     // the longest path `d` attribute as a proxy for radius (largest circle).
@@ -42,7 +38,18 @@ async function selectBiggestStation(page: Page): Promise<{ x: number; y: number 
     return { x: b.left + b.width / 2, y: b.top + b.height / 2 }
   })
   if (!coords) throw new Error('No station paths found')
-  await page.mouse.click(coords.x, coords.y)
+  return coords
+}
+
+/**
+ * Select the largest station by hovering its midpoint (`hoverToSelect` mode
+ * — selection persists after the cursor moves away). Clicking would instead
+ * TOGGLE the station into the multi-select set (`?sel=`), mounting the
+ * rides panel over the lower map — see the "multi-select" spec below.
+ */
+async function selectBiggestStation(page: Page): Promise<{ x: number; y: number }> {
+  const coords = await biggestStation(page)
+  await page.mouse.move(coords.x, coords.y)
   return coords
 }
 
@@ -120,5 +127,30 @@ test.describe('Station map — selection + overlap', () => {
       const texts = await tooltips.allTextContents()
       return texts.length === 1 && !/→/.test(texts[0])
     }, { timeout: 3000, message: 'collapsed to source tooltip only' }).toBe(true)
+  })
+})
+
+test.describe('Station map — multi-select rides panel', () => {
+  test('clicking a station toggles it into `?sel=` and opens the rides panel', async ({ page }) => {
+    await page.goto('/stations')
+    await waitForStations(page)
+    const station = await biggestStation(page)
+    await page.mouse.click(station.x, station.y)
+
+    // One chip (with a remove button) + the panel's Range control appear.
+    const chipX = page.getByRole('button', { name: /^Remove / })
+    await expect(chipX).toHaveCount(1)
+    await expect(page.getByLabel('Range:')).toBeVisible()
+    // `?sel=` carries exactly the clicked station's short_name.
+    const sel = new URL(page.url()).searchParams.get('sel')
+    expect(sel).toMatch(/^[A-Z]*[\d.]+$/)
+    expect(sel!.includes(',')).toBe(false)
+
+    // Remove via the chip's × (the map circle may sit under the panel —
+    // e.g. Red Hook stations at default view — so the chip is the reliable
+    // removal affordance). Panel unmounts, `?sel=` clears.
+    await chipX.click()
+    await expect(chipX).toHaveCount(0)
+    await expect.poll(() => new URL(page.url()).searchParams.get('sel')).toBe(null)
   })
 })
