@@ -1,6 +1,6 @@
 # rides-v5: engine-built rides pyramids (drop-LUC keys, fixed-duration ladder)
 
-Status: **built + registered, serving deploying** (2026-08-07). Both anchors Batch-built full-history in one pass each (start: 2,390 windows / 1.89B source rows → 243 shards / 14.1GB, 20 min; end: 243 shards / 14.2GB, 16 min; Fargate Spot 16 vCPU), 243/243 registered per anchor in D1. Acceptance: 5/5 scratch month×anchor samples (201306, 201907, 202605, 202606 start; 202606 end) byte-equal to rides-v3 via the registry map — the runs caught the v3 `canon.get(sid, sid)` identity-fallback rule and era-varying parquet dtypes (both fixed in `MonthlyRidesSource`), plus a stale `normalized/` plain-key S3 mirror (refreshed server-side from the DVC store, all 157 months). Deferred: ci.yml monthly-extension hook (GHA IAM Batch-submit perms unverified; interim = manual `ctbk gbfs engine submit -f` per anchor after each monthly ingest, + `ctbk gbfs invalidate` on the previous month's tail for start-anchor spillback). Originally drafted 2026-08-06. Successor to `rides-v3` bundling the two standing migrations, per `specs/lu-attribution.md` §Sequencing and `specs/drop-luc-station-keys.md`: station-ID (`s:<short_name>`) keys + frozen vocab cells, and the v5-style stack (YAML ladder config, pyrmts-engine Batch build, D1 `pyramid_shards` registry, `/health` cover, reconcile, GC). Supersedes the drop-LUC spec's "rides-v4" Lambda-streaming plan — the engine + Batch pipeline (proven by avail-v5/v6) replaces it.
+Status: **fixed tiers built + registered + serving; calendar layer specced** (2026-08-07). Calendar bins design resolved (see RESOLVED DESIGN below): het-tiling planner + materialized `{1,2,3,6}mo + 1y` tiers, blocked on pyrmts `specs/calendar-units.md` (#122, handed off). Multi-select-stations multiscale FE work proceeds in parallel on the fixed tiers. Both anchors Batch-built full-history in one pass each (start: 2,390 windows / 1.89B source rows → 243 shards / 14.1GB, 20 min; end: 243 shards / 14.2GB, 16 min; Fargate Spot 16 vCPU), 243/243 registered per anchor in D1. Acceptance: 5/5 scratch month×anchor samples (201306, 201907, 202605, 202606 start; 202606 end) byte-equal to rides-v3 via the registry map — the runs caught the v3 `canon.get(sid, sid)` identity-fallback rule and era-varying parquet dtypes (both fixed in `MonthlyRidesSource`), plus a stale `normalized/` plain-key S3 mirror (refreshed server-side from the DVC store, all 157 months). Deferred: ci.yml monthly-extension hook (GHA IAM Batch-submit perms unverified; interim = manual `ctbk gbfs engine submit -f` per anchor after each monthly ingest, + `ctbk gbfs invalidate` on the previous month's tail for start-anchor spillback). Originally drafted 2026-08-06. Successor to `rides-v3` bundling the two standing migrations, per `specs/lu-attribution.md` §Sequencing and `specs/drop-luc-station-keys.md`: station-ID (`s:<short_name>`) keys + frozen vocab cells, and the v5-style stack (YAML ladder config, pyrmts-engine Batch build, D1 `pyramid_shards` registry, `/health` cover, reconcile, GC). Supersedes the drop-LUC spec's "rides-v4" Lambda-streaming plan — the engine + Batch pipeline (proven by avail-v5/v6) replaces it.
 
 ## What changes vs rides-v3
 
@@ -48,7 +48,25 @@ tier   bin   max shard   ≈bins/shard
 14d    14d   4096d       ~293
 ```
 
-**Calendar tiers (`1mo/3mo/1y`) are dropped from the pyramid and become serve-time rebins of the `1d` tier.** Rationale: the Home chart's full-history query (`bin_budget=200`) lands on today's `1mo` tier and its bars are true calendar months — epoch-anchored 30d bins would be a visible regression. But month boundaries are whole days and rides metrics are pure sums, so `floor(1d bins → calendar month) + sum` at serve time is *exact*, cheap (~4,900 daily rows → 160 monthly rows; fewer R2 GETs than the current 14-shard `1mo` reads), and edge-cacheable. The rides route grows a `bin=1mo|3mo|1y` calendar-rebin mode reading the `1d` tier; the pyramid stays fixed-duration end to end (no pyrmts calendar-shard support needed — task #122 stays unnecessary for rides).
+Planned calendar family (blocked on pyrmts #122; see RESOLVED DESIGN below) — calendar-aligned pow-2-year shards, exact from the fixed base:
+
+```
+tier   bin    shards (sketch)          ≈bins/max-shard
+1mo    1mo    1y, 2y, 4y, 8y, 16y      192
+2mo    2mo    1y, 2y, 4y, 16y, 32y     192
+3mo    3mo    1y, 4y, 16y, 64y         256
+6mo    6mo    2y, 8y, 32y, 128y        256
+1y     1y     4y, 16y, 128y            128
+```
+
+**RESOLVED DESIGN (2026-08-07, superseding both earlier takes)**: calendar bins land as *two layers sharing one core* (see pyrmts `specs/calendar-units.md`, the #122 spec ask):
+
+1. **Calendar-target het-tiling in the pyrmts planner** — decompose each calendar bin into aligned fixed-day bins fully contained in it (greedy containment from `{14d, 7d, 3d, 1d}`, ~5–9 pieces/month), reaggregate at stitch. Required unconditionally: the in-progress month's `/1mo` shard cannot exist until the month closes, so live monthly tips are always het-tiled (calendar flavor of mixed-tier tail coverage). Also serves calendar bins over any pyramid with no materialized calendar tiers.
+2. **Materialized calendar tiers `{1,2,3,6}mo + 1y`** as the index on top — bin-SUFs above `14d`: 2.17, 2, 1.5, 2, 2 (all ≤2.2). Cascade edges `1mo ← 1d` (exact; only divisors of one day divide months, so `3d/7d/14d` can't be build sources), `2mo ← 1mo`, `3mo ← 1mo`, `6mo ← 3mo`, `1y ← 6mo`. Calendar-aligned shards (pow-2 years per tier, same ≲1k-bins/shard sizing pass as the fixed tiers). Closed months are immutable → build-once, extend-monthly.
+
+Whether a pyramid materializes calendar tiers is a per-pyramid config choice (tiers present in YAML or not); the planner prefers a materialized+registered calendar tier and het-tiles the residue. Rides materializes (full-history monthly Home view: ~160 bins/series materialized vs ~1.1k het-tiled vs ~4.8k from raw `1d` — the last OOM-killed the CFW worker, and het-tiling alone leaves the flagship view on a ~4× memory margin). Avail stays fixed-only until a calendar view exists there.
+
+**Interim (until pyrmts #122 lands + calendar fill runs)**: Home's default stays `v3`; `?pyramid=v5` is windowed-queries-only; the serve-time `bin=1mo` rebin path (reads the whole windowed `1d` range — the discredited design, kept temporarily) stays for sub-multi-year windows only, and gets deleted when the calendar tiers + het-tiling serve path replace it.
 
 ## Build + steady state
 
