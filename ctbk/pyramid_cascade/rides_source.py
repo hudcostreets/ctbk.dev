@@ -134,11 +134,17 @@ class MonthlyRidesSource(TiledSource):
                 'Gender', 'User Type', 'Rideable Type',
             ],
         )
+        # Dim dtypes vary by era (early months dictionary-encode
+        # `User Type`/`Rideable Type`/even `Gender` as Categorical;
+        # later ones use Int8/Utf8): route everything through Utf8
+        # before typing. Gender's Utf8→Float64→Int64 chain absorbs both
+        # '1' and '1.0' renderings.
         df = df.with_columns(
             pl.col(cols['time']).dt.truncate('1h').dt.epoch('ms').alias('dt'),
             (pl.col('Stop Time') - pl.col('Start Time'))
                 .dt.total_seconds().cast(pl.Int64).alias('dur_s'),
-            pl.col('Gender').fill_null(0).cast(pl.Int64)
+            pl.col('Gender').cast(pl.Utf8).cast(pl.Float64, strict=False)
+                .fill_null(0).cast(pl.Int64)
                 .replace_strict(GENDER_MAP, default='unknown').alias('gender'),
             pl.col('User Type').cast(pl.Utf8).fill_null('unknown').alias('user_type'),
             pl.col('Rideable Type').cast(pl.Utf8).fill_null('unknown').alias('bike_type'),
