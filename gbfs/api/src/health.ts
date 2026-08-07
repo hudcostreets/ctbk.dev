@@ -388,9 +388,13 @@ export async function getPyramidsHealth(db: D1Database, r2?: HealthR2): Promise<
 	}
 
 	const { TIERS, AVAIL_GENESIS } = await import('./avail_geo');
+	const { V5_TIERS, RIDES_GENESIS } = await import('./rides_v1');
 	const out: PyramidsHealth = [];
-	for (const [name, keyPrefix] of HEALTH_PYRAMIDS) {
-		const cover = await pyramidCover(db, name, keyPrefix, shardCol, TIERS, AVAIL_GENESIS);
+	for (const { name, keyPrefix, rides } of HEALTH_PYRAMIDS) {
+		const cover = await pyramidCover(
+			db, name, keyPrefix, shardCol,
+			rides ? V5_TIERS : TIERS, rides ? RIDES_GENESIS : AVAIL_GENESIS,
+		);
 		if (!cover) continue;
 		if (r2) await annotateSegmentBytes(r2, keyPrefix, cover);
 		out.push(cover);
@@ -423,12 +427,15 @@ async function annotateSegmentBytes(
 }
 
 /** Registry pyramids surfaced on /health: (D1 `pyramid` name, R2 key
- *  prefix). v3 + v5 + v6 share the TIERS ladder (identical merged rung
- *  sets); dormant avail-v4 is intentionally omitted (superseded by v5). */
-const HEALTH_PYRAMIDS: [name: string, keyPrefix: string][] = [
-	['avail', 'avail-v3'],
-	['avail-v5', 'avail-v5'],
-	['avail-v6', 'avail-v6'],
+ *  prefix). avail v3/v5/v6 share the TIERS ladder; rides-v5 pyramids
+ *  carry their own ladder + genesis (`rides: true`). Dormant avail-v4 is
+ *  intentionally omitted (superseded by v5). */
+const HEALTH_PYRAMIDS: { name: string; keyPrefix: string; rides?: boolean }[] = [
+	{ name: 'avail', keyPrefix: 'avail-v3' },
+	{ name: 'avail-v5', keyPrefix: 'avail-v5' },
+	{ name: 'avail-v6', keyPrefix: 'avail-v6' },
+	{ name: 'rides-v5-start', keyPrefix: 'rides-v5/start', rides: true },
+	{ name: 'rides-v5-end', keyPrefix: 'rides-v5/end', rides: true },
 ];
 
 /** Cover status for one registry pyramid — `pyrmts-cfw`'s

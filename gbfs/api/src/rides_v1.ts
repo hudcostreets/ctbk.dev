@@ -47,20 +47,23 @@ import {
 	type Row,
 	type Tier,
 } from 'pyrmts';
-import { parquetBackend } from 'pyrmts';
-import { r2Storage } from 'pyrmts-cfw';
+import { parquetBackend, CachedShardIndex, type ShardIndex } from 'pyrmts';
+import { r2Storage, D1ShardIndex } from 'pyrmts-cfw';
 import { retryingStorage } from './r2_retry';
 import {
 	filterCellsAndRes,
 	filterCellsByCover,
 	getSpatialIndex,
 	planGeoQuery,
+	planGeoQueryFromInventory,
 	s2Index,
+	vocabCover,
 	type BBox,
 	type GeoPyramid,
 	type SpatialIndex,
 	type SpatialSet,
 } from 'pyrmts-geo';
+import { loadV5Vocab, v5BBoxCover } from './avail_geo';
 
 const METRICS = ['count', 'duration'] as const;
 type Metric = typeof METRICS[number];
@@ -558,6 +561,205 @@ export async function serveRidesCells(bucket: R2Bucket, request: Request, corsOr
 	const anchor = parseAnchor(url, cors);
 	if (anchor instanceof Response) return anchor;
 	return serveRidesReduced(ridesCellsPyramid(bucket, anchor, variant), request, cors, false);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rides-v5: engine-built, station-identity-keyed, inventory-driven
+// (`specs/rides-v5.md`). Differences vs v1-3:
+//   - keys: frozen vocab cells + `s:<short_name>` identity rows (drop-LUC)
+//     — user covers/bboxes translate to positive-only vocab covers via
+//     the station registry (raw S2 cover cells match no stored rows)
+//   - shards: multi-rung fixed-duration min-cover, resolved from the D1
+//     `pyramid_shards` inventory (same machinery as avail-v5/v6)
+//   - calendar bins: `bin=1mo|3mo|1y` reads the 1d tier and rebins at
+//     serve time (exact for sum monoids — month boundaries are whole
+//     days); the pyramid itself has no calendar tiers.
+
+export const RIDES_GENESIS = new Date('2013-06-01T00:00:00Z');
+
+export const V5_TIERS: Tier[] = [
+	{ name: '1h',  bin: '1h',  shards: ['1d', '2d', '4d', '8d', '16d', '32d'] },
+	{ name: '3h',  bin: '3h',  shards: ['4d', '8d', '16d', '32d', '64d', '128d'] },
+	{ name: '6h',  bin: '6h',  shards: ['8d', '16d', '32d', '64d', '128d', '256d'] },
+	{ name: '12h', bin: '12h', shards: ['16d', '32d', '64d', '128d', '256d', '512d'] },
+	{ name: '1d',  bin: '1d',  shards: ['32d', '64d', '128d', '256d', '512d', '1024d'] },
+	{ name: '3d',  bin: '3d',  shards: ['96d', '192d', '384d', '768d', '1536d', '3072d'] },
+	{ name: '7d',  bin: '7d',  shards: ['224d', '448d', '896d', '1792d', '3584d', '7168d'] },
+	{ name: '14d', bin: '14d', shards: ['448d', '896d', '1792d', '3584d', '7168d'] },
+];
+
+const CALENDAR_BINS = ['1mo', '3mo', '1y'] as const;
+type CalendarBin = typeof CALENDAR_BINS[number];
+
+const V5_SHARD_TTL_MS = 60_000;
+const _v5ShardIndex: Record<string, ShardIndex> = {};
+function v5ShardIndex(db: D1Database, name: string): ShardIndex {
+	return _v5ShardIndex[name] ??= new CachedShardIndex(new D1ShardIndex(db), { ttlMs: V5_SHARD_TTL_MS });
+}
+
+function ridesV5Pyramid(bucket: R2Bucket, anchor: Anchor, cells: boolean): GeoPyramid {
+	return {
+		storage: parquetBackend(retryingStorage(r2Storage(bucket))),
+		keyTemplate: `rides-v5/${anchor}/{tier}/{shard}/{period}.parquet`,
+		axis: 'time',
+		binCol: 'dt',
+		metrics: METRICS.map((name) => ({ name, monoid: 'sum' as const })),
+		tiers: V5_TIERS,
+		dims: [
+			...(cells ? [{ name: 'cell', type: 'string' as const }] : []),
+			...DIMS.map((d) => ({ name: d, type: 'string' as const })),
+		],
+		geo: { cellCol: 'cell', resolutions: [15, 14, 13, 12, 11, 10], index: s2Index },
+	};
+}
+
+function calendarFloor(ms: number, unit: CalendarBin): number {
+	const d = new Date(ms);
+	const y = d.getUTCFullYear();
+	const m = d.getUTCMonth();
+	if (unit === '1y') return Date.UTC(y, 0, 1);
+	if (unit === '3mo') return Date.UTC(y, m - (m % 3), 1);
+	return Date.UTC(y, m, 1);
+}
+
+const MONOID_COLS = METRICS.flatMap((m) => [`${m}_n`, `${m}_sum`, `${m}_sumsq`]);
+
+/** Serve-time calendar rebin of 1d-binned rows: floor `dt` to the
+ *  calendar unit, group by (dt, non-metric cols), sum the monoid
+ *  triplets. Exact for sum monoids (month boundaries are whole days). */
+function rebinCalendar(rows: Row[], unit: CalendarBin): Row[] {
+	const groups = new Map<string, Row>();
+	for (const r of rows) {
+		const dt = calendarFloor(r.dt as number, unit);
+		const dimKey = Object.entries(r)
+			.filter(([k]) => k !== 'dt' && !MONOID_COLS.includes(k))
+			.map(([k, v]) => `${k}=${v}`)
+			.sort()
+			.join('|');
+		const key = `${dt}|${dimKey}`;
+		const g = groups.get(key);
+		if (!g) {
+			groups.set(key, { ...r, dt });
+		} else {
+			for (const c of MONOID_COLS) g[c] = (g[c] as number ?? 0) + (r[c] as number ?? 0);
+		}
+	}
+	return [...groups.values()].sort((a, b) => (a.dt as number) - (b.dt as number));
+}
+
+/** Translate a raw-S2 user cover (include/exclude, `minimalCover`
+ *  output) to the positive-only vocab cover of the stations it selects. */
+async function v5UserCover(bucket: R2Bucket, include: string[], exclude: string[]): Promise<string[]> {
+	const { graph, stations } = await loadV5Vocab(bucket);
+	const set: SpatialSet = { include, exclude };
+	const wanted = stations
+		.filter((s) => {
+			const leaf = s2Index.latLngToCell(s.lat, s.lng, s2Index.maxLevel);
+			return s2Index.cellInSet(leaf, s2Index.maxLevel, set);
+		})
+		.map((s) => s.key);
+	if (wanted.length === 0) return [];
+	return vocabCover(graph, wanted, { positiveOnly: true }).include;
+}
+
+export async function serveRidesV5(
+	bucket: R2Bucket,
+	db: D1Database,
+	request: Request,
+	corsOrigin: string,
+	cellsRoute: boolean,
+): Promise<Response> {
+	const cors = corsOrigin || null;
+	const url = new URL(request.url);
+	const anchor = parseAnchor(url, cors);
+	if (anchor instanceof Response) return anchor;
+	const from = parseInstant(url.searchParams.get('from'));
+	const to = parseInstant(url.searchParams.get('to'));
+	if (from === null || to === null) {
+		return errorResponse(400, 'from and to query params required (ISO-8601)', cors);
+	}
+	const reducerRaw = url.searchParams.get('reducer') ?? DEFAULT_REDUCER;
+	if (!REDUCERS.includes(reducerRaw as Reducer)) {
+		return errorResponse(400, `bad reducer '${reducerRaw}'; one of ${REDUCERS.join('|')}`, cors);
+	}
+	const reducer = reducerRaw as Reducer;
+	const binRaw = url.searchParams.get('bin');
+	if (binRaw !== null && !CALENDAR_BINS.includes(binRaw as CalendarBin)) {
+		return errorResponse(400, `bad bin '${binRaw}'; one of ${CALENDAR_BINS.join('|')} (or omit for bin_budget)`, cors);
+	}
+	const calendarBin = binRaw as CalendarBin | null;
+	const rangeDays = Math.max(1, Math.ceil((to.getTime() - from.getTime()) / 86_400_000));
+	// Calendar mode pins the 1d tier: a budget of exactly the range's day
+	// count admits 1d and rejects everything finer.
+	const binBudget = calendarBin !== null
+		? rangeDays
+		: parsePositiveInt(url.searchParams.get('bin_budget'), 1024);
+	if (binBudget === null) return errorResponse(400, 'invalid bin_budget', cors);
+
+	const cellsRaw = url.searchParams.get('cells');
+	const userCells = cellsRaw
+		? cellsRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+		: null;
+	const exclude = (url.searchParams.get('cells.exclude') ?? '')
+		.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+	const bbox = parseBBox(url.searchParams.get('bbox'));
+	let include: string[];
+	if (userCells !== null) {
+		// `s:`-key covers pass through untranslated (station-detail path);
+		// raw S2 covers translate via the registry.
+		include = userCells.every((c) => c.startsWith('s:'))
+			? userCells
+			: await v5UserCover(bucket, userCells, exclude);
+	} else if (bbox !== null) {
+		include = await v5BBoxCover(bucket, bbox);
+	} else {
+		return errorResponse(400, 'either `bbox` or `cells` is required', cors);
+	}
+	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+	if (cors) headers['Access-Control-Allow-Origin'] = cors;
+	if (include.length === 0) {
+		return new Response(JSON.stringify({ records: [], reducer, anchor, plan: null }), { headers });
+	}
+
+	const pyramid = ridesV5Pyramid(bucket, anchor, cellsRoute);
+	const pyramidName = `rides-v5-${anchor}`;
+	const registered = await v5ShardIndex(db, pyramidName).listShards(pyramidName, { range: { from, to } });
+	const plan = planGeoQueryFromInventory(
+		pyramid,
+		{ range: { from, to }, binBudget, outputCells: { res: -1, cells: include } },
+		registered,
+	);
+	const rgFilters = parseDimFilters(url) ?? [];
+	const shardRows = await Promise.all(
+		plan.segments.map((seg) => pyramid.storage.fetchSegment(seg, {
+			binCol: pyramid.binCol,
+			range: { from: seg.from, to: seg.to },
+			filters: [{ col: 'cell', values: include }, ...rgFilters],
+		})),
+	);
+	const includeSet = new Set(include);
+	const filtered = shardRows.map((rows) => rows.filter((r) => includeSet.has(r.cell as string)));
+	let stitched = stitch({ pyramid, plan, shardRows: filtered });
+	if (calendarBin !== null) stitched = rebinCalendar(stitched, calendarBin);
+	const reduced = reduceRows(stitched, reducer, cellsRoute ? [] : ['cell']);
+	return new Response(JSON.stringify({
+		records: reduced,
+		reducer,
+		anchor,
+		plan: {
+			outputTier: plan.outputTier?.name ?? null,
+			outputBin: calendarBin ?? plan.outputBin,
+			outputRes: plan.outputRes,
+			outputCells: include,
+			segments: plan.segments.map((s) => ({
+				tier: s.shardTier.name,
+				from: s.from.toISOString(),
+				to: s.to.toISOString(),
+				reaggregate: s.reaggregate,
+				keys: s.keys,
+			})),
+		},
+	}), { headers });
 }
 
 // Per-variant aliases used by `index.ts` route handlers.

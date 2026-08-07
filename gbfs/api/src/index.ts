@@ -493,7 +493,7 @@ import { createHandlers } from '@rdub/file-tree/server';
 import { computeAndStoreHealthSnapshot, readCachedHealthSnapshot } from './health';
 import { runAlerts } from './alerts';
 import { DEFAULT_PYRAMID, repairGeneration, serveAvailV3, serveAvailV3Cells } from './avail_geo';
-import { serveRidesV1, serveRidesV1Cells, serveRidesV2, serveRidesV2Cells, serveRidesV3, serveRidesV3Cells } from './rides_v1';
+import { serveRidesV1, serveRidesV1Cells, serveRidesV2, serveRidesV2Cells, serveRidesV3, serveRidesV3Cells, serveRidesV5 } from './rides_v1';
 import { withR2Retry } from './r2_retry';
 
 /**
@@ -1112,11 +1112,14 @@ async function executeRidesQuery(
 }
 
 /** Pyramids whose registrations the cron reconciles: D1 pyramid name →
- *  R2 key prefix. */
-const RECONCILE_PYRAMIDS: [string, string][] = [
-	['avail', 'avail-v3/'],
-	['avail-v5', 'avail-v5/'],
-	['avail-v6', 'avail-v6/'],
+ *  R2 key prefix, plus ladder + genesis (rides ladders/geneses differ
+ *  from avail's; omitted → avail defaults). */
+const RECONCILE_PYRAMIDS: { name: string; prefix: string; rides?: boolean }[] = [
+	{ name: 'avail', prefix: 'avail-v3/' },
+	{ name: 'avail-v5', prefix: 'avail-v5/' },
+	{ name: 'avail-v6', prefix: 'avail-v6/' },
+	{ name: 'rides-v5-start', prefix: 'rides-v5/start/', rides: true },
+	{ name: 'rides-v5-end', prefix: 'rides-v5/end/', rides: true },
 ];
 
 /** Register expected-cover shards that exist on R2 but are missing from
@@ -1128,15 +1131,16 @@ const RECONCILE_PYRAMIDS: [string, string][] = [
  *  rows), so this is a few HEADs per minute, not a full LIST. */
 async function reconcileRegistry(env: Env): Promise<void> {
 	const { TIERS, AVAIL_GENESIS } = await import('./avail_geo');
+	const { V5_TIERS, RIDES_GENESIS } = await import('./rides_v1');
 	const now = new Date();
-	for (const [pyramid, prefix] of RECONCILE_PYRAMIDS) {
+	for (const { name: pyramid, prefix, rides } of RECONCILE_PYRAMIDS) {
 		// listExpectedShards only reads `.tiers` and `.keyTemplate` (same
 		// stub-cast as health.ts's pyramidCover).
 		const pyr = {
-			tiers: TIERS,
+			tiers: rides ? V5_TIERS : TIERS,
 			keyTemplate: `${prefix}{tier}/{shard}/{period}.parquet`,
 		} as unknown as Pyramid;
-		const expected = listExpectedShards(pyr, { from: AVAIL_GENESIS, to: now });
+		const expected = listExpectedShards(pyr, { from: rides ? RIDES_GENESIS : AVAIL_GENESIS, to: now });
 		const rs = await env.DB.prepare(
 			'SELECT key FROM pyramid_shards WHERE pyramid = ?').bind(pyramid).all<{ key: string }>();
 		const registered = new Set((rs.results ?? []).map((r) => r.key));
@@ -1341,9 +1345,9 @@ export default {
 		// Variants share schema; v1 = original cascade, v2 = consolidated
 		// cascade + `(cell, dt)` sort, v3 = S2-keyed (exact lineage). See
 		// `specs/done/rides-pyramid-{v1,v2,v3}.md` + `rides_v1.ts`.
-		const ridesMatch = url.pathname.match(/^\/api\/rides-(v[123])(\/cells)?$/);
+		const ridesMatch = url.pathname.match(/^\/api\/rides-(v[1235])(\/cells)?$/);
 		if (ridesMatch) {
-			const variant = ridesMatch[1] as 'v1' | 'v2' | 'v3';
+			const variant = ridesMatch[1] as 'v1' | 'v2' | 'v3' | 'v5';
 			const cellsRoute = !!ridesMatch[2];
 			// Edge cache: rides-* cold queries are O(seconds) since they
 			// fan out to many R2 GETs + decode + filter + stitch. Mirroring
@@ -1363,11 +1367,16 @@ export default {
 				v2: { rollup: serveRidesV2, cells: serveRidesV2Cells },
 				v3: { rollup: serveRidesV3, cells: serveRidesV3Cells },
 			} as const;
-			const serve = cellsRoute ? serveByVariant[variant].cells : serveByVariant[variant].rollup;
 			const tRidesStart = performance.now();
 			let resp: Response;
 			try {
-				resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*');
+				if (variant === 'v5') {
+					// Inventory-driven (D1 `pyramid_shards`) — see rides_v1.ts.
+					resp = await serveRidesV5(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*', cellsRoute);
+				} else {
+					const serve = cellsRoute ? serveByVariant[variant].cells : serveByVariant[variant].rollup;
+					resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*');
+				}
 			} catch (err: any) {
 				return errorResponse(err.message ?? `rides-${variant} error`, 500, env);
 			}
@@ -1708,7 +1717,7 @@ export default {
 		if (url.pathname.startsWith('/api/files/')) {
 			const handlers = createHandlers(
 				R2Store(env.R2, {
-					prefixes: ['gbfs/', 'avail/', 'avail-v3/', 'avail-v5/', 'avail-v6/'],
+					prefixes: ['gbfs/', 'avail/', 'avail-v3/', 'avail-v5/', 'avail-v6/', 'rides-v5/'],
 					publicBaseUrl: env.R2_PUBLIC_BASE_URL,
 					presign: {
 						endpoint: env.R2_S3_ENDPOINT,

@@ -374,14 +374,14 @@ async function loadEarliestPerShard(db: D1Database, pyramidName: string = PYRAMI
 // does no sign-flip arithmetic). Graph + registry cached per isolate
 // with a TTL (registry churns rarely); failures aren't cached.
 
-interface V5Vocab {
+export interface V5Vocab {
 	graph: ReturnType<typeof buildVocabGraph>;
 	stations: { key: string; lat: number; lng: number }[];
 }
 let _v5Vocab: { value: Promise<V5Vocab>; ts: number } | null = null;
 const V5_VOCAB_TTL_MS = 10 * 60_000;
 
-function loadV5Vocab(bucket: R2Bucket): Promise<V5Vocab> {
+export function loadV5Vocab(bucket: R2Bucket): Promise<V5Vocab> {
 	const now = Date.now();
 	if (_v5Vocab && now - _v5Vocab.ts < V5_VOCAB_TTL_MS) return _v5Vocab.value;
 	const value = (async (): Promise<V5Vocab> => {
@@ -402,7 +402,7 @@ function loadV5Vocab(bucket: R2Bucket): Promise<V5Vocab> {
 	return value;
 }
 
-async function v5BBoxCover(bucket: R2Bucket, bbox: BBox): Promise<string[]> {
+export async function v5BBoxCover(bucket: R2Bucket, bbox: BBox): Promise<string[]> {
 	const { graph, stations } = await loadV5Vocab(bucket);
 	const wanted = stations
 		.filter((s) => s.lat >= bbox.minLat && s.lat <= bbox.maxLat && s.lng >= bbox.minLng && s.lng <= bbox.maxLng)
