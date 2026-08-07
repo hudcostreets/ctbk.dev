@@ -22,7 +22,7 @@ export const SYSTEM_BBOX = '40.5,-74.2,41.0,-73.7' as const
 const DATA_START_ISO = '2013-06-01T00:00:00Z'
 
 export type Anchor = 'start' | 'end'
-export type Pyramid = 'v1' | 'v2' | 'v3'
+export type Pyramid = 'v1' | 'v2' | 'v3' | 'v5'
 
 /** Static h3 region-cells for v1/v2. v3 doesn't use a static asset —
  *  it computes a mixed-resolution `minimalCover` live from
@@ -177,10 +177,12 @@ export function useRidesV1({
   const fromIso = (from ?? new Date(DATA_START_ISO)).toISOString()
   const toIso = (to ?? defaultTo()).toISOString()
   // v1/v2: static single-level h3 cells from a JSON asset.
-  // v3: live minimalCover (mixed res + exclude) computed from
+  // v3/v5: live minimalCover (mixed res + exclude) computed from
   // stations-regional.json at FE startup, cached by TSQ. Each hook gates
   // its own fetch on `enabled` — only the variant in use does I/O.
-  const isV3 = pyramid === 'v3'
+  // v5 sends the same raw-S2 covers; the worker translates them to the
+  // station vocabulary (`v5UserCover`).
+  const isV3 = pyramid === 'v3' || pyramid === 'v5'
   const staticCells = useRegionCellsH3(!isV3)
   const minCovers = useRegionCoversV3(isV3)
 
@@ -216,7 +218,13 @@ export function useRidesV1({
         sp.set('to', toIso)
         sp.set('bbox', SYSTEM_BBOX)
         sp.set('reducer', 'sum')
-        sp.set('bin_budget', '200')
+        if (pyramid === 'v5') {
+          // v5 has no calendar tiers; the worker rebins the 1d tier to
+          // exact calendar months at serve time (`specs/rides-v5.md`).
+          sp.set('bin', '1mo')
+        } else {
+          sp.set('bin_budget', '200')
+        }
         sp.set('cell_budget', '16')
         if (include) sp.set('cells', include.join(','))
         if (exclude.length) sp.set('cells.exclude', exclude.join(','))

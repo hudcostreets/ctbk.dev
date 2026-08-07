@@ -49,7 +49,7 @@ import { buildTraces, monthToDate } from '../chart/ymrgtb-traces'
 import { buildLayout } from '../chart/ymrgtb-layout'
 import { useRidesV1, type Pyramid, type ApiTarget } from '../query/ridesV1'
 
-const Pyramids: Pyramid[] = ['v1', 'v2', 'v3']
+const Pyramids: Pyramid[] = ['v1', 'v2', 'v3', 'v5']
 const ApiTargets: ApiTarget[] = ['prod', 'dev']
 
 export const RideableTypesExample = "/?y=m&s=b&rt=ce&d=2002-"
@@ -94,7 +94,7 @@ export default function Home() {
   const [stackBy, setStackBy] = useUrlState('s', codeParam<StackByV2>('None', StackByV2QueryStrings))
   const [stackRelative, setStackRelative] = useUrlState('pct', boolParam)
   const [regions, setRegions] = useUrlState('r', codesParam(Regions, RegionQueryStrings))
-  const [pyramid, setPyramid] = useUrlState<Pyramid>('pyramid', codeParam<Pyramid>('v3', [['v1', 'v1'], ['v2', 'v2'], ['v3', 'v3']]))
+  const [pyramid, setPyramid] = useUrlState<Pyramid>('pyramid', codeParam<Pyramid>('v3', [['v1', 'v1'], ['v2', 'v2'], ['v3', 'v3'], ['v5', 'v5']]))
   const [api, setApi] = useUrlState<ApiTarget>('api', codeParam<ApiTarget>('prod', [['prod', 'prod'], ['dev', 'dev']]))
   const [userTypes, setUserTypes] = useUrlState('u', codesParam(UserTypes, UserTypeQueryStrings))
   const [genders, setGenders] = useUrlState('g', codesParam(Genders, GenderQueryStrings))
