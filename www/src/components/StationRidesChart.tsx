@@ -84,10 +84,12 @@ export default function StationRidesChart({
         { stroke: axisColor, grid: { stroke: gridColor }, ticks: { stroke: axisColor }, size: 50 },
       ],
       legend: { show: false },
+      // No fills: two translucent fills over a dark bg stack into a grey
+      // smear that reads as a third (phantom) series.
       series: [
         { label: 'Time' },
-        { label: 'Starts', stroke: STARTS_COLOR, fill: STARTS_COLOR + '30', paths: stepped, width: 2 },
-        { label: 'Ends', stroke: ENDS_COLOR, fill: ENDS_COLOR + '30', paths: stepped, width: 2 },
+        { label: 'Starts', stroke: STARTS_COLOR, paths: stepped, width: 2 },
+        { label: 'Ends', stroke: ENDS_COLOR, paths: stepped, width: 2 },
       ],
     }
 

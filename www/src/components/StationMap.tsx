@@ -103,22 +103,55 @@ function StationMarkers({
   const selectedStation = selectedId ? stations[selectedId] : undefined
   const mPerPx = useMemo(() => getMetersPerPixel(map), [map, zoom])
 
+  // Latest-value refs for everything the circle event handlers read. The
+  // circles pane must be STABLE across selection changes: with `selectedId`
+  // (or changing callback identities) in its memo deps, every hover-select
+  // remounted all ~2,700 leaflet circles — the fresh layer under the
+  // stationary cursor re-fired `mouseover`, scheduling another select →
+  // re-render → remount → … a churn loop that strobed the fan and destroyed
+  // mousedown targets mid-gesture (clicks silently dropped).
+  const selectedIdRef = useRef(selectedId)
+  selectedIdRef.current = selectedId
+  const setSelectedIdRef = useRef(setSelectedId)
+  setSelectedIdRef.current = setSelectedId
+  const onPinRef = useRef(onPin)
+  onPinRef.current = onPin
+  const onTogglePinRef = useRef(onTogglePin)
+  onTogglePinRef.current = onTogglePin
+  const onMarkerHoverRef = useRef(onMarkerHover)
+  onMarkerHoverRef.current = onMarkerHover
+
   // Hover-prefetch: fire `onMarkerHover(id)` 80 ms after the cursor settles on
   // a circle, cancelling if the cursor leaves first. Quick mouse-passes don't
   // trigger requests; deliberate hovers warm the cache for an imminent click.
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Hover-select settle: `hoverToSelect` waits 150 ms before committing the
+  // selection (and thus redrawing the destination-line fan) — sweeping the
+  // cursor across a dense area no longer strobes a fan per station crossed.
+  const selectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => () => {
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
+    if (selectTimerRef.current) clearTimeout(selectTimerRef.current)
   }, [])
   const scheduleHoverPrefetch = (id: string) => {
-    if (!onMarkerHover) return
+    if (!onMarkerHoverRef.current) return
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
-    hoverTimerRef.current = setTimeout(() => onMarkerHover(id), 80)
+    hoverTimerRef.current = setTimeout(() => onMarkerHoverRef.current?.(id), 80)
   }
   const cancelHoverPrefetch = () => {
     if (hoverTimerRef.current) {
       clearTimeout(hoverTimerRef.current)
       hoverTimerRef.current = null
+    }
+  }
+  const scheduleHoverSelect = (id: string) => {
+    if (selectTimerRef.current) clearTimeout(selectTimerRef.current)
+    selectTimerRef.current = setTimeout(() => setSelectedIdRef.current?.(id), 150)
+  }
+  const cancelHoverSelect = () => {
+    if (selectTimerRef.current) {
+      clearTimeout(selectTimerRef.current)
+      selectTimerRef.current = null
     }
   }
 
@@ -143,6 +176,30 @@ function StationMarkers({
   const HIT_RADIUS_PX = 6
   const hitRadius = HIT_RADIUS_PX * mPerPx
 
+  // The lines pane sits above circles, so an edge crossing a station's
+  // clickable area intercepts clicks aimed at that station. Forward such
+  // clicks: a click within a station's hit radius means the STATION (same
+  // radius rule as the invisible hit circles); only clicks on open line
+  // body fall back to the edge's own behavior (keep the source selected).
+  const stationAtLatLng = (ll: L.LatLng): string | null => {
+    let bestId: string | null = null
+    let bestDist = Infinity
+    for (const [id, st] of Object.entries(stations)) {
+      const clickable = max(hitRadius, sqrt(st.ends) || 0)
+      const d = map.distance(ll, [st.lat, st.lng])
+      if (d <= clickable && d < bestDist) { bestDist = d; bestId = id }
+    }
+    return bestId
+  }
+  const onEdgeClick = (e: L.LeafletMouseEvent) => {
+    const hit = stationAtLatLng(e.latlng)
+    const toggle = onTogglePinRef.current
+    const select = onPinRef.current ?? setSelectedIdRef.current
+    if (hit && toggle) toggle(hit)
+    else if (hit && select) select(hit)
+    else if (selectedIdRef.current) select?.(selectedIdRef.current)
+  }
+
   const lines = useMemo(() => {
     if (!selectedStation || !selectedId || !pairCounts) return null
     if (!(selectedId in pairCounts)) return null
@@ -164,13 +221,11 @@ function StationMarkers({
               weight={weight}
               opacity={0.7}
               eventHandlers={{
-                // Edge clicks pin the source station — treat edge interaction
-                // as a subset of station interaction. The user can still click
-                // the destination station directly through any non-occluded
-                // neighbor; clicking the edge falls back to keeping the source
-                // selected so the "View station details" link below the map
-                // resolves to something useful.
-                click: () => (onPin ?? setSelectedId)?.(selectedId),
+                // Clicks within a station's hit radius forward to that
+                // station (multi-select toggle / pin); open-line-body clicks
+                // keep the source selected so the "View station details"
+                // link below the map resolves to something useful.
+                click: onEdgeClick,
                 // Pop the destination's tooltip while the cursor is on this
                 // edge — handled by `edgeDstTooltip` below.
                 mouseover: () => setHoveredEdgeDstId(dstId),
@@ -241,18 +296,24 @@ function StationMarkers({
           // Hit-test circle: invisible (fillOpacity 0, weight 0), but with
           // a clickable radius of at least HIT_RADIUS_PX. Carries the
           // eventHandlers + tooltip.
-          const eventHandlers: Record<string, () => void> = {}
-          if (onTogglePin || onPin || setSelectedId) {
-            // Multi-select mode (`onTogglePin`): clicks toggle set membership;
-            // hover still drives the transient selection highlight.
-            eventHandlers.click = () => onTogglePin ? onTogglePin(id) : (onPin ?? setSelectedId)?.(id)
-          }
-          if (onMarkerHover || (hoverToSelect && setSelectedId)) {
-            eventHandlers.mouseover = () => {
-              if (hoverToSelect && setSelectedId && id !== selectedId) setSelectedId(id)
+          // Handlers read live values via refs so this pane never needs to
+          // remount on selection changes (see the churn-loop note above).
+          const eventHandlers: Record<string, () => void> = {
+            // Multi-select mode (`onTogglePin`): clicks toggle set
+            // membership; hover still drives the transient selection.
+            click: () => {
+              const toggle = onTogglePinRef.current
+              if (toggle) toggle(id)
+              else (onPinRef.current ?? setSelectedIdRef.current)?.(id)
+            },
+            mouseover: () => {
+              if (hoverToSelect && id !== selectedIdRef.current) scheduleHoverSelect(id)
               scheduleHoverPrefetch(id)
-            }
-            eventHandlers.mouseout = cancelHoverPrefetch
+            },
+            mouseout: () => {
+              cancelHoverPrefetch()
+              cancelHoverSelect()
+            },
           }
           const hit = (
             <Circle
@@ -262,7 +323,7 @@ function StationMarkers({
               fillOpacity={0}
               weight={0}
               bubblingMouseEvents={false}
-              eventHandlers={Object.keys(eventHandlers).length ? eventHandlers : undefined}
+              eventHandlers={eventHandlers}
             >
               {/* Suppress base-circle tooltips for other stations while a
                   station is pinned — the pinned TT stays put, nothing else
@@ -279,7 +340,7 @@ function StationMarkers({
         })}
       </Pane>
     )
-  }, [stations, selectedId, setSelectedId, onPin, onTogglePin, onMarkerHover, colors, stationColors, hoverToSelect, isPinned, hitRadius])
+  }, [stations, colors, stationColors, hoverToSelect, isPinned, hitRadius])
 
   // Multi-select rings: one non-interactive ring per pinned station. Sits
   // above base circles so membership reads at a glance; clicks pass through
@@ -298,9 +359,10 @@ function StationMarkers({
               key={`pin-${id}`}
               center={{ lat: st.lat, lng: st.lng }}
               color={MULTI_PIN_COLOR}
-              fillOpacity={0}
+              fillColor={MULTI_PIN_COLOR}
+              fillOpacity={0.25}
               radius={radius}
-              weight={3}
+              weight={4}
               interactive={false}
             />
           )

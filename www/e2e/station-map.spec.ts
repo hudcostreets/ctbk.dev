@@ -50,6 +50,9 @@ async function biggestStation(page: Page): Promise<{ x: number; y: number }> {
 async function selectBiggestStation(page: Page): Promise<{ x: number; y: number }> {
   const coords = await biggestStation(page)
   await page.mouse.move(coords.x, coords.y)
+  // Hover-select commits after a 150 ms settle (anti-flicker debounce);
+  // outwait it before the caller moves the cursor away.
+  await page.waitForTimeout(300)
   return coords
 }
 

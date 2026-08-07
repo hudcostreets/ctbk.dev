@@ -101,6 +101,10 @@ a.subtitle:hover {
     z-index: 420 !important;
 }
 
+/* Lines render above circles (the fan reads better over the rings), which
+ * also means edges win hit-testing where they cross a station's clickable
+ * area — the edge click handler compensates by forwarding clicks to the
+ * nearest station within its hit radius (see `StationMarkers`). */
 .lines {
     z-index: 450 !important;
 }
