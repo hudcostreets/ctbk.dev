@@ -992,6 +992,29 @@ def gbfs_engine_seed(
 	err(f'uploaded {prefix}/config.yaml')
 
 
+@gbfs_engine.command('jobdef', help='Register a new `pyrmts-engine` job-definition revision: latest revision\'s properties with the container image swapped (creds/env copied wholesale, never read).')
+@option('-n', '--dry-run', is_flag=True, help='Print current + new image; no registration.')
+@argument('image', metavar='IMAGE')
+def gbfs_engine_jobdef(dry_run: bool, image: str) -> None:
+	import boto3
+	batch = boto3.client('batch', region_name='us-east-1')
+	defs = batch.describe_job_definitions(jobDefinitionName='pyrmts-engine', status='ACTIVE')['jobDefinitions']
+	latest = max(defs, key=lambda d: d['revision'])
+	props = latest['containerProperties']
+	err(f"rev {latest['revision']}: {props['image']}")
+	if dry_run:
+		err(f'would register: {image}')
+		return
+	props['image'] = image
+	out = batch.register_job_definition(
+		jobDefinitionName='pyrmts-engine',
+		type='container',
+		containerProperties=props,
+		platformCapabilities=latest.get('platformCapabilities', ['FARGATE']),
+	)
+	err(f"registered rev {out['revision']}: {image}")
+
+
 @gbfs_engine.command('submit', help='Submit an engine build of the scratch prefix to AWS Batch (`pyrmts-engine batch submit` passthrough with the standard ctbk args).')
 @option('-a', '--aligned', default=None, help='Smoke range: DUR[:N] = first N epoch-aligned DUR periods after genesis.')
 @option('-b', '--mem-budget', default=None, help='Window-admission byte budget, e.g. 24g (build -b; default 70% of the cgroup limit).')
@@ -1043,7 +1066,9 @@ def gbfs_engine_submit(
 	sort = 'cell,dt,gender,user_type,bike_type' if _rides_anchor(config_name) else 's2_cell,dt'
 	cmd = [
 		'pyrmts-engine', 'batch', 'submit',
-		'-n', prefix,
+		# Batch job names reject '/' (multi-segment prefixes like
+		# `rides-v5/start`); manifest + config paths keep the real prefix.
+		'-n', prefix.replace('/', '-'),
 		'-w', window,
 		'-g', str(rg_size),
 		'-s', sort,
