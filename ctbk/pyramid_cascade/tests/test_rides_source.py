@@ -232,6 +232,22 @@ def test_unmapped_sid_coordinate_fallback(pyramid):
     )
 
 
+def test_identity_sid_maps_to_own_chain(pyramid):
+    # Modern rides carry short_names directly as station ids ('ST1'),
+    # absent from the legacy id-map: `canon.get(sid, sid)` semantics —
+    # the sid itself is the candidate short_name, NOT coordinate
+    # fallback (the JC149 finding, `specs/rides-v5.md` acceptance).
+    t = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+    src = make_source(pyramid, {'202606': [
+        ride(t, t.replace(minute=10), start_sid='ST1'),
+    ]})
+    h12 = ms(t)
+    assert read_sorted(src, JUN, JUL) == sorted(
+        expected_rows('cell-a', h12, 'male', 'Subscriber', 'classic', 1, 600, 360_000)
+        + expected_rows('s:ST1', h12, 'male', 'Subscriber', 'classic', 1, 600, 360_000)
+    )
+
+
 def test_missing_mid_history_month_is_coverage_miss(pyramid):
     # A window over a month whose parquet is absent: strict coverage
     # miss (the engine's `max_missing_source` guard turns it into a

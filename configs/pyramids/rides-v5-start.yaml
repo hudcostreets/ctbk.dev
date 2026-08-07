@@ -1,0 +1,49 @@
+# ctbk rides-v5 pyramid, `start` anchor (`specs/rides-v5.md`): engine
+# raw-ingest from `normalized/<YYYYMM>.parquet` via `MonthlyRidesSource`,
+# station-identity keys (frozen ragged vocabulary + `s:<short_name>` —
+# same graph as avail-v5/v6), fixed-duration pow-2 day shard ladder
+# (calendar `1mo/3mo/1y` views are serve-time rebins of the `1d` tier,
+# NOT pyramid tiers). Genesis 2013-06-01.
+#
+# Sum monoids: wide columns `{count,duration}_{n,sum,sumsq}` —
+# byte-compatible with rides-v3's `MONOID_COLS`; `count`'s value ≡ 1 per
+# ride, `duration` = ride seconds.
+
+storage:
+  type: s3
+  bucket: ctbk
+  key: "rides-v5/start/{tier}/{shard}/{period}.parquet"
+
+defaults:
+  rg_size: 2048
+
+axis: time
+binCol: dt
+
+dims:
+  - { name: cell,      type: string }
+  - { name: gender,    type: string }
+  - { name: user_type, type: string }
+  - { name: bike_type, type: string }
+
+metrics:
+  - { name: count,    monoid: sum }
+  - { name: duration, monoid: sum }
+
+# ≈1k bins per max shard (the rides-v2 sizing rule); powers-of-2 day
+# rungs so monthly extension fills consolidate tip dust the same way the
+# avail ladders do.
+tiers:
+  - { name: 1h,  bin: 1h,  shards: [1d, 2d, 4d, 8d, 16d, 32d] }
+  - { name: 3h,  bin: 3h,  shards: [4d, 8d, 16d, 32d, 64d, 128d] }
+  - { name: 6h,  bin: 6h,  shards: [8d, 16d, 32d, 64d, 128d, 256d] }
+  - { name: 12h, bin: 12h, shards: [16d, 32d, 64d, 128d, 256d, 512d] }
+  - { name: 1d,  bin: 1d,  shards: [32d, 64d, 128d, 256d, 512d, 1024d] }
+  - { name: 3d,  bin: 3d,  shards: [96d, 192d, 384d, 768d, 1536d, 3072d] }
+  - { name: 7d,  bin: 7d,  shards: [224d, 448d, 896d, 1792d, 3584d, 7168d] }
+  - { name: 14d, bin: 14d, shards: [448d, 896d, 1792d, 3584d, 7168d] }
+
+geo:
+  cellCol: cell
+  # S2 levels (canonical pyrmts order: finest → coarsest)
+  resolutions: [15, 14, 13, 12, 11, 10]

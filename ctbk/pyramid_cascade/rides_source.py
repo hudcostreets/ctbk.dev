@@ -92,7 +92,11 @@ class MonthlyRidesSource(TiledSource):
     ) -> None:
         super().__init__(pyramid)
         self.anchor: Anchor = anchor
-        self._canonical = canonical
+        # v3 canonicalization semantics (`canon.get(sid, sid)`): the
+        # id-map wins, else the sid ITSELF is the candidate short_name —
+        # modern rides carry short_names ('JC149') directly as station
+        # ids, absent from the legacy id-map.
+        self._canonical = {sn: sn for sn in chains} | canonical
         self._geo = geo
         self._vocab_cells = vocab_cells
         self._available = available_months
@@ -143,8 +147,12 @@ class MonthlyRidesSource(TiledSource):
         df = df.with_columns(
             pl.col('sid').replace_strict(self._canonical, default=None).alias('short_name'),
         )
-        mapped = df.filter(pl.col('short_name').is_not_null())
-        unmapped = df.filter(pl.col('short_name').is_null())
+        # Mapped = canonicalized to a short_name that HAS a chain; a
+        # canonical name absent from the chains (registry drift) falls
+        # back to coordinates, exactly like an unmapped sid (v3 rule).
+        has_chain = pl.col('short_name').is_in(self._chains['short_name'])
+        mapped = df.filter(pl.col('short_name').is_not_null() & has_chain)
+        unmapped = df.filter(pl.col('short_name').is_null() | ~has_chain)
 
         long = (
             mapped
