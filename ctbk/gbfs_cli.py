@@ -1039,12 +1039,14 @@ def gbfs_engine_submit(
 ) -> None:
 	prefix = scratch_prefix or f'{config_name}-engine-check'
 	bucket = os.environ.get('R2_BUCKET', 'ctbk')
+	from ctbk.pyramid_cascade.engine_check import _rides_anchor
+	sort = 'cell,dt,gender,user_type,bike_type' if _rides_anchor(config_name) else 's2_cell,dt'
 	cmd = [
 		'pyrmts-engine', 'batch', 'submit',
 		'-n', prefix,
 		'-w', window,
 		'-g', str(rg_size),
-		'-s', 's2_cell,dt',
+		'-s', sort,
 		'-m', f's3://{bucket}/{prefix}/{manifest_name}',
 	]
 	if fill and aligned is None and range_ is None:

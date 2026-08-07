@@ -35,12 +35,14 @@ DEFAULT_MANIFEST = 'tmp/engine-check-manifest.jsonl'
 
 
 def config_prefix(config_yaml: str) -> str:
-    """The keyTemplate's leading path segment (e.g. `avail-v4`)."""
+    """The keyTemplate's full literal head before `/{tier}` — single
+    segment for avail (`avail-v4`), multi-segment for rides
+    (`rides-v5/start`)."""
     cfg = parse_pyramid_yaml(config_yaml)
-    prefix, _, _ = cfg.keyTemplate.partition('/')
-    if '{' in prefix:
-        raise ValueError(f"keyTemplate {cfg.keyTemplate!r} has no literal leading prefix")
-    return prefix
+    head, sep, _ = cfg.keyTemplate.partition('/{tier}')
+    if not sep or '{' in head:
+        raise ValueError(f"keyTemplate {cfg.keyTemplate!r} has no literal head before '/{{tier}}'")
+    return head
 
 
 def merged_yaml(config_name: str) -> str:
@@ -59,10 +61,7 @@ def scratch_yaml(config_name: str, scratch_prefix: str) -> str:
     have happened: a silent no-op here would point a "scratch" build at
     serving keys."""
     merged = merged_yaml(config_name)
-    cfg = parse_pyramid_yaml(merged)
-    head, sep, _ = cfg.keyTemplate.partition('/{tier}')
-    if not sep or '{' in head:
-        raise ValueError(f"keyTemplate {cfg.keyTemplate!r} has no literal head before '/{{tier}}'")
+    head = config_prefix(merged)
     if scratch_prefix == head:
         raise ValueError(f"scratch prefix {scratch_prefix!r} is the real serving prefix — refusing")
     out = merged.replace(f'{head}/{{tier}}', f'{scratch_prefix}/{{tier}}')

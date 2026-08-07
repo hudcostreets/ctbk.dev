@@ -15,6 +15,9 @@ RUN pip install --no-cache-dir s2cell==1.8.0
 # onto PYTHONPATH without the rest of the package.
 COPY gbfs/engine/ctbk_engine_src.py /app/ctbk_engine_src.py
 COPY ctbk/pyramid_cascade/raw_source.py /app/ctbk_raw_source.py
+COPY ctbk/pyramid_cascade/rides_source.py /app/ctbk_rides_source.py
 COPY ctbk/pyramid_cascade/vocab.py /app/ctbk_vocab.py
 COPY configs/pyramids/station-vocab.json /app/station-vocab.json
+COPY s3/ctbk/stations/station-id-map.json /app/station-id-map.json
+COPY gbfs/engine/station-geo.json /app/station-geo.json
 ENV PYTHONPATH=/app
