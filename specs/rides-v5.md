@@ -74,6 +74,24 @@ Whether a pyramid materializes calendar tiers is a per-pyramid config choice (ti
 - **Monthly extension**: no Lambda tick — rides advance monthly. Hook the ci.yml "Process new month" flow: after `norm create` lands `normalized/<ym>.parquet`, submit the engine fill (extension mode fills the new month across both anchors' rungs). Idempotent, journal-repairable (shard-invalidation applies as-is if a month is ever re-published).
 - **Registry/health**: add `rides-v5-start`/`rides-v5-end` to `RECONCILE_PYRAMIDS` + `HEALTH_PYRAMIDS` **in the same change that creates the prefixes** (the avail-v6 burn-in lesson: reconcile-map omission = invisible tip).
 
+## Footer pathology (2026-08-07): `rg_size` 2048 → 16384 rebuild
+
+Prod incident: multi-select FE requests (wide windows, `bin_budget≈1460` → 12h tier) intermittently died with CORS-less network errors. `wrangler tail` showed `outcome: exceededMemory` ("Worker exceeded memory limit", 503) — an isolate kill takes down every in-flight request together, and CF's kill response carries no `Access-Control-Allow-Origin`, which is why the browser reported it as a CORS block.
+
+Root cause chain:
+- `rg_size: 2048` was inherited from the avail configs (tuned for small per-station shards). Rides shards are all-network × dims: the 12h/512d and 1d/1024d shards run 11-13M rows / 245-285MB with **5.6-6.3k row groups** and **7-8MB serialized parquet footers** (~60k column-chunk metadata entries each).
+- pyrmts' `fetchShardData` parses the *full* footer per shard per request (`parquetMetadataAsync`, no cache); hyparquet materializes it as a JS object graph ~10× the serialized size (50-100MB per big shard).
+- `serveRidesV5` fanned all plan segments out concurrently, and the FE fires start+end anchors in parallel → several multi-MB footer parses stacked in one isolate → 128MB limit exceeded. Single sequential requests always succeeded (~1.2-2s, most of it footer parse — also the "first hit takes ~4s" report); concurrency was the killer. Repro: 8 concurrent cold `bin_budget=1460` requests → 24/24 failures; curl sequential → 0 failures.
+- avail-v6 has the same shard shape (15m/32d = 534MB, 6.2k RGs, 5.4MB footer) — it survives because avail queries touch 1-2 segments for one station, but it sits near the same cliff. Fold an `rg_size` bump into the #175 avail-v6 regen.
+
+Mitigations (deployed from `gbfs/api`, no rebuild needed):
+1. Segments fetched sequentially within a request (`fetchSegmentsSequential`) in both `serveRides` and `serveRidesV5` — one metadata graph alive per request. (A cross-request semaphore was tried first and 1101'd: Workers forbid resuming one request's I/O from another request's context, so queued-waiter hand-off is structurally impossible.)
+2. Load-shed: module-scope in-flight counter, immediate CORS'd 503 + `Retry-After` beyond 2 concurrent rides fetches (no queuing → no cross-context continuation); cap 4 was tried first and still 1102'd. TSQ's default retry absorbs sheds client-side, and the FE passes TSQ's `AbortSignal` so superseded fetches cancel instead of stacking against the cap. Dev-worker verification: 8 concurrent cold `bin_budget=1460` → 2×200 + 6× clean shed 503s, zero 1101/1102s, all responses CORS'd.
+3. Rides edge-cache live-window TTL 60s → 1h (rides data lands monthly; fresher is pure cold-miss waste).
+4. FE Latest-mode "now" quantized to 15 min (stable TSQ + edge cache keys).
+
+Durable fix: **D1 RG manifest** (`specs/rg-manifest.md`) — per-RG byte spans + cell/dt stats + chunk metadata in D1, so serving does one D1 query + parallel range reads of exactly the matched RGs and never touches a footer. Keeps `rg_size: 2048` (fine pruning becomes an asset: ~150-500KB fetched per multi-select query); the `rg_size: 16384` Batch regen originally proposed here is SHELVED as a fallback. Interim mitigations above stay until manifest P1 lands, then the sequential-fetch + in-flight-cap constraints get relaxed.
+
 ## Acceptance (per drop-LUC spec, adapted)
 
 1. Every v5 `s:<short_name>` row ≡ the corresponding v3 LUC row via the current denorm's cell↔station map, over a sample of months spanning eras (2013, 2019, 2024, 2026) — run before the next monthly churn while v3 and the denorm are freshly consistent.

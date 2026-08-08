@@ -50,6 +50,8 @@ import {
 import { parquetBackend, CachedShardIndex, type ShardIndex } from 'pyrmts';
 import { r2Storage, D1ShardIndex } from 'pyrmts-cfw';
 import { retryingStorage } from './r2_retry';
+import { acquireFooterSlot, busyResponse, FetchBusyError } from './fetch_guard';
+import { fetchShardRows } from './rg_manifest';
 import {
 	filterCellsAndRes,
 	filterCellsByCover,
@@ -257,6 +259,22 @@ function errorResponse(status: number, message: string, cors: string | null): Re
 	return new Response(JSON.stringify({ error: message }), { status, headers });
 }
 
+// ─── Rides fetch memory guard ────────────────────────────────────────────
+//
+// `fetchSegment` parses each shard's full parquet footer via hyparquet —
+// the big rides shards' 7-8MB footers become large JS object graphs, and
+// a few concurrent parses blow the isolate's 128MB limit (`outcome:
+// exceededMemory`). See `fetch_guard.ts` for the load-shed rationale.
+// Footer-parsing paths run segments sequentially within a request (one
+// metadata graph alive at a time) under the guard's in-flight cap; the
+// RG-manifest path (`rg_manifest.ts`, `specs/rg-manifest.md`) never
+// parses footers and bypasses both bounds.
+async function fetchSegmentsSequential<S, R>(segments: S[], fn: (seg: S) => Promise<R>): Promise<R[]> {
+	const out: R[] = [];
+	for (const seg of segments) out.push(await fn(seg));
+	return out;
+}
+
 /** Read `filter.<dim>=v1,v2,...` for each declared dim; return a
  *  pyrmts-shape `filters` array (or `undefined` if none specified). */
 function parseDimFilters(url: URL): { col: string; values: string[] }[] | undefined {
@@ -378,14 +396,24 @@ async function serveRidesReduced(
 		...(rgFilters ?? []),
 		...(allCoverCells ? [{ col: pyramid.geo!.cellCol, values: allCoverCells }] : []),
 	];
-	const shardRows = await Promise.all(
-		plan.segments.map((seg) => pyramid.storage.fetchSegment(seg, {
+	let releaseSlot: () => void;
+	try {
+		releaseSlot = await acquireFooterSlot();
+	} catch (err) {
+		if (err instanceof FetchBusyError) return busyResponse(cors);
+		throw err;
+	}
+	let shardRows: Row[][];
+	try {
+		shardRows = await fetchSegmentsSequential(plan.segments, (seg) => pyramid.storage.fetchSegment(seg, {
 			binCol: pyramid.binCol,
 			range: { from: seg.from, to: seg.to },
 			filters: allFilters.length ? allFilters : undefined,
 			...(debug ? { trace } : {}),
-		})),
-	);
+		}));
+	} finally {
+		releaseSlot();
+	}
 
 	const tFilter = performance.now();
 	// Three filter paths:
@@ -668,6 +696,9 @@ export async function serveRidesV5(
 	request: Request,
 	corsOrigin: string,
 	cellsRoute: boolean,
+	// ctx.waitUntil passthrough — carries deferred RG-manifest fills past
+	// the response (`rg_manifest.ts`).
+	defer: (p: Promise<unknown>) => void = () => {},
 ): Promise<Response> {
 	const cors = corsOrigin || null;
 	const url = new URL(request.url);
@@ -730,13 +761,49 @@ export async function serveRidesV5(
 		registered,
 	);
 	const rgFilters = parseDimFilters(url) ?? [];
-	const shardRows = await Promise.all(
-		plan.segments.map((seg) => pyramid.storage.fetchSegment(seg, {
-			binCol: pyramid.binCol,
-			range: { from: seg.from, to: seg.to },
-			filters: [{ col: 'cell', values: include }, ...rgFilters],
-		})),
-	);
+	// RG-manifest path (`specs/rg-manifest.md` P1): `s:`-key covers with no
+	// dim filters serve from the D1 row-group index — no footer parse, so
+	// segments fan out in parallel and the footer guard doesn't apply
+	// (misses fall back to the guarded footer path per key, and fill the
+	// manifest via `defer`). Dim-filtered or vocab-cell queries keep the
+	// legacy guarded sequential path (dim RG-prune semantics + large
+	// token sets are out of P1 scope).
+	const manifestEligible = rgFilters.length === 0 && include.every((c) => c.startsWith('s:'));
+	let shardRows: Row[][];
+	try {
+		if (manifestEligible) {
+			const writtenAtByKey = new Map(registered.map((s) => [s.key, s.writtenAt?.getTime() ?? 0]));
+			const storage = retryingStorage(r2Storage(bucket));
+			shardRows = await Promise.all(plan.segments.map(async (seg) => {
+				const perKey = await Promise.all(seg.keys.map((key) => fetchShardRows({
+					db,
+					storage,
+					pyramid: pyramidName,
+					key,
+					writtenAt: writtenAtByKey.get(key) ?? 0,
+					from: seg.from,
+					to: seg.to,
+					cells: include,
+					defer,
+				})));
+				return perKey.flat();
+			}));
+		} else {
+			const releaseSlot = await acquireFooterSlot();
+			try {
+				shardRows = await fetchSegmentsSequential(plan.segments, (seg) => pyramid.storage.fetchSegment(seg, {
+					binCol: pyramid.binCol,
+					range: { from: seg.from, to: seg.to },
+					filters: [{ col: 'cell', values: include }, ...rgFilters],
+				}));
+			} finally {
+				releaseSlot();
+			}
+		}
+	} catch (err) {
+		if (err instanceof FetchBusyError) return busyResponse(cors);
+		throw err;
+	}
 	const includeSet = new Set(include);
 	const filtered = shardRows.map((rows) => rows.filter((r) => includeSet.has(r.cell as string)));
 	let stitched = stitch({ pyramid, plan, shardRows: filtered });

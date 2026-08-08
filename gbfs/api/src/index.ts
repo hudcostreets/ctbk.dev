@@ -1372,7 +1372,7 @@ export default {
 			try {
 				if (variant === 'v5') {
 					// Inventory-driven (D1 `pyramid_shards`) — see rides_v1.ts.
-					resp = await serveRidesV5(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*', cellsRoute);
+					resp = await serveRidesV5(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*', cellsRoute, (p) => ctx.waitUntil(p));
 				} else {
 					const serve = cellsRoute ? serveByVariant[variant].cells : serveByVariant[variant].rollup;
 					resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*');
@@ -1397,12 +1397,17 @@ export default {
 			}
 			if (resp.ok) {
 				// `to` exclusive — past-only iff `to` ≤ now − 5min (cron slack).
+				// Rides data lands MONTHLY (tripdata drops), so even windows
+				// touching "now" only change when a new month is ingested —
+				// 1h staleness on live windows is invisible, and the longer
+				// TTL keeps repeat wide-window queries (expensive: multi-MB
+				// footer parses) on the edge cache instead of the worker.
 				const toRaw = url.searchParams.get('to');
 				const toMs = toRaw ? Date.parse(toRaw) : NaN;
 				const isPast = Number.isFinite(toMs) && toMs <= Date.now() - 300_000;
 				const cacheControl = isPast
 					? 'public, max-age=86400, immutable'
-					: 'public, max-age=60';
+					: 'public, max-age=3600';
 				const headers = new Headers(resp.headers);
 				headers.set('Cache-Control', cacheControl);
 				resp = new Response(resp.body, { status: resp.status, headers });
