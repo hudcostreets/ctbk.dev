@@ -63,6 +63,7 @@ async function fetchAnchor(
   fromIso: string,
   toIso: string,
   binBudget: number,
+  signal?: AbortSignal,
 ): Promise<{ byDt: Map<number, number>; outputBin?: string }> {
   const url = new URL(`${API_BASE}/api/rides-v5`)
   const sp = url.searchParams
@@ -72,7 +73,7 @@ async function fetchAnchor(
   sp.set('bin_budget', String(binBudget))
   sp.set('reducer', 'sum')
   sp.set('cells', sKeys.join(','))
-  const res = await dbgFetch(url.toString())
+  const res = await dbgFetch(url.toString(), { signal })
   if (!res.ok) throw new Error(`rides-v5 ${anchor}: HTTP ${res.status}`)
   const data = await res.json() as RidesV5Response
   // One record per (dt, gender, user_type, bike_type) — collapse dims.
@@ -98,13 +99,16 @@ export function useMultiStationRides(
   return useQuery<MultiRidesResult>({
     queryKey: ['rides-multi', setKey, fromS, toS, `bb${binBudget}`],
     enabled: sorted.length > 0 && viewportPx > 0,
-    queryFn: async () => {
+    // TSQ's signal cancels superseded fetches (rapid pans / re-bins) so
+    // stale requests don't stack against the worker's in-flight cap (it
+    // load-sheds 503s beyond 2 concurrent rides fetches per isolate).
+    queryFn: async ({ signal }) => {
       const fromIso = new Date(fromS * 1000).toISOString()
       const toIso = new Date(toS * 1000).toISOString()
       const sKeys = sorted.map((sn) => `s:${sn}`)
       const [start, end] = await Promise.all([
-        fetchAnchor('start', sKeys, fromIso, toIso, binBudget),
-        fetchAnchor('end', sKeys, fromIso, toIso, binBudget),
+        fetchAnchor('start', sKeys, fromIso, toIso, binBudget, signal),
+        fetchAnchor('end', sKeys, fromIso, toIso, binBudget, signal),
       ])
       const dts = [...new Set([...start.byDt.keys(), ...end.byDt.keys()])].sort((a, b) => a - b)
       const rows: MultiRidesRow[] = dts.map((dtS) => ({
@@ -116,6 +120,10 @@ export function useMultiStationRides(
         ?? mathMax(1, round((toS - fromS) / binBudget))
       return { rows, binS: servedBinS }
     },
+    // Cold wide windows can transiently fail while the worker's RG
+    // manifest is still filling (footer parses serialize; the busy 503
+    // clears in seconds) — retry harder than the app-wide default of 1.
+    retry: 3,
     // Keep previous data across range/bin changes for the same station set
     // (smooth pans); reset on set changes so stale traces don't linger.
     placeholderData: (prev, prevQuery) => {

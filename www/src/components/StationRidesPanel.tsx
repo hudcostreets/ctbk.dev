@@ -71,11 +71,14 @@ export default function StationRidesPanel({ shortNames, stations, onRemove, onCl
     return () => ro.disconnect()
   }, [])
 
-  // Quantize "now" to the minute so Latest-mode `[fromS, toS)` — and with
+  // Quantize "now" to 15 min so Latest-mode `[fromS, toS)` — and with
   // them the TSQ query key — stay stable across re-renders (hover churn on
   // the map re-renders the page constantly; an un-quantized `Date.now()`
-  // here would refetch forever).
-  const nowS = floor(Date.now() / 60_000) * 60
+  // here would refetch forever). Coarse quantization also keeps the URL
+  // cache-key stable for the worker's edge cache: rides data lands
+  // monthly, so a fresher "now" buys nothing but cold refetches of the
+  // expensive wide-window queries.
+  const nowS = floor(Date.now() / 900_000) * 900
   const [rawFromS, rawToS] = range.timestamp === null
     ? [nowS - floor(range.duration / 1000), nowS]
     : rangeToUnixSeconds(range)
