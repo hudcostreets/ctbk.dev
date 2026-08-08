@@ -260,6 +260,58 @@ async function fallbackFetch(opts: SegmentFetchOpts): Promise<Row[]> {
 	}
 }
 
+/** Registry-proxy backfill (`ctbk gbfs manifest backfill`): parse one
+ *  shard's footer and fill its manifest rows, synchronously. `written_at`
+ *  is read from `pyramid_shards` via the same binding (truthful side of
+ *  the 2026-07-28 split-brain). */
+export async function backfillManifestKey(
+	db: D1Database,
+	storage: Storage,
+	pyramid: string,
+	key: string,
+): Promise<{ n_rgs: number; written_at: number }> {
+	const row = await db.prepare('SELECT written_at FROM pyramid_shards WHERE pyramid = ? AND key = ?')
+		.bind(pyramid, key).first<{ written_at: number }>();
+	const writtenAt = row?.written_at ?? 0;
+	const release = await acquireFooterSlot(30_000);
+	try {
+		const head = await storage.head(key);
+		if (head === null) throw new Error(`backfillManifestKey: object not found: ${key}`);
+		const file = storageBuffer(storage, key, head.size);
+		const metadata = await parquetMetadataAsync(file, { initialFetchSize: INITIAL_FETCH_SIZE });
+		await fillManifestInner(db, pyramid, key, writtenAt, metadata);
+		return { n_rgs: metadata.row_groups.length, written_at: writtenAt };
+	} finally {
+		release();
+	}
+}
+
+/** Fill coverage for a pyramid: registered keys vs completed fills, with
+ *  stale fills (shard re-registered since) called out separately. */
+export async function manifestStatus(
+	db: D1Database,
+	pyramid: string,
+): Promise<{ registered: number; filled: number; stale: string[]; unfilled: string[] }> {
+	const [shards, fills] = await db.batch([
+		db.prepare('SELECT key, written_at FROM pyramid_shards WHERE pyramid = ?').bind(pyramid),
+		db.prepare('SELECT key, shard_written_at FROM rg_manifest_fills WHERE pyramid = ?').bind(pyramid),
+	]);
+	const fillMap = new Map(
+		((fills.results ?? []) as { key: string; shard_written_at: number }[])
+			.map((r) => [r.key, r.shard_written_at]),
+	);
+	const stale: string[] = [];
+	const unfilled: string[] = [];
+	let filled = 0;
+	for (const s of (shards.results ?? []) as { key: string; written_at: number }[]) {
+		const fillAt = fillMap.get(s.key);
+		if (fillAt === undefined) unfilled.push(s.key);
+		else if (fillAt !== s.written_at) stale.push(s.key);
+		else filled++;
+	}
+	return { registered: (shards.results ?? []).length, filled, stale, unfilled };
+}
+
 /** In-isolate single-flight: skip duplicate fills for a key already being
  *  filled here. Cross-isolate races are harmless: fills are idempotent
  *  (OR REPLACE, identical content for identical (key, written_at)), and

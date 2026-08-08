@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -153,6 +154,78 @@ def gbfs_d1_shards(
 		else:
 			age_str = f'{age / (60 * 24):.1f}d old'
 		print(f'{r["tier"]:>4} {r["shard_dur"]:>10} {r["n"]:>7}  {earliest:>16}  {latest:>16}  {age_str}')
+
+
+# ─── RG manifest (specs/rg-manifest.md) ─────────────────────────────
+
+MANIFEST_PYRAMIDS = ('rides-v5-start', 'rides-v5-end')
+
+
+def _registry_post(env_name: str, body: dict) -> dict:
+	"""POST a registry-proxy op to the api worker (Bearer
+	`CTBK_REGISTRY_SECRET`). All D1 access happens worker-side via the
+	binding — the truthful side of the 2026-07-28 REST split-brain."""
+	import urllib.request
+	secret = os.environ.get('CTBK_REGISTRY_SECRET')
+	if not secret:
+		raise click.ClickException('CTBK_REGISTRY_SECRET not set. `source .envrc`.')
+	req = urllib.request.Request(
+		f'{API_URLS[env_name]}/api/registry',
+		data=json.dumps(body).encode(),
+		headers={
+			'Authorization': f'Bearer {secret}',
+			'Content-Type': 'application/json',
+			'User-Agent': 'ctbk-gbfs-cli/1.0',
+		},
+	)
+	with urllib.request.urlopen(req, timeout=120) as resp:
+		return json.loads(resp.read())
+
+
+@gbfs.group('manifest', help='RG manifest: D1 row-group index for parquet pyramid serving (`specs/rg-manifest.md`).')
+def gbfs_manifest() -> None:
+	pass
+
+
+@gbfs_manifest.command('status', help='Fill coverage per pyramid: registered keys vs completed fills (+ stale fills whose shard was re-registered).')
+@option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='prod', show_default=True, help='api worker to query (shared D1, but ops must be deployed there).')
+@option('-p', '--pyramid', 'pyramids', multiple=True, help=f'Pyramid name (repeatable) [default: {", ".join(MANIFEST_PYRAMIDS)}].')
+@option('-v', '--verbose', is_flag=True, help='List unfilled/stale keys.')
+def gbfs_manifest_status(env_name: str, pyramids: tuple[str, ...], verbose: bool) -> None:
+	for pyramid in pyramids or MANIFEST_PYRAMIDS:
+		s = _registry_post(env_name, {'op': 'manifest_status', 'pyramid': pyramid})
+		print(f'{pyramid}: {s["filled"]}/{s["registered"]} filled, {len(s["stale"])} stale, {len(s["unfilled"])} unfilled')
+		if verbose:
+			for k in s['stale']:
+				print(f'  stale: {k}')
+			for k in s['unfilled']:
+				print(f'  unfilled: {k}')
+
+
+@gbfs_manifest.command('backfill', help='Fill manifest rows for unfilled/stale shards (worker parses each footer server-side via `manifest_fill`; sequential, idempotent).')
+@option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='prod', show_default=True, help='api worker to run fills on.')
+@option('-m', '--max', 'max_keys', type=int, default=None, help='Stop after this many fills.')
+@option('-n', '--dry-run', is_flag=True, help='List keys that would fill; no writes.')
+@option('-p', '--pyramid', 'pyramids', multiple=True, help=f'Pyramid name (repeatable) [default: {", ".join(MANIFEST_PYRAMIDS)}].')
+def gbfs_manifest_backfill(env_name: str, max_keys: int | None, dry_run: bool, pyramids: tuple[str, ...]) -> None:
+	done = 0
+	for pyramid in pyramids or MANIFEST_PYRAMIDS:
+		s = _registry_post(env_name, {'op': 'manifest_status', 'pyramid': pyramid})
+		todo = s['unfilled'] + s['stale']
+		err(f'{pyramid}: {len(todo)} to fill ({len(s["unfilled"])} unfilled, {len(s["stale"])} stale)')
+		for key in todo:
+			if max_keys is not None and done >= max_keys:
+				err(f'stopping at --max {max_keys}')
+				return
+			if dry_run:
+				print(key)
+				continue
+			t0 = time.time()
+			res = _registry_post(env_name, {'op': 'manifest_fill', 'pyramid': pyramid, 'key': key})
+			done += 1
+			err(f'  filled {key}: {res["n_rgs"]} RGs in {time.time() - t0:.1f}s')
+	if not dry_run:
+		err(f'{done} fills')
 
 
 # ─── cascade tick ───────────────────────────────────────────────────
