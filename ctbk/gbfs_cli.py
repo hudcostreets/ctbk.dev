@@ -169,17 +169,36 @@ def _registry_post(env_name: str, body: dict) -> dict:
 	secret = os.environ.get('CTBK_REGISTRY_SECRET')
 	if not secret:
 		raise click.ClickException('CTBK_REGISTRY_SECRET not set. `source .envrc`.')
-	req = urllib.request.Request(
-		f'{API_URLS[env_name]}/api/registry',
-		data=json.dumps(body).encode(),
-		headers={
-			'Authorization': f'Bearer {secret}',
-			'Content-Type': 'application/json',
-			'User-Agent': 'ctbk-gbfs-cli/1.0',
-		},
-	)
-	with urllib.request.urlopen(req, timeout=120) as resp:
-		return json.loads(resp.read())
+	from urllib.error import HTTPError
+	last: Exception | None = None
+	# CF edge occasionally 403s bursty urllib POST loops (bot scoring) —
+	# observed on the first backfill run; EB-retry through it.
+	for attempt in range(4):
+		if attempt:
+			time.sleep(2 ** attempt)
+		req = urllib.request.Request(
+			f'{API_URLS[env_name]}/api/registry',
+			data=json.dumps(body).encode(),
+			headers={
+				'Authorization': f'Bearer {secret}',
+				'Content-Type': 'application/json',
+				'User-Agent': 'ctbk-gbfs-cli/1.0',
+			},
+		)
+		try:
+			with urllib.request.urlopen(req, timeout=120) as resp:
+				return json.loads(resp.read())
+		except HTTPError as e:
+			if e.code not in (403, 429, 500, 502, 503):
+				raise
+			last = e
+			err(f'  registry {body.get("op")}: HTTP {e.code}, retrying ({attempt + 1}/4)')
+		except (ConnectionResetError, TimeoutError, OSError) as e:
+			# Long sequential loops occasionally get connection resets
+			# (each urllib call opens a fresh connection; CF edge churn).
+			last = e
+			err(f'  registry {body.get("op")}: {type(e).__name__}, retrying ({attempt + 1}/4)')
+	raise click.ClickException(f'registry {body.get("op")}: {last}')
 
 
 @gbfs.group('manifest', help='RG manifest: D1 row-group index for parquet pyramid serving (`specs/rg-manifest.md`).')
