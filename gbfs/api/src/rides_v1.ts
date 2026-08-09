@@ -784,6 +784,7 @@ export async function serveRidesV5(
 					from: seg.from,
 					to: seg.to,
 					cells: include,
+					cellCol: 'cell',
 					defer,
 				})));
 				return perKey.flat();

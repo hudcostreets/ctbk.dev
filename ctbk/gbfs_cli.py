@@ -221,17 +221,43 @@ def gbfs_manifest_status(env_name: str, pyramids: tuple[str, ...], verbose: bool
 				print(f'  unfilled: {k}')
 
 
-@gbfs_manifest.command('backfill', help='Fill manifest rows for unfilled/stale shards (worker parses each footer server-side via `manifest_fill`; sequential, idempotent).')
+def _key_shard_bins(key: str) -> int:
+	"""Bins per shard, derived from the `<prefix>/{tier}/{shard}/{period}`
+	key layout — a cheap client-side proxy for RG count (rows ≈ bins ×
+	cells; RGs ≈ rows / rg_size). Unparseable keys → huge (never skip).
+
+	Key-path durations use bare `m` for minutes (`10m/12h/…`), unlike the
+	D1 `shard_dur` spellings (`5min`, `1mo`) `_dur_min` handles."""
+	import re
+	units = {'m': 1, 'min': 1, 'h': 60, 'd': 60 * 24}
+	def dur(s: str) -> int | None:
+		mm = re.match(r'^(\d+)([a-z]+)$', s)
+		if not mm or mm.group(2) not in units:
+			return None
+		return int(mm.group(1)) * units[mm.group(2)]
+	parts = key.split('/')
+	if len(parts) < 3:
+		return 10**9
+	tier_min = dur(parts[-3])
+	shard_min = dur(parts[-2])
+	if tier_min is None or shard_min is None or tier_min == 0:
+		return 10**9
+	return shard_min // tier_min
+
+
+@gbfs_manifest.command('backfill', help='Fill manifest rows for unfilled/stale shards (worker parses each footer server-side via `manifest_fill`; sequential, idempotent). Keys below `--min-bins` are skipped client-side — small shards\' footers are cheap via the fallback path, and for avail they are exactly the Lambda-churned ones.')
+@option('-b', '--min-bins', type=int, default=450, show_default=True, help='Skip keys whose shard/tier duration ratio (bins per shard) is below this — proxy for the worker-side `MIN_FILL_RGS` floor.')
 @option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='prod', show_default=True, help='api worker to run fills on.')
 @option('-m', '--max', 'max_keys', type=int, default=None, help='Stop after this many fills.')
 @option('-n', '--dry-run', is_flag=True, help='List keys that would fill; no writes.')
 @option('-p', '--pyramid', 'pyramids', multiple=True, help=f'Pyramid name (repeatable) [default: {", ".join(MANIFEST_PYRAMIDS)}].')
-def gbfs_manifest_backfill(env_name: str, max_keys: int | None, dry_run: bool, pyramids: tuple[str, ...]) -> None:
+def gbfs_manifest_backfill(min_bins: int, env_name: str, max_keys: int | None, dry_run: bool, pyramids: tuple[str, ...]) -> None:
 	done = 0
 	for pyramid in pyramids or MANIFEST_PYRAMIDS:
 		s = _registry_post(env_name, {'op': 'manifest_status', 'pyramid': pyramid})
-		todo = s['unfilled'] + s['stale']
-		err(f'{pyramid}: {len(todo)} to fill ({len(s["unfilled"])} unfilled, {len(s["stale"])} stale)')
+		candidates = s['unfilled'] + s['stale']
+		todo = [k for k in candidates if _key_shard_bins(k) >= min_bins]
+		err(f'{pyramid}: {len(todo)} to fill ({len(s["unfilled"])} unfilled, {len(s["stale"])} stale, {len(candidates) - len(todo)} below --min-bins {min_bins})')
 		for key in todo:
 			if max_keys is not None and done >= max_keys:
 				err(f'stopping at --max {max_keys}')
@@ -242,9 +268,12 @@ def gbfs_manifest_backfill(env_name: str, max_keys: int | None, dry_run: bool, p
 			t0 = time.time()
 			res = _registry_post(env_name, {'op': 'manifest_fill', 'pyramid': pyramid, 'key': key})
 			done += 1
-			err(f'  filled {key}: {res["n_rgs"]} RGs in {time.time() - t0:.1f}s')
+			if res.get('skipped'):
+				err(f'  skipped {key}: {res["n_rgs"]} RGs < fill floor')
+			else:
+				err(f'  filled {key}: {res["n_rgs"]} RGs in {time.time() - t0:.1f}s')
 	if not dry_run:
-		err(f'{done} fills')
+		err(f'{done} keys processed')
 
 
 # ─── cascade tick ───────────────────────────────────────────────────

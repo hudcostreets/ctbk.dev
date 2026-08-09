@@ -1237,7 +1237,8 @@ export default {
 					if (!body.pyramid || !body.key) return errorResponse('pyramid + key required', 400, env);
 					const t0 = performance.now();
 					const storage = retryingStorage(r2Storage(env.R2));
-					const res = await backfillManifestKey(env.DB, storage, body.pyramid, body.key);
+					const cellCol = body.pyramid.startsWith('avail') ? 's2_cell' : 'cell';
+					const res = await backfillManifestKey(env.DB, storage, body.pyramid, body.key, cellCol);
 					return jsonResponse({ ...res, ms: Math.round(performance.now() - t0) }, env);
 				}
 				return errorResponse(`unknown op ${body.op}`, 400, env);
@@ -1313,8 +1314,8 @@ export default {
 			let resp: Response;
 			try {
 				resp = cellsRoute
-					? await serveAvailV3Cells(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*')
-					: await serveAvailV3(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*');
+					? await serveAvailV3Cells(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*', (p) => ctx.waitUntil(p))
+					: await serveAvailV3(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*', (p) => ctx.waitUntil(p));
 			} catch (err: any) {
 				return errorResponse(err.message ?? `avail-v3${cellsRoute ? '/cells' : ''} error`, 500, env);
 			}

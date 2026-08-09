@@ -93,6 +93,8 @@ Where it lives: P1 in `gbfs/api` directly (import hyparquet; bypass `pyramid.sto
 - **P2 — writer-side population** at registration; backfill CLI becomes repair-only.
 - **P3 — coverage**: rides-v5 bbox/vocab covers (chunked cell predicates), then avail-v6 (same footer cliff: 5.4MB footers on 534MB shards; currently one bad query away from the same incident), then rides-v3 while it still serves Home (or skip if #177 cutover lands first).
 
+  *P3 avail progress (2026-08-08)*: `serveGeoReduced` gained the manifest path for all-`s:` covers with no excludes (the StationDetail avail shape) on the vocab pyramids; `cellCol` parameterized (`s2_cell` for avail vs rides' `cell`). **Fill floor** `MIN_FILL_RGS = 512` added on both lazy fills and the backfill op: avail's Lambda-churned tip shards (8k+ of avail-v5's 8,270 registered keys) have sub-MB footers that parse in tens of ms via fallback — filling them would just burn D1 writes on every rewrite (~$10/mo naively). The backfill CLI mirrors the floor client-side (`--min-bins`, derived from the key's `{tier}/{shard}` durations) so it doesn't POST thousands of parse-then-skip ops. Fill-worthy: avail-v5 204 + avail-v6 168 keys ≈ ~$2 of writes. Dev-verified byte-equal cold/warm: avail-v6 1.9s → 0.52s; avail-v5 2.7s → 0.99s. Vocab-cell/bbox covers + rides-v3 remain out of scope (chunked predicates).
+
 ## Acceptance
 
 1. Byte-equality: manifest-served response ≡ footer-served response for a matrix of (station sets × ranges × bin budgets) — same records, same plan.

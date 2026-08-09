@@ -31,6 +31,15 @@ const INITIAL_FETCH_SIZE = 64 * 1024;
 // downstream keeps exactness).
 const MAX_CELL_TOKENS = 45;
 
+// Fill-worthiness floor: shards below this RG count have sub-MB footers
+// that parse in tens of ms via the fallback path — filling them buys
+// little, and for the avail pyramids the SMALL shards are exactly the
+// ones the Lambda cascade churns continuously (every rewrite would
+// invalidate + re-fill, ~$10/mo of pointless D1 writes). Big
+// consolidated shards — the ones whose footers are expensive — rarely
+// churn. Applies to both lazy fills and the backfill op.
+const MIN_FILL_RGS = 512;
+
 interface ManifestRg {
 	rg_idx: number;
 	row_start: number;
@@ -60,6 +69,7 @@ export interface SegmentFetchOpts {
 	from: Date;               // segment range (bin overlap)
 	to: Date;
 	cells: string[];          // include tokens (row-level filtering happens downstream)
+	cellCol: string;          // parquet cell column ('cell' for rides, 's2_cell' for avail)
 	defer: (p: Promise<unknown>) => void;
 }
 
@@ -216,13 +226,15 @@ async function fallbackFetch(opts: SegmentFetchOpts): Promise<Row[]> {
 		const file = storageBuffer(opts.storage, opts.key, head.size);
 		const metadata = await parquetMetadataAsync(file, { initialFetchSize: INITIAL_FETCH_SIZE });
 
-		opts.defer(fillManifest(opts, metadata).catch((err) => {
-			console.warn(`rg_manifest fill failed for ${opts.key}: ${(err as Error).message}`);
-		}));
+		if (metadata.row_groups.length >= MIN_FILL_RGS) {
+			opts.defer(fillManifest(opts, metadata).catch((err) => {
+				console.warn(`rg_manifest fill failed for ${opts.key}: ${(err as Error).message}`);
+			}));
+		}
 
 		// RG-prune by cell/dt stats (same semantics as pyrmts
 		// `selectRowGroupRuns`), then read matched runs.
-		const cellIdx = findColIdx(metadata, 'cell');
+		const cellIdx = findColIdx(metadata, opts.cellCol);
 		const dtIdx = findColIdx(metadata, 'dt');
 		const fromMs = opts.from.getTime();
 		const toMs = opts.to.getTime();
@@ -269,7 +281,8 @@ export async function backfillManifestKey(
 	storage: Storage,
 	pyramid: string,
 	key: string,
-): Promise<{ n_rgs: number; written_at: number }> {
+	cellCol: string,
+): Promise<{ n_rgs: number; written_at: number; skipped?: boolean }> {
 	const row = await db.prepare('SELECT written_at FROM pyramid_shards WHERE pyramid = ? AND key = ?')
 		.bind(pyramid, key).first<{ written_at: number }>();
 	const writtenAt = row?.written_at ?? 0;
@@ -279,7 +292,10 @@ export async function backfillManifestKey(
 		if (head === null) throw new Error(`backfillManifestKey: object not found: ${key}`);
 		const file = storageBuffer(storage, key, head.size);
 		const metadata = await parquetMetadataAsync(file, { initialFetchSize: INITIAL_FETCH_SIZE });
-		await fillManifestInner(db, pyramid, key, writtenAt, metadata);
+		if (metadata.row_groups.length < MIN_FILL_RGS) {
+			return { n_rgs: metadata.row_groups.length, written_at: writtenAt, skipped: true };
+		}
+		await fillManifestInner(db, pyramid, key, writtenAt, metadata, cellCol);
 		return { n_rgs: metadata.row_groups.length, written_at: writtenAt };
 	} finally {
 		release();
@@ -325,14 +341,14 @@ async function fillManifest(opts: SegmentFetchOpts, metadata: FileMetaData): Pro
 	if (fillsInFlight.has(flightKey)) return;
 	fillsInFlight.add(flightKey);
 	try {
-		await fillManifestInner(db, pyramid, key, writtenAt, metadata);
+		await fillManifestInner(db, pyramid, key, writtenAt, metadata, opts.cellCol);
 	} finally {
 		fillsInFlight.delete(flightKey);
 	}
 }
 
-async function fillManifestInner(db: D1Database, pyramid: string, key: string, writtenAt: number, metadata: FileMetaData): Promise<void> {
-	const cellIdx = findColIdx(metadata, 'cell');
+async function fillManifestInner(db: D1Database, pyramid: string, key: string, writtenAt: number, metadata: FileMetaData, cellCol: string): Promise<void> {
+	const cellIdx = findColIdx(metadata, cellCol);
 	const dtIdx = findColIdx(metadata, 'dt');
 	const insert = db.prepare(
 		'INSERT OR REPLACE INTO rg_manifest '

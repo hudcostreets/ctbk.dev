@@ -37,6 +37,8 @@ import {
 import { parquetBackend, CachedShardIndex, type ShardIndex } from 'pyrmts';
 import { r2Storage, D1ShardIndex } from 'pyrmts-cfw';
 import { retryingStorage } from './r2_retry';
+import { busyResponse, FetchBusyError } from './fetch_guard';
+import { fetchShardRows } from './rg_manifest';
 import {
 	buildVocabGraph,
 	filterCellsAndRes,
@@ -452,6 +454,9 @@ async function serveGeoReduced(
 	request: Request,
 	cors: string | null,
 	pyramidName: string = PYRAMID_NAME,
+	// ctx.waitUntil passthrough — carries deferred RG-manifest fills past
+	// the response (`rg_manifest.ts`).
+	defer: (p: Promise<unknown>) => void = () => {},
 ): Promise<Response> {
 	const url = new URL(request.url);
 	const from = parseInstant(url.searchParams.get('from'));
@@ -588,16 +593,51 @@ async function serveGeoReduced(
 		? [{ col: cellCol, values: allCoverCells }]
 		: [];
 
+	// RG-manifest path (`specs/rg-manifest.md` P3): all-`s:` covers with no
+	// excludes (the StationDetail avail chart shape on the vocab pyramids)
+	// serve from the D1 row-group index — no footer parse. Misses fall
+	// back to the footer path per key and lazily fill (big shards only —
+	// see `MIN_FILL_RGS`; the Lambda-churned tip shards stay on the cheap
+	// fallback so their constant rewrites don't grind D1 writes).
+	const manifestEligible = userCells !== null
+		&& userCellsExclude.length === 0
+		&& userCells.every((c) => c.startsWith('s:'));
 	// Thread `binCol` + per-segment range so hyparquet prunes row groups by
 	// `dt` column stats — shards are `(dt, s2_cell)`-sorted with small
 	// row groups, so a sub-shard time window reads only the matching RGs.
-	const shardRows = await Promise.all(
-		plan.segments.map((seg) => pyramid.storage.fetchSegment(seg, {
-			binCol: pyramid.binCol,
-			range: { from: seg.from, to: seg.to },
-			filters: allFilters.length ? allFilters : undefined,
-		})),
-	);
+	let shardRows: Row[][];
+	if (manifestEligible) {
+		const writtenAtByKey = new Map(registeredShards.map((s) => [s.key, s.writtenAt?.getTime() ?? 0]));
+		const storage = retryingStorage(r2Storage(bucket));
+		try {
+			shardRows = await Promise.all(plan.segments.map(async (seg) => {
+				const perKey = await Promise.all(seg.keys.map((key) => fetchShardRows({
+					db,
+					storage,
+					pyramid: pyramidName,
+					key,
+					writtenAt: writtenAtByKey.get(key) ?? 0,
+					from: seg.from,
+					to: seg.to,
+					cells: userCells!,
+					cellCol,
+					defer,
+				})));
+				return perKey.flat();
+			}));
+		} catch (err) {
+			if (err instanceof FetchBusyError) return busyResponse(cors);
+			throw err;
+		}
+	} else {
+		shardRows = await Promise.all(
+			plan.segments.map((seg) => pyramid.storage.fetchSegment(seg, {
+				binCol: pyramid.binCol,
+				range: { from: seg.from, to: seg.to },
+				filters: allFilters.length ? allFilters : undefined,
+			})),
+		);
+	}
 
 	// Filter to keep only rows the cover claims. Three paths:
 	//   - User cover (include∪exclude — multi-level or single, no sign-flip
@@ -650,15 +690,15 @@ function pyramidParam(request: Request): { name: string; keyTemplate: string } |
 }
 
 /** HTTP handler for `/api/avail-v3` — v3 rollup over bbox (S2-keyed). */
-export async function serveAvailV3(bucket: R2Bucket, db: D1Database, request: Request, corsOrigin: string): Promise<Response> {
+export async function serveAvailV3(bucket: R2Bucket, db: D1Database, request: Request, corsOrigin: string, defer: (p: Promise<unknown>) => void = () => {}): Promise<Response> {
 	const p = pyramidParam(request);
 	if (p === null) return errorResponse(400, 'unknown pyramid', corsOrigin || null);
-	return serveGeoReduced(availV3Pyramid(bucket, p.keyTemplate), bucket, db, request, corsOrigin || null, p.name);
+	return serveGeoReduced(availV3Pyramid(bucket, p.keyTemplate), bucket, db, request, corsOrigin || null, p.name, defer);
 }
 
 /** HTTP handler for `/api/avail-v3/cells` — v3 per-cell rows preserved. */
-export async function serveAvailV3Cells(bucket: R2Bucket, db: D1Database, request: Request, corsOrigin: string): Promise<Response> {
+export async function serveAvailV3Cells(bucket: R2Bucket, db: D1Database, request: Request, corsOrigin: string, defer: (p: Promise<unknown>) => void = () => {}): Promise<Response> {
 	const p = pyramidParam(request);
 	if (p === null) return errorResponse(400, 'unknown pyramid', corsOrigin || null);
-	return serveGeoReduced(availV3CellsPyramid(bucket, p.keyTemplate), bucket, db, request, corsOrigin || null, p.name);
+	return serveGeoReduced(availV3CellsPyramid(bucket, p.keyTemplate), bucket, db, request, corsOrigin || null, p.name, defer);
 }
