@@ -1,9 +1,9 @@
 # ctbk rides-v5 pyramid, `end` anchor (`specs/rides-v5.md`): engine
 # raw-ingest from `normalized/<YYYYMM>.parquet` via `MonthlyRidesSource`,
 # station-identity keys (frozen ragged vocabulary + `s:<short_name>` —
-# same graph as avail-v5/v6), fixed-duration pow-2 day shard ladder
-# (calendar `1mo/3mo/1y` views are serve-time rebins of the `1d` tier,
-# NOT pyramid tiers). Genesis 2013-06-01.
+# same graph as avail-v5/v6), fixed-duration pow-2 day shard ladder plus
+# a materialized calendar family (`specs/rides-v5.md` RESOLVED DESIGN;
+# pyrmts `specs/calendar-units.md`). Genesis 2013-06-01.
 #
 # Sum monoids: wide columns `{count,duration}_{n,sum,sumsq}` —
 # byte-compatible with rides-v3's `MONOID_COLS`; `count`'s value ≡ 1 per
@@ -42,6 +42,16 @@ tiers:
   - { name: 3d,  bin: 3d,  shards: [96d, 192d, 384d, 768d, 1536d, 3072d] }
   - { name: 7d,  bin: 7d,  shards: [224d, 448d, 896d, 1792d, 3584d, 7168d] }
   - { name: 14d, bin: 14d, shards: [448d, 896d, 1792d, 3584d, 7168d] }
+  # Calendar family (bin-SUFs above 14d: 2.17, 2, 1.5, 2, 2): calendar-
+  # aligned pow-2-year shards, ≲1k bins/shard. Cascade edges: 1mo ← 1d
+  # (exact — only divisors of one day divide months), 2mo ← 1mo,
+  # 3mo ← 1mo, 6mo ← 3mo, 1y ← 6mo. Closed months immutable →
+  # build-once, extend-monthly; the live tip is het-tiled at serve time.
+  - { name: 1mo, bin: 1mo, shards: [1y, 2y, 4y, 8y, 16y] }
+  - { name: 2mo, bin: 2mo, shards: [1y, 2y, 4y, 16y, 32y] }
+  - { name: 3mo, bin: 3mo, shards: [1y, 4y, 16y, 64y] }
+  - { name: 6mo, bin: 6mo, shards: [2y, 8y, 32y, 128y] }
+  - { name: 1y,  bin: 1y,  shards: [4y, 16y, 128y] }
 
 geo:
   cellCol: cell

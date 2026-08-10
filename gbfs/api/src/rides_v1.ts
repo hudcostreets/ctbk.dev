@@ -41,6 +41,7 @@
  * as hyparquet RG-prune filters via pyrmts §2 `FetchOptions.filters`.
  */
 import {
+	planQueryFromInventory,
 	stitch,
 	type FetchTrace,
 	type Pyramid,
@@ -62,6 +63,7 @@ import {
 	vocabCover,
 	type BBox,
 	type GeoPyramid,
+	type GeoQueryPlan,
 	type SpatialIndex,
 	type SpatialSet,
 } from 'pyrmts-geo';
@@ -599,12 +601,17 @@ export async function serveRidesCells(bucket: R2Bucket, request: Request, corsOr
 //     the station registry (raw S2 cover cells match no stored rows)
 //   - shards: multi-rung fixed-duration min-cover, resolved from the D1
 //     `pyramid_shards` inventory (same machinery as avail-v5/v6)
-//   - calendar bins: `bin=1mo|3mo|1y` reads the 1d tier and rebins at
-//     serve time (exact for sum monoids — month boundaries are whole
-//     days); the pyramid itself has no calendar tiers.
+//   - calendar bins: `bin=1mo|2mo|3mo|6mo|1y` plans via the pyrmts
+//     ragged-calendar planner (`targetBin`): a materialized+registered
+//     calendar tier serves whole bins where covered; the residue (and
+//     always the un-closed tip) het-tiles from whole-day fixed tiers,
+//     reaggregated at stitch (exact for sum monoids — month boundaries
+//     are whole days).
 
 export const RIDES_GENESIS = new Date('2013-06-01T00:00:00Z');
 
+// Mirrors `configs/pyramids/rides-v5-{start,end}.yaml` (fixed pow-2 day
+// ladder + materialized calendar family).
 export const V5_TIERS: Tier[] = [
 	{ name: '1h',  bin: '1h',  shards: ['1d', '2d', '4d', '8d', '16d', '32d'] },
 	{ name: '3h',  bin: '3h',  shards: ['4d', '8d', '16d', '32d', '64d', '128d'] },
@@ -614,9 +621,14 @@ export const V5_TIERS: Tier[] = [
 	{ name: '3d',  bin: '3d',  shards: ['96d', '192d', '384d', '768d', '1536d', '3072d'] },
 	{ name: '7d',  bin: '7d',  shards: ['224d', '448d', '896d', '1792d', '3584d', '7168d'] },
 	{ name: '14d', bin: '14d', shards: ['448d', '896d', '1792d', '3584d', '7168d'] },
+	{ name: '1mo', bin: '1mo', shards: ['1y', '2y', '4y', '8y', '16y'] },
+	{ name: '2mo', bin: '2mo', shards: ['1y', '2y', '4y', '16y', '32y'] },
+	{ name: '3mo', bin: '3mo', shards: ['1y', '4y', '16y', '64y'] },
+	{ name: '6mo', bin: '6mo', shards: ['2y', '8y', '32y', '128y'] },
+	{ name: '1y',  bin: '1y',  shards: ['4y', '16y', '128y'] },
 ];
 
-const CALENDAR_BINS = ['1mo', '3mo', '1y'] as const;
+const CALENDAR_BINS = ['1mo', '2mo', '3mo', '6mo', '1y'] as const;
 type CalendarBin = typeof CALENDAR_BINS[number];
 
 const V5_SHARD_TTL_MS = 60_000;
@@ -639,40 +651,6 @@ function ridesV5Pyramid(bucket: R2Bucket, anchor: Anchor, cells: boolean): GeoPy
 		],
 		geo: { cellCol: 'cell', resolutions: [15, 14, 13, 12, 11, 10], index: s2Index },
 	};
-}
-
-function calendarFloor(ms: number, unit: CalendarBin): number {
-	const d = new Date(ms);
-	const y = d.getUTCFullYear();
-	const m = d.getUTCMonth();
-	if (unit === '1y') return Date.UTC(y, 0, 1);
-	if (unit === '3mo') return Date.UTC(y, m - (m % 3), 1);
-	return Date.UTC(y, m, 1);
-}
-
-const MONOID_COLS = METRICS.flatMap((m) => [`${m}_n`, `${m}_sum`, `${m}_sumsq`]);
-
-/** Serve-time calendar rebin of 1d-binned rows: floor `dt` to the
- *  calendar unit, group by (dt, non-metric cols), sum the monoid
- *  triplets. Exact for sum monoids (month boundaries are whole days). */
-function rebinCalendar(rows: Row[], unit: CalendarBin): Row[] {
-	const groups = new Map<string, Row>();
-	for (const r of rows) {
-		const dt = calendarFloor(r.dt as number, unit);
-		const dimKey = Object.entries(r)
-			.filter(([k]) => k !== 'dt' && !MONOID_COLS.includes(k))
-			.map(([k, v]) => `${k}=${v}`)
-			.sort()
-			.join('|');
-		const key = `${dt}|${dimKey}`;
-		const g = groups.get(key);
-		if (!g) {
-			groups.set(key, { ...r, dt });
-		} else {
-			for (const c of MONOID_COLS) g[c] = (g[c] as number ?? 0) + (r[c] as number ?? 0);
-		}
-	}
-	return [...groups.values()].sort((a, b) => (a.dt as number) - (b.dt as number));
 }
 
 /** Translate a raw-S2 user cover (include/exclude, `minimalCover`
@@ -719,12 +697,8 @@ export async function serveRidesV5(
 		return errorResponse(400, `bad bin '${binRaw}'; one of ${CALENDAR_BINS.join('|')} (or omit for bin_budget)`, cors);
 	}
 	const calendarBin = binRaw as CalendarBin | null;
-	const rangeDays = Math.max(1, Math.ceil((to.getTime() - from.getTime()) / 86_400_000));
-	// Calendar mode pins the 1d tier: a budget of exactly the range's day
-	// count admits 1d and rejects everything finer.
-	const binBudget = calendarBin !== null
-		? rangeDays
-		: parsePositiveInt(url.searchParams.get('bin_budget'), 1024);
+	// Ignored by the planner when `targetBin` (calendar mode) is set.
+	const binBudget = parsePositiveInt(url.searchParams.get('bin_budget'), 1024);
 	if (binBudget === null) return errorResponse(400, 'invalid bin_budget', cors);
 
 	const cellsRaw = url.searchParams.get('cells');
@@ -755,11 +729,17 @@ export async function serveRidesV5(
 	const pyramid = ridesV5Pyramid(bucket, anchor, cellsRoute);
 	const pyramidName = `rides-v5-${anchor}`;
 	const registered = await v5ShardIndex(db, pyramidName).listShards(pyramidName, { range: { from, to } });
-	const plan = planGeoQueryFromInventory(
-		pyramid,
-		{ range: { from, to }, binBudget, outputCells: { res: -1, cells: include } },
-		registered,
-	);
+	// Calendar mode plans through the core ragged-calendar planner
+	// (`targetBin`) — the geo wrapper doesn't forward it, and this path
+	// never uses per-segment geo cells (rows are filtered by `include`
+	// below), so the time-only plan is sufficient.
+	const plan = calendarBin !== null
+		? planQueryFromInventory(pyramid, { range: { from, to }, binBudget, targetBin: calendarBin }, registered)
+		: planGeoQueryFromInventory(
+			pyramid,
+			{ range: { from, to }, binBudget, outputCells: { res: -1, cells: include } },
+			registered,
+		);
 	const rgFilters = parseDimFilters(url) ?? [];
 	// RG-manifest path (`specs/rg-manifest.md` P1): `s:`-key covers with no
 	// dim filters serve from the D1 row-group index — no footer parse, so
@@ -807,8 +787,7 @@ export async function serveRidesV5(
 	}
 	const includeSet = new Set(include);
 	const filtered = shardRows.map((rows) => rows.filter((r) => includeSet.has(r.cell as string)));
-	let stitched = stitch({ pyramid, plan, shardRows: filtered });
-	if (calendarBin !== null) stitched = rebinCalendar(stitched, calendarBin);
+	const stitched = stitch({ pyramid, plan, shardRows: filtered });
 	const reduced = reduceRows(stitched, reducer, cellsRoute ? [] : ['cell']);
 	return new Response(JSON.stringify({
 		records: reduced,
@@ -816,8 +795,8 @@ export async function serveRidesV5(
 		anchor,
 		plan: {
 			outputTier: plan.outputTier?.name ?? null,
-			outputBin: calendarBin ?? plan.outputBin,
-			outputRes: plan.outputRes,
+			outputBin: plan.outputBin,
+			outputRes: calendarBin !== null ? -1 : (plan as GeoQueryPlan).outputRes,
 			outputCells: include,
 			segments: plan.segments.map((s) => ({
 				tier: s.shardTier.name,
