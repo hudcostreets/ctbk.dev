@@ -5,7 +5,7 @@
 # Build from the ctbk REPO ROOT (the context needs ctbk/ + configs/):
 #   pyrmts-engine batch push -c . -f gbfs/engine/Dockerfile -p linux/arm64 \
 #     006196295121.dkr.ecr.us-east-1.amazonaws.com/ctbk-engine:$(git rev-parse --short HEAD)
-FROM 006196295121.dkr.ecr.us-east-1.amazonaws.com/pyrmts-engine:ce770e7
+FROM 006196295121.dkr.ecr.us-east-1.amazonaws.com/pyrmts-engine:ed50cdb
 
 # `station_chain` vocab expansion (ctbk_vocab).
 RUN pip install --no-cache-dir s2cell==1.8.0
