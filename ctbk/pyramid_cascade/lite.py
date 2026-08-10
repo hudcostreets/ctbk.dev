@@ -25,6 +25,8 @@ R2_BUCKET = 'ctbk'
 # periods; materializers clip source ranges to this and short-circuit
 # shards whose entire period lies before it.
 AVAIL_GENESIS = datetime(2026, 4, 7, 1, 15, tzinfo=timezone.utc)
+# rides-v5 genesis (mirrors `RIDES_GENESIS` in `gbfs/api/src/rides_v1.ts`).
+RIDES_GENESIS = datetime(2013, 6, 1, tzinfo=timezone.utc)
 
 UNIT_MIN = {'min': 1, 'h': 60, 'd': 1440, 'mo': 1440 * 30, 'y': 1440 * 365}
 

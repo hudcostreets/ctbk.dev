@@ -1198,8 +1198,9 @@ def gbfs_engine_submit(
 	if fill and aligned is None and range_ is None:
 		# Genesis→now defaulting is ctbk's job — the engine has no genesis
 		# knowledge and keeps `-r` required even under `-f`.
-		from ctbk.pyramid_cascade.lite import AVAIL_GENESIS
-		from_, to = AVAIL_GENESIS, datetime.now(timezone.utc)
+		from ctbk.pyramid_cascade.lite import AVAIL_GENESIS, RIDES_GENESIS
+		from_ = RIDES_GENESIS if _rides_anchor(config_name) else AVAIL_GENESIS
+		to = datetime.now(timezone.utc)
 	else:
 		from_, to = _engine_range(aligned, range_)
 	cmd += ['-r', f'{from_.strftime("%Y-%m-%dT%H:%M")}/{to.strftime("%Y-%m-%dT%H:%M")}']
