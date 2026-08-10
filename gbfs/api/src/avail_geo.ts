@@ -104,22 +104,23 @@ const KEY_TEMPLATE = 'avail-v3/{tier}/{shard}/{period}.parquet';
 
 /** Serveable pyramids: `?pyramid=` values → (D1 registry name, key
  *  template, key style). Same ladder/genesis; v5 is the
- *  engine-backfilled, vocab-keyed successor (`specs/avail-v5-stack.md`)
- *  and the default since the 2026-07-29 cutover; v3 (`avail`) stays
- *  addressable behind the explicit param until retirement. */
+ *  engine-backfilled, vocab-keyed successor (`specs/avail-v5-stack.md`),
+ *  default 2026-07-29 → 2026-08-10; v3 (`avail`) stays addressable
+ *  behind the explicit param until retirement. */
 const PYRAMIDS: Record<string, { name: string; keyTemplate: string; vocab?: boolean }> = {
 	'avail': { name: 'avail', keyTemplate: KEY_TEMPLATE },
 	'avail-v5': { name: 'avail-v5', keyTemplate: 'avail-v5/{tier}/{shard}/{period}.parquet', vocab: true },
 	// LU-attributed successor (engine raw-ingest regen, `specs/lu-attribution.md`);
-	// same frozen-vocab keys as v5. Addressable behind the explicit param
-	// during burn-in; default flip is the cutover step.
+	// same frozen-vocab keys as v5. Default since 2026-08-10 (post
+	// burn-in: recent windows byte-equal to v5, tip freshness equal,
+	// historical deltas = the intended LU re-attribution correction).
 	'avail-v6': { name: 'avail-v6', keyTemplate: 'avail-v6/{tier}/{shard}/{period}.parquet', vocab: true },
 };
 
 /** The pyramid served when `?pyramid=` is absent. Also folded into the
  *  edge-cache key (`index.ts`) so flipping this constant rotates cache
  *  entries instead of serving the old default's cached payloads. */
-export const DEFAULT_PYRAMID = 'avail-v5';
+export const DEFAULT_PYRAMID = 'avail-v6';
 
 /** Repair-generation edge-cache versioning
  *  (`specs/shard-invalidation-adoption.md`): past-window responses stay
