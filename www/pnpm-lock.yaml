@@ -63,11 +63,11 @@ importers:
         specifier: ^0.1.0
         version: 0.1.0
       pyrmts:
-        specifier: https://github.com/runsascoded/pyrmts#c1f1f1bcd5854519c41032d03d9bed5d3d1e76b3&path:/js/packages/pyrmts
-        version: https://codeload.github.com/runsascoded/pyrmts/tar.gz/c1f1f1bcd5854519c41032d03d9bed5d3d1e76b3#path:/js/packages/pyrmts(react@18.3.1)
+        specifier: https://github.com/runsascoded/pyrmts#60439222ad02c11da83b78ad17e1ef35b95d2baa&path:/js/packages/pyrmts
+        version: https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa#path:/js/packages/pyrmts(react@18.3.1)
       pyrmts-geo:
-        specifier: https://github.com/runsascoded/pyrmts#c1f1f1bcd5854519c41032d03d9bed5d3d1e76b3&path:/js/packages/pyrmts-geo
-        version: https://codeload.github.com/runsascoded/pyrmts/tar.gz/c1f1f1bcd5854519c41032d03d9bed5d3d1e76b3#path:/js/packages/pyrmts-geo(react@18.3.1)
+        specifier: https://github.com/runsascoded/pyrmts#60439222ad02c11da83b78ad17e1ef35b95d2baa&path:/js/packages/pyrmts-geo
+        version: https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa#path:/js/packages/pyrmts-geo(react@18.3.1)
       react:
         specifier: ^18.2.0
         version: 18.3.1
@@ -3190,8 +3190,8 @@ packages:
     deprecated: < 24.15.0 is no longer supported
     hasBin: true
 
-  pyrmts-geo@https://codeload.github.com/runsascoded/pyrmts/tar.gz/c1f1f1bcd5854519c41032d03d9bed5d3d1e76b3#path:/js/packages/pyrmts-geo:
-    resolution: {path: /js/packages/pyrmts-geo, tarball: https://codeload.github.com/runsascoded/pyrmts/tar.gz/c1f1f1bcd5854519c41032d03d9bed5d3d1e76b3}
+  pyrmts-geo@https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa#path:/js/packages/pyrmts-geo:
+    resolution: {path: /js/packages/pyrmts-geo, tarball: https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa}
     version: 0.0.0
     peerDependencies:
       react: '>=18'
@@ -3199,17 +3199,8 @@ packages:
       react:
         optional: true
 
-  pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/c1f1f1bcd5854519c41032d03d9bed5d3d1e76b3#path:/js/packages/pyrmts:
-    resolution: {path: /js/packages/pyrmts, tarball: https://codeload.github.com/runsascoded/pyrmts/tar.gz/c1f1f1bcd5854519c41032d03d9bed5d3d1e76b3}
-    version: 0.0.0
-    peerDependencies:
-      react: '>=18'
-    peerDependenciesMeta:
-      react:
-        optional: true
-
-  pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/ffc72db1c72dca93db719b1fe6e250c31e5644e9#path:/js/packages/pyrmts:
-    resolution: {path: /js/packages/pyrmts, tarball: https://codeload.github.com/runsascoded/pyrmts/tar.gz/ffc72db1c72dca93db719b1fe6e250c31e5644e9}
+  pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa#path:/js/packages/pyrmts:
+    resolution: {path: /js/packages/pyrmts, tarball: https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa}
     version: 0.0.0
     peerDependencies:
       react: '>=18'
@@ -7392,22 +7383,15 @@ snapshots:
       - typescript
       - utf-8-validate
 
-  pyrmts-geo@https://codeload.github.com/runsascoded/pyrmts/tar.gz/c1f1f1bcd5854519c41032d03d9bed5d3d1e76b3#path:/js/packages/pyrmts-geo(react@18.3.1):
+  pyrmts-geo@https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa#path:/js/packages/pyrmts-geo(react@18.3.1):
     dependencies:
       h3-js: 4.4.0
-      pyrmts: https://codeload.github.com/runsascoded/pyrmts/tar.gz/ffc72db1c72dca93db719b1fe6e250c31e5644e9#path:/js/packages/pyrmts(react@18.3.1)
+      pyrmts: https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa#path:/js/packages/pyrmts(react@18.3.1)
       s2js: 1.44.0
     optionalDependencies:
       react: 18.3.1
 
-  pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/c1f1f1bcd5854519c41032d03d9bed5d3d1e76b3#path:/js/packages/pyrmts(react@18.3.1):
-    dependencies:
-      hyparquet: 1.26.0
-      yaml: 2.9.0
-    optionalDependencies:
-      react: 18.3.1
-
-  pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/ffc72db1c72dca93db719b1fe6e250c31e5644e9#path:/js/packages/pyrmts(react@18.3.1):
+  pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa#path:/js/packages/pyrmts(react@18.3.1):
     dependencies:
       hyparquet: 1.26.0
       yaml: 2.9.0
