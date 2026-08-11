@@ -600,9 +600,18 @@ async function serveGeoReduced(
 	// back to the footer path per key and lazily fill (big shards only —
 	// see `MIN_FILL_RGS`; the Lambda-churned tip shards stay on the cheap
 	// fallback so their constant rewrites don't grind D1 writes).
+	// Manifest fast path (`specs/rg-manifest.md` P3): explicit covers on
+	// vocab pyramids use exact-match per-token predicates — valid for any
+	// vocab term (`s:` keys AND vocab cells; rows exist only at vocab
+	// terms, so a non-vocab token matches nothing on either path).
+	// Region-scale vocab covers measure ≤16 tokens (NYC), well inside the
+	// predicate builder's 45-token cap. Excludes stay on the legacy path
+	// (query-time subtraction; rare). Non-vocab pyramids (avail-v3) keep
+	// the legacy path: their S2 cover cells match rows by containment,
+	// not equality, so per-token exact predicates would undercount.
 	const manifestEligible = userCells !== null
 		&& userCellsExclude.length === 0
-		&& userCells.every((c) => c.startsWith('s:'));
+		&& (PYRAMIDS[pyramidName]?.vocab === true || userCells.every((c) => c.startsWith('s:')));
 	// Thread `binCol` + per-segment range so hyparquet prunes row groups by
 	// `dt` column stats — shards are `(dt, s2_cell)`-sorted with small
 	// row groups, so a sub-shard time window reads only the matching RGs.

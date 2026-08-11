@@ -741,14 +741,17 @@ export async function serveRidesV5(
 			registered,
 		);
 	const rgFilters = parseDimFilters(url) ?? [];
-	// RG-manifest path (`specs/rg-manifest.md` P1): `s:`-key covers with no
-	// dim filters serve from the D1 row-group index — no footer parse, so
-	// segments fan out in parallel and the footer guard doesn't apply
-	// (misses fall back to the guarded footer path per key, and fill the
-	// manifest via `defer`). Dim-filtered or vocab-cell queries keep the
-	// legacy guarded sequential path (dim RG-prune semantics + large
-	// token sets are out of P1 scope).
-	const manifestEligible = rgFilters.length === 0 && include.every((c) => c.startsWith('s:'));
+	// RG-manifest path (`specs/rg-manifest.md` P1+P3): serve from the D1
+	// row-group index — no footer parse, so segments fan out in parallel
+	// and the footer guard doesn't apply (misses fall back to the guarded
+	// footer path per key, and fill the manifest via `defer`). `include`
+	// is always a vocab term list here (`s:` passthrough, or raw
+	// covers/bboxes translated positive-only via `vocabCover`), so
+	// per-token exact-match predicates are valid for every shape;
+	// region-scale covers measure ≤16 tokens (NYC), inside the predicate
+	// builder's 45-token cap. Dim-filtered queries keep the legacy
+	// guarded sequential path (dim RG-prune semantics are out of scope).
+	const manifestEligible = rgFilters.length === 0;
 	let shardRows: Row[][];
 	try {
 		if (manifestEligible) {
