@@ -11,11 +11,14 @@
  * Modes:
  *  - static: the shipped region-cells assets.
  *  - minCover: live per-region `minimalCover` (pyrmts-geo).
- *  - custom: pick an arbitrary station set (click markers, lasso
- *    polygon, or geolocation/radius/N-nearest) and see BOTH covers of
- *    it: the raw-S2 `minimalCover` (± green/red) and the positive-only
- *    `vocabCover` the API actually serves (`specs/rg-manifest.md` P3),
- *    plus live rides/avail stats for the selection via the prod API.
+ *  - custom: pick an arbitrary station set (click markers/cover-cells,
+ *    lasso polygon, geolocation/radius/N-nearest, or the searchable
+ *    neighborhoods catalog — `neighborhoods.json` via `ctbk
+ *    neighborhoods`: NYC NTA2020 + JC neighborhood associations) and
+ *    see BOTH covers of it: the raw-S2 `minimalCover` (± green/red)
+ *    and the positive-only `vocabCover` the API actually serves
+ *    (`specs/rg-manifest.md` P3), plus live rides/avail stats for the
+ *    selection via the prod API.
  */
 import { useQuery } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
@@ -52,15 +55,24 @@ const INDEX_DEFAULTS: Record<'h3' | 's2', { url: string; level: number; finestLe
   s2: { url: '/assets/region-cells-s2.json', level: 11, finestLevel: 15, coarsestLevel: 10 },
 }
 
-/** Convert s2 token to closed polygon (4 vertices + repeat first to close). */
+/** S2 cell → boundary polygon. Each edge is a great-circle arc (constant
+ *  u/v on the cube face = a plane through the origin), so sample along it —
+ *  normalized lerp between the endpoint vectors stays on the arc. Straight
+ *  lat/lng segments visibly bow off-course at coarse levels. */
 function s2CellVertices(token: string): [number, number][] {
   const ci = cellid.fromToken(token)
   const cell = Cell.fromCellID(ci)
+  const level = cellid.level(ci)
+  const perEdge = Math.max(1, Math.min(32, 2 ** (12 - level)))
+  const r2d = 180 / Math.PI
   const pts: [number, number][] = []
   for (let i = 0; i < 4; i++) {
-    const p = cell.vertex(i)
-    const ll = LatLng.fromPoint(p)
-    pts.push([(ll.lat as number) * 180 / Math.PI, (ll.lng as number) * 180 / Math.PI])
+    const a = cell.vertex(i), b = cell.vertex((i + 1) & 3)
+    for (let s = 0; s < perEdge; s++) {
+      const t = s / perEdge
+      const x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t, z = a.z + (b.z - a.z) * t
+      pts.push([Math.atan2(z, Math.hypot(x, y)) * r2d, Math.atan2(y, x) * r2d])
+    }
   }
   return pts
 }
@@ -150,6 +162,36 @@ function distM(lat1: number, lng1: number, lat2: number, lng2: number): number {
 
 type StationLucAsset = { by_short_name: Record<string, { cell: string; lat: number; lng: number }> }
 
+/** `neighborhoods.json` (built by `ctbk neighborhoods`): named station-sets
+ *  with source polygons — NYC NTA2020 + JC neighborhood associations. */
+type NbhdSet = {
+  id: string
+  name: string
+  group: string
+  region: string
+  stations: string[]
+  polys: [number, number][][][]  // [poly][ring][pt] as [lat, lng]
+}
+type NbhdAsset = { sets: NbhdSet[] }
+type NbhdGroup = { key: string; region: string; group: string; stations: string[]; members: NbhdSet[] }
+
+function groupNbhds(sets: NbhdSet[]): NbhdGroup[] {
+  const byKey = new Map<string, NbhdGroup>()
+  const groups: NbhdGroup[] = []
+  for (const s of sets) {
+    const key = `${s.region}/${s.group}`
+    let g = byKey.get(key)
+    if (!g) {
+      g = { key, region: s.region, group: s.group, stations: [], members: [] }
+      byKey.set(key, g)
+      groups.push(g)
+    }
+    g.stations.push(...s.stations)
+    g.members.push(s)
+  }
+  return groups
+}
+
 type SelTool = 'click' | 'lasso' | 'radius'
 
 /** Map click dispatcher for the custom-selection tools. */
@@ -207,6 +249,8 @@ export default function CellsDebug() {
   const [nearestN, setNearestN] = useState<number | ''>('')
   const [coverView, setCoverView] = useState<'vocab' | 's2'>('vocab')
   const [geoErr, setGeoErr] = useState<string | null>(null)
+  const [setQuery, setSetQuery] = useState('')
+  const [visibleRegions, setVisibleRegions] = useState<Set<Region>>(new Set(REGIONS))
 
   const stationsQ = useQuery<Stations>({
     queryKey: ['stations-regional'],
@@ -235,6 +279,12 @@ export default function CellsDebug() {
     },
     staleTime: Infinity,
   })
+  const nbhdQ = useQuery<NbhdAsset>({
+    queryKey: ['neighborhoods'],
+    queryFn: async () => (await fetch('/assets/neighborhoods.json')).json(),
+    staleTime: Infinity,
+  })
+  const nbhdGroups = useMemo(() => (nbhdQ.data ? groupNbhds(nbhdQ.data.sets) : []), [nbhdQ.data])
 
   // ── custom-mode covers ──
   const customCovers = useMemo(() => {
@@ -305,6 +355,29 @@ export default function CellsDebug() {
       return next
     })
   }
+  /** Bulk toggle: if every id is already selected, deselect them all;
+   *  otherwise select them all. */
+  const toggleStationIds = (ids: string[]) => {
+    if (ids.length === 0) return
+    setSelected((prev) => {
+      const next = new Set(prev)
+      const all = ids.every((id) => next.has(id))
+      for (const id of ids) { if (all) next.delete(id); else next.add(id) }
+      return next
+    })
+  }
+  /** Clicking a rendered cover cell toggles the stations inside it —
+   *  the easy way to de-select a chunk (2nd click on a fully-selected
+   *  cell removes its stations). */
+  const toggleCellStations = (tok: string) => {
+    if (!stations) return
+    const cover: SpatialSet<string> = { include: [tok], exclude: [] }
+    const ids = Object.entries(stations)
+      .filter(([, s]) => isCellInCover(s2Index, s2Index.latLngToCell(s.lat, s.lng, s2Index.maxLevel), cover))
+      .map(([id]) => id)
+    toggleStationIds(ids)
+  }
+  const isAllSelected = (ids: string[]) => ids.length > 0 && ids.every((id) => selected.has(id))
   const applyLasso = (add: boolean) => {
     if (!stations || lassoPts.length < 3) return
     setSelected((prev) => {
@@ -419,9 +492,9 @@ export default function CellsDebug() {
 
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif' }}>
-      <aside style={{ width: 320, padding: 16, overflowY: 'auto', borderRight: '1px solid #ccc' }}>
+      <aside style={{ width: 320, padding: 16, overflowY: 'auto', borderRight: '1px solid rgba(128,128,128,0.4)' }}>
         <h2 style={{ marginTop: 0 }}>Cells Debug</h2>
-        <p style={{ fontSize: 13, color: '#666' }}>
+        <p style={{ fontSize: 13, color: '#999' }}>
           Visualize region covers — static single-level vs live
           <code> minimalCover</code> (pyrmts-geo).
         </p>
@@ -432,7 +505,7 @@ export default function CellsDebug() {
               <option value="s2">S2</option>
             </select>
           </label>
-          {detectedLevel !== null && <span style={{ marginLeft: 8, fontSize: 13, color: '#666' }}>
+          {detectedLevel !== null && <span style={{ marginLeft: 8, fontSize: 13, color: '#999' }}>
             (detected level: {index === 'h3' ? 'r' : 'L'}{detectedLevel})
           </span>}
         </div>
@@ -455,9 +528,28 @@ export default function CellsDebug() {
             <input type="checkbox" checked={showStations} onChange={(e) => setShowStations(e.target.checked)} />
             Show stations
           </label>
+          {mode !== 'custom' && (
+            <div style={{ marginTop: 4 }}>
+              <strong>Regions: </strong>
+              {REGIONS.map((r) => (
+                <label key={r} style={{ marginRight: 8, color: REGION_COLOR[r] }}>
+                  <input
+                    type="checkbox"
+                    checked={visibleRegions.has(r)}
+                    onChange={(e) => setVisibleRegions((prev) => {
+                      const next = new Set(prev)
+                      if (e.target.checked) next.add(r); else next.delete(r)
+                      return next
+                    })}
+                  />
+                  {r}
+                </label>
+              ))}
+            </div>
+          )}
         </div>
         {mode === 'custom' && (
-          <div style={{ background: '#f5f5f5', padding: 8, fontSize: 13, marginBottom: 12 }}>
+          <div style={{ background: 'rgba(128,128,128,0.15)', padding: 8, fontSize: 13, marginBottom: 12 }}>
             <div style={{ marginBottom: 8 }}>
               <strong>Tool: </strong>
               <select value={tool} onChange={(e) => { setTool(e.target.value as SelTool); setLassoPts([]) }}>
@@ -477,7 +569,7 @@ export default function CellsDebug() {
             {tool === 'radius' && (
               <div style={{ marginBottom: 8 }}>
                 <button onClick={useMyLocation}>Use my location</button>
-                <span style={{ marginLeft: 6, color: '#666' }}>or click the map</span>
+                <span style={{ marginLeft: 6, color: '#999' }}>or click the map</span>
                 {geoErr && <div style={{ color: '#d32f2f' }}>{geoErr}</div>}
                 {center && <div>center: {center[0].toFixed(5)}, {center[1].toFixed(5)}</div>}
                 <div style={{ marginTop: 4 }}>
@@ -495,6 +587,49 @@ export default function CellsDebug() {
                 <button key={r} style={{ color: REGION_COLOR[r] }} onClick={() => selectRegion(r)}>{r}</button>
               ))}{' '}
               <button onClick={() => setSelected(new Set())}>None</button>
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <strong>Sets: </strong>
+              <input
+                type="text"
+                placeholder="search neighborhoods…"
+                value={setQuery}
+                onChange={(e) => setSetQuery(e.target.value)}
+                style={{ width: '60%' }}
+              />
+              {nbhdQ.isLoading && <div style={{ color: '#999' }}>loading sets…</div>}
+              {nbhdQ.data && (() => {
+                const q = setQuery.trim().toLowerCase()
+                const matches = (s: NbhdSet) => !q || s.name.toLowerCase().includes(q) || s.group.toLowerCase().includes(q)
+                const row = (label: string, ids: string[], onClick: () => void, indent: boolean, key: string, bold?: boolean) => (
+                  <div
+                    key={key}
+                    onClick={onClick}
+                    style={{
+                      paddingLeft: indent ? 16 : 0,
+                      cursor: 'pointer',
+                      fontWeight: bold ? 600 : 400,
+                      userSelect: 'none',
+                    }}
+                  >
+                    {isAllSelected(ids) ? '☑' : '☐'} {label} <span style={{ color: '#999' }}>({ids.length})</span>
+                  </div>
+                )
+                return (
+                  <div style={{ maxHeight: 220, overflowY: 'auto', marginTop: 4, border: '1px solid rgba(128,128,128,0.4)', padding: 4 }}>
+                    {nbhdGroups.map((g) => {
+                      const vis = g.members.filter(matches)
+                      if (vis.length === 0) return null
+                      return (
+                        <div key={g.key}>
+                          {row(`${g.group} (${g.region})`, g.stations, () => toggleStationIds(g.stations), false, g.key, true)}
+                          {vis.map((s) => row(s.name, s.stations, () => toggleStationIds(s.stations), true, s.id))}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )
+              })()}
             </div>
             <div><strong>{selected.size}</strong> stations selected</div>
             {customCovers && (
@@ -529,14 +664,14 @@ export default function CellsDebug() {
                     </tbody>
                   </table>
                 )}
-                {statsQ.isFetching && <div style={{ color: '#666' }}>fetching stats…</div>}
+                {statsQ.isFetching && <div style={{ color: '#999' }}>fetching stats…</div>}
                 {statsQ.error && <div style={{ color: '#d32f2f' }}>stats: {String(statsQ.error)}</div>}
               </div>
             )}
           </div>
         )}
         {mode === 'minCover' && minCovers && (
-          <div style={{ background: '#f5f5f5', padding: 8, fontSize: 13, marginBottom: 12 }}>
+          <div style={{ background: 'rgba(128,128,128,0.15)', padding: 8, fontSize: 13, marginBottom: 12 }}>
             <strong>minCover sizes:</strong>
             <table style={{ width: '100%' }}>
               <tbody>
@@ -555,7 +690,7 @@ export default function CellsDebug() {
         {stats && (
           <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
             <thead>
-              <tr style={{ textAlign: 'left', borderBottom: '1px solid #ccc' }}>
+              <tr style={{ textAlign: 'left', borderBottom: '1px solid rgba(128,128,128,0.4)' }}>
                 <th>Region</th><th>Cells</th><th title="own-region stations in own-region cover">✓</th>
                 <th title="other-region stations caught by this region's cover">leak</th>
                 <th title="own-region stations missed by own-region cover">miss</th>
@@ -607,23 +742,32 @@ export default function CellsDebug() {
         )}
         {mode === 'custom' && customCovers && coverView === 's2' && customCovers.s2Cover.include.map((tok) => (
           <Polygon key={`cs2i-${tok}`} positions={s2CellVertices(tok)}
+            eventHandlers={tool === 'click' ? { click: () => toggleCellStations(tok) } : undefined}
             pathOptions={{ color: '#2e7d32', weight: 1.5, fillColor: '#2e7d32', fillOpacity: 0.15 }}>
-            <Tooltip sticky>+ {tok} (L{cellid.level(cellid.fromToken(tok))})</Tooltip>
+            <Tooltip sticky>+ {tok} (L{cellid.level(cellid.fromToken(tok))}) — click to toggle stations</Tooltip>
           </Polygon>
         ))}
         {mode === 'custom' && customCovers && coverView === 's2' && customCovers.s2Cover.exclude.map((tok) => (
           <Polygon key={`cs2e-${tok}`} positions={s2CellVertices(tok)}
+            eventHandlers={tool === 'click' ? { click: () => toggleCellStations(tok) } : undefined}
             pathOptions={{ color: '#d32f2f', weight: 2, dashArray: '4 3', fillColor: '#d32f2f', fillOpacity: 0.15 }}>
-            <Tooltip sticky>− {tok} (L{cellid.level(cellid.fromToken(tok))})</Tooltip>
+            <Tooltip sticky>− {tok} (L{cellid.level(cellid.fromToken(tok))}) — click to toggle stations</Tooltip>
           </Polygon>
         ))}
         {mode === 'custom' && customCovers?.vocab && coverView === 'vocab' && customCovers.vocab.include
           .filter((t) => !t.startsWith('s:'))
           .map((tok) => (
             <Polygon key={`cvi-${tok}`} positions={s2CellVertices(tok)}
+              eventHandlers={tool === 'click' ? { click: () => toggleCellStations(tok) } : undefined}
               pathOptions={{ color: '#2e7d32', weight: 1.5, fillColor: '#2e7d32', fillOpacity: 0.15 }}>
-              <Tooltip sticky>vocab {tok} (L{cellid.level(cellid.fromToken(tok))})</Tooltip>
+              <Tooltip sticky>vocab {tok} (L{cellid.level(cellid.fromToken(tok))}) — click to toggle stations</Tooltip>
             </Polygon>
+          ))}
+        {mode === 'custom' && nbhdQ.data && nbhdQ.data.sets
+          .filter((s) => isAllSelected(s.stations))
+          .map((s) => (
+            <Polygon key={`nb-${s.id}`} positions={s.polys} interactive={false}
+              pathOptions={{ color: '#7b1fa2', weight: 1.5, dashArray: '2 4', fill: false }} />
           ))}
         {mode === 'custom' && customCovers?.vocab && coverView === 'vocab' && customCovers.vocab.include
           .filter((t) => t.startsWith('s:'))
@@ -631,12 +775,13 @@ export default function CellsDebug() {
             const s = stations[term.slice(2)]
             return s ? (
               <CircleMarker key={`cvs-${term}`} center={[s.lat, s.lng]} radius={7}
+                eventHandlers={tool === 'click' ? { click: () => toggleStation(term.slice(2)) } : undefined}
                 pathOptions={{ color: '#2e7d32', weight: 2, fillOpacity: 0 }}>
                 <Tooltip>vocab term {term}</Tooltip>
               </CircleMarker>
             ) : null
           })}
-        {showCells && mode !== 'custom' && REGIONS.flatMap((region) =>
+        {showCells && mode !== 'custom' && REGIONS.filter((r) => visibleRegions.has(r)).flatMap((region) =>
           (renderCells[region] ?? []).map((tok) => (
             <Polygon
               key={`inc-${region}-${tok}`}
@@ -652,7 +797,7 @@ export default function CellsDebug() {
             </Polygon>
           )),
         )}
-        {showCells && mode !== 'custom' && REGIONS.flatMap((region) =>
+        {showCells && mode !== 'custom' && REGIONS.filter((r) => visibleRegions.has(r)).flatMap((region) =>
           (renderExcludes[region] ?? []).map((tok) => (
             <Polygon
               key={`exc-${region}-${tok}`}
