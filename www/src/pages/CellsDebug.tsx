@@ -90,7 +90,7 @@ function distM(lat1: number, lng1: number, lat2: number, lng2: number): number {
   return 2 * R * Math.asin(Math.sqrt(a))
 }
 
-type LucLeaf = { key: string; cell: string }
+type LucLeaf = { key: string; cell: string; lat: number; lng: number }
 type StationLucAsset = { by_short_name: Record<string, { cell: string; lat: number; lng: number }> }
 
 /** `neighborhoods.json` (built by `ctbk neighborhoods`): named station-sets
@@ -125,9 +125,12 @@ function groupNbhds(sets: NbhdSet[]): NbhdGroup[] {
 
 type SelTool = 'click' | 'lasso' | 'radius'
 
-/** Map click dispatcher for the selection tools. */
-function MapClicks({ onClick }: { onClick: (lat: number, lng: number) => void }) {
-  useMapEvents({ click: (e) => onClick(e.latlng.lat, e.latlng.lng) })
+/** Map click + zoom dispatcher for the selection tools / marker sizing. */
+function MapEvents({ onClick, onZoom }: { onClick: (lat: number, lng: number) => void; onZoom: (z: number) => void }) {
+  useMapEvents({
+    click: (e) => onClick(e.latlng.lat, e.latlng.lng),
+    zoomend: (e) => onZoom(e.target.getZoom()),
+  })
   return null
 }
 
@@ -140,9 +143,10 @@ export default function CellsDebug() {
   const [center, setCenter] = useState<[number, number] | null>(null)
   const [radiusM, setRadiusM] = useState(500)
   const [nearestN, setNearestN] = useState<number | ''>('')
-  const [coverView, setCoverView] = useState<'vocab' | 's2'>('vocab')
+  const [coverView, setCoverView] = useState<'vocab' | 'vocabPm' | 's2'>('vocab')
   const [geoErr, setGeoErr] = useState<string | null>(null)
   const [setQuery, setSetQuery] = useState('')
+  const [zoom, setZoom] = useState(11)
 
   const stationsQ = useQuery<Stations>({
     queryKey: ['stations-regional'],
@@ -160,7 +164,7 @@ export default function CellsDebug() {
         fetch('/assets/station-vocab.json').then((r) => r.json()) as Promise<{ cells: string[] }>,
         fetch('/assets/station-luc.json').then((r) => r.json()) as Promise<StationLucAsset>,
       ])
-      const leaves = Object.entries(luc.by_short_name).map(([sn, e]) => ({ key: `s:${sn}`, cell: e.cell }))
+      const leaves = Object.entries(luc.by_short_name).map(([sn, e]) => ({ key: `s:${sn}`, cell: e.cell, lat: e.lat, lng: e.lng }))
       return {
         graph: buildVocabGraph(s2Index, vocab.cells, leaves),
         leaves,
@@ -192,7 +196,8 @@ export default function CellsDebug() {
       maxLevel: COARSEST_LEVEL,
     })
     let vocab: SpatialSet<string> | null = null
-    let wantedCount = 0
+    let vocabPm: SpatialSet<string> | null = null
+    let wantedKeys: Set<string> | null = null
     if (vocabQ.data) {
       // Geographic wanted: every LUC leaf inside the selection's S2
       // footprint — incl. retired stations that only exist in the LUC
@@ -201,10 +206,14 @@ export default function CellsDebug() {
       const wanted = vocabQ.data.leaves
         .filter((l) => isCellInCover(s2Index, l.cell, s2Cover))
         .map((l) => l.key)
-      wantedCount = wanted.length
+      wantedKeys = new Set(wanted)
+      // Positive-only = what rides-v5 serving can express (`cells=` is an
+      // include-list). The ± variant shows what an exclude param would buy:
+      // sibling groups collapse to "parent minus blockers" (JC: 10 → 3+4).
       vocab = wanted.length > 0 ? vocabCover(vocabQ.data.graph, wanted, { positiveOnly: true }) : { include: [], exclude: [] }
+      vocabPm = wanted.length > 0 ? vocabCover(vocabQ.data.graph, wanted) : { include: [], exclude: [] }
     }
-    return { s2Cover, vocab, wantedCount }
+    return { s2Cover, vocab, vocabPm, wantedKeys }
   }, [stationsQ.data, selected, vocabQ.data])
 
   // ── live stats for the selection (vocab cover → prod API) ──
@@ -323,6 +332,14 @@ export default function CellsDebug() {
   const selectedInLuc = vocabQ.data
     ? [...selected].filter((id) => vocabQ.data!.leafKeys.has(`s:${id}`)).length
     : 0
+  // Marker radii scale with zoom (tiny dots are unreadable when zoomed in).
+  const unselR = Math.min(6, Math.max(2, 2 + (zoom - 12)))
+  const selR = Math.min(11, Math.max(4, 4 + (zoom - 12)))
+  const termCounts = (c: SpatialSet<string>) => {
+    const cells = c.include.filter((t) => !t.startsWith('s:')).length
+    const excl = c.exclude.length ? ` − ${c.exclude.length}` : ''
+    return `${c.include.length + c.exclude.length} terms (${cells} cells + ${c.include.length - cells} s:${excl})`
+  }
 
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif' }}>
@@ -430,8 +447,9 @@ export default function CellsDebug() {
             <div style={{ marginTop: 8 }}>
               <div>
                 <strong>Cover: </strong>
-                <select value={coverView} onChange={(e) => setCoverView(e.target.value as 'vocab' | 's2')}>
-                  <option value="vocab">vocabCover (as served)</option>
+                <select value={coverView} onChange={(e) => setCoverView(e.target.value as 'vocab' | 'vocabPm' | 's2')}>
+                  <option value="vocab">vocabCover (as served, + only)</option>
+                  <option value="vocabPm">vocabCover (±)</option>
                   <option value="s2">minimalCover (raw S2 ±)</option>
                 </select>
               </div>
@@ -442,17 +460,21 @@ export default function CellsDebug() {
                     <td>+{customCovers.s2Cover.include.length} −{customCovers.s2Cover.exclude.length}</td>
                   </tr>
                   <tr>
-                    <td>vocab</td>
-                    <td>{customCovers.vocab
-                      ? `${customCovers.vocab.include.length} terms (${customCovers.vocab.include.filter((t) => !t.startsWith('s:')).length} cells + ${customCovers.vocab.include.filter((t) => t.startsWith('s:')).length} s:)`
-                      : 'loading vocab…'}</td>
+                    <td>vocab +</td>
+                    <td>{customCovers.vocab ? termCounts(customCovers.vocab) : 'loading vocab…'}</td>
                   </tr>
-                  {customCovers.vocab && (
+                  {customCovers.vocabPm && (
+                    <tr>
+                      <td>vocab ±</td>
+                      <td>+{customCovers.vocabPm.include.length} −{customCovers.vocabPm.exclude.length}</td>
+                    </tr>
+                  )}
+                  {customCovers.wantedKeys && (
                     <tr>
                       <td style={{ color: '#999' }}>wanted</td>
                       <td style={{ color: '#999' }}>
-                        {customCovers.wantedCount} LUC leaves
-                        {customCovers.wantedCount > selectedInLuc ? ` (+${customCovers.wantedCount - selectedInLuc} retired in footprint)` : ''}
+                        {customCovers.wantedKeys.size} LUC leaves
+                        {customCovers.wantedKeys.size > selectedInLuc ? ` (+${customCovers.wantedKeys.size - selectedInLuc} retired in footprint)` : ''}
                       </td>
                     </tr>
                   )}
@@ -493,7 +515,7 @@ export default function CellsDebug() {
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         />
-        <MapClicks onClick={onMapClick} />
+        <MapEvents onClick={onMapClick} onZoom={setZoom} />
         {lassoPts.length > 0 && (
           <Polyline positions={[...lassoPts, lassoPts[0]!]} pathOptions={{ color: '#7b1fa2', weight: 2, dashArray: '6 4' }} />
         )}
@@ -514,40 +536,75 @@ export default function CellsDebug() {
             <Tooltip sticky>− {tok} (L{cellid.level(cellid.fromToken(tok))}) — click to toggle stations</Tooltip>
           </Polygon>
         ))}
-        {showCells && customCovers?.vocab && coverView === 'vocab' && customCovers.vocab.include
-          .filter((t) => !t.startsWith('s:'))
-          .map((tok) => (
-            <Polygon key={`cvi-${tok}`} positions={s2CellVertices(tok)}
-              eventHandlers={tool === 'click' ? { click: () => toggleCellStations(tok) } : undefined}
-              pathOptions={{ color: '#2e7d32', weight: 1.5, fillColor: '#2e7d32', fillOpacity: 0.15 }}>
-              <Tooltip sticky>vocab {tok} (L{cellid.level(cellid.fromToken(tok))}) — click to toggle stations</Tooltip>
-            </Polygon>
-          ))}
-        {showCells && customCovers?.vocab && coverView === 'vocab' && customCovers.vocab.include
-          .filter((t) => t.startsWith('s:'))
-          .map((term) => {
-            const s = stations[term.slice(2)]
-            return s ? (
-              <CircleMarker key={`cvs-${term}`} center={[s.lat, s.lng]} radius={7}
-                eventHandlers={tool === 'click' ? { click: () => toggleStation(term.slice(2)) } : undefined}
-                pathOptions={{ color: '#2e7d32', weight: 2, fillOpacity: 0 }}>
-                <Tooltip>vocab term {term}</Tooltip>
-              </CircleMarker>
-            ) : null
-          })}
+        {showCells && (coverView === 'vocab' || coverView === 'vocabPm') && (() => {
+          const cover = coverView === 'vocab' ? customCovers?.vocab : customCovers?.vocabPm
+          if (!cover) return null
+          const cellLayers = (terms: string[], excluded: boolean) => terms
+            .filter((t) => !t.startsWith('s:'))
+            .map((tok) => (
+              <Polygon key={`cv${excluded ? 'e' : 'i'}-${tok}`} positions={s2CellVertices(tok)}
+                eventHandlers={tool === 'click' ? { click: () => toggleCellStations(tok) } : undefined}
+                pathOptions={excluded
+                  ? { color: '#d32f2f', weight: 2, dashArray: '4 3', fillColor: '#d32f2f', fillOpacity: 0.15 }
+                  : { color: '#2e7d32', weight: 1.5, fillColor: '#2e7d32', fillOpacity: 0.15 }}>
+                <Tooltip sticky>{excluded ? '−' : '+'} vocab {tok} (L{cellid.level(cellid.fromToken(tok))}) — click to toggle stations</Tooltip>
+              </Polygon>
+            ))
+          const sLayers = (terms: string[], excluded: boolean) => terms
+            .filter((t) => t.startsWith('s:'))
+            .map((term) => {
+              const sn = term.slice(2)
+              const pos = stations[sn] ?? vocabQ.data?.leaves.find((l) => l.key === term)
+              return pos ? (
+                <CircleMarker key={`cvs${excluded ? 'e' : 'i'}-${term}`} center={[pos.lat, pos.lng]} radius={selR + 3}
+                  eventHandlers={tool === 'click' && stations[sn] ? { click: () => toggleStation(sn) } : undefined}
+                  pathOptions={{ color: excluded ? '#d32f2f' : '#2e7d32', weight: 2, fillOpacity: 0 }}>
+                  <Tooltip>{excluded ? '−' : '+'} vocab term {term}</Tooltip>
+                </CircleMarker>
+              ) : null
+            })
+          return [
+            ...cellLayers(cover.include, false),
+            ...cellLayers(cover.exclude, true),
+            ...sLayers(cover.include, false),
+            ...sLayers(cover.exclude, true),
+          ]
+        })()}
         {nbhdQ.data && nbhdQ.data.sets
           .filter((s) => isAllSelected(s.stations))
           .map((s) => (
             <Polygon key={`nb-${s.id}`} positions={s.polys} interactive={false}
               pathOptions={{ color: '#7b1fa2', weight: 1.5, dashArray: '2 4', fill: false }} />
           ))}
+        {showStations && vocabQ.data && vocabQ.data.leaves
+          .filter((l) => !stations[l.key.slice(2)])
+          .map((l) => {
+            const inFootprint = customCovers?.wantedKeys?.has(l.key) ?? false
+            return (
+              <CircleMarker
+                key={`ret-${l.key}`}
+                center={[l.lat, l.lng]}
+                radius={unselR}
+                interactive={true}
+                pathOptions={{
+                  color: inFootprint ? '#7b1fa2' : '#757575',
+                  fillColor: '#757575',
+                  fillOpacity: 0.5,
+                  weight: inFootprint ? 2 : 1,
+                  dashArray: '2 2',
+                }}
+              >
+                <Tooltip>{l.key.slice(2)} — retired (LUC-only{inFootprint ? ', in wanted footprint' : ''})</Tooltip>
+              </CircleMarker>
+            )
+          })}
         {showStations && Object.entries(stations).map(([id, s]) => {
           const isSel = selected.has(id)
           return (
             <CircleMarker
               key={id}
               center={[s.lat, s.lng]}
-              radius={isSel ? 4 : 2}
+              radius={isSel ? selR : unselR}
               eventHandlers={tool === 'click' ? { click: () => toggleStation(id) } : undefined}
               pathOptions={{
                 color: isSel ? '#7b1fa2' : REGION_COLOR[s.region],
