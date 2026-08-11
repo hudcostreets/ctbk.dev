@@ -22,8 +22,5 @@ export default defineConfig({
     strictPort: true,
     host: true,
     allowedHosts,
-  },
-  optimizeDeps: {
-    exclude: ['pyrmts-geo'],
-  },
+  }
 })

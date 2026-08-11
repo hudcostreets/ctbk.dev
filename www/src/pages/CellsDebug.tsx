@@ -8,16 +8,23 @@
  *
  * Mount: `/cells-debug` (lazy via main.tsx).
  *
- * Phase 1 (this file): static covers only.
- * Phase 2 (future): live minimalCover toggle.
+ * Modes:
+ *  - static: the shipped region-cells assets.
+ *  - minCover: live per-region `minimalCover` (pyrmts-geo).
+ *  - custom: pick an arbitrary station set (click markers, lasso
+ *    polygon, or geolocation/radius/N-nearest) and see BOTH covers of
+ *    it: the raw-S2 `minimalCover` (± green/red) and the positive-only
+ *    `vocabCover` the API actually serves (`specs/rg-manifest.md` P3),
+ *    plus live rides/avail stats for the selection via the prod API.
  */
 import { useQuery } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
-import { CircleMarker, MapContainer, Polygon, TileLayer, Tooltip } from 'react-leaflet'
+import { Circle, CircleMarker, MapContainer, Polygon, Polyline, TileLayer, Tooltip, useMapEvents } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { cellToBoundary, latLngToCell } from 'h3-js'
-import { h3Index, isCellInCover, minimalCover, s2Index, type SpatialSet } from 'pyrmts-geo'
+import { buildVocabGraph, h3Index, isCellInCover, minimalCover, s2Index, vocabCover, type SpatialSet, type VocabGraph } from 'pyrmts-geo'
 import { s2 } from 's2js'
+import { API_BASE } from '../query/stations'
 
 const { cellid, Cell, LatLng } = s2
 const { round } = Math
@@ -118,7 +125,38 @@ function computeStats(
   return out
 }
 
-type Mode = 'static' | 'minCover'
+type Mode = 'static' | 'minCover' | 'custom'
+
+// ─── custom-selection helpers ─────────────────────────────────────────
+
+/** Ray-casting point-in-polygon on [lat, lng] vertices. */
+function pointInPolygon(lat: number, lng: number, poly: [number, number][]): boolean {
+  let inside = false
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [yi, xi] = poly[i]!, [yj, xj] = poly[j]!
+    if ((xi > lng) !== (xj > lng) && lat < ((yj - yi) * (lng - xi)) / (xj - xi) + yi) inside = !inside
+  }
+  return inside
+}
+
+/** Haversine distance in meters. */
+function distM(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000, d2r = Math.PI / 180
+  const dLat = (lat2 - lat1) * d2r, dLng = (lng2 - lng1) * d2r
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1 * d2r) * Math.cos(lat2 * d2r) * Math.sin(dLng / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(a))
+}
+
+type StationLucAsset = { by_short_name: Record<string, { cell: string; lat: number; lng: number }> }
+
+type SelTool = 'click' | 'lasso' | 'radius'
+
+/** Map click dispatcher for the custom-selection tools. */
+function MapClicks({ onClick }: { onClick: (lat: number, lng: number) => void }) {
+  useMapEvents({ click: (e) => onClick(e.latlng.lat, e.latlng.lng) })
+  return null
+}
 
 /** Compute per-region `minimalCover(include=this-region's stations,
  *  system=ALL stations)`. Returns mixed-resolution `{include, exclude}`
@@ -160,6 +198,16 @@ export default function CellsDebug() {
   const [showStations, setShowStations] = useState(true)
   const [showCells, setShowCells] = useState(true)
 
+  // ── custom-selection state ──
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [tool, setTool] = useState<SelTool>('click')
+  const [lassoPts, setLassoPts] = useState<[number, number][]>([])
+  const [center, setCenter] = useState<[number, number] | null>(null)
+  const [radiusM, setRadiusM] = useState(500)
+  const [nearestN, setNearestN] = useState<number | ''>('')
+  const [coverView, setCoverView] = useState<'vocab' | 's2'>('vocab')
+  const [geoErr, setGeoErr] = useState<string | null>(null)
+
   const stationsQ = useQuery<Stations>({
     queryKey: ['stations-regional'],
     queryFn: async () => (await fetch('/assets/stations-regional.json')).json(),
@@ -170,6 +218,134 @@ export default function CellsDebug() {
     queryFn: async () => (await fetch(INDEX_DEFAULTS[index].url)).json(),
     staleTime: Infinity,
   })
+  // Frozen serving vocabulary (`station-vocab.json` cells + `station-luc`
+  // leaves) — the graph `vocabCover` minimizes over.
+  const vocabQ = useQuery<{ graph: VocabGraph; leafKeys: Set<string> }>({
+    queryKey: ['station-vocab-graph'],
+    queryFn: async () => {
+      const [vocab, luc] = await Promise.all([
+        fetch('/assets/station-vocab.json').then((r) => r.json()) as Promise<{ cells: string[] }>,
+        fetch('/assets/station-luc.json').then((r) => r.json()) as Promise<StationLucAsset>,
+      ])
+      const leaves = Object.entries(luc.by_short_name).map(([sn, e]) => ({ key: `s:${sn}`, cell: e.cell }))
+      return {
+        graph: buildVocabGraph(s2Index, vocab.cells, leaves),
+        leafKeys: new Set(leaves.map((l) => l.key)),
+      }
+    },
+    staleTime: Infinity,
+  })
+
+  // ── custom-mode covers ──
+  const customCovers = useMemo(() => {
+    if (mode !== 'custom' || !stationsQ.data || selected.size === 0) return null
+    const stations = stationsQ.data
+    const { finestLevel, coarsestLevel } = INDEX_DEFAULTS.s2
+    const leafByStation = Object.entries(stations).map(([id, s]) => ({
+      id, cell: s2Index.latLngToCell(s.lat, s.lng, finestLevel),
+    }))
+    const system = Array.from(new Set(leafByStation.map((x) => x.cell)))
+    const includeCells = Array.from(new Set(
+      leafByStation.filter((x) => selected.has(x.id)).map((x) => x.cell),
+    ))
+    const s2Cover = minimalCover(s2Index, includeCells, system, {
+      allowSubtraction: true,
+      maxLevel: coarsestLevel,
+    })
+    let vocab: SpatialSet<string> | null = null
+    if (vocabQ.data) {
+      const wanted = [...selected].map((id) => `s:${id}`).filter((k) => vocabQ.data!.leafKeys.has(k))
+      vocab = wanted.length > 0 ? vocabCover(vocabQ.data.graph, wanted, { positiveOnly: true }) : { include: [], exclude: [] }
+    }
+    return { s2Cover, vocab }
+  }, [mode, stationsQ.data, selected, vocabQ.data])
+
+  // ── live stats for the selection (vocab cover → prod API) ──
+  const vocabTerms = customCovers?.vocab?.include ?? null
+  const statsQ = useQuery<{ rides12mo: number; bikesAvg: number; docksAvg: number }>({
+    queryKey: ['custom-cover-stats', vocabTerms?.join(',') ?? ''],
+    enabled: mode === 'custom' && vocabTerms !== null && vocabTerms.length > 0,
+    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      const cells = vocabTerms!.join(',')
+      const nowS = Math.floor(Date.now() / 900_000) * 900
+      const to = new Date(nowS * 1000).toISOString()
+      // Rides ingest ends at the last closed month — a trailing-12mo
+      // window is always populated (a 30d one is empty mid-cycle).
+      const from12mo = new Date((nowS - 365 * 86400) * 1000).toISOString()
+      const from1h = new Date((nowS - 3600) * 1000).toISOString()
+      const ridesUrl = `${API_BASE}/api/rides-v5?anchor=start&cells=${encodeURIComponent(cells)}&from=${from12mo}&to=${to}&bin=1mo`
+      // bin_budget=4 over 1h → 15min-or-finer bins, so the tip bin is
+      // recent (bin_budget=1 picks a 3h tier whose bin may not have
+      // closed inside the window → empty records).
+      const availUrl = `${API_BASE}/api/avail-v3?cells=${encodeURIComponent(cells)}&from=${from1h}&to=${to}&bin_budget=4&reducer=mean`
+      const [rides, avail] = await Promise.all([
+        fetch(ridesUrl).then((r) => { if (!r.ok) throw new Error(`rides: ${r.status}`); return r.json() }),
+        fetch(availUrl).then((r) => { if (!r.ok) throw new Error(`avail: ${r.status}`); return r.json() }),
+      ]) as [{ records: { count: number }[] }, { records: { dt: number; bikes: number; ebikes: number; docks: number }[] }]
+      const rides12mo = rides.records.reduce((a, r) => a + (r.count ?? 0), 0)
+      // The non-/cells avail route pools the histogram monoid across the
+      // whole cover per bin, so `mean` = average per station-minute
+      // (NOT a total; the output's `s2_cell` label is just the first
+      // term). Report the latest bin's per-station averages.
+      const latest = avail.records.reduce<typeof avail.records[number] | null>(
+        (a, r) => (a === null || r.dt > a.dt ? r : a), null)
+      const bikesAvg = latest ? (latest.bikes ?? 0) + (latest.ebikes ?? 0) : 0
+      const docksAvg = latest ? (latest.docks ?? 0) : 0
+      return { rides12mo: Math.round(rides12mo), bikesAvg, docksAvg }
+    },
+  })
+
+  // ── selection actions ──
+  const stations = stationsQ.data
+  const toggleStation = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+  const applyLasso = (add: boolean) => {
+    if (!stations || lassoPts.length < 3) return
+    setSelected((prev) => {
+      const next = new Set(prev)
+      for (const [id, s] of Object.entries(stations)) {
+        if (pointInPolygon(s.lat, s.lng, lassoPts)) {
+          if (add) next.add(id); else next.delete(id)
+        }
+      }
+      return next
+    })
+    setLassoPts([])
+  }
+  const applyRadius = () => {
+    if (!stations || center === null) return
+    const [clat, clng] = center
+    const withDist = Object.entries(stations)
+      .map(([id, s]) => ({ id, d: distM(clat, clng, s.lat, s.lng) }))
+    const ids = nearestN !== '' && nearestN > 0
+      ? withDist.sort((a, b) => a.d - b.d).slice(0, nearestN).map((x) => x.id)
+      : withDist.filter((x) => x.d <= radiusM).map((x) => x.id)
+    setSelected(new Set(ids))
+  }
+  const useMyLocation = () => {
+    setGeoErr(null)
+    if (!navigator.geolocation) { setGeoErr('geolocation unavailable'); return }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => setCenter([pos.coords.latitude, pos.coords.longitude]),
+      (e) => setGeoErr(e.message),
+      { enableHighAccuracy: true, timeout: 10_000 },
+    )
+  }
+  const selectRegion = (r: Region) => {
+    if (!stations) return
+    setSelected(new Set(Object.entries(stations).filter(([, s]) => s.region === r).map(([id]) => id)))
+  }
+  const onMapClick = (lat: number, lng: number) => {
+    if (mode !== 'custom') return
+    if (tool === 'lasso') setLassoPts((p) => [...p, [lat, lng]])
+    else if (tool === 'radius') setCenter([lat, lng])
+  }
 
   const detectedLevel = useMemo(
     () => (cellsQ.data ? detectLevel(cellsQ.data, index) : null),
@@ -239,9 +415,7 @@ export default function CellsDebug() {
   if (stationsQ.isLoading || cellsQ.isLoading) return <div style={{ padding: 16 }}>Loading…</div>
   if (stationsQ.error || cellsQ.error)
     return <div style={{ padding: 16 }}>Error loading data</div>
-  if (!stationsQ.data || !cellsQ.data) return null
-
-  const stations = stationsQ.data
+  if (!stations || !cellsQ.data) return null
 
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif' }}>
@@ -267,6 +441,7 @@ export default function CellsDebug() {
             <select value={mode} onChange={(e) => setMode(e.target.value as Mode)}>
               <option value="static">Static (region-cells.json)</option>
               <option value="minCover">minimalCover (live; pyrmts-geo)</option>
+              <option value="custom">Custom selection (live covers)</option>
             </select>
           </label>
         </div>
@@ -281,6 +456,85 @@ export default function CellsDebug() {
             Show stations
           </label>
         </div>
+        {mode === 'custom' && (
+          <div style={{ background: '#f5f5f5', padding: 8, fontSize: 13, marginBottom: 12 }}>
+            <div style={{ marginBottom: 8 }}>
+              <strong>Tool: </strong>
+              <select value={tool} onChange={(e) => { setTool(e.target.value as SelTool); setLassoPts([]) }}>
+                <option value="click">Click stations</option>
+                <option value="lasso">Lasso polygon</option>
+                <option value="radius">Location / radius</option>
+              </select>
+            </div>
+            {tool === 'lasso' && (
+              <div style={{ marginBottom: 8 }}>
+                <div>Click the map to add vertices ({lassoPts.length}).</div>
+                <button disabled={lassoPts.length < 3} onClick={() => applyLasso(true)}>Select inside</button>{' '}
+                <button disabled={lassoPts.length < 3} onClick={() => applyLasso(false)}>Deselect inside</button>{' '}
+                <button disabled={lassoPts.length === 0} onClick={() => setLassoPts([])}>Clear</button>
+              </div>
+            )}
+            {tool === 'radius' && (
+              <div style={{ marginBottom: 8 }}>
+                <button onClick={useMyLocation}>Use my location</button>
+                <span style={{ marginLeft: 6, color: '#666' }}>or click the map</span>
+                {geoErr && <div style={{ color: '#d32f2f' }}>{geoErr}</div>}
+                {center && <div>center: {center[0].toFixed(5)}, {center[1].toFixed(5)}</div>}
+                <div style={{ marginTop: 4 }}>
+                  <label>radius <input type="number" style={{ width: 64 }} value={radiusM} min={50} step={50}
+                    onChange={(e) => setRadiusM(Number(e.target.value) || 0)} /> m</label>
+                  <label style={{ marginLeft: 8 }}>or N nearest <input type="number" style={{ width: 48 }} value={nearestN}
+                    onChange={(e) => setNearestN(e.target.value === '' ? '' : Number(e.target.value))} /></label>
+                </div>
+                <button style={{ marginTop: 4 }} disabled={center === null} onClick={applyRadius}>Select</button>
+              </div>
+            )}
+            <div style={{ marginBottom: 8 }}>
+              <strong>Presets: </strong>
+              {REGIONS.map((r) => (
+                <button key={r} style={{ color: REGION_COLOR[r] }} onClick={() => selectRegion(r)}>{r}</button>
+              ))}{' '}
+              <button onClick={() => setSelected(new Set())}>None</button>
+            </div>
+            <div><strong>{selected.size}</strong> stations selected</div>
+            {customCovers && (
+              <div style={{ marginTop: 8 }}>
+                <div>
+                  <strong>Cover: </strong>
+                  <select value={coverView} onChange={(e) => setCoverView(e.target.value as 'vocab' | 's2')}>
+                    <option value="vocab">vocabCover (as served)</option>
+                    <option value="s2">minimalCover (raw S2 ±)</option>
+                  </select>
+                </div>
+                <table style={{ width: '100%', marginTop: 4 }}>
+                  <tbody>
+                    <tr>
+                      <td>S2 ±</td>
+                      <td>+{customCovers.s2Cover.include.length} −{customCovers.s2Cover.exclude.length}</td>
+                    </tr>
+                    <tr>
+                      <td>vocab</td>
+                      <td>{customCovers.vocab
+                        ? `${customCovers.vocab.include.length} terms (${customCovers.vocab.include.filter((t) => !t.startsWith('s:')).length} cells + ${customCovers.vocab.include.filter((t) => t.startsWith('s:')).length} s:)`
+                        : 'loading vocab…'}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                {statsQ.data && (
+                  <table style={{ width: '100%', marginTop: 4 }}>
+                    <tbody>
+                      <tr><td>rides, last 12mo</td><td>{statsQ.data.rides12mo.toLocaleString()}</td></tr>
+                      <tr><td>bikes/station now</td><td>{statsQ.data.bikesAvg.toFixed(1)} (≈{Math.round(statsQ.data.bikesAvg * selected.size)} total)</td></tr>
+                      <tr><td>free docks/station now</td><td>{statsQ.data.docksAvg.toFixed(1)} (≈{Math.round(statsQ.data.docksAvg * selected.size)} total)</td></tr>
+                    </tbody>
+                  </table>
+                )}
+                {statsQ.isFetching && <div style={{ color: '#666' }}>fetching stats…</div>}
+                {statsQ.error && <div style={{ color: '#d32f2f' }}>stats: {String(statsQ.error)}</div>}
+              </div>
+            )}
+          </div>
+        )}
         {mode === 'minCover' && minCovers && (
           <div style={{ background: '#f5f5f5', padding: 8, fontSize: 13, marginBottom: 12 }}>
             <strong>minCover sizes:</strong>
@@ -344,7 +598,45 @@ export default function CellsDebug() {
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         />
-        {showCells && REGIONS.flatMap((region) =>
+        <MapClicks onClick={onMapClick} />
+        {mode === 'custom' && lassoPts.length > 0 && (
+          <Polyline positions={[...lassoPts, lassoPts[0]!]} pathOptions={{ color: '#7b1fa2', weight: 2, dashArray: '6 4' }} />
+        )}
+        {mode === 'custom' && tool === 'radius' && center && nearestN === '' && (
+          <Circle center={center} radius={radiusM} pathOptions={{ color: '#7b1fa2', weight: 1, fillOpacity: 0.05 }} />
+        )}
+        {mode === 'custom' && customCovers && coverView === 's2' && customCovers.s2Cover.include.map((tok) => (
+          <Polygon key={`cs2i-${tok}`} positions={s2CellVertices(tok)}
+            pathOptions={{ color: '#2e7d32', weight: 1.5, fillColor: '#2e7d32', fillOpacity: 0.15 }}>
+            <Tooltip sticky>+ {tok} (L{cellid.level(cellid.fromToken(tok))})</Tooltip>
+          </Polygon>
+        ))}
+        {mode === 'custom' && customCovers && coverView === 's2' && customCovers.s2Cover.exclude.map((tok) => (
+          <Polygon key={`cs2e-${tok}`} positions={s2CellVertices(tok)}
+            pathOptions={{ color: '#d32f2f', weight: 2, dashArray: '4 3', fillColor: '#d32f2f', fillOpacity: 0.15 }}>
+            <Tooltip sticky>− {tok} (L{cellid.level(cellid.fromToken(tok))})</Tooltip>
+          </Polygon>
+        ))}
+        {mode === 'custom' && customCovers?.vocab && coverView === 'vocab' && customCovers.vocab.include
+          .filter((t) => !t.startsWith('s:'))
+          .map((tok) => (
+            <Polygon key={`cvi-${tok}`} positions={s2CellVertices(tok)}
+              pathOptions={{ color: '#2e7d32', weight: 1.5, fillColor: '#2e7d32', fillOpacity: 0.15 }}>
+              <Tooltip sticky>vocab {tok} (L{cellid.level(cellid.fromToken(tok))})</Tooltip>
+            </Polygon>
+          ))}
+        {mode === 'custom' && customCovers?.vocab && coverView === 'vocab' && customCovers.vocab.include
+          .filter((t) => t.startsWith('s:'))
+          .map((term) => {
+            const s = stations[term.slice(2)]
+            return s ? (
+              <CircleMarker key={`cvs-${term}`} center={[s.lat, s.lng]} radius={7}
+                pathOptions={{ color: '#2e7d32', weight: 2, fillOpacity: 0 }}>
+                <Tooltip>vocab term {term}</Tooltip>
+              </CircleMarker>
+            ) : null
+          })}
+        {showCells && mode !== 'custom' && REGIONS.flatMap((region) =>
           (renderCells[region] ?? []).map((tok) => (
             <Polygon
               key={`inc-${region}-${tok}`}
@@ -360,7 +652,7 @@ export default function CellsDebug() {
             </Polygon>
           )),
         )}
-        {showCells && REGIONS.flatMap((region) =>
+        {showCells && mode !== 'custom' && REGIONS.flatMap((region) =>
           (renderExcludes[region] ?? []).map((tok) => (
             <Polygon
               key={`exc-${region}-${tok}`}
@@ -377,21 +669,25 @@ export default function CellsDebug() {
             </Polygon>
           )),
         )}
-        {showStations && Object.entries(stations).map(([id, s]) => (
-          <CircleMarker
-            key={id}
-            center={[s.lat, s.lng]}
-            radius={2}
-            pathOptions={{
-              color: REGION_COLOR[s.region],
-              fillColor: REGION_COLOR[s.region],
-              fillOpacity: 0.9,
-              weight: 1,
-            }}
-          >
-            <Tooltip>{id} ({s.region}){s.name ? ` — ${s.name}` : ''}</Tooltip>
-          </CircleMarker>
-        ))}
+        {showStations && Object.entries(stations).map(([id, s]) => {
+          const isSel = mode === 'custom' && selected.has(id)
+          return (
+            <CircleMarker
+              key={id}
+              center={[s.lat, s.lng]}
+              radius={isSel ? 4 : 2}
+              eventHandlers={mode === 'custom' && tool === 'click' ? { click: () => toggleStation(id) } : undefined}
+              pathOptions={{
+                color: isSel ? '#7b1fa2' : REGION_COLOR[s.region],
+                fillColor: isSel ? '#7b1fa2' : REGION_COLOR[s.region],
+                fillOpacity: 0.9,
+                weight: isSel ? 2 : 1,
+              }}
+            >
+              <Tooltip>{id} ({s.region}){s.name ? ` — ${s.name}` : ''}</Tooltip>
+            </CircleMarker>
+          )
+        })}
       </MapContainer>
     </div>
   )
