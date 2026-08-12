@@ -20,7 +20,7 @@
  * Mount: `/cells-debug` (lazy via main.tsx).
  */
 import { useQuery } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Circle, CircleMarker, MapContainer, Polygon, Polyline, TileLayer, Tooltip, useMapEvents } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { buildVocabGraph, isCellInCover, minimalCover, s2Index, vocabCover, type SpatialSet, type VocabGraph } from 'pyrmts-geo'
@@ -126,11 +126,24 @@ function groupNbhds(sets: NbhdSet[]): NbhdGroup[] {
 type SelTool = 'click' | 'lasso' | 'radius'
 
 /** Map click + zoom dispatcher for the selection tools / marker sizing. */
-function MapEvents({ onClick, onZoom }: { onClick: (lat: number, lng: number) => void; onZoom: (z: number) => void }) {
-  useMapEvents({
+function MapEvents({ onClick, onZoom, onMove, onDblClick, disableDblZoom }: {
+  onClick: (lat: number, lng: number) => void
+  onZoom: (z: number) => void
+  onMove: (lat: number, lng: number) => void
+  onDblClick: () => void
+  disableDblZoom: boolean
+}) {
+  const map = useMapEvents({
     click: (e) => onClick(e.latlng.lat, e.latlng.lng),
     zoomend: (e) => onZoom(e.target.getZoom()),
+    mousemove: (e) => onMove(e.latlng.lat, e.latlng.lng),
+    dblclick: () => onDblClick(),
   })
+  // Double-click finishes the lasso — zoom would fight it.
+  useEffect(() => {
+    if (disableDblZoom) map.doubleClickZoom.disable()
+    else map.doubleClickZoom.enable()
+  }, [map, disableDblZoom])
   return null
 }
 
@@ -140,6 +153,8 @@ export default function CellsDebug() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [tool, setTool] = useState<SelTool>('click')
   const [lassoPts, setLassoPts] = useState<[number, number][]>([])
+  const [cursor, setCursor] = useState<[number, number] | null>(null)
+  const [highlightTok, setHighlightTok] = useState<string | null>(null)
   const [center, setCenter] = useState<[number, number] | null>(null)
   const [radiusM, setRadiusM] = useState(500)
   const [nearestN, setNearestN] = useState<number | ''>('')
@@ -308,18 +323,30 @@ export default function CellsDebug() {
     toggleStationIds(ids)
   }
   const isAllSelected = (ids: string[]) => ids.length > 0 && ids.every((id) => selected.has(id))
-  const applyLasso = (add: boolean) => {
-    if (!stations || lassoPts.length < 3) return
+  const applyLasso = (add: boolean, pts: [number, number][] = lassoPts) => {
+    if (!stations || pts.length < 3) return
     setSelected((prev) => {
       const next = new Set(prev)
       for (const [id, s] of Object.entries(stations)) {
-        if (pointInPolygon(s.lat, s.lng, lassoPts)) {
+        if (pointInPolygon(s.lat, s.lng, pts)) {
           if (add) next.add(id); else next.delete(id)
         }
       }
       return next
     })
     setLassoPts([])
+    setCursor(null)
+  }
+  /** Double-click finish: the dblclick's two click events each appended
+   *  a vertex at ~the same point — drop the dup(s) before applying. */
+  const finishLasso = () => {
+    const q = [...lassoPts]
+    while (q.length >= 2) {
+      const [alat, alng] = q[q.length - 1]!, [blat, blng] = q[q.length - 2]!
+      if (Math.abs(alat - blat) < 1e-7 && Math.abs(alng - blng) < 1e-7) q.pop()
+      else break
+    }
+    if (q.length >= 3) applyLasso(true, q)
   }
   const applyRadius = () => {
     if (!stations || center === null) return
@@ -345,9 +372,32 @@ export default function CellsDebug() {
     setSelected(new Set(Object.entries(stations).filter(([, s]) => s.region === r).map(([id]) => id)))
   }
   const onMapClick = (lat: number, lng: number) => {
-    if (tool === 'lasso') setLassoPts((p) => [...p, [lat, lng]])
-    else if (tool === 'radius') setCenter([lat, lng])
+    if (tool === 'lasso') {
+      // Clicking back on the 1st vertex (≤12px at current zoom) closes
+      // the polygon and selects inside.
+      if (lassoPts.length >= 3) {
+        const [flat, flng] = lassoPts[0]!
+        const degPerPx = 360 / (256 * 2 ** zoom)  // Web-Mercator lng°/px
+        const dx = (lng - flng) / degPerPx
+        const dy = (lat - flat) / (degPerPx * Math.cos(flat * Math.PI / 180))
+        if (Math.hypot(dx, dy) <= 12) { applyLasso(true); return }
+      }
+      setLassoPts((p) => [...p, [lat, lng]])
+    } else if (tool === 'radius') setCenter([lat, lng])
   }
+  const onMapMove = (lat: number, lng: number) => {
+    if (tool === 'lasso' && lassoPts.length > 0) setCursor([lat, lng])
+    else if (cursor !== null) setCursor(null)
+  }
+  // Esc abandons an in-progress lasso.
+  useEffect(() => {
+    if (!(tool === 'lasso' && lassoPts.length > 0)) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { setLassoPts([]); setCursor(null) }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [tool, lassoPts.length > 0])
 
   if (stationsQ.isLoading) return <div style={{ padding: 16 }}>Loading…</div>
   if (stationsQ.error) return <div style={{ padding: 16 }}>Error loading data</div>
@@ -367,6 +417,9 @@ export default function CellsDebug() {
 
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif' }}>
+      {/* Leaflet focuses clicked SVG paths; the browser then outlines the
+        * element's axis-aligned bounding box — noise on nested cell grids. */}
+      <style>{`.leaflet-interactive:focus { outline: none; }`}</style>
       <aside style={{ width: 320, padding: 16, overflowY: 'auto', borderRight: '1px solid rgba(128,128,128,0.4)' }}>
         <h2 style={{ marginTop: 0 }}>Cells Debug</h2>
         <p style={{ fontSize: 13, color: '#999' }}>
@@ -393,7 +446,7 @@ export default function CellsDebug() {
         <div style={{ background: 'rgba(128,128,128,0.15)', padding: 8, fontSize: 13, marginBottom: 12 }}>
           <div style={{ marginBottom: 8 }}>
             <strong>Tool: </strong>
-            <select value={tool} onChange={(e) => { setTool(e.target.value as SelTool); setLassoPts([]) }}>
+            <select value={tool} onChange={(e) => { setTool(e.target.value as SelTool); setLassoPts([]); setCursor(null) }}>
               <option value="click">Click stations</option>
               <option value="lasso">Lasso polygon</option>
               <option value="radius">Location / radius</option>
@@ -402,9 +455,10 @@ export default function CellsDebug() {
           {tool === 'lasso' && (
             <div style={{ marginBottom: 8 }}>
               <div>Click the map to add vertices ({lassoPts.length}).</div>
+              <div style={{ color: '#999' }}>Click the 1st vertex or double-click to close (selects inside); Esc cancels.</div>
               <button disabled={lassoPts.length < 3} onClick={() => applyLasso(true)}>Select inside</button>{' '}
               <button disabled={lassoPts.length < 3} onClick={() => applyLasso(false)}>Deselect inside</button>{' '}
-              <button disabled={lassoPts.length === 0} onClick={() => setLassoPts([])}>Clear</button>
+              <button disabled={lassoPts.length === 0} onClick={() => { setLassoPts([]); setCursor(null) }}>Clear</button>
             </div>
           )}
           {tool === 'radius' && (
@@ -545,9 +599,11 @@ export default function CellsDebug() {
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         />
-        <MapEvents onClick={onMapClick} onZoom={setZoom} />
+        <MapEvents onClick={onMapClick} onZoom={setZoom} onMove={onMapMove}
+          onDblClick={finishLasso} disableDblZoom={tool === 'lasso'} />
         {vocabGrid && vocabGrid.map(({ tok, level, count, split, verts }) => (
           <Polygon key={`vg-${tok}`} positions={verts}
+            eventHandlers={tool === 'click' ? { click: () => setHighlightTok((t) => (t === tok ? null : tok)) } : undefined}
             pathOptions={{
               color: '#607d8b',
               weight: 1,
@@ -556,11 +612,26 @@ export default function CellsDebug() {
               fillColor: '#607d8b',
               fillOpacity: 0.02,
             }}>
-            <Tooltip sticky>vocab {tok} (L{level}) — {count} stations, {split ? 'split' : 'terminal'}</Tooltip>
+            <Tooltip sticky>vocab {tok} (L{level}) — {count} stations, {split ? 'split' : 'terminal'} — click to highlight</Tooltip>
           </Polygon>
         ))}
+        {highlightTok && (
+          <Polygon positions={s2CellVertices(highlightTok)} interactive={false}
+            pathOptions={{ color: '#1976d2', weight: 3, fill: false }} />
+        )}
         {lassoPts.length > 0 && (
-          <Polyline positions={[...lassoPts, lassoPts[0]!]} pathOptions={{ color: '#7b1fa2', weight: 2, dashArray: '6 4' }} />
+          <>
+            <Polyline positions={lassoPts} interactive={false}
+              pathOptions={{ color: '#7b1fa2', weight: 2 }} />
+            {cursor && (
+              <Polyline
+                positions={[lassoPts[lassoPts.length - 1]!, cursor, ...(lassoPts.length >= 2 ? [lassoPts[0]!] : [])]}
+                interactive={false}
+                pathOptions={{ color: '#7b1fa2', weight: 1.5, dashArray: '4 4', opacity: 0.7 }} />
+            )}
+            <CircleMarker center={lassoPts[0]!} radius={6} interactive={false}
+              pathOptions={{ color: '#7b1fa2', weight: 2, fillColor: '#fff', fillOpacity: 1 }} />
+          </>
         )}
         {tool === 'radius' && center && nearestN === '' && (
           <Circle center={center} radius={radiusM} pathOptions={{ color: '#7b1fa2', weight: 1, fillOpacity: 0.05 }} />
