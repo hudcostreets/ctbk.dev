@@ -147,6 +147,7 @@ export default function CellsDebug() {
   const [geoErr, setGeoErr] = useState<string | null>(null)
   const [setQuery, setSetQuery] = useState('')
   const [zoom, setZoom] = useState(11)
+  const [showVocabGrid, setShowVocabGrid] = useState(false)
 
   const stationsQ = useQuery<Stations>({
     queryKey: ['stations-regional'],
@@ -157,7 +158,7 @@ export default function CellsDebug() {
   // leaves) — the graph `vocabCover` minimizes over. `leaves` spans the
   // full LUC universe (incl. retired stations), needed for geographic
   // `wanted` computation.
-  const vocabQ = useQuery<{ graph: VocabGraph; leaves: LucLeaf[]; leafKeys: Set<string> }>({
+  const vocabQ = useQuery<{ graph: VocabGraph; leaves: LucLeaf[]; leafKeys: Set<string>; cells: string[] }>({
     queryKey: ['station-vocab-graph'],
     queryFn: async () => {
       const [vocab, luc] = await Promise.all([
@@ -169,6 +170,7 @@ export default function CellsDebug() {
         graph: buildVocabGraph(s2Index, vocab.cells, leaves),
         leaves,
         leafKeys: new Set(leaves.map((l) => l.key)),
+        cells: vocab.cells,
       }
     },
     staleTime: Infinity,
@@ -179,6 +181,28 @@ export default function CellsDebug() {
     staleTime: Infinity,
   })
   const nbhdGroups = useMemo(() => (nbhdQ.data ? groupNbhds(nbhdQ.data.sets) : []), [nbhdQ.data])
+
+  // Vocab-grid layer: every frozen vocab cell, with its LUC-leaf count and
+  // whether it split (has vocab children). Counts by walking each leaf's
+  // ancestor tokens (cheap: leaves × levels), not cell×leaf containment.
+  const vocabGrid = useMemo(() => {
+    if (!showVocabGrid || !vocabQ.data) return null
+    const vocabSet = new Set(vocabQ.data.cells)
+    const counts = new Map<string, number>()
+    for (const l of vocabQ.data.leaves) {
+      const ci = cellid.fromToken(l.cell)
+      const leafLvl = cellid.level(ci)
+      for (let lvl = 10; lvl <= Math.min(20, leafLvl); lvl++) {
+        const tok = cellid.toToken(cellid.parent(ci, lvl))
+        if (vocabSet.has(tok)) counts.set(tok, (counts.get(tok) ?? 0) + 1)
+      }
+    }
+    return vocabQ.data.cells.map((tok) => {
+      const kids = cellid.children(cellid.fromToken(tok))
+      const split = kids.some((k) => vocabSet.has(cellid.toToken(k)))
+      return { tok, level: cellid.level(cellid.fromToken(tok)), count: counts.get(tok) ?? 0, split, verts: s2CellVertices(tok) }
+    })
+  }, [showVocabGrid, vocabQ.data])
 
   // ── covers for the current selection ──
   const customCovers = useMemo(() => {
@@ -359,6 +383,12 @@ export default function CellsDebug() {
             <input type="checkbox" checked={showStations} onChange={(e) => setShowStations(e.target.checked)} />
             Show stations
           </label>
+          <br />
+          <label>
+            <input type="checkbox" checked={showVocabGrid} onChange={(e) => setShowVocabGrid(e.target.checked)} />
+            Show vocab grid
+            <span style={{ color: '#999' }}> (solid = split, dashed = terminal)</span>
+          </label>
         </div>
         <div style={{ background: 'rgba(128,128,128,0.15)', padding: 8, fontSize: 13, marginBottom: 12 }}>
           <div style={{ marginBottom: 8 }}>
@@ -516,6 +546,19 @@ export default function CellsDebug() {
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         />
         <MapEvents onClick={onMapClick} onZoom={setZoom} />
+        {vocabGrid && vocabGrid.map(({ tok, level, count, split, verts }) => (
+          <Polygon key={`vg-${tok}`} positions={verts}
+            pathOptions={{
+              color: '#607d8b',
+              weight: 1,
+              opacity: 0.6,
+              dashArray: split ? undefined : '3 3',
+              fillColor: '#607d8b',
+              fillOpacity: 0.02,
+            }}>
+            <Tooltip sticky>vocab {tok} (L{level}) — {count} stations, {split ? 'split' : 'terminal'}</Tooltip>
+          </Polygon>
+        ))}
         {lassoPts.length > 0 && (
           <Polyline positions={[...lassoPts, lassoPts[0]!]} pathOptions={{ color: '#7b1fa2', weight: 2, dashArray: '6 4' }} />
         )}
