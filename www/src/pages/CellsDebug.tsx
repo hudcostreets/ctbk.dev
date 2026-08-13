@@ -44,7 +44,12 @@ const REGION_COLOR: Record<Region, string> = {
   Other: '#9e9e9e',
 }
 
-// Station leaves land at FINEST before `minimalCover` compacts them;
+// Station leaves land at FINEST before `minimalCover` compacts them.
+// L15 is lossy: ~1100/2340 stations share their L15 cell with a neighbor
+// (LUC level ≥16), so a cover for one silently spans the other (e.g.
+// JC081 ⇒ its L14 also holds unselected JC075). The right system is LUC
+// cells, but pyrmts-geo's `minimalCover` currently requires a uniform-
+// level system — see pyrmts `specs/minimal-cover-mixed-levels.md`.
 // COARSEST caps output cells (the v3/v5 builds materialize L10..15).
 const FINEST_LEVEL = 15
 const COARSEST_LEVEL = 10
@@ -247,9 +252,12 @@ export default function CellsDebug() {
     const includeCells = Array.from(new Set(
       leafByStation.filter((x) => selected.has(x.id)).map((x) => x.cell),
     ))
+    // NB: `maxLevel` is a dead `MinimalCoverOpts` field (unread by the DP);
+    // `coarsestLevel` is the real cap — without it big selections roll up
+    // to L7-8 cells no materialized tier can serve.
     const s2Cover = minimalCover(s2Index, includeCells, system, {
       allowSubtraction: true,
-      maxLevel: COARSEST_LEVEL,
+      coarsestLevel: COARSEST_LEVEL,
     })
     let vocab: SpatialSet<string> | null = null
     let vocabPm: SpatialSet<string> | null = null
