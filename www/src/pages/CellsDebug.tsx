@@ -1,27 +1,30 @@
 /**
  * Debug page for station-set covers (S2 / vocab).
  *
- * Pick an arbitrary station set — click markers/cover-cells, lasso
- * polygon, geolocation/radius/N-nearest, region presets, or the
- * searchable neighborhoods catalog (`neighborhoods.json` via `ctbk
- * neighborhoods`: NYC NTA2020 + JC neighborhood associations) — and
- * see BOTH covers of it:
+ * Pick an arbitrary station set — click markers/cover-cells, ⌘-drag
+ * rectangle, lasso polygon, geolocation/radius/N-nearest, region
+ * presets, or the searchable neighborhoods catalog (`neighborhoods.json`
+ * via `ctbk neighborhoods`: NYC NTA2020 + JC neighborhood associations)
+ * — and see how `vocabCover` (pyrmts-geo) resolves it: the actual
+ * terms the API would be handed for EXACTLY the selected stations
+ * (`s:` leaf keys), in both the positive-only form (`cells=` is an
+ * include-list) and the ± variant an `exclude_cells=` param would
+ * allow. Cell terms only appear when every LUC leaf under them (incl.
+ * retired stations) is selected — a retired leaf blocks its vocab
+ * ancestors, which is why area-shaped selections still cost `s:`
+ * fan-out (region/bbox serving instead uses geographic wanted,
+ * `v5UserCover`).
  *
- *  - raw-S2 `minimalCover` (± green/red, pyrmts-geo)
- *  - the positive-only `vocabCover` the API serves for region/bbox
- *    queries (`specs/rg-manifest.md` P3). Its `wanted` set is
- *    GEOGRAPHIC (every LUC leaf inside the selection's S2 footprint,
- *    incl. retired stations) — `v5UserCover` semantics. Exact-selection
- *    wanted fragments the cover badly: any coarse vocab ancestor is
- *    blocked when it would swallow a retired leaf (JC: 46 terms exact
- *    vs 10 cells geographic).
+ * The Cover dropdown also has a raw-S2 `minimalCover` (± green/red)
+ * what-if baseline: stations as uniform-L15 point cells, no `s:`
+ * terms (see the `FINEST_LEVEL` lossiness caveat below).
  *
  * Plus live rides/avail stats for the selection via the prod API.
  * Mount: `/cells-debug` (lazy via main.tsx).
  */
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useMemo, useState } from 'react'
-import { Circle, CircleMarker, MapContainer, Polygon, Polyline, TileLayer, Tooltip, useMapEvents } from 'react-leaflet'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Circle, CircleMarker, MapContainer, Polygon, Polyline, Rectangle, TileLayer, Tooltip, useMapEvents } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { buildVocabGraph, isCellInCover, minimalCover, s2Index, vocabCover, type SpatialSet, type VocabGraph } from 'pyrmts-geo'
 import { llzParam, useUrlState } from 'use-prms'
@@ -143,12 +146,14 @@ const selParam: Param<Set<string>> = {
 }
 
 /** Map click + zoom dispatcher for the selection tools / marker sizing. */
-function MapEvents({ onClick, onMoveEnd, onMove, onDblClick, disableDblZoom }: {
+function MapEvents({ onClick, onMoveEnd, onMove, onDown, onDblClick, disableDblZoom, disableDrag }: {
   onClick: (lat: number, lng: number) => void
   onMoveEnd: (lat: number, lng: number, zoom: number) => void
   onMove: (lat: number, lng: number) => void
+  onDown: (lat: number, lng: number, meta: boolean, ev: MouseEvent) => void
   onDblClick: () => void
   disableDblZoom: boolean
+  disableDrag: boolean
 }) {
   const map = useMapEvents({
     click: (e) => onClick(e.latlng.lat, e.latlng.lng),
@@ -158,6 +163,9 @@ function MapEvents({ onClick, onMoveEnd, onMove, onDblClick, disableDblZoom }: {
       onMoveEnd(c.lat, c.lng, m.getZoom())
     },
     mousemove: (e) => onMove(e.latlng.lat, e.latlng.lng),
+    // ⌘-rect release is handled by a window `mouseup` listener (works
+    // even when the pointer leaves the map), not a map `mouseup`.
+    mousedown: (e) => onDown(e.latlng.lat, e.latlng.lng, e.originalEvent.metaKey || e.originalEvent.ctrlKey, e.originalEvent),
     dblclick: () => onDblClick(),
   })
   // Double-click finishes the lasso — zoom would fight it.
@@ -165,6 +173,11 @@ function MapEvents({ onClick, onMoveEnd, onMove, onDblClick, disableDblZoom }: {
     if (disableDblZoom) map.doubleClickZoom.disable()
     else map.doubleClickZoom.enable()
   }, [map, disableDblZoom])
+  // ⌘-drag draws a selection rectangle — map panning would fight it.
+  useEffect(() => {
+    if (disableDrag) map.dragging.disable()
+    else map.dragging.enable()
+  }, [map, disableDrag])
   return null
 }
 
@@ -176,6 +189,33 @@ export default function CellsDebug() {
   const [tool, setTool] = useState<SelTool>('click')
   const [lassoPts, setLassoPts] = useState<[number, number][]>([])
   const [cursor, setCursor] = useState<[number, number] | null>(null)
+  // In-progress ⌘-drag selection rectangle (corner a = mousedown, b =
+  // cursor). State renders it; the ref is the source of truth for the
+  // event handlers — a fast down→move→up can finish before React commits
+  // (or paints), so gesture logic can't wait on state.
+  const [rect, setRect] = useState<{ a: [number, number]; b: [number, number] } | null>(null)
+  const rectRef = useRef<{ a: [number, number]; b: [number, number] } | null>(null)
+  // ⌘ held: map dragging must be OFF *before* the mousedown lands —
+  // Leaflet's Draggable captures the gesture synchronously, so disabling
+  // in reaction to the mousedown itself is too late (it pans anyway).
+  const [metaHeld, setMetaHeld] = useState(false)
+  useEffect(() => {
+    const set = (e: KeyboardEvent, v: boolean) => { if (e.key === 'Meta' || e.key === 'Control') setMetaHeld(v) }
+    const down = (e: KeyboardEvent) => set(e, true)
+    const up = (e: KeyboardEvent) => set(e, false)
+    const blur = () => setMetaHeld(false)  // ⌘-Tab away would strand the disable
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
+    window.addEventListener('blur', blur)
+    return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+      window.removeEventListener('blur', blur)
+    }
+  }, [])
+  // A finished ⌘-rect's mouseup still emits a `click` (Leaflet only eats
+  // it after a real map pan) — ignore clicks in this window after release.
+  const suppressClicksUntil = useRef(0)
   const [highlightTok, setHighlightTok] = useState<string | null>(null)
   const [center, setCenter] = useState<[number, number] | null>(null)
   const [radiusM, setRadiusM] = useState(500)
@@ -193,8 +233,8 @@ export default function CellsDebug() {
   })
   // Frozen serving vocabulary (`station-vocab.json` cells + `station-luc`
   // leaves) — the graph `vocabCover` minimizes over. `leaves` spans the
-  // full LUC universe (incl. retired stations), needed for geographic
-  // `wanted` computation.
+  // full LUC universe (incl. retired stations), used for vocab-grid
+  // counts and retired-leaf marker positions.
   const vocabQ = useQuery<{ graph: VocabGraph; leaves: LucLeaf[]; leafKeys: Set<string>; cells: string[] }>({
     queryKey: ['station-vocab-graph'],
     queryFn: async () => {
@@ -261,23 +301,17 @@ export default function CellsDebug() {
     })
     let vocab: SpatialSet<string> | null = null
     let vocabPm: SpatialSet<string> | null = null
-    let wantedKeys: Set<string> | null = null
     if (vocabQ.data) {
-      // Geographic wanted: every LUC leaf inside the selection's S2
-      // footprint — incl. retired stations that only exist in the LUC
-      // universe. Matches `v5UserCover` region/bbox serving; see module
-      // doc for why exact-selection wanted fragments the cover.
-      const wanted = vocabQ.data.leaves
-        .filter((l) => isCellInCover(s2Index, l.cell, s2Cover))
-        .map((l) => l.key)
-      wantedKeys = new Set(wanted)
+      // Exact-selection wanted: the cover must resolve to precisely the
+      // chosen stations — what the API would be handed for this set.
       // Positive-only = what rides-v5 serving can express (`cells=` is an
       // include-list). The ± variant shows what an exclude param would buy:
-      // sibling groups collapse to "parent minus blockers" (JC: 10 → 3+4).
+      // sibling groups collapse to "parent minus blockers".
+      const wanted = [...selected].map((id) => `s:${id}`).filter((k) => vocabQ.data!.leafKeys.has(k))
       vocab = wanted.length > 0 ? vocabCover(vocabQ.data.graph, wanted, { positiveOnly: true }) : { include: [], exclude: [] }
       vocabPm = wanted.length > 0 ? vocabCover(vocabQ.data.graph, wanted) : { include: [], exclude: [] }
     }
-    return { s2Cover, vocab, vocabPm, wantedKeys }
+    return { s2Cover, vocab, vocabPm }
   }, [stationsQ.data, selected, vocabQ.data])
 
   // ── live stats for the selection (vocab cover → prod API) ──
@@ -318,7 +352,9 @@ export default function CellsDebug() {
 
   // ── selection actions ──
   const stations = stationsQ.data
+  const clickSuppressed = () => performance.now() < suppressClicksUntil.current
   const toggleStation = (id: string) => {
+    if (clickSuppressed()) return
     const next = new Set(selected)
     if (next.has(id)) next.delete(id); else next.add(id)
     setSelected(next)
@@ -336,7 +372,7 @@ export default function CellsDebug() {
    *  the easy way to de-select a chunk (2nd click on a fully-selected
    *  cell removes its stations). */
   const toggleCellStations = (tok: string) => {
-    if (!stations) return
+    if (!stations || clickSuppressed()) return
     const cover: SpatialSet<string> = { include: [tok], exclude: [] }
     const ids = Object.entries(stations)
       .filter(([, s]) => isCellInCover(s2Index, s2Index.latLngToCell(s.lat, s.lng, s2Index.maxLevel), cover))
@@ -390,7 +426,32 @@ export default function CellsDebug() {
     if (!stations) return
     setSelected(new Set(Object.entries(stations).filter(([, s]) => s.region === r).map(([id]) => id)))
   }
+  /** ⌘-drag rectangle: bulk-toggle stations in the dragged bounds (any tool). */
+  const onMapDown = (lat: number, lng: number, meta: boolean, ev: MouseEvent) => {
+    if (!meta) return
+    ev.preventDefault()  // no text selection while dragging
+    rectRef.current = { a: [lat, lng], b: [lat, lng] }
+    setRect(rectRef.current)
+  }
+  const finishRect = () => {
+    const r = rectRef.current
+    if (!r) return
+    rectRef.current = null
+    setRect(null)
+    const { a, b } = r
+    // Sub-4px drags are just ⌘clicks — let the ensuing click through.
+    const degPerPx = 360 / (256 * 2 ** zoom)
+    if (Math.hypot((a[1] - b[1]) / degPerPx, (a[0] - b[0]) / degPerPx) < 4) return
+    suppressClicksUntil.current = performance.now() + 200
+    if (!stations) return
+    const [latLo, latHi] = [Math.min(a[0], b[0]), Math.max(a[0], b[0])]
+    const [lngLo, lngHi] = [Math.min(a[1], b[1]), Math.max(a[1], b[1])]
+    toggleStationIds(Object.entries(stations)
+      .filter(([, s]) => s.lat >= latLo && s.lat <= latHi && s.lng >= lngLo && s.lng <= lngHi)
+      .map(([id]) => id))
+  }
   const onMapClick = (lat: number, lng: number) => {
+    if (clickSuppressed()) return
     if (tool === 'lasso') {
       // Clicking back on the 1st vertex (≤12px at current zoom) closes
       // the polygon and selects inside.
@@ -409,9 +470,30 @@ export default function CellsDebug() {
     setView({ lat, lng, zoom: z })
   }
   const onMapMove = (lat: number, lng: number) => {
-    if (tool === 'lasso' && lassoPts.length > 0) setCursor([lat, lng])
+    if (rectRef.current) {
+      rectRef.current = { a: rectRef.current.a, b: [lat, lng] }
+      setRect(rectRef.current)
+    } else if (tool === 'lasso' && lassoPts.length > 0) setCursor([lat, lng])
     else if (cursor !== null) setCursor(null)
   }
+  // ⌘-rect lifecycle: window `mouseup` finalizes (fires even when the
+  // pointer is released outside the map); Esc cancels. Listeners are
+  // mounted for the whole page life — attaching them only while a rect
+  // is active would race a fast drag (effects run post-paint).
+  const finishRectRef = useRef(finishRect)
+  finishRectRef.current = finishRect
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && rectRef.current) { rectRef.current = null; setRect(null) }
+    }
+    const onUp = () => finishRectRef.current()
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
   // Esc abandons an in-progress lasso.
   useEffect(() => {
     if (!(tool === 'lasso' && lassoPts.length > 0)) return
@@ -474,6 +556,7 @@ export default function CellsDebug() {
               <option value="lasso">Lasso polygon</option>
               <option value="radius">Location / radius</option>
             </select>
+            <div style={{ color: '#999', marginTop: 2 }}>⌘-drag a rectangle to bulk-toggle stations (any tool)</div>
           </div>
           {tool === 'lasso' && (
             <div style={{ marginBottom: 8 }}>
@@ -563,10 +646,6 @@ export default function CellsDebug() {
               <table style={{ width: '100%', marginTop: 4 }}>
                 <tbody>
                   <tr>
-                    <td>S2 ±</td>
-                    <td>+{customCovers.s2Cover.include.length} −{customCovers.s2Cover.exclude.length}</td>
-                  </tr>
-                  <tr>
                     <td>vocab +</td>
                     <td>{customCovers.vocab ? termCounts(customCovers.vocab) : 'loading vocab…'}</td>
                   </tr>
@@ -576,13 +655,13 @@ export default function CellsDebug() {
                       <td>+{customCovers.vocabPm.include.length} −{customCovers.vocabPm.exclude.length}</td>
                     </tr>
                   )}
-                  {customCovers.wantedKeys && (
+                  <tr>
+                    <td style={{ color: '#999' }}>S2 raw ±</td>
+                    <td style={{ color: '#999' }}>+{customCovers.s2Cover.include.length} −{customCovers.s2Cover.exclude.length}</td>
+                  </tr>
+                  {selected.size > selectedInLuc && (
                     <tr>
-                      <td style={{ color: '#999' }}>wanted</td>
-                      <td style={{ color: '#999' }}>
-                        {customCovers.wantedKeys.size} LUC leaves
-                        {customCovers.wantedKeys.size > selectedInLuc ? ` (+${customCovers.wantedKeys.size - selectedInLuc} retired in footprint)` : ''}
-                      </td>
+                      <td style={{ color: '#999' }} colSpan={2}>{selected.size - selectedInLuc} selected not in vocab (unserved)</td>
                     </tr>
                   )}
                 </tbody>
@@ -623,10 +702,15 @@ export default function CellsDebug() {
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         />
         <MapEvents onClick={onMapClick} onMoveEnd={onMoveEnd} onMove={onMapMove}
-          onDblClick={finishLasso} disableDblZoom={tool === 'lasso'} />
+          onDown={onMapDown} onDblClick={finishLasso}
+          disableDblZoom={tool === 'lasso'} disableDrag={metaHeld || rect !== null} />
+        {rect && (
+          <Rectangle bounds={[rect.a, rect.b]} interactive={false}
+            pathOptions={{ color: '#7b1fa2', weight: 1.5, dashArray: '4 4', fillColor: '#7b1fa2', fillOpacity: 0.08 }} />
+        )}
         {vocabGrid && vocabGrid.map(({ tok, level, count, split, verts }) => (
           <Polygon key={`vg-${tok}`} positions={verts}
-            eventHandlers={tool === 'click' ? { click: () => setHighlightTok((t) => (t === tok ? null : tok)) } : undefined}
+            eventHandlers={tool === 'click' ? { click: () => { if (clickSuppressed()) return; setHighlightTok((t) => (t === tok ? null : tok)) } } : undefined}
             pathOptions={{
               color: '#607d8b',
               weight: 1,
@@ -715,26 +799,23 @@ export default function CellsDebug() {
           ))}
         {showStations && vocabQ.data && vocabQ.data.leaves
           .filter((l) => !stations[l.key.slice(2)])
-          .map((l) => {
-            const inFootprint = customCovers?.wantedKeys?.has(l.key) ?? false
-            return (
-              <CircleMarker
-                key={`ret-${l.key}`}
-                center={[l.lat, l.lng]}
-                radius={unselR}
-                interactive={true}
-                pathOptions={{
-                  color: inFootprint ? '#7b1fa2' : '#757575',
-                  fillColor: '#757575',
-                  fillOpacity: 0.5,
-                  weight: inFootprint ? 2 : 1,
-                  dashArray: '2 2',
-                }}
-              >
-                <Tooltip>{l.key.slice(2)} — retired (LUC-only{inFootprint ? ', in wanted footprint' : ''})</Tooltip>
-              </CircleMarker>
-            )
-          })}
+          .map((l) => (
+            <CircleMarker
+              key={`ret-${l.key}`}
+              center={[l.lat, l.lng]}
+              radius={unselR}
+              interactive={true}
+              pathOptions={{
+                color: '#757575',
+                fillColor: '#757575',
+                fillOpacity: 0.5,
+                weight: 1,
+                dashArray: '2 2',
+              }}
+            >
+              <Tooltip>{l.key.slice(2)} — retired (LUC-only; blocks vocab ancestors)</Tooltip>
+            </CircleMarker>
+          ))}
         {showStations && Object.entries(stations).map(([id, s]) => {
           const isSel = selected.has(id)
           return (
