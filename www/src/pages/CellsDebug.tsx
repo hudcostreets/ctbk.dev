@@ -24,6 +24,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { Circle, CircleMarker, MapContainer, Polygon, Polyline, TileLayer, Tooltip, useMapEvents } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { buildVocabGraph, isCellInCover, minimalCover, s2Index, vocabCover, type SpatialSet, type VocabGraph } from 'pyrmts-geo'
+import { llzParam, useUrlState } from 'use-prms'
+import type { LLZ, Param } from 'use-prms'
 import { s2 } from 's2js'
 import { API_BASE } from '../query/stations'
 
@@ -125,17 +127,31 @@ function groupNbhds(sets: NbhdSet[]): NbhdGroup[] {
 
 type SelTool = 'click' | 'lasso' | 'radius'
 
+const DEFAULT_LLZ: LLZ = { lat: 40.74, lng: -73.98, zoom: 11 }
+const viewParam = llzParam({ default: DEFAULT_LLZ, latLngDecimals: 3 })
+
+/** `?sel=`: comma-joined sorted short_names. NB: region presets select
+ *  2k+ stations → very long (but functional) URLs; fine for a debug page. */
+const selParam: Param<Set<string>> = {
+  encode: (v) => (v.size ? [...v].sort().join(',') : undefined),
+  decode: (raw) => new Set(raw ? raw.split(',').filter(Boolean) : []),
+}
+
 /** Map click + zoom dispatcher for the selection tools / marker sizing. */
-function MapEvents({ onClick, onZoom, onMove, onDblClick, disableDblZoom }: {
+function MapEvents({ onClick, onMoveEnd, onMove, onDblClick, disableDblZoom }: {
   onClick: (lat: number, lng: number) => void
-  onZoom: (z: number) => void
+  onMoveEnd: (lat: number, lng: number, zoom: number) => void
   onMove: (lat: number, lng: number) => void
   onDblClick: () => void
   disableDblZoom: boolean
 }) {
   const map = useMapEvents({
     click: (e) => onClick(e.latlng.lat, e.latlng.lng),
-    zoomend: (e) => onZoom(e.target.getZoom()),
+    // `moveend` also fires after zooms — one hook covers pan + zoom.
+    moveend: (e) => {
+      const m = e.target, c = m.getCenter()
+      onMoveEnd(c.lat, c.lng, m.getZoom())
+    },
     mousemove: (e) => onMove(e.latlng.lat, e.latlng.lng),
     dblclick: () => onDblClick(),
   })
@@ -150,7 +166,8 @@ function MapEvents({ onClick, onZoom, onMove, onDblClick, disableDblZoom }: {
 export default function CellsDebug() {
   const [showStations, setShowStations] = useState(true)
   const [showCells, setShowCells] = useState(true)
-  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [selected, setSelected] = useUrlState('sel', selParam)
+  const [view, setView] = useUrlState('ll', viewParam)
   const [tool, setTool] = useState<SelTool>('click')
   const [lassoPts, setLassoPts] = useState<[number, number][]>([])
   const [cursor, setCursor] = useState<[number, number] | null>(null)
@@ -161,7 +178,7 @@ export default function CellsDebug() {
   const [coverView, setCoverView] = useState<'vocab' | 'vocabPm' | 's2'>('vocab')
   const [geoErr, setGeoErr] = useState<string | null>(null)
   const [setQuery, setSetQuery] = useState('')
-  const [zoom, setZoom] = useState(11)
+  const [zoom, setZoom] = useState(view.zoom)
   const [showVocabGrid, setShowVocabGrid] = useState(false)
 
   const stationsQ = useQuery<Stations>({
@@ -294,22 +311,18 @@ export default function CellsDebug() {
   // ── selection actions ──
   const stations = stationsQ.data
   const toggleStation = (id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id); else next.add(id)
-      return next
-    })
+    const next = new Set(selected)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    setSelected(next)
   }
   /** Bulk toggle: if every id is already selected, deselect them all;
    *  otherwise select them all. */
   const toggleStationIds = (ids: string[]) => {
     if (ids.length === 0) return
-    setSelected((prev) => {
-      const next = new Set(prev)
-      const all = ids.every((id) => next.has(id))
-      for (const id of ids) { if (all) next.delete(id); else next.add(id) }
-      return next
-    })
+    const next = new Set(selected)
+    const all = ids.every((id) => next.has(id))
+    for (const id of ids) { if (all) next.delete(id); else next.add(id) }
+    setSelected(next)
   }
   /** Clicking a rendered cover cell toggles the stations inside it —
    *  the easy way to de-select a chunk (2nd click on a fully-selected
@@ -325,15 +338,13 @@ export default function CellsDebug() {
   const isAllSelected = (ids: string[]) => ids.length > 0 && ids.every((id) => selected.has(id))
   const applyLasso = (add: boolean, pts: [number, number][] = lassoPts) => {
     if (!stations || pts.length < 3) return
-    setSelected((prev) => {
-      const next = new Set(prev)
-      for (const [id, s] of Object.entries(stations)) {
-        if (pointInPolygon(s.lat, s.lng, pts)) {
-          if (add) next.add(id); else next.delete(id)
-        }
+    const next = new Set(selected)
+    for (const [id, s] of Object.entries(stations)) {
+      if (pointInPolygon(s.lat, s.lng, pts)) {
+        if (add) next.add(id); else next.delete(id)
       }
-      return next
-    })
+    }
+    setSelected(next)
     setLassoPts([])
     setCursor(null)
   }
@@ -384,6 +395,10 @@ export default function CellsDebug() {
       }
       setLassoPts((p) => [...p, [lat, lng]])
     } else if (tool === 'radius') setCenter([lat, lng])
+  }
+  const onMoveEnd = (lat: number, lng: number, z: number) => {
+    setZoom(z)
+    setView({ lat, lng, zoom: z })
   }
   const onMapMove = (lat: number, lng: number) => {
     if (tool === 'lasso' && lassoPts.length > 0) setCursor([lat, lng])
@@ -591,15 +606,15 @@ export default function CellsDebug() {
       </aside>
       <MapContainer
         style={{ flex: 1, background: '#eee' }}
-        center={[40.74, -73.98]}
-        zoom={11}
+        center={[view.lat, view.lng]}
+        zoom={view.zoom}
         scrollWheelZoom
       >
         <TileLayer
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         />
-        <MapEvents onClick={onMapClick} onZoom={setZoom} onMove={onMapMove}
+        <MapEvents onClick={onMapClick} onMoveEnd={onMoveEnd} onMove={onMapMove}
           onDblClick={finishLasso} disableDblZoom={tool === 'lasso'} />
         {vocabGrid && vocabGrid.map(({ tok, level, count, split, verts }) => (
           <Polygon key={`vg-${tok}`} positions={verts}
