@@ -57,26 +57,57 @@ const REGION_COLOR: Record<Region, string> = {
 const FINEST_LEVEL = 15
 const COARSEST_LEVEL = 10
 
-/** S2 cell → boundary polygon. Each edge is a great-circle arc (constant
- *  u/v on the cube face = a plane through the origin), so sample along it —
- *  normalized lerp between the endpoint vectors stays on the arc. Straight
- *  lat/lng segments visibly bow off-course at coarse levels. */
-function s2CellVertices(token: string): [number, number][] {
+/** S2 cell → 4 sampled boundary arcs (edge k = vertex k → k+1, CCW).
+ *  Each edge is a great-circle arc (constant u/v on the cube face = a
+ *  plane through the origin), so sample along it — normalized lerp
+ *  between the endpoint vectors stays on the arc. Straight lat/lng
+ *  segments visibly bow off-course at coarse levels. Each arc includes
+ *  both endpoints (polyline-ready). */
+function s2CellEdgeArcs(token: string): [number, number][][] {
   const ci = cellid.fromToken(token)
   const cell = Cell.fromCellID(ci)
   const level = cellid.level(ci)
   const perEdge = Math.max(1, Math.min(32, 2 ** (12 - level)))
   const r2d = 180 / Math.PI
-  const pts: [number, number][] = []
+  const edges: [number, number][][] = []
   for (let i = 0; i < 4; i++) {
     const a = cell.vertex(i), b = cell.vertex((i + 1) & 3)
-    for (let s = 0; s < perEdge; s++) {
+    const pts: [number, number][] = []
+    for (let s = 0; s <= perEdge; s++) {
       const t = s / perEdge
       const x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t, z = a.z + (b.z - a.z) * t
       pts.push([Math.atan2(z, Math.hypot(x, y)) * r2d, Math.atan2(y, x) * r2d])
     }
+    edges.push(pts)
   }
-  return pts
+  return edges
+}
+
+function s2CellVertices(token: string): [number, number][] {
+  return s2CellEdgeArcs(token).flatMap((pts) => pts.slice(0, -1))
+}
+
+/** The edges of `token` that lie on its PARENT's boundary. Every cell is
+ *  one quadrant of its parent, so exactly 2 adjacent edges qualify.
+ *  Rendered thicker as a merge cue: when sibling cells jointly tile a
+ *  parent, the thick edges form the parent's full ring with only thin
+ *  seams inside — i.e. "these could collapse to the parent (± subtractions)".
+ *  Vertex k ↔ uv corner in order (uLo,vLo),(uHi,vLo),(uHi,vHi),(uLo,vHi)
+ *  (verified against s2js: sibling quadrants' facing edges coincide). */
+function s2ParentEdgeArcs(token: string): [number, number][][] {
+  const ci = cellid.fromToken(token)
+  const lvl = cellid.level(ci)
+  if (lvl === 0) return []
+  const uv = cellid.boundUV(ci)
+  const puv = cellid.boundUV(cellid.parent(ci, lvl - 1))
+  const eps = 1e-12
+  const shared = [
+    Math.abs(uv.y.lo - puv.y.lo) < eps,  // edge 0: v = vLo
+    Math.abs(uv.x.hi - puv.x.hi) < eps,  // edge 1: u = uHi
+    Math.abs(uv.y.hi - puv.y.hi) < eps,  // edge 2: v = vHi
+    Math.abs(uv.x.lo - puv.x.lo) < eps,  // edge 3: u = uLo
+  ]
+  return s2CellEdgeArcs(token).filter((_, k) => shared[k])
 }
 
 // ─── selection helpers ────────────────────────────────────────────────
@@ -708,7 +739,7 @@ export default function CellsDebug() {
           <Rectangle bounds={[rect.a, rect.b]} interactive={false}
             pathOptions={{ color: '#7b1fa2', weight: 1.5, dashArray: '4 4', fillColor: '#7b1fa2', fillOpacity: 0.08 }} />
         )}
-        {vocabGrid && vocabGrid.map(({ tok, level, count, split, verts }) => (
+        {vocabGrid && vocabGrid.flatMap(({ tok, level, count, split, verts }) => [
           <Polygon key={`vg-${tok}`} positions={verts}
             eventHandlers={tool === 'click' ? { click: () => { if (clickSuppressed()) return; setHighlightTok((t) => (t === tok ? null : tok)) } } : undefined}
             pathOptions={{
@@ -720,8 +751,10 @@ export default function CellsDebug() {
               fillOpacity: 0.02,
             }}>
             <Tooltip sticky>vocab {tok} (L{level}) — {count} stations, {split ? 'split' : 'terminal'} — click to highlight</Tooltip>
-          </Polygon>
-        ))}
+          </Polygon>,
+          <Polyline key={`vgp-${tok}`} positions={s2ParentEdgeArcs(tok)} interactive={false}
+            pathOptions={{ color: '#607d8b', weight: 2.5, opacity: 0.6 }} />,
+        ])}
         {highlightTok && (
           <Polygon positions={s2CellVertices(highlightTok)} interactive={false}
             pathOptions={{ color: '#1976d2', weight: 3, fill: false }} />
@@ -743,34 +776,44 @@ export default function CellsDebug() {
         {tool === 'radius' && center && nearestN === '' && (
           <Circle center={center} radius={radiusM} pathOptions={{ color: '#7b1fa2', weight: 1, fillOpacity: 0.05 }} />
         )}
-        {showCells && customCovers && coverView === 's2' && customCovers.s2Cover.include.map((tok) => (
+        {showCells && customCovers && coverView === 's2' && customCovers.s2Cover.include.flatMap((tok) => [
           <Polygon key={`cs2i-${tok}`} positions={s2CellVertices(tok)}
             eventHandlers={tool === 'click' ? { click: () => toggleCellStations(tok) } : undefined}
             pathOptions={{ color: '#2e7d32', weight: 1.5, fillColor: '#2e7d32', fillOpacity: 0.15 }}>
             <Tooltip sticky>+ {tok} (L{cellid.level(cellid.fromToken(tok))}) — click to toggle stations</Tooltip>
-          </Polygon>
-        ))}
-        {showCells && customCovers && coverView === 's2' && customCovers.s2Cover.exclude.map((tok) => (
+          </Polygon>,
+          <Polyline key={`cs2ip-${tok}`} positions={s2ParentEdgeArcs(tok)} interactive={false}
+            pathOptions={{ color: '#2e7d32', weight: 4 }} />,
+        ])}
+        {showCells && customCovers && coverView === 's2' && customCovers.s2Cover.exclude.flatMap((tok) => [
           <Polygon key={`cs2e-${tok}`} positions={s2CellVertices(tok)}
             eventHandlers={tool === 'click' ? { click: () => toggleCellStations(tok) } : undefined}
             pathOptions={{ color: '#d32f2f', weight: 2, dashArray: '4 3', fillColor: '#d32f2f', fillOpacity: 0.15 }}>
             <Tooltip sticky>− {tok} (L{cellid.level(cellid.fromToken(tok))}) — click to toggle stations</Tooltip>
-          </Polygon>
-        ))}
+          </Polygon>,
+          <Polyline key={`cs2ep-${tok}`} positions={s2ParentEdgeArcs(tok)} interactive={false}
+            pathOptions={{ color: '#d32f2f', weight: 4, dashArray: '4 3' }} />,
+        ])}
         {showCells && (coverView === 'vocab' || coverView === 'vocabPm') && (() => {
           const cover = coverView === 'vocab' ? customCovers?.vocab : customCovers?.vocabPm
           if (!cover) return null
           const cellLayers = (terms: string[], excluded: boolean) => terms
             .filter((t) => !t.startsWith('s:'))
-            .map((tok) => (
+            .flatMap((tok) => [
               <Polygon key={`cv${excluded ? 'e' : 'i'}-${tok}`} positions={s2CellVertices(tok)}
                 eventHandlers={tool === 'click' ? { click: () => toggleCellStations(tok) } : undefined}
                 pathOptions={excluded
                   ? { color: '#d32f2f', weight: 2, dashArray: '4 3', fillColor: '#d32f2f', fillOpacity: 0.15 }
                   : { color: '#2e7d32', weight: 1.5, fillColor: '#2e7d32', fillOpacity: 0.15 }}>
                 <Tooltip sticky>{excluded ? '−' : '+'} vocab {tok} (L{cellid.level(cellid.fromToken(tok))}) — click to toggle stations</Tooltip>
-              </Polygon>
-            ))
+              </Polygon>,
+              // Thicker where the edge is also the PARENT's boundary — the
+              // merge cue: a fully-thick ring of siblings ⇒ parent-collapsible.
+              <Polyline key={`cv${excluded ? 'e' : 'i'}p-${tok}`} positions={s2ParentEdgeArcs(tok)} interactive={false}
+                pathOptions={excluded
+                  ? { color: '#d32f2f', weight: 4, dashArray: '4 3' }
+                  : { color: '#2e7d32', weight: 4 }} />,
+            ])
           const sLayers = (terms: string[], excluded: boolean) => terms
             .filter((t) => t.startsWith('s:'))
             .map((term) => {
