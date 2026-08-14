@@ -156,7 +156,8 @@
     "202603": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/5e/ea628829a259127aa1d6053836f03d",
     "202604": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/01/b6752cf572cbced2faf33d5f76c0dd",
     "202605": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/94/13f7a238cdeb023f3901f984d9d853",
-    "202606": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/ee/b3e482bb854172d08573229870c53c"
+    "202606": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/ee/b3e482bb854172d08573229870c53c",
+    "202607": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/6f/5ceb027288d20db30526a480b9fd36"
   },
   "pairs": {
     "201306": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/4e/8f1f27cbb5ba2b608c3cb552d8295e",
@@ -315,7 +316,8 @@
     "202603": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/bb/1b1df5312a0246ca5c3f265130ae39",
     "202604": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/9e/57ebe5417a266f5afe25703ff1f92e",
     "202605": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/56/ecd1dbc34289fa71a08a50455645a1",
-    "202606": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/3d/606469ca32ff52fc79e101faa30f62"
+    "202606": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/3d/606469ca32ff52fc79e101faa30f62",
+    "202607": "https://ctbk.s3.amazonaws.com/.dvc/files/md5/fa/a9abaaed740fffd2d83c228b105c34"
   },
-  "latestMonth": "202606"
+  "latestMonth": "202607"
 }
