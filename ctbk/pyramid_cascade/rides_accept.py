@@ -104,6 +104,22 @@ def read_v5(cli, anchor: str, tier: str, t0: datetime, t1: datetime) -> pd.DataF
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def read_v5_month(cli, anchor: str, t0: datetime, t1: datetime) -> pd.DataFrame:
+    """Monthly v5 rows: the materialized 1mo tier when it covers the
+    month, else rebin from the 1h base (the calendar family is built
+    through closed years only — the live tip is het-tiled at serve time,
+    so recent months have no 1mo shard; 1h always has base coverage)."""
+    try:
+        return read_v5(cli, anchor, '1mo', t0, t1)
+    except RuntimeError:
+        df = read_v5(cli, anchor, '1h', t0, t1)
+        if df.empty:
+            return df
+        df = df.copy()
+        df['dt'] = int(t0.timestamp()) * 1000
+        return df.groupby(['cell', 'dt', *GROUP], observed=True)[MONOID_COLS].sum().reset_index()
+
+
 def month_bounds(ym: str) -> tuple[datetime, datetime]:
     t0 = datetime.strptime(ym, '%Y-%m').replace(tzinfo=timezone.utc)
     t1 = t0.replace(year=t0.year + 1, month=1) if t0.month == 12 else t0.replace(month=t0.month + 1)
@@ -123,7 +139,7 @@ def check_station_equiv(cli, anchor: str, ym: str) -> dict:
     t0, t1 = month_bounds(ym)
     luc = luc_map()
 
-    v5 = read_v5(cli, anchor, '1mo', t0, t1)
+    v5 = read_v5_month(cli, anchor, t0, t1)
     v5 = v5[v5['cell'].str.startswith('s:')].copy()
     v5['short'] = v5['cell'].str[2:]
 
@@ -208,7 +224,7 @@ def check_totals(cli, anchor: str, ym: str) -> dict:
     t0, t1 = month_bounds(ym)
     gt = _gt_count(anchor, ym)
 
-    v5 = read_v5(cli, anchor, '1mo', t0, t1)
+    v5 = read_v5_month(cli, anchor, t0, t1)
     v5_total = int(v5[v5['cell'].str.startswith('s:')]['count_sum'].sum())
 
     luc_cells = set(luc_map().values())
