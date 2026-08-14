@@ -990,6 +990,91 @@ def rides_v5_accept(anchor: str, months: str, rebin_months: str, verbose: bool) 
 	err("all acceptance checks passed")
 
 
+# ─── rides-v5 monthly cadence (specs/rides-v5.md §monthly cadence) ─────
+
+RIDES_V5_ANCHOR_SPECS = (
+	('rides-v5-start', 'rides-v5/start', 'ctbk_engine_src:rides_start'),
+	('rides-v5-end', 'rides-v5/end', 'ctbk_engine_src:rides_end'),
+)
+
+
+@gbfs.command('rides-v5-extend', help='Monthly rides-v5 cadence for one freshly-ingested month: (1) server-side copy `normalized/<YM>.parquet` from the DVC store to its public plain key (the Batch factory lists that prefix), (2) invalidate the previous month on the start anchor (spillback refold), (3) `engine submit -f` both anchors with the range capped at month-end (a now-capped fill writes 0-row tip shards that later read as built-and-empty and trips max_missing_source on the in-progress month), (4) RG-manifest backfill. Station-map/vocab regen for new stations is NOT covered (spec cadence item 4). Needs AWS + R2 creds, CTBK_REGISTRY_SECRET, and `pyrmts-engine` on PATH.')
+@option('-n', '--dry-run', is_flag=True, help='Print planned actions (and engine submit commands); no writes or submits.')
+@argument('ym', metavar='YM')
+@click.pass_context
+def rides_v5_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
+	import boto3
+	import yaml
+
+	ym = ym.replace('-', '')
+	if len(ym) != 6 or not ym.isdigit():
+		raise click.BadParameter(f'YM must be YYYYMM or YYYY-MM; got {ym!r}')
+	m0 = datetime(int(ym[:4]), int(ym[4:]), 1, tzinfo=timezone.utc)
+	m1 = datetime(m0.year + 1, 1, 1, tzinfo=timezone.utc) if m0.month == 12 else m0.replace(month=m0.month + 1)
+	p0 = datetime(m0.year - 1, 12, 1, tzinfo=timezone.utc) if m0.month == 1 else m0.replace(month=m0.month - 1)
+
+	# 1. Plain-key mirror: the engine's rides factory discovers months by
+	# listing `s3://ctbk/normalized/` — DVC pushes only content-addressed
+	# blobs, so each new month needs this server-side copy.
+	dvc_path = Path(f's3/ctbk/normalized/{ym}.parquet.dvc')
+	if not dvc_path.exists():
+		raise click.ClickException(f'{dvc_path} not found — has {ym} been consolidated?')
+	out = yaml.safe_load(dvc_path.read_text())['outs'][0]
+	md5, size = out['md5'], out['size']
+	s3 = boto3.client('s3', region_name='us-east-1')
+	dst = f'normalized/{ym}.parquet'
+	try:
+		have = s3.head_object(Bucket='ctbk', Key=dst)['ContentLength']
+	except s3.exceptions.ClientError:
+		have = None
+	if have == size:
+		err(f'mirror: s3://ctbk/{dst} up to date ({size:,} B)')
+	elif dry_run:
+		err(f'mirror: would copy .dvc/files/md5/{md5[:2]}/{md5[2:]} → {dst} ({size:,} B; have {have})')
+	else:
+		s3.copy_object(Bucket='ctbk', Key=dst, CopySource={'Bucket': 'ctbk', 'Key': f'.dvc/files/md5/{md5[:2]}/{md5[2:]}'})
+		err(f'mirror: copied → s3://ctbk/{dst} ({size:,} B)')
+
+	# 2. Spillback: prev-month rides that ended in `ym` only became
+	# attributable now — invalidate prev month so the start-anchor fill
+	# re-ingests it. (End-anchor months are complete on first build.)
+	from pyrmts_engine.invalidation import invalidate, load_invalidations
+	from ctbk.pyramid_cascade.engine_check import load_pyramid
+	pyramid = load_pyramid('rides-v5-start')
+	entries, _ = load_invalidations(pyramid)
+	if any(e.start == p0 and e.end == m0 for e in entries):
+		err(f'invalidate: [{p0:%Y-%m-%d}, {m0:%Y-%m-%d}) already journaled')
+	elif dry_run:
+		err(f'invalidate: would journal [{p0:%Y-%m-%d}, {m0:%Y-%m-%d}) on rides-v5-start')
+	else:
+		invalidate(pyramid, (p0, m0))
+		err(f'invalidate: journaled [{p0:%Y-%m-%d}, {m0:%Y-%m-%d}) on rides-v5-start')
+
+	# 3. Fills, range capped at month-end.
+	from ctbk.pyramid_cascade.lite import RIDES_GENESIS
+	range_ = f'{RIDES_GENESIS:%Y-%m-%dT%H:%M}/{m1:%Y-%m-%dT%H:%M}'
+	for config_name, prefix, factory in RIDES_V5_ANCHOR_SPECS:
+		rc = _engine_submit(
+			config_name,
+			scratch_prefix=prefix,
+			fill=True,
+			source_spec=factory,
+			range_=range_,
+			watch=True,
+			dry_run=dry_run,
+		)
+		if rc:
+			raise click.ClickException(f'{config_name} fill failed (rc={rc})')
+
+	# 4. RG-manifest rows for the new shards (serving falls back to
+	# footer reads meanwhile, but big shards' footers are the expensive
+	# path the manifest exists to avoid).
+	ctx.invoke(gbfs_manifest_backfill, dry_run=dry_run)
+
+	err(f'rides-v5 extended through {m1:%Y-%m}. Not covered: station-map/vocab regen for new '
+		f'stations (spec cadence item 4). Verify: `ctbk gbfs rides-v5-accept -m {p0:%Y-%m},{m0:%Y-%m} -r {m0:%Y-%m}`')
+
+
 # ─── pyrmts-engine validation (specs/pyrmts-engine-validation.md) ──────
 
 
@@ -1181,51 +1266,32 @@ def gbfs_engine_jobdef(dry_run: bool, image: str) -> None:
 	err(f"registered rev {out['revision']}: {image}")
 
 
-@gbfs_engine.command('submit', help='Submit an engine build of the scratch prefix to AWS Batch (`pyrmts-engine batch submit` passthrough with the standard ctbk args).')
-@option('-a', '--aligned', default=None, help='Smoke range: DUR[:N] = first N epoch-aligned DUR periods after genesis.')
-@option('-b', '--mem-budget', default=None, help='Window-admission byte budget, e.g. 24g (build -b; default 70% of the cgroup limit).')
-@option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
-@option('-c', '--close-chunk', default=None, help='Target combined-long bytes per close chunk, e.g. 1g (build -c).')
-@option('-e', '--env', 'envs', multiple=True, help='Extra container env var NAME=VALUE (repeatable).')
-@option('-f', '--fill', is_flag=True, help='Declarative gap-fill: diff expected min-cover vs actual storage, build only missing (build -f; range optional, defaults genesis→now). See pyrmts specs/engine-fill-mode.md.')
-@option('-g', '--rg-size', type=int, default=2048, show_default=True, help='Output-shard parquet row-group size.')
-@option('-j', '--workers', type=int, default=None, help='Window-worker threads (build -j; default: job vCPUs).')
-@option('-K', '--max-inflight', type=int, default=None, help='Max windows in flight past the watermark (build -K).')
-@option('-k', '--close-workers', type=int, default=None, help='Concurrent close computations (build -C).')
-@option('-M', '--memory', type=int, default=None, help='Override job memory MiB (e.g. 122880 needs -V 16).')
-@option('-m', '--manifest', 'manifest_name', default='manifest.jsonl', show_default=True, help='Manifest object name under the scratch prefix.')
-@option('-n', '--dry-run', is_flag=True, help='Print the submit command without running it.')
-@option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
-@option('-r', '--range', 'range_', default=None, help='Half-open build range `[FROM]/TO` (UTC ISO; FROM defaults to genesis).')
-@option('-s', '--source', 'source_rung', default='1m', show_default=True, help='Source tier, `tier` (min-cover: read the tier as stored) or `tier@shard_dur` (pin one rung, e.g. seeded scratch).')
-@option('-u', '--resume', is_flag=True, help='Skip shards already in the manifest (resume after a Spot reclaim).')
-@option('-V', '--vcpus', type=int, default=None, help='Override job vCPUs.')
-@option('-W', '--watch', is_flag=True, help='Tail the job log stream; exit with its status.')
-@option('-w', '--window', default='12h', show_default=True, help='Streaming window Duration (memory dial).')
-@option('-x', '--source-factory', 'source_spec', default=None, help='Source factory module:attr (needs an app-derived image; overrides -s).')
-def gbfs_engine_submit(
-	aligned: str | None,
-	mem_budget: str | None,
+def _engine_submit(
 	config_name: str,
-	close_chunk: str | None,
-	envs: tuple[str, ...],
-	fill: bool,
-	rg_size: int,
-	workers: int | None,
-	max_inflight: int | None,
-	close_workers: int | None,
-	memory: int | None,
-	manifest_name: str,
-	dry_run: bool,
-	scratch_prefix: str | None,
-	range_: str | None,
-	source_rung: str,
-	resume: bool,
-	vcpus: int | None,
-	watch: bool,
-	window: str,
-	source_spec: str | None,
-) -> None:
+	*,
+	aligned: str | None = None,
+	mem_budget: str | None = None,
+	close_chunk: str | None = None,
+	envs: tuple[str, ...] = (),
+	fill: bool = False,
+	rg_size: int = 2048,
+	workers: int | None = None,
+	max_inflight: int | None = None,
+	close_workers: int | None = None,
+	memory: int | None = None,
+	manifest_name: str = 'manifest.jsonl',
+	dry_run: bool = False,
+	scratch_prefix: str | None = None,
+	range_: str | None = None,
+	source_rung: str = '1m',
+	resume: bool = False,
+	vcpus: int | None = None,
+	watch: bool = False,
+	window: str = '12h',
+	source_spec: str | None = None,
+) -> int:
+	"""Build + run the `pyrmts-engine batch submit` command; returns its
+	exit code (0 for dry-run)."""
 	prefix = scratch_prefix or f'{config_name}-engine-check'
 	bucket = os.environ.get('R2_BUCKET', 'ctbk')
 	from ctbk.pyramid_cascade.engine_check import _rides_anchor
@@ -1281,8 +1347,64 @@ def gbfs_engine_submit(
 	cmd += [f's3://{bucket}/{prefix}/config.yaml']
 	if dry_run:
 		print(' '.join(cmd))
-		return
-	sys.exit(subprocess.run(cmd).returncode)
+		return 0
+	return subprocess.run(cmd).returncode
+
+
+@gbfs_engine.command('submit', help='Submit an engine build of the scratch prefix to AWS Batch (`pyrmts-engine batch submit` passthrough with the standard ctbk args).')
+@option('-a', '--aligned', default=None, help='Smoke range: DUR[:N] = first N epoch-aligned DUR periods after genesis.')
+@option('-b', '--mem-budget', default=None, help='Window-admission byte budget, e.g. 24g (build -b; default 70% of the cgroup limit).')
+@option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
+@option('-c', '--close-chunk', default=None, help='Target combined-long bytes per close chunk, e.g. 1g (build -c).')
+@option('-e', '--env', 'envs', multiple=True, help='Extra container env var NAME=VALUE (repeatable).')
+@option('-f', '--fill', is_flag=True, help='Declarative gap-fill: diff expected min-cover vs actual storage, build only missing (build -f; range optional, defaults genesis→now). See pyrmts specs/engine-fill-mode.md.')
+@option('-g', '--rg-size', type=int, default=2048, show_default=True, help='Output-shard parquet row-group size.')
+@option('-j', '--workers', type=int, default=None, help='Window-worker threads (build -j; default: job vCPUs).')
+@option('-K', '--max-inflight', type=int, default=None, help='Max windows in flight past the watermark (build -K).')
+@option('-k', '--close-workers', type=int, default=None, help='Concurrent close computations (build -C).')
+@option('-M', '--memory', type=int, default=None, help='Override job memory MiB (e.g. 122880 needs -V 16).')
+@option('-m', '--manifest', 'manifest_name', default='manifest.jsonl', show_default=True, help='Manifest object name under the scratch prefix.')
+@option('-n', '--dry-run', is_flag=True, help='Print the submit command without running it.')
+@option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
+@option('-r', '--range', 'range_', default=None, help='Half-open build range `[FROM]/TO` (UTC ISO; FROM defaults to genesis).')
+@option('-s', '--source', 'source_rung', default='1m', show_default=True, help='Source tier, `tier` (min-cover: read the tier as stored) or `tier@shard_dur` (pin one rung, e.g. seeded scratch).')
+@option('-u', '--resume', is_flag=True, help='Skip shards already in the manifest (resume after a Spot reclaim).')
+@option('-V', '--vcpus', type=int, default=None, help='Override job vCPUs.')
+@option('-W', '--watch', is_flag=True, help='Tail the job log stream; exit with its status.')
+@option('-w', '--window', default='12h', show_default=True, help='Streaming window Duration (memory dial).')
+@option('-x', '--source-factory', 'source_spec', default=None, help='Source factory module:attr (needs an app-derived image; overrides -s).')
+def gbfs_engine_submit(
+	aligned: str | None,
+	mem_budget: str | None,
+	config_name: str,
+	close_chunk: str | None,
+	envs: tuple[str, ...],
+	fill: bool,
+	rg_size: int,
+	workers: int | None,
+	max_inflight: int | None,
+	close_workers: int | None,
+	memory: int | None,
+	manifest_name: str,
+	dry_run: bool,
+	scratch_prefix: str | None,
+	range_: str | None,
+	source_rung: str,
+	resume: bool,
+	vcpus: int | None,
+	watch: bool,
+	window: str,
+	source_spec: str | None,
+) -> None:
+	sys.exit(_engine_submit(
+		config_name,
+		aligned=aligned, mem_budget=mem_budget, close_chunk=close_chunk, envs=envs,
+		fill=fill, rg_size=rg_size, workers=workers, max_inflight=max_inflight,
+		close_workers=close_workers, memory=memory, manifest_name=manifest_name,
+		dry_run=dry_run, scratch_prefix=scratch_prefix, range_=range_,
+		source_rung=source_rung, resume=resume, vcpus=vcpus, watch=watch,
+		window=window, source_spec=source_spec,
+	))
 
 
 def _load_manifest(path: str) -> list[dict]:

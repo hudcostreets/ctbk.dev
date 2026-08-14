@@ -106,6 +106,8 @@ After the 202607 catch-up (plain-key mirror copy of `normalized/202607.parquet`,
 - **rebin 2026-07: 0 diffs** both anchors (1.31M/1.32M rows).
 - **totals: v5Δ ≡ v3Δ everywhere** (pyramids agree with each other exactly); both sit −84/−116 (June) and −3,408/−3,475 (July, ≈0.07%) below raw normalized counts = rides at stations absent from `station-luc.json`/id-map (July's new stations). Clears when the station-map/vocab regen joins the monthly cadence.
 
+**`ctbk gbfs rides-v5-extend <ym>`** wraps items 1–3 below (idempotent: skips an up-to-date mirror + already-journaled invalidation; `-n` dry-runs). The ci.yml hook = call it after `cons create` once GHA IAM Batch-submit perms are verified; until then it's the manual monthly one-liner.
+
 Monthly-cadence gaps surfaced (the ci.yml hook must do all of these):
 1. Plain-key mirror copy `normalized/<ym>.parquet` (server-side from the DVC store) — the 8/07 refresh was one-off.
 2. `invalidate` prev month (start anchor spillback) + `submit -f -x` both anchors, **range capped at the new month's end** (running to `now` mid-month writes 0-row tip shards that read as built-and-empty later, and trips `max_missing_source` on the absent in-progress month).
