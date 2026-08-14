@@ -237,3 +237,31 @@ jobs:
               icon_emoji=':bike:',
           ).sync(Thread(messages=messages))
           PY
+
+      # Failed deploys were previously SILENT (the success notify simply
+      # didn't fire) — e.g. 2026-08-14's two e2e-gated failures left the
+      # site undeployable for ~5h with no ping.
+      - name: Notify Slack — deploy failed
+        if: failure() && github.ref == 'refs/heads/www'
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SHA: ${{ github.sha }}
+          MSG: ${{ github.event.head_commit.message }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          uv run --no-project --with 'thrds==0.4.0' --python 3.12 python - <<'PY'
+          import os
+          from thrds import SlackClient
+          sha = os.environ['SHA']
+          subject = (os.environ.get('MSG') or '').splitlines()[0] if os.environ.get('MSG') else '(no message)'
+          SlackClient(
+              token=os.environ['SLACK_BOT_TOKEN'],
+              channel='C0B5MKF28NP',
+              username='ctbk-bot',
+              icon_emoji=':bike:',
+          ).post(
+              f":x: *ctbk.dev deploy FAILED* — <{os.environ['REPO_URL']}/commit/{sha}|`{sha[:7]}`> {subject}\n"
+              f"<{os.environ['RUN_URL']}|logs>"
+          )
+          PY

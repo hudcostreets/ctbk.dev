@@ -37,6 +37,9 @@ jobs:
         run: |
           if [ -n "${{ inputs.args }}" ]; then
             echo "args=${{ inputs.args }}" >> "$GITHUB_OUTPUT"
+            # Surface the month in Slack notifies too (else "month ?")
+            ym=$(echo "${{ inputs.args }}" | grep -oE '20[0-9]{4}' | head -1)
+            [ -n "$ym" ] && echo "ym=$ym" >> "$GITHUB_OUTPUT"
           else
             # Auto-detect month from most recent tripdata import commit
             ym=$(git log -1 --format=%s | sed -n 's/.*\(20[0-9]\{4\}\)-citibike.*/\1/p' | head -1)
