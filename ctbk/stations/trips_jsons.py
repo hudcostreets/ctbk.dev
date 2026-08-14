@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 from utz import err, run
+from utz.cli import flag
 
 from ctbk.cli.base import ctbk
 from ctbk.cli.git_dvc_cmd import git_dvc_cmd
@@ -35,7 +36,8 @@ SORT_COLS = ['Year', 'Month', 'Docking', 'Gender', 'User Type', 'Rideable Type']
 
 @ctbk.command('station-trips-json', help="Generate per-station ymdgtb_cd.json files from aggregated parquets.")
 @git_dvc_cmd
-def create(dry_run: bool) -> str | None:
+@flag('-f', '--force', help="Skip the full-history input guard (whole-artifact rebuild from a deliberately partial aggregate set).")
+def create(dry_run: bool, force: bool) -> str | None:
     id_map = json.loads(ID_MAP.read_text())
 
     frames = []
@@ -69,6 +71,18 @@ def create(dry_run: bool) -> str | None:
         .sum()
     )
     err(f"Aggregated to {len(agg):,} rows across {agg['short_name'].nunique():,} canonical stations")
+
+    # This is a whole-artifact rebuild from whatever aggregate parquets exist
+    # locally: a partial set silently truncates 13y of history (2026-08-14
+    # incident: a CI runner with only the new month's aggregates shrank the
+    # artifact 229MB → 2.5MB). Require inputs reaching back to genesis.
+    months = sorted(set(zip(agg['Year'].astype(int), agg['Month'].astype(int))))
+    if not force and (months[0] != (2013, 6) or len(months) < 150):
+        raise RuntimeError(
+            f"aggregate inputs look partial: {len(months)} months, earliest "
+            f"{months[0][0]}-{months[0][1]:02d} (expected genesis 2013-06). "
+            f"`dvc pull 's3/ctbk/aggregated/ymrgtb[se]_cd_*.parquet.dvc'` first, or pass -f/--force."
+        )
 
     if dry_run:
         err("Dry run, not writing files")
