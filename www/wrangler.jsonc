@@ -25,5 +25,20 @@
   },
   "observability": {
     "enabled": true
+  },
+  // Staging site at dev.ctbk.dev (`wrangler deploy --env dev` → worker
+  // `ctbk-dev-dev`; the `dev` branch deploys here via www.yml). Same
+  // domain-attach convention as prod: `dev.ctbk.dev` is account state,
+  // not config.
+  "env": {
+    "dev": {
+      "assets": {
+        "directory": "./dist",
+        "not_found_handling": "single-page-application"
+      },
+      "observability": {
+        "enabled": true
+      }
+    }
   }
 }

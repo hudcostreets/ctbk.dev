@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - www
+      - dev
       - scrns-playwright-test
   workflow_dispatch:
 jobs:
@@ -46,6 +47,7 @@ jobs:
       # re-run to rebuild with fresh files.
       - name: Screenshots dep-check
         id: scrgate
+        if: github.ref != 'refs/heads/dev'
         run: |
           data_md5=$(awk '/md5:/{print $3; exit}' s3/ctbk/stations/ymdgtb.dvc)
           www_tree=$(git ls-files -s -- www ':!www/public/screenshots' | git hash-object --stdin)
@@ -109,29 +111,33 @@ jobs:
       # zone permissions).
       - name: Deploy to Cloudflare Workers (ctbk-dev)
         id: deploy
-        if: github.ref == 'refs/heads/www'
+        if: github.ref == 'refs/heads/www' || github.ref == 'refs/heads/dev'
         working-directory: www
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: pnpm exec wrangler deploy
+          # `dev` branch → staging worker `ctbk-dev-dev` (dev.ctbk.dev)
+          ENV_FLAG: ${{ github.ref == 'refs/heads/dev' && '--env dev' || '' }}
+        run: pnpm exec wrangler deploy $ENV_FLAG
       - name: Post-deploy smoke check
         id: smoke
         if: steps.deploy.outcome == 'success'
         working-directory: www
+        env:
+          HOST: ${{ github.ref == 'refs/heads/dev' && 'dev.ctbk.dev' || 'ctbk.dev' }}
         run: |
           # One-shot-ish (3 tries): Workers-Assets deploys are atomic
           # (index + chunks flip together), unlike the GHP era's
           # out-of-sync windows that needed a 5-min polling loop.
           for i in 1 2 3; do
             sleep 10
-            html=$(curl -sf https://ctbk.dev/ || true)
+            html=$(curl -sf "https://$HOST/" || true)
             [ -z "$html" ] && continue
             chunks=$(echo "$html" | grep -oE 'assets/[A-Za-z0-9._/-]+\.(js|css)' | sort -u)
             [ -z "$chunks" ] && continue
             fail=0
             for c in $chunks; do
-              code=$(curl -s -o /dev/null -w '%{http_code}' "https://ctbk.dev/$c")
+              code=$(curl -s -o /dev/null -w '%{http_code}' "https://$HOST/$c")
               [ "$code" = "200" ] || { fail=1; echo "  $code  $c"; break; }
             done
             if [ "$fail" = "0" ]; then
