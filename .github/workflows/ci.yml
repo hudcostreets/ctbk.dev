@@ -130,13 +130,25 @@ jobs:
           git config --global user.name 'GitHub Actions'
           git config --global user.email 'ryan-williams@users.noreply.github.com'
 
-      - name: Pull tripdata
+      - name: Pull pipeline inputs
         if: steps.args.outputs.args
         run: |
           # Pull any tripdata zips needed by the command
           ym=$(echo "${{ steps.args.outputs.args }}" | grep -oE '20[0-9]{4}' | head -1)
           if [ -n "$ym" ]; then
             dvc pull s3/tripdata/*${ym}*.dvc || true
+            # Whole-history / prev-month inputs for `ctbk update` steps that
+            # would otherwise silently rebuild full-history artifacts from a
+            # partial local set (2026-08-14 truncation incident, #183):
+            # - prev month's consolidated parquet: rides base-tier refold
+            #   (`rides-v1-build -O` re-buckets prev month + its spillover)
+            # - ymrgtb{s,e} aggregates (~20MB total): `station-trips-json`
+            #   whole-artifact rebuild
+            # - station-observations: lat/lng fallback in rides base build
+            prev=$(date -u -d "${ym}01 -1 month" +%Y%m)
+            dvc pull s3/ctbk/normalized/${prev}.parquet.dvc
+            dvc pull s3/ctbk/aggregated/ymrgtbs_cd_*.parquet.dvc s3/ctbk/aggregated/ymrgtbe_cd_*.parquet.dvc
+            dvc pull s3/ctbk/stations/station-observations.parquet.dvc
           fi
 
       - uses: actions/setup-node@v5
