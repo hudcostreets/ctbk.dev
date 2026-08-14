@@ -945,6 +945,51 @@ def gbfs_invalidate(
 	err(f'{journal_key(pyramid)}: appended [{interval[0].isoformat()}, {interval[1].isoformat()}) — {n} entries pending repair')
 
 
+# ─── rides-v5 acceptance (specs/rides-v5.md §Acceptance) ───────────────
+
+
+@gbfs.command('rides-v5-accept', help='rides-v5 acceptance vs rides-v3 + normalized ground truth: (1) per-station monthly row equivalence via the station↔LUC map, (2) 1h→6h monoid rebin probe, (3) leaf count totals vs normalized-source ride counts.')
+@option('-a', '--anchor', default='both', show_default=True, help="'start' | 'end' | 'both'.")
+@option('-m', '--months', default='2013-07,2019-06,2024-06,2026-06,2026-07', show_default=True, help='Comma-separated YYYY-MM sample months (checks 1+3).')
+@option('-r', '--rebin-months', default='2026-06', show_default=True, help='Months for the 1h→6h rebin probe (heavier; check 2).')
+@option('-v', '--verbose', is_flag=True, help='Print example diff rows on failure.')
+def rides_v5_accept(anchor: str, months: str, rebin_months: str, verbose: bool) -> None:
+	from ctbk.pyramid_cascade.rides_accept import check_rebin, check_station_equiv, check_totals
+	from ctbk.rides_v1 import r2_client
+	cli = r2_client()
+	anchors = ('start', 'end') if anchor == 'both' else (anchor,)
+	n_fail = 0
+	for a in anchors:
+		for ym in filter(None, months.split(',')):
+			r = check_station_equiv(cli, a, ym)
+			ok = r['diff_rows'] == 0 and r['v5_rows'] > 0
+			n_fail += not ok
+			print(f"equiv  {a:5s} {ym}: {'OK ' if ok else 'FAIL'} "
+				  f"v5={r['v5_rows']:,} v3={r['v3_rows']:,} rows "
+				  f"({r['stations_v5']:,}/{r['stations_v3']:,} stations), {r['diff_rows']:,} diffs")
+			if verbose and r['diff_rows']:
+				for ex in r['examples']:
+					print(f"    {ex}")
+			t = check_totals(cli, a, ym)
+			ok = t['v5_delta'] == 0 and t['v3_delta'] == 0
+			n_fail += not ok
+			print(f"totals {a:5s} {ym}: {'OK ' if ok else 'FAIL'} "
+				  f"gt={t['agg']:,} v5Δ={t['v5_delta']:+,} v3Δ={t['v3_delta']:+,}")
+		for ym in filter(None, rebin_months.split(',')):
+			r = check_rebin(cli, a, ym)
+			ok = r['diff_rows'] == 0 and r['materialized_rows'] > 0
+			n_fail += not ok
+			print(f"rebin  {a:5s} {ym}: {'OK ' if ok else 'FAIL'} "
+				  f"1h→6h={r['rebinned_rows']:,} vs 6h={r['materialized_rows']:,} rows, {r['diff_rows']:,} diffs")
+			if verbose and r['diff_rows']:
+				for ex in r['examples']:
+					print(f"    {ex}")
+	if n_fail:
+		err(f"{n_fail} acceptance check(s) FAILED")
+		sys.exit(1)
+	err("all acceptance checks passed")
+
+
 # ─── pyrmts-engine validation (specs/pyrmts-engine-validation.md) ──────
 
 
