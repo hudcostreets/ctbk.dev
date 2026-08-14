@@ -38,7 +38,15 @@ const MAX_CELL_TOKENS = 45;
 // invalidate + re-fill, ~$10/mo of pointless D1 writes). Big
 // consolidated shards — the ones whose footers are expensive — rarely
 // churn. Applies to both lazy fills and the backfill op.
+//
+// Rides pyramids get NO floor: their shards are monthly-frozen (no
+// Lambda churn, negligible D1 write cost), and full manifest coverage
+// is what lets the Home chart's 3 concurrent region queries bypass the
+// footer-fetch guard entirely (unmanifested calendar shards otherwise
+// serialize behind `FOOTER_FETCH_MAX_INFLIGHT=1` and shed 503s under
+// the default-pyramid=v5 load shape).
 const MIN_FILL_RGS = 512;
+const minFillRgs = (pyramid: string): number => pyramid.startsWith('rides-') ? 0 : MIN_FILL_RGS;
 
 interface ManifestRg {
 	rg_idx: number;
@@ -226,7 +234,7 @@ async function fallbackFetch(opts: SegmentFetchOpts): Promise<Row[]> {
 		const file = storageBuffer(opts.storage, opts.key, head.size);
 		const metadata = await parquetMetadataAsync(file, { initialFetchSize: INITIAL_FETCH_SIZE });
 
-		if (metadata.row_groups.length >= MIN_FILL_RGS) {
+		if (metadata.row_groups.length >= minFillRgs(opts.pyramid)) {
 			opts.defer(fillManifest(opts, metadata).catch((err) => {
 				console.warn(`rg_manifest fill failed for ${opts.key}: ${(err as Error).message}`);
 			}));
@@ -292,7 +300,7 @@ export async function backfillManifestKey(
 		if (head === null) throw new Error(`backfillManifestKey: object not found: ${key}`);
 		const file = storageBuffer(storage, key, head.size);
 		const metadata = await parquetMetadataAsync(file, { initialFetchSize: INITIAL_FETCH_SIZE });
-		if (metadata.row_groups.length < MIN_FILL_RGS) {
+		if (metadata.row_groups.length < minFillRgs(pyramid)) {
 			return { n_rgs: metadata.row_groups.length, written_at: writtenAt, skipped: true };
 		}
 		await fillManifestInner(db, pyramid, key, writtenAt, metadata, cellCol);
