@@ -1050,21 +1050,66 @@ def rides_v5_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
 		invalidate(pyramid, (p0, m0))
 		err(f'invalidate: journaled [{p0:%Y-%m-%d}, {m0:%Y-%m-%d}) on rides-v5-start')
 
-	# 3. Fills, range capped at month-end.
-	from ctbk.pyramid_cascade.lite import RIDES_GENESIS
-	range_ = f'{RIDES_GENESIS:%Y-%m-%dT%H:%M}/{m1:%Y-%m-%dT%H:%M}'
+	# 3. Fills, UNCAPPED range (genesis → now). Capping at month-end
+	# leaves coarse-rung holes: shards whose spans cross the cap (e.g.
+	# `1d/64d` covering Jun 4–Aug 7) can't build inside it, and July's
+	# serve-time monthly rebin rides on the 1d tier. Tip shards carrying
+	# an empty current-month tail are the DESIGN (het-tiled tip); only
+	# wholly-empty pure-future shards are relics — swept in step 4.
 	for config_name, prefix, factory in RIDES_V5_ANCHOR_SPECS:
 		rc = _engine_submit(
 			config_name,
 			scratch_prefix=prefix,
 			fill=True,
 			source_spec=factory,
-			range_=range_,
 			watch=True,
 			dry_run=dry_run,
 		)
 		if rc:
 			raise click.ClickException(f'{config_name} fill failed (rc={rc})')
+
+	# 4. Sweep 0-row relic shards lying wholly past month-end: present-
+	# but-empty reads as "built" to later fills (an outage signal), so a
+	# relic blocks its window from ever filling once real data lands.
+	# Must be removed from all THREE stores — R2, the D1 registry, and
+	# the per-prefix `manifest.jsonl` (the fill's presence source).
+	from ctbk.pyramid_cascade.lite import r2_client as _lite_r2
+	cli_r2 = _lite_r2()
+	m1_ms = int(m1.timestamp()) * 1000
+	relics: list[tuple[str, str, str, str, int]] = []  # (key, pyramid, tier, shard_dur, period_start_ms)
+	for config_name, prefix, _ in RIDES_V5_ANCHOR_SPECS:
+		for tier in ('1h', '3h', '6h', '12h', '1d', '3d', '7d', '14d'):
+			tier_prefix = f'{prefix}/{tier}/'
+			resp = cli_r2.list_objects_v2(Bucket='ctbk', Prefix=tier_prefix)
+			for o in resp.get('Contents', []):
+				if o['Size'] > 4096:
+					continue
+				shard, period = o['Key'][len(tier_prefix):-len('.parquet')].split('/')
+				p0_dt = datetime.strptime(period, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+				if int(p0_dt.timestamp()) * 1000 >= m1_ms:
+					relics.append((o['Key'], config_name, tier, shard, int(p0_dt.timestamp()) * 1000))
+	if relics:
+		err(f'sweep: {len(relics)} pure-future 0-row relic shard(s)')
+		for key, *_ in relics:
+			err(f'  {key}')
+		if not dry_run:
+			for key, *_ in relics:
+				cli_r2.delete_object(Bucket='ctbk', Key=key)
+			conds = ' OR '.join(
+				f"(pyramid='{p}' AND tier='{t}' AND shard_dur='{s}' AND period_start={ms})"
+				for _, p, t, s, ms in relics
+			)
+			_run_wrangler_d1(f'DELETE FROM pyramid_shards WHERE {conds}', db='ctbk-gbfs', wrangler_cwd=DEFAULT_WRANGLER_CWD)
+			for _config_name2, prefix2, _f in RIDES_V5_ANCHOR_SPECS:
+				mkey = f'{prefix2}/manifest.jsonl'
+				body = cli_r2.get_object(Bucket='ctbk', Key=mkey)['Body'].read().decode()
+				recs = [json.loads(l) for l in body.splitlines() if l.strip()]
+				dropped = {k for k, *_ in relics}
+				keep = [r for r in recs if r['key'] not in dropped]
+				if len(keep) != len(recs):
+					out = '\n'.join(json.dumps(r, separators=(',', ':')) for r in keep) + '\n'
+					cli_r2.put_object(Bucket='ctbk', Key=mkey, Body=out.encode(), ContentType='application/jsonl')
+					err(f'  {mkey}: {len(recs)} → {len(keep)} records')
 
 	# 4. RG-manifest rows for the new shards (serving falls back to
 	# footer reads meanwhile, but big shards' footers are the expensive
