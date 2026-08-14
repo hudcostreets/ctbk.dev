@@ -52,6 +52,11 @@ STATION_OBS_PATH = Path(f's3/{R2_BUCKET}/stations/station-observations.parquet')
 Variant = Literal['v1', 'v2', 'v3']
 VARIANTS: tuple[Variant, ...] = ('v1', 'v2', 'v3')
 
+# Earliest tripdata month. 'all'-sharded outputs span [genesis, now); any
+# full-history recompute must enumerate inputs from here, never from a
+# narrower CLI window (see the 2026-08-14 truncation incident, task #183).
+GENESIS_DATE = Date(2013, 6, 1)
+
 
 def dst_prefix(variant: Variant) -> str:
     return f'rides-{variant}'
@@ -385,21 +390,22 @@ def _load_rides_for_anchor(ym: YM, anchor: Anchor) -> pd.DataFrame:
     ym_start = pd.Timestamp(f'{ym_str[:4]}-{ym_str[4:6]}-01')
     ym_end = ym_start + pd.offsets.MonthBegin(1)
 
-    paths = [SRC_DIR / f'{ym}.parquet']
+    # The month's own parquet is a hard requirement: building from a partial
+    # source set silently truncates the shard. Only the spillover month
+    # (ym+1, not yet published for the latest ym) may be legitimately absent.
+    own_path = SRC_DIR / f'{ym}.parquet'
+    if not own_path.exists():
+        raise FileNotFoundError(
+            f"normalized source missing: {own_path} — `dvc pull` it before building {ym}"
+        )
+    paths = [own_path]
     if anchor == 'start':
         nxt = ym + 1
         nxt_path = SRC_DIR / f'{nxt}.parquet'
         if nxt_path.exists():
             paths.append(nxt_path)
 
-    frames = []
-    for p in paths:
-        if not p.exists():
-            err(f"  missing source: {p}")
-            continue
-        frames.append(pd.read_parquet(p, columns=SRC_COLS))
-    if not frames:
-        return pd.DataFrame(columns=SRC_COLS)
+    frames = [pd.read_parquet(p, columns=SRC_COLS) for p in paths]
     df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
 
     cfg = ANCHOR_CONFIG[anchor]
@@ -552,12 +558,11 @@ def build_1h_month_table(
     agg['count_sumsq'] = agg['count_n']
     agg['duration_n'] = agg['count_n']
 
-    out_cols = [
-        cc, 'dt', 'gender', 'user_type', 'bike_type',
-        'count_n', 'count_sum', 'count_sumsq',
-        'duration_n', 'duration_sum', 'duration_sumsq',
-    ]
-    schema = pa.schema([
+    return shard_table(agg, cc)
+
+
+def shard_schema(cc: str) -> pa.Schema:
+    return pa.schema([
         (cc, pa.string()),
         ('dt', pa.int64()),
         ('gender', pa.string()),
@@ -570,7 +575,11 @@ def build_1h_month_table(
         ('duration_sum', pa.int64()),
         ('duration_sumsq', pa.int64()),
     ])
-    return pa.Table.from_pandas(agg[out_cols], schema=schema, preserve_index=False)
+
+
+def shard_table(df: pd.DataFrame, cc: str) -> pa.Table:
+    out_cols = [cc, 'dt', *DIM_COLS, *MONOID_COLS]
+    return pa.Table.from_pandas(df[out_cols], schema=shard_schema(cc), preserve_index=False)
 
 
 def write_table_to_r2(cli, table: pa.Table, key: str, cell_col: str, variant: Variant = 'v1') -> int:
@@ -670,6 +679,21 @@ def build_cascade_table(
     cc = cell_col(anchor, variant)
     in_periods = input_periods_for_output(tier, shard_start, spec.derive_from, all_dates, variant)
 
+    # Row-level window bounds, mirroring `input_periods_for_output`'s shard
+    # window. Enumeration alone can't restrict what's read when the *source*
+    # tier is 'all'-sharded (every v2/v3 derived tier): its single shard
+    # holds full history, so unfiltered rows would leak outside the window.
+    if spec.shard == 'all':
+        if all_dates is None:
+            raise ValueError("output shard='all' requires all_dates=(from, to)")
+        lo_dt = datetime.combine(all_dates[0], datetime.min.time(), tzinfo=timezone.utc)
+        hi_dt = datetime.combine(all_dates[1], datetime.min.time(), tzinfo=timezone.utc)
+    else:
+        lo_dt = shard_start
+        hi_dt = shard_end(spec.shard, shard_start)
+    lo_ms = int(lo_dt.timestamp()) * 1000
+    hi_ms = int(hi_dt.timestamp()) * 1000
+
     cli = None if local_dir else r2_client()
     group_keys = [cc, 'dt', *DIM_COLS]
 
@@ -685,6 +709,9 @@ def build_cascade_table(
         n_present += 1
         df = tab.to_pandas()
         del tab
+        df = df[(df['dt'] >= lo_ms) & (df['dt'] < hi_ms)]
+        if df.empty:
+            continue
         if spec.bin_sec is not None:
             df['dt'] = (df['dt'].astype('int64') // (spec.bin_sec * 1000)) * (spec.bin_sec * 1000)
         else:
@@ -697,28 +724,13 @@ def build_cascade_table(
             acc = pd.concat([acc, chunk], ignore_index=True)
             del chunk
             acc = acc.groupby(group_keys, sort=False, observed=True, dropna=False)[MONOID_COLS].sum().reset_index()
-    if n_present == 0:
+    if n_present == 0 or acc is None:
         return None
 
     agg = acc
     for c in MONOID_COLS:
         agg[c] = agg[c].astype('int64')
-
-    schema = pa.schema([
-        (cc, pa.string()),
-        ('dt', pa.int64()),
-        ('gender', pa.string()),
-        ('user_type', pa.string()),
-        ('bike_type', pa.string()),
-        ('count_n', pa.int64()),
-        ('count_sum', pa.int64()),
-        ('count_sumsq', pa.int64()),
-        ('duration_n', pa.int64()),
-        ('duration_sum', pa.int64()),
-        ('duration_sumsq', pa.int64()),
-    ])
-    out_cols = [cc, 'dt', *DIM_COLS, *MONOID_COLS]
-    return pa.Table.from_pandas(agg[out_cols], schema=schema, preserve_index=False)
+    return shard_table(agg, cc)
 
 
 # ─── Worker (top-level for ProcessPool pickling) ───────────────────────
@@ -731,6 +743,7 @@ def _build_shard_task(
     resolutions: tuple[int, ...],
     local_dir: str | None,
     all_dates_iso: tuple[str, str] | None,
+    full: bool = False,
     variant: Variant = 'v1',
 ) -> tuple[str, Anchor, str, int]:
     """Build + write one rides-<variant>/<anchor>/<tier>/<period>.parquet shard.
@@ -738,6 +751,14 @@ def _build_shard_task(
     Dispatches on `tier_specs(variant)[tier].derive_from`:
       - None → build from normalized source (1h tier only)
       - else → cascade from derive_from tier
+
+    'all'-sharded outputs hold full history, so `[-f, -T]` must never bound
+    their recompute directly (the 2026-08-14 truncation incident, task #183).
+    Instead:
+      - `full=True` (or no existing shard): recompute from `GENESIS_DATE`.
+      - else (merge-patch): recompute only output buckets overlapping
+        `[-f, -T]` from source, carry earlier rows over from the existing
+        shard unchanged.
     Returns (period, anchor, status, bytes). status ∈ {wrote, skip, empty}."""
     spec = tier_specs(variant)[tier]
     t = datetime.fromisoformat(shard_start_iso)
@@ -765,7 +786,29 @@ def _build_shard_task(
             (Date.fromisoformat(all_dates_iso[0]), Date.fromisoformat(all_dates_iso[1]))
             if all_dates_iso else None
         )
-        table = build_cascade_table(anchor, tier, t, local_dir, ad, variant)
+        if spec.shard == 'all':
+            assert ad is not None
+            lo_ms = int(datetime.combine(ad[0], datetime.min.time(), tzinfo=timezone.utc).timestamp()) * 1000
+            cutoff_ms = (
+                dt_floor_ms_fixed(lo_ms, spec.bin_sec) if spec.bin_sec is not None
+                else dt_floor_ms_calendar(lo_ms, tier)
+            )
+            existing = None if full else read_shard(anchor, tier, period, local_dir, cli, variant)
+            if existing is None:
+                table = build_cascade_table(anchor, tier, t, local_dir, (GENESIS_DATE, ad[1]), variant)
+            else:
+                # Merge-patch: recompute output buckets from the bucket-floor
+                # of `-f` (straddling fixed-width buckets refill completely),
+                # keep strictly-earlier rows from the existing shard.
+                cutoff_date = datetime.fromtimestamp(cutoff_ms / 1000, tz=timezone.utc).date()
+                fresh = build_cascade_table(anchor, tier, t, local_dir, (cutoff_date, ad[1]), variant)
+                old_df = existing.to_pandas()
+                old_df = old_df[old_df['dt'] < cutoff_ms]
+                parts = [df for df in (old_df, fresh.to_pandas() if fresh is not None else None)
+                         if df is not None and not df.empty]
+                table = shard_table(pd.concat(parts, ignore_index=True), cc) if parts else None
+        else:
+            table = build_cascade_table(anchor, tier, t, local_dir, ad, variant)
 
     if table is None:
         return (period, anchor, 'empty', 0)
@@ -805,6 +848,7 @@ def _ym_range(date_from: str, date_to: str) -> list[YM]:
         help="'start' | 'end' | 'both' (default 'both').")
 @option('-c', '--concurrency', type=int, default=4, help="Worker process count.")
 @option('-f', '--ym-from', 'ym_from', required=True, help="Inclusive start (YYYY-MM).")
+@flag('-F', '--full', help="'all'-sharded tiers: recompute the whole history (genesis → --ym-to) instead of merge-patching [-f, -T] into the existing shard. Implies -O.")
 @option('-l', '--local-dir', type=str, default=None,
         help="Read/write local dir instead of R2 (prototype/smoke).")
 @option('-n', '--dry-run', is_flag=True)
@@ -820,6 +864,7 @@ def rides_v1_build_cmd(
     anchor: str,
     concurrency: int,
     ym_from: str,
+    full: bool,
     local_dir: str | None,
     dry_run: bool,
     overwrite: bool,
@@ -836,6 +881,8 @@ def rides_v1_build_cmd(
     if anchor not in ('start', 'end', 'both'):
         raise BadParameter(f"--anchor must be one of start/end/both; got {anchor!r}")
     anchors: tuple[Anchor, ...] = ANCHORS if anchor == 'both' else (anchor,)  # type: ignore[assignment]
+    if full:
+        overwrite = True
 
     spec = specs[tier]
     ymf = _parse_ym(ym_from)
@@ -871,7 +918,7 @@ def rides_v1_build_cmd(
     if concurrency <= 1:
         for s_iso, a in tasks:
             period, _a, status, n = _build_shard_task(
-                tier, s_iso, a, overwrite, res_tup, local_dir, all_dates_iso, variant,  # type: ignore[arg-type]
+                tier, s_iso, a, overwrite, res_tup, local_dir, all_dates_iso, full, variant,  # type: ignore[arg-type]
             )
             err(f"  {status:5s} {a:5s} {period} ({n:,} B)")
             n_wrote += (status == 'wrote'); n_skip += (status == 'skip'); n_empty += (status == 'empty')
@@ -880,7 +927,7 @@ def rides_v1_build_cmd(
         with ProcessPoolExecutor(max_workers=concurrency) as pool:
             futs = {
                 pool.submit(
-                    _build_shard_task, tier, s_iso, a, overwrite, res_tup, local_dir, all_dates_iso, variant,  # type: ignore[arg-type]
+                    _build_shard_task, tier, s_iso, a, overwrite, res_tup, local_dir, all_dates_iso, full, variant,  # type: ignore[arg-type]
                 ): (s_iso, a)
                 for s_iso, a in tasks
             }

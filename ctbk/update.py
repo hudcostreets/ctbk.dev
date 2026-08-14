@@ -71,9 +71,12 @@ def update(
     # Rebuild rides pyramids (v1/v2/v3) that back /api/rides-{v1,v2,v3}.
     # Range = prev-month → current: rebuilding prev month's /1h start-anchored
     # shard picks up rides that started in prev but ended in current (dropped
-    # previously because the current month's normalized parquet didn't exist).
-    # Derived tiers span multi-month or all-time, so `-O` (overwrite) is
-    # required to fold in the new /1h data.
+    # previously because the current month's normalized parquet didn't exist)
+    # — `-O` on the base call makes that refold actually happen (without it
+    # the existing prev shard short-circuits as `skip`). Requires prev's
+    # `normalized/<ym>.parquet` locally (`ci.yml` pulls it). Derived tiers
+    # need `-O` to fold in the new /1h data; 'all'-sharded tiers merge-patch
+    # the [-f, -T] window into the existing full-history shard (task #183).
     err(f"--- Rides pyramids (v1/v2/v3) ---")
     yyyy, mm = ym[:4], ym[4:]
     ym_new = f"{yyyy}-{mm}"
@@ -82,7 +85,7 @@ def update(
     else:
         ym_prev = f"{yyyy}-{int(mm) - 1:02d}"
     for v in ('v1', 'v2', 'v3'):
-        ctbk_run('rides-v1-build', '-v', v, '-f', ym_prev, '-T', ym_new)
+        ctbk_run('rides-v1-build', '-v', v, '-f', ym_prev, '-T', ym_new, '-O')
         for t in ('3h', '6h', '12h', '1d', '3d', '7d', '14d', '1mo', '3mo', '1y'):
             ctbk_run('rides-v1-build', '-v', v, '-f', ym_prev, '-T', ym_new, '-t', t, '-O')
 
