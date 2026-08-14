@@ -68,7 +68,10 @@ def update(
     err(f"--- Station trips JSONs ---")
     ctbk_run('station-trips-json', '-a', '-d')
 
-    # Rebuild rides pyramids (v1/v2/v3) that back /api/rides-{v1,v2,v3}.
+    # Rebuild the rides-v3 pyramid that backs /api/rides-v3 (the Home chart).
+    # v1/v2 (h3-keyed) are retired — no monthly rebuilds; their code + R2
+    # prefixes await GC (h3 verdict 2026-08-14: child hexes neither necessary
+    # nor sufficient to cover their parent, unsuitable for exact rollups).
     # Range = prev-month → current: rebuilding prev month's /1h start-anchored
     # shard picks up rides that started in prev but ended in current (dropped
     # previously because the current month's normalized parquet didn't exist)
@@ -77,14 +80,14 @@ def update(
     # `normalized/<ym>.parquet` locally (`ci.yml` pulls it). Derived tiers
     # need `-O` to fold in the new /1h data; 'all'-sharded tiers merge-patch
     # the [-f, -T] window into the existing full-history shard (task #183).
-    err(f"--- Rides pyramids (v1/v2/v3) ---")
+    err(f"--- Rides pyramid (v3) ---")
     yyyy, mm = ym[:4], ym[4:]
     ym_new = f"{yyyy}-{mm}"
     if mm == '01':
         ym_prev = f"{int(yyyy) - 1}-12"
     else:
         ym_prev = f"{yyyy}-{int(mm) - 1:02d}"
-    for v in ('v1', 'v2', 'v3'):
+    for v in ('v3',):
         ctbk_run('rides-v1-build', '-v', v, '-f', ym_prev, '-T', ym_new, '-O')
         for t in ('3h', '6h', '12h', '1d', '3d', '7d', '14d', '1mo', '3mo', '1y'):
             ctbk_run('rides-v1-build', '-v', v, '-f', ym_prev, '-T', ym_new, '-t', t, '-O')
