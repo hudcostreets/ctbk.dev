@@ -56,6 +56,43 @@ async function selectBiggestStation(page: Page): Promise<{ x: number; y: number 
   return coords
 }
 
+/**
+ * Hover a rendered destination line and wait for the 3-tooltip state
+ * (permanent source tooltip + `→` mid-edge tooltip + destination tooltip).
+ *
+ * Targets actual `path`s in the "lines" pane rather than a fixed offset
+ * from the source station — which line fan exists at any pixel shifts with
+ * each data month. Each polyline is a straight 2-point segment, so its
+ * bbox center lies ON the line; try the longest few (midpoint farthest
+ * from the source hit-circle, widest hover target) until one sticks.
+ */
+async function hoverDestinationLine(page: Page): Promise<boolean> {
+  const tooltips = page.locator('.leaflet-container .leaflet-tooltip')
+  const candidates = await page.evaluate(() => {
+    const paths = document.querySelectorAll<SVGPathElement>('.leaflet-pane.leaflet-lines-pane path')
+    return [...paths]
+      .map(p => {
+        const b = p.getBoundingClientRect()
+        return { x: b.left + b.width / 2, y: b.top + b.height / 2, len: Math.hypot(b.width, b.height) }
+      })
+      .sort((a, b) => b.len - a.len)
+      .slice(0, 5)
+  })
+  for (const { x, y } of candidates) {
+    await page.mouse.move(x, y)
+    try {
+      await expect.poll(async () => {
+        const texts = await tooltips.allTextContents()
+        return texts.length === 3 && texts.filter(t => /→/.test(t)).length === 1
+      }, { timeout: 1500 }).toBe(true)
+      return true
+    } catch {
+      continue
+    }
+  }
+  return false
+}
+
 test.describe('Station map — selection + overlap', () => {
   test('selecting a station on /stations draws destination lines + permanent tooltip', async ({ page }) => {
     await page.goto('/stations')
@@ -78,7 +115,7 @@ test.describe('Station map — selection + overlap', () => {
   test('hovering a destination line shows source + edge + dest tooltips', async ({ page }) => {
     await page.goto('/stations')
     await waitForStations(page)
-    const station = await selectBiggestStation(page)
+    await selectBiggestStation(page)
 
     // Move cursor off the source station's hit area first — otherwise the
     // station's hover tooltip stacks on top of its permanent tooltip
@@ -90,25 +127,17 @@ test.describe('Station map — selection + overlap', () => {
       { timeout: 3000, message: 'baseline: source-station permanent tooltip only' }).toBe(1)
     expect(await tooltips.first().textContent()).not.toMatch(/→/)
 
-    // Hover a location where a destination line should run (a short radial
-    // offset from the source station, where the fan is densest).
-    await page.mouse.move(station.x + 40, station.y + 40)
-
-    // While hovering the line: three tooltips. The source station's permanent
+    // While hovering a line: three tooltips. The source station's permanent
     // tooltip stays put, the mid-edge tooltip ("→ {dst}: {count}") appears,
     // and a permanent destination tooltip pops at the line's other end.
-    await expect.poll(async () => {
-      const texts = await tooltips.allTextContents()
-      const arrowTips = texts.filter(t => /→/.test(t))
-      const plainTips = texts.filter(t => !/→/.test(t))
-      return texts.length === 3 && arrowTips.length === 1 && plainTips.length === 2
-    }, { timeout: 3000, message: '3 tooltips: 1 with "→", 2 plain (source + dest)' }).toBe(true)
+    expect(await hoverDestinationLine(page),
+      '3 tooltips: 1 with "→", 2 plain (source + dest)').toBe(true)
   })
 
   test('moving the cursor off the line collapses back to the source tooltip', async ({ page }) => {
     await page.goto('/stations')
     await waitForStations(page)
-    const station = await selectBiggestStation(page)
+    await selectBiggestStation(page)
 
     // Settle to baseline (just the permanent source TT, see test above).
     await page.mouse.move(5, 5)
@@ -117,11 +146,7 @@ test.describe('Station map — selection + overlap', () => {
 
     // Hover a line (confirm transition to 3-tooltip state), then move far
     // away off the map.
-    await page.mouse.move(station.x + 40, station.y + 40)
-    await expect.poll(async () => {
-      const texts = await tooltips.allTextContents()
-      return texts.length === 3 && texts.some(t => /→/.test(t))
-    }, { timeout: 3000 }).toBe(true)
+    expect(await hoverDestinationLine(page), 'reached 3-tooltip hover state').toBe(true)
 
     await page.mouse.move(5, 5)
 
