@@ -128,7 +128,11 @@ Matrix: {2013-07, 2019-06, 2024-06, 2026-06, 2026-07} × {start, end}; v3 freshl
 
 ## Cutover
 
-`?pyramid=`-style variant param on `/api/rides-v3` (or `/api/rides-v5` route alias), FE flag akin to `availPyramid`, burn-in, flip, GC `rides-v1/2/3` prefixes (v1/v2 already deletable per #106).
+**FLIPPED 2026-08-14**: Home default `?pyramid=` → v5. Prereqs completed same-day: station-map regen (`ctbk station-luc-build` — 2,530 active + 272 historical; the 4 new-July stations carried the whole 3.4k totals residue), Jun–Jul window rebuilt from source with the new map, per-pyramid RG-manifest fill floor (rides → 0; full coverage lets the Home chart's 3 concurrent region queries bypass the footer guard), JC-region series verified v5 ≡ v3 across 131 months (v5 +2 rides in 2026-04). v3 stays as `?pyramid=v3` rollback until GC (#184 queue behind v1/v2).
+
+Operational lessons encoded in `rides-v5-extend`: fills must run UNCAPPED (a month-end range cap leaves coarse-rung holes — spans crossing the cap can't build, and monthly serve-time rebinning rides on `1d`); wholly-past-month-end 0-row shards are poison (present-but-empty = built) and must be swept from all THREE stores — R2, D1 `pyramid_shards`, and the per-prefix `manifest.jsonl`, which is the fill's presence source of truth.
+
+Remaining: ci.yml hook (call `rides-v5-extend` post-`cons create`; gated on GHA IAM Batch-submit), station-map/vocab regen folded into the same hook, residual cold-load footer parses (first uncached page load sheds 1-2 region queries → TSQ retry settles ~2s; same behavior the multi-select panels shipped with), then GC `rides-v1/2/3`.
 
 ## Open questions
 

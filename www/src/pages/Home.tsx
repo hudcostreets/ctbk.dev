@@ -4,9 +4,11 @@
  * that region's cell covering as `cells=`. Output rows carry their
  * region tag so `buildTraces` filters/stacks naturally.
  *
- * `?pyramid=v3&api=prod` is the default. `?pyramid=v{1,2}` switch the
- * H3-keyed predecessors (left in for A/B; see #105); `?api=dev` routes
- * against the dev worker. `?screenshot` hides controls for OG/screenshot
+ * `?pyramid=v5&api=prod` is the default (engine-built, `s:`-keyed —
+ * `specs/rides-v5.md` cutover). `?pyramid=v3` is the S2/LUC predecessor
+ * (rollback path until GC); `?pyramid=v{1,2}` the retired h3 ones (#184).
+ * `?api=dev` routes against the dev worker. `?screenshot` hides controls
+ * for OG/screenshot
  * harness use (see `www/scrns.config.json`).
  */
 import { useUrlState, boolParam, numberArrayParam } from 'use-prms'
@@ -94,7 +96,7 @@ export default function Home() {
   const [stackBy, setStackBy] = useUrlState('s', codeParam<StackByV2>('None', StackByV2QueryStrings))
   const [stackRelative, setStackRelative] = useUrlState('pct', boolParam)
   const [regions, setRegions] = useUrlState('r', codesParam(Regions, RegionQueryStrings))
-  const [pyramid, setPyramid] = useUrlState<Pyramid>('pyramid', codeParam<Pyramid>('v3', [['v1', 'v1'], ['v2', 'v2'], ['v3', 'v3'], ['v5', 'v5']]))
+  const [pyramid, setPyramid] = useUrlState<Pyramid>('pyramid', codeParam<Pyramid>('v5', [['v1', 'v1'], ['v2', 'v2'], ['v3', 'v3'], ['v5', 'v5']]))
   const [api, setApi] = useUrlState<ApiTarget>('api', codeParam<ApiTarget>('prod', [['prod', 'prod'], ['dev', 'dev']]))
   const [userTypes, setUserTypes] = useUrlState('u', codesParam(UserTypes, UserTypeQueryStrings))
   const [genders, setGenders] = useUrlState('g', codesParam(Genders, GenderQueryStrings))
