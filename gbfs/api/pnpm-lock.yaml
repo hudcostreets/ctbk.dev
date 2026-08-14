@@ -12,8 +12,8 @@ importers:
         specifier: https://github.com/runsascoded/file-tree#5731bbe913f3d7a1656867f99bda6ddec121057b
         version: https://codeload.github.com/runsascoded/file-tree/tar.gz/5731bbe913f3d7a1656867f99bda6ddec121057b(highlight.js@11.11.1)(hyparquet@https://codeload.github.com/runsascoded/hyparquet/tar.gz/0f355ea5a37dcb9b29a43e33a3d45ce660c80798)(jq-web@0.6.2)(react-dom@18.3.1(react@19.2.6))(react-markdown@10.1.0(@types/react@19.2.15)(react@19.2.6))(react-router-dom@6.30.3(react-dom@18.3.1(react@19.2.6))(react@19.2.6))(react@19.2.6)(remark-gfm@4.0.1)(use-prms@0.4.1(react@19.2.6))
       '@rdub/thrds':
-        specifier: https://github.com/runsascoded/thrds#ts-dist
-        version: https://codeload.github.com/runsascoded/thrds/tar.gz/fa1b54a560508de161d0912ed0156c044d46bc9c
+        specifier: ^0.1.1
+        version: 0.1.1
       '@resvg/resvg-wasm':
         specifier: ^2.6.2
         version: 2.6.2
@@ -607,9 +607,8 @@ packages:
       react-router-dom:
         optional: true
 
-  '@rdub/thrds@https://codeload.github.com/runsascoded/thrds/tar.gz/fa1b54a560508de161d0912ed0156c044d46bc9c':
-    resolution: {tarball: https://codeload.github.com/runsascoded/thrds/tar.gz/fa1b54a560508de161d0912ed0156c044d46bc9c}
-    version: 0.1.1-dist.0a0b7d8
+  '@rdub/thrds@0.1.1':
+    resolution: {integrity: sha512-pDQ6570C2ZsyHse/GLE9kEM2eE3wKoINACBRHE0NcaumFBvJdXcUD97DFlOAXWkm+rl4OJpanY6gIZ5GF9VxmA==}
     engines: {node: '>=18'}
 
   '@remix-run/router@1.23.2':
@@ -1252,6 +1251,15 @@ packages:
       react:
         optional: true
 
+  pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/bf6aa2e33bd265bda33f2cb8ecf78a3ac3def072#path:/js/packages/pyrmts:
+    resolution: {path: /js/packages/pyrmts, tarball: https://codeload.github.com/runsascoded/pyrmts/tar.gz/bf6aa2e33bd265bda33f2cb8ecf78a3ac3def072}
+    version: 0.0.0
+    peerDependencies:
+      react: '>=18'
+    peerDependenciesMeta:
+      react:
+        optional: true
+
   react-dom@18.3.1:
     resolution: {integrity: sha512-5m4nQKp+rZRb09LNH59GM4BxTh9251/ylbKIbpe7TpGxfJ+9kv6BLkLBXIjjspbgbnIBNqlI23tRnTWT0snUIw==}
     peerDependencies:
@@ -1854,7 +1862,7 @@ snapshots:
       react-dom: 18.3.1(react@19.2.6)
       react-router-dom: 6.30.3(react-dom@18.3.1(react@19.2.6))(react@19.2.6)
 
-  '@rdub/thrds@https://codeload.github.com/runsascoded/thrds/tar.gz/fa1b54a560508de161d0912ed0156c044d46bc9c': {}
+  '@rdub/thrds@0.1.1': {}
 
   '@remix-run/router@1.23.2':
     optional: true
@@ -2657,19 +2665,26 @@ snapshots:
 
   pyrmts-cfw@https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa#path:/js/packages/pyrmts-cfw(react@19.2.6):
     dependencies:
-      pyrmts: https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa#path:/js/packages/pyrmts(react@19.2.6)
+      pyrmts: https://codeload.github.com/runsascoded/pyrmts/tar.gz/bf6aa2e33bd265bda33f2cb8ecf78a3ac3def072#path:/js/packages/pyrmts(react@19.2.6)
     transitivePeerDependencies:
       - react
 
   pyrmts-geo@https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa#path:/js/packages/pyrmts-geo(react@19.2.6):
     dependencies:
       h3-js: 4.4.0
-      pyrmts: https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa#path:/js/packages/pyrmts(react@19.2.6)
+      pyrmts: https://codeload.github.com/runsascoded/pyrmts/tar.gz/bf6aa2e33bd265bda33f2cb8ecf78a3ac3def072#path:/js/packages/pyrmts(react@19.2.6)
       s2js: 1.44.0
     optionalDependencies:
       react: 19.2.6
 
   pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/60439222ad02c11da83b78ad17e1ef35b95d2baa#path:/js/packages/pyrmts(react@19.2.6):
+    dependencies:
+      hyparquet: 1.26.0
+      yaml: 2.9.0
+    optionalDependencies:
+      react: 19.2.6
+
+  pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/bf6aa2e33bd265bda33f2cb8ecf78a3ac3def072#path:/js/packages/pyrmts(react@19.2.6):
     dependencies:
       hyparquet: 1.26.0
       yaml: 2.9.0
