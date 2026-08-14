@@ -98,6 +98,18 @@ Durable fix: **D1 RG manifest** (`specs/rg-manifest.md`) — per-RG byte spans +
 2. Vocab-cell rows cross-checked by monoid rebin (1h→6h consistency probe, as avail).
 3. Whole-pyramid totals vs `ctbk agg` monthly counts (the existing gt).
 
+## Acceptance run 2026-08-14 (`ctbk gbfs rides-v5-accept`, on `e`)
+
+Matrix: {2013-07, 2019-06, 2024-06, 2026-06, 2026-07} × {start, end}; v3 freshly full-rebuilt the same day (#183), so v3↔denorm consistency was maximal.
+
+- **Correctness: green.** `equiv` (per-station monthly rows, all dims × 6 monoid cols, v5 `s:` vs v3 LUC) and `totals` (vs anchor-time counts straight from `normalized/<ym>.parquet`) are exact — 0 diffs, Δ0 — for 2013/2019/2024 both anchors, and for `end 2026-06`.
+- **Every failure is freshness, not correctness:**
+  - `start 2026-06`: v5 short 907 rides (641/9,442 rows) — the Jun→Jul spillover, attributable only once 202607 landed; v3 got it via the same-day `-O` refold, v5's tip predates it.
+  - `2026-07` both anchors: v5 empty — nothing extends v5 monthly (base 1h ends 2026-06-30).
+  - `rebin 2026-06`: 130k "diffs" are all in [Jun 27 18:00, Jul 1) — the 6h tier's tip lags the 1h tip (serve-time het-tiling covers the gap); the overlapping window is exact.
+  - Small residues (v3Δ −84/−116, −3.4k for 2026-07) are unmapped-station fallback rides — `station-luc.json` / vocab lag the newest stations.
+- **Cutover prerequisite surfaced:** wire v5 monthly cadence into the pipeline — extension build of the new month, invalidation-refold of the prior month's spillover, coarse-tier tip extension, and station-map/vocab regen — then re-run to full green.
+
 ## Cutover
 
 `?pyramid=`-style variant param on `/api/rides-v3` (or `/api/rides-v5` route alias), FE flag akin to `availPyramid`, burn-in, flip, GC `rides-v1/2/3` prefixes (v1/v2 already deletable per #106).
