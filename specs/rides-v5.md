@@ -98,7 +98,21 @@ Durable fix: **D1 RG manifest** (`specs/rg-manifest.md`) — per-RG byte spans +
 2. Vocab-cell rows cross-checked by monoid rebin (1h→6h consistency probe, as avail).
 3. Whole-pyramid totals vs `ctbk agg` monthly counts (the existing gt).
 
-## Acceptance run 2026-08-14 (`ctbk gbfs rides-v5-accept`, on `e`)
+## Acceptance FINAL 2026-08-14 (post catch-up fills)
+
+After the 202607 catch-up (plain-key mirror copy of `normalized/202607.parquet`, `ctbk gbfs invalidate -C rides-v5-start` over June, `engine submit -f -x` both anchors, 0-row Aug tip relics deleted+deregistered, `manifest backfill`):
+
+- **equiv: 0 diffs, all 5 months × both anchors** (2013-07, 2019-06, 2024-06, 2026-06, 2026-07) — June spillover refolded, July built ≡ v3.
+- **rebin 2026-07: 0 diffs** both anchors (1.31M/1.32M rows).
+- **totals: v5Δ ≡ v3Δ everywhere** (pyramids agree with each other exactly); both sit −84/−116 (June) and −3,408/−3,475 (July, ≈0.07%) below raw normalized counts = rides at stations absent from `station-luc.json`/id-map (July's new stations). Clears when the station-map/vocab regen joins the monthly cadence.
+
+Monthly-cadence gaps surfaced (the ci.yml hook must do all of these):
+1. Plain-key mirror copy `normalized/<ym>.parquet` (server-side from the DVC store) — the 8/07 refresh was one-off.
+2. `invalidate` prev month (start anchor spillback) + `submit -f -x` both anchors, **range capped at the new month's end** (running to `now` mid-month writes 0-row tip shards that read as built-and-empty later, and trips `max_missing_source` on the absent in-progress month).
+3. `engine register` happens in-run; `manifest backfill` after.
+4. Regen `station-luc.json` (+ R2 upload) / id-map / geo assets for new stations — id-map + geo are image-baked today (move to R2 reads, or rebuild image monthly).
+
+## Acceptance run 2026-08-14 (first pass, on `e`)
 
 Matrix: {2013-07, 2019-06, 2024-06, 2026-06, 2026-07} × {start, end}; v3 freshly full-rebuilt the same day (#183), so v3↔denorm consistency was maximal.
 
