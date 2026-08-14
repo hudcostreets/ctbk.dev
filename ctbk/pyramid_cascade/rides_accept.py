@@ -89,9 +89,11 @@ def v5_shards_covering(cli, anchor: str, tier: str, t0: datetime, t1: datetime) 
     return out
 
 
-def read_v5(cli, anchor: str, tier: str, t0: datetime, t1: datetime) -> pd.DataFrame:
+def read_v5(cli, anchor: str, tier: str, t0: datetime, t1: datetime, allow_empty: bool = False) -> pd.DataFrame:
     keys = v5_shards_covering(cli, anchor, tier, t0, t1)
     if not keys:
+        if allow_empty:
+            return pd.DataFrame(columns=['cell', 'dt', *GROUP, *MONOID_COLS])
         raise RuntimeError(f"no v5 {anchor}/{tier} shards cover [{t0:%Y-%m-%d}, {t1:%Y-%m-%d})")
     lo_ms, hi_ms = int(t0.timestamp()) * 1000, int(t1.timestamp()) * 1000
     frames = []
@@ -112,7 +114,10 @@ def read_v5_month(cli, anchor: str, t0: datetime, t1: datetime) -> pd.DataFrame:
     try:
         return read_v5(cli, anchor, '1mo', t0, t1)
     except RuntimeError:
-        df = read_v5(cli, anchor, '1h', t0, t1)
+        # A wholly-unbuilt month (v5 not yet extended) reports as empty —
+        # the caller's row/station counts make the gap loud without
+        # aborting the rest of the matrix.
+        df = read_v5(cli, anchor, '1h', t0, t1, allow_empty=True)
         if df.empty:
             return df
         df = df.copy()
