@@ -87,10 +87,15 @@ def update(
         ym_prev = f"{int(yyyy) - 1}-12"
     else:
         ym_prev = f"{yyyy}-{int(mm) - 1:02d}"
+    # `-c 2`: the default 4-way pool holds four ~5.5M-ride month frames
+    # (chain-inflated ~7×) simultaneously — borderline OOM on 16GB GHA
+    # runners (2026-08-15 run 31898541586 died as "operation was
+    # canceled" 40s into the 4-way 1h builds). Two workers halve peak
+    # memory for ~1 extra minute.
     for v in ('v3',):
-        ctbk_run('rides-v1-build', '-v', v, '-f', ym_prev, '-T', ym_new, '-O')
+        ctbk_run('rides-v1-build', '-c', '2', '-v', v, '-f', ym_prev, '-T', ym_new, '-O')
         for t in ('3h', '6h', '12h', '1d', '3d', '7d', '14d', '1mo', '3mo', '1y'):
-            ctbk_run('rides-v1-build', '-v', v, '-f', ym_prev, '-T', ym_new, '-t', t, '-O')
+            ctbk_run('rides-v1-build', '-c', '2', '-v', v, '-f', ym_prev, '-T', ym_new, '-t', t, '-O')
 
     if not no_www:
         err(f"--- WWW assets ---")
