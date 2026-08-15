@@ -68,38 +68,10 @@ def update(
     err(f"--- Station trips JSONs ---")
     ctbk_run('station-trips-json', '-a', '-d')
 
-    # Rebuild the rides-v3 pyramid that backs /api/rides-v3 (the Home chart).
-    # v1/v2 (h3-keyed) are retired — no monthly rebuilds; their code + R2
-    # prefixes await GC (h3 verdict 2026-08-14: child hexes neither necessary
-    # nor sufficient to cover their parent, unsuitable for exact rollups).
-    # Range = prev-month → current: rebuilding prev month's /1h start-anchored
-    # shard picks up rides that started in prev but ended in current (dropped
-    # previously because the current month's normalized parquet didn't exist)
-    # — `-O` on the base call makes that refold actually happen (without it
-    # the existing prev shard short-circuits as `skip`). Requires prev's
-    # `normalized/<ym>.parquet` locally (`ci.yml` pulls it). Derived tiers
-    # need `-O` to fold in the new /1h data; 'all'-sharded tiers merge-patch
-    # the [-f, -T] window into the existing full-history shard (task #183).
-    err(f"--- Rides pyramid (v3) ---")
-    yyyy, mm = ym[:4], ym[4:]
-    ym_new = f"{yyyy}-{mm}"
-    if mm == '01':
-        ym_prev = f"{int(yyyy) - 1}-12"
-    else:
-        ym_prev = f"{yyyy}-{int(mm) - 1:02d}"
-    # Concurrency capped for 16GB GHA runners (runs 31898541586 +
-    # 31899347297 both died as "operation was canceled" = runner OOM):
-    # - 1h-12h: `-c 2` (four ~5.5M-ride month frames at the default -c 4
-    #   was already borderline)
-    # - 'all'-sharded tiers (1d+): `-c 1` — the merge-patch loads the
-    #   existing full-history shard (~750MB parquet → ~5.4GB RSS per
-    #   worker, measured); two anchor workers exceed the runner.
-    for v in ('v3',):
-        ctbk_run('rides-v1-build', '-c', '2', '-v', v, '-f', ym_prev, '-T', ym_new, '-O')
-        for t in ('3h', '6h', '12h'):
-            ctbk_run('rides-v1-build', '-c', '2', '-v', v, '-f', ym_prev, '-T', ym_new, '-t', t, '-O')
-        for t in ('1d', '3d', '7d', '14d', '1mo', '3mo', '1y'):
-            ctbk_run('rides-v1-build', '-c', '1', '-v', v, '-f', ym_prev, '-T', ym_new, '-t', t, '-O')
+    # (The rides-v3 rollback-pyramid rebuild moved to `ctbk
+    # rides-v3-extend` — R2-only writes, no git/DVC artifacts, so ci.yml
+    # runs it AFTER the www push as a best-effort step instead of
+    # blocking the month on the memory-hungriest builds.)
 
     if not no_www:
         err(f"--- WWW assets ---")

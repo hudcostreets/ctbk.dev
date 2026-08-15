@@ -39,7 +39,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import s2cell
 from botocore.exceptions import ClientError
-from click import BadParameter, option
+from click import BadParameter, argument, option
 from pyrmts import write_tier_parquet
 from utz import err
 from utz.cli import flag
@@ -867,3 +867,28 @@ def rides_v1_build_cmd(
                 bytes_total += n
 
     err(f"done: {n_wrote} wrote, {n_skip} skip, {n_empty} empty, {bytes_total:,} bytes total")
+
+
+@ctbk.command('rides-v3-extend', help="Monthly rides-v3 (rollback pyramid) extension for one freshly-ingested month: `rides-v1-build -O` over [prev, ym] for the 1h tier + every derived tier.")
+@option('-c', '--concurrency', type=int, default=1, help="Worker process count per tier build (default 1: the 'all'-shard merge-patch peaks ~5.4GB RSS per worker; two workers OOM'd 16GB GHA runners, 2026-08-15).")
+@argument('ym', metavar='YM')
+def rides_v3_extend_cmd(concurrency: int, ym: str) -> None:
+    """Range = prev-month → current: rebuilding prev month's /1h
+    start-anchored shard picks up rides that started in prev but ended
+    in the new month (invisible until the new month's normalized parquet
+    existed) — `-O` makes that refold actually happen (without it the
+    existing prev shard short-circuits as `skip`). Requires prev's
+    `normalized/<ym>.parquet` locally (`ci.yml` pulls it). Derived tiers
+    need `-O` to fold in the new /1h data; 'all'-sharded tiers
+    merge-patch the [-f, -T] window into the existing full-history shard
+    (2026-08-14 truncation incident). Each tier runs as a subprocess so
+    peak memory resets between tiers."""
+    from utz import run
+    y = _parse_ym(ym)
+    prev = y - 1
+    ym_new = f'{str(y)[:4]}-{str(y)[4:6]}'
+    ym_prev = f'{str(prev)[:4]}-{str(prev)[4:6]}'
+    c = str(concurrency)
+    run('ctbk', 'rides-v1-build', '-c', c, '-v', 'v3', '-f', ym_prev, '-T', ym_new, '-O')
+    for t in ('3h', '6h', '12h', '1d', '3d', '7d', '14d', '1mo', '3mo', '1y'):
+        run('ctbk', 'rides-v1-build', '-c', c, '-v', 'v3', '-f', ym_prev, '-T', ym_new, '-t', t, '-O')

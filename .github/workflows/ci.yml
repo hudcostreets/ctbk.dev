@@ -258,6 +258,15 @@ jobs:
         if: steps.args.outputs.args
         run: git push origin HEAD:www
 
+      # Rollback-pyramid rebuild AFTER the push: v3 writes only R2 (no
+      # git/DVC artifacts) and its 'all'-shard merge-patches are the
+      # memory-hungriest builds on the runner — a flake here must not
+      # block the month (the deploy + v5 already shipped above). A
+      # failure still fails the run → top-level `:x:` ping.
+      - name: Extend rides-v3 (rollback pyramid)
+        if: steps.args.outputs.args && steps.args.outputs.ym
+        run: ctbk rides-v3-extend ${{ steps.args.outputs.ym }}
+
       - name: Notify Slack — outcome
         if: always() && steps.slack_start.outputs.ts
         env:
