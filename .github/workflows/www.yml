@@ -39,12 +39,13 @@ jobs:
         env:
           CI: '1'
         run: pnpm test --reporter=list
-      # ─── Screenshots: input-gated DVX regen (specs/www-screenshots-dvx.md)
-      # Regenerate exactly when a declared dep changed since the recorded
-      # provenance (`.deps.json`), BEFORE the build consumes them — the
-      # old flow gated on output bytes (impossible for ND renders; the map
-      # + mosaic had to be exempted) and needed a self-commit + full
-      # re-run to rebuild with fresh files.
+      # ─── Screenshots: input-gated regen, HR S3 home
+      # (specs/www-screenshots-s3-hr.md). Regenerate exactly when a
+      # declared dep changed since the provenance recorded in the S3
+      # manifest (`s3://ctbk/screenshots/.deps.json`), BEFORE the build
+      # consumes them. Nothing screenshot-related is git-tracked: the
+      # old pointer-commit flow triggered a second, content-identical
+      # deploy and raced concurrent pushes to `www`/`main`.
       - name: Screenshots dep-check
         id: scrgate
         if: github.ref != 'refs/heads/dev'
@@ -53,8 +54,9 @@ jobs:
           www_tree=$(git ls-files -s -- www ':!www/public/screenshots' | git hash-object --stdin)
           echo "data_md5=$data_md5" >> $GITHUB_OUTPUT
           echo "www_tree=$www_tree" >> $GITHUB_OUTPUT
-          rec_data=$(jq -r '.ymdgtb_md5 // "none"' www/public/screenshots/.deps.json 2>/dev/null || echo none)
-          rec_tree=$(jq -r '.www_tree // "none"' www/public/screenshots/.deps.json 2>/dev/null || echo none)
+          deps=$(curl -sf https://ctbk.s3.amazonaws.com/screenshots/.deps.json || echo '{}')
+          rec_data=$(echo "$deps" | jq -r '.ymdgtb_md5 // "none"')
+          rec_tree=$(echo "$deps" | jq -r '.www_tree // "none"')
           if [ "$data_md5" != "$rec_data" ] || [ "$www_tree" != "$rec_tree" ]; then
             echo "stale=true" >> $GITHUB_OUTPUT
             echo "stale: data $rec_data -> $data_md5 | tree $rec_tree -> $www_tree"
@@ -78,8 +80,16 @@ jobs:
           command -v magick >/dev/null || command -v convert >/dev/null \
             || sudo apt-get install -y -qq imagemagick
           bash scripts/compose-og.sh
-          # Upload changed blobs to the DVX CA store + rewrite pointers +
-          # record this regen's deps.
+      - name: Publish screenshots to S3
+        if: steps.scrgate.outputs.stale == 'true' && github.ref == 'refs/heads/www'
+        working-directory: www
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          # Overwrite the HR keys + manifest in place — no git commit, so
+          # this run's build (below) is the only deploy.
           uv run scripts/push-screenshots.py \
             -d "${{ steps.scrgate.outputs.data_md5 }}" \
             -t "${{ steps.scrgate.outputs.www_tree }}"
@@ -89,18 +99,6 @@ jobs:
         with:
           name: screenshots
           path: www/public/screenshots/
-      - name: Commit screenshot pointers
-        if: steps.scrgate.outputs.stale == 'true' && github.ref == 'refs/heads/www'
-        run: |
-          git add www/public/screenshots
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "github@actions"
-          git commit -m "Update screenshot pointers (input-gated regen)"
-          git pull --rebase origin www
-          git push origin HEAD:www
-          git fetch --unshallow origin main || true
-          git pull --rebase origin main
-          git push origin HEAD:main
       - name: Build
         working-directory: www
         run: pnpm build
