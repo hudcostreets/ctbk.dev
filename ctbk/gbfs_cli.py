@@ -1056,7 +1056,7 @@ RIDES_V5_ANCHOR_SPECS = (
 )
 
 
-@gbfs.command('rides-v5-extend', help='Monthly rides-v5 cadence for one freshly-ingested month: (1) server-side copy `normalized/<YM>.parquet` from the DVC store to its public plain key (the Batch factory lists that prefix), (2) invalidate the previous month on the start anchor (spillback refold), (3) `engine submit -f` both anchors with the range capped at month-end (a now-capped fill writes 0-row tip shards that later read as built-and-empty and trips max_missing_source on the in-progress month), (4) RG-manifest backfill. Station-map/vocab regen for new stations is NOT covered (spec cadence item 4). Needs AWS + R2 creds, CTBK_REGISTRY_SECRET, and `pyrmts-engine` on PATH.')
+@gbfs.command('rides-v5-extend', help='Monthly rides-v5 cadence for one freshly-ingested month: (1) server-side copy `normalized/<YM>.parquet` from the DVC store to its public plain key (the Batch factory lists that prefix), (2) invalidate the previous month on the start anchor (spillback refold), (3) `engine submit -f` both anchors, UNCAPPED range + `--max-missing 0.01` (capping at month-end leaves coarse-rung holes; the tolerance covers the in-progress month, whose source is unpublished mid-month), (4) sweep post-month-end 0-row relic shards, (5) RG-manifest backfill. Station-map/vocab regen for new stations is NOT covered (spec cadence item 4). Needs AWS + R2 creds, CTBK_REGISTRY_SECRET, and `pyrmts-engine` on PATH.')
 @option('-n', '--dry-run', is_flag=True, help='Print planned actions (and engine submit commands); no writes or submits.')
 @argument('ym', metavar='YM')
 @click.pass_context
@@ -1121,6 +1121,13 @@ def rides_v5_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
 			fill=True,
 			source_spec=factory,
 			watch=True,
+			# Tolerate exactly the in-progress month's absent source: an
+			# uncapped fill's expected cover reaches `now`, so current-
+			# month shards want `normalized/<this-month>.parquet`, which
+			# never exists mid-month (1/~160 months ≈ 0.006 < 0.01; a
+			# real 2-month hole still fails). The 0-row shards written
+			# for those windows are swept in step 4 below.
+			max_missing=0.01,
 			dry_run=dry_run,
 		)
 		if rc:
@@ -1383,6 +1390,7 @@ def _engine_submit(
 	close_workers: int | None = None,
 	memory: int | None = None,
 	manifest_name: str = 'manifest.jsonl',
+	max_missing: float | None = None,
 	dry_run: bool = False,
 	scratch_prefix: str | None = None,
 	range_: str | None = None,
@@ -1427,6 +1435,8 @@ def _engine_submit(
 		cmd += ['-t', tier]
 		if dur:
 			cmd += ['-d', dur]
+	if max_missing is not None:
+		cmd += ['--max-missing', str(max_missing)]
 	if resume:
 		cmd += ['-u']
 	if mem_budget is not None:
