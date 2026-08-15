@@ -5,6 +5,10 @@ on:
       args:
         description: "Args to pass to `ctbk` (default: auto-detect month and run `update`)"
         required: false
+      quiet:
+        description: "Skip Slack pings (validation/test dispatches — watch via the GHA UI instead)"
+        type: boolean
+        default: false
   workflow_run:
     workflows: ["Sync tripdata bucket"]
     types: [completed]
@@ -113,7 +117,7 @@ jobs:
 
       - name: Notify Slack — processing started
         id: slack_start
-        if: steps.args.outputs.args
+        if: steps.args.outputs.args && inputs.quiet != true
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           ARGS: ${{ steps.args.outputs.args }}
@@ -193,7 +197,7 @@ jobs:
           ctbk gbfs vocab check
 
       - name: Notify Slack — LUC churn needs review
-        if: steps.args.outputs.args && steps.luc.outputs.luc_moved != '0' && steps.luc.outputs.luc_moved != ''
+        if: steps.args.outputs.args && inputs.quiet != true && steps.luc.outputs.luc_moved != '0' && steps.luc.outputs.luc_moved != ''
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           MOVED: ${{ steps.luc.outputs.luc_moved }}
