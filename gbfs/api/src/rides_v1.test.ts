@@ -5,7 +5,7 @@ import { reduceRows } from './rides_v1';
 describe('reduceRows', () => {
 	const baseRow = (m: { count: [number, number, number]; duration: [number, number, number] }): Row => ({
 		dt: 1779404400_000,
-		start_h3_cell: '892a1072117ffff',
+		start_s2_cell: '89c2588',
 		gender: 'unknown',
 		user_type: 'Subscriber',
 		bike_type: 'classic_bike',
@@ -21,7 +21,7 @@ describe('reduceRows', () => {
 		const rows = [baseRow({ count: [10, 10, 10], duration: [10, 6000, 4_800_000] })];
 		expect(reduceRows(rows, 'sum')).toEqual([{
 			dt: 1779404400_000,
-			start_h3_cell: '892a1072117ffff',
+			start_s2_cell: '89c2588',
 			gender: 'unknown',
 			user_type: 'Subscriber',
 			bike_type: 'classic_bike',
@@ -34,7 +34,7 @@ describe('reduceRows', () => {
 		const rows = [baseRow({ count: [42, 42, 42], duration: [42, 9999, 2_000_000] })];
 		expect(reduceRows(rows, 'count')).toEqual([{
 			dt: 1779404400_000,
-			start_h3_cell: '892a1072117ffff',
+			start_s2_cell: '89c2588',
 			gender: 'unknown',
 			user_type: 'Subscriber',
 			bike_type: 'classic_bike',
@@ -51,7 +51,7 @@ describe('reduceRows', () => {
 		expect(reduceRows(rows, 'mean')).toEqual([
 			{
 				dt: 1779404400_000,
-				start_h3_cell: '892a1072117ffff',
+				start_s2_cell: '89c2588',
 				gender: 'unknown',
 				user_type: 'Subscriber',
 				bike_type: 'classic_bike',
@@ -60,7 +60,7 @@ describe('reduceRows', () => {
 			},
 			{
 				dt: 1779404400_000,
-				start_h3_cell: '892a1072117ffff',
+				start_s2_cell: '89c2588',
 				gender: 'unknown',
 				user_type: 'Subscriber',
 				bike_type: 'classic_bike',
@@ -76,7 +76,7 @@ describe('reduceRows', () => {
 		const rows = [baseRow({ count: [3, 3, 3], duration: [3, 600, 140000] })];
 		expect(reduceRows(rows, 'stddev')).toEqual([{
 			dt: 1779404400_000,
-			start_h3_cell: '892a1072117ffff',
+			start_s2_cell: '89c2588',
 			gender: 'unknown',
 			user_type: 'Subscriber',
 			bike_type: 'classic_bike',
@@ -90,9 +90,9 @@ describe('reduceRows', () => {
 		expect(reduceRows(rows, 'raw')).toEqual(rows);
 	});
 
-	it('dropCols (sum): strips named columns from output (used to scrub `start_h3_cell` from rollup rows)', () => {
+	it('dropCols (sum): strips named columns from output (used to scrub `start_s2_cell` from rollup rows)', () => {
 		const rows = [baseRow({ count: [10, 10, 10], duration: [10, 6000, 4_800_000] })];
-		expect(reduceRows(rows, 'sum', ['start_h3_cell'])).toEqual([{
+		expect(reduceRows(rows, 'sum', ['start_s2_cell'])).toEqual([{
 			dt: 1779404400_000,
 			gender: 'unknown',
 			user_type: 'Subscriber',
@@ -104,7 +104,7 @@ describe('reduceRows', () => {
 
 	it('dropCols (raw): scrubs without collapsing metric triplets', () => {
 		const rows = [baseRow({ count: [3, 3, 3], duration: [3, 600, 140000] })];
-		const out = reduceRows(rows, 'raw', ['start_h3_cell']);
+		const out = reduceRows(rows, 'raw', ['start_s2_cell']);
 		expect(out).toEqual([{
 			dt: 1779404400_000,
 			gender: 'unknown',
@@ -114,6 +114,6 @@ describe('reduceRows', () => {
 			duration_n: 3, duration_sum: 600, duration_sumsq: 140000,
 		}]);
 		// Source array untouched — defensive copy semantics.
-		expect(rows[0]!.start_h3_cell).toBe('892a1072117ffff');
+		expect(rows[0]!.start_s2_cell).toBe('89c2588');
 	});
 });

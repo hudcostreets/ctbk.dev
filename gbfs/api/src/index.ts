@@ -493,7 +493,7 @@ import { createHandlers } from '@rdub/file-tree/server';
 import { computeAndStoreHealthSnapshot, readCachedHealthSnapshot } from './health';
 import { runAlerts } from './alerts';
 import { DEFAULT_PYRAMID, repairGeneration, serveAvailV3, serveAvailV3Cells } from './avail_geo';
-import { serveRidesV1, serveRidesV1Cells, serveRidesV2, serveRidesV2Cells, serveRidesV3, serveRidesV3Cells, serveRidesV5 } from './rides_v1';
+import { serveRidesV3, serveRidesV3Cells, serveRidesV5 } from './rides_v1';
 import { retryingStorage, withR2Retry } from './r2_retry';
 import { r2Storage } from 'pyrmts-cfw';
 import { backfillManifestKey, manifestStatus } from './rg_manifest';
@@ -1355,14 +1355,14 @@ export default {
 			return resp;
 		}
 
-		// /api/rides-{v1,v2,v3}[/cells] — pyrmts-geo serving of rides
-		// pyramids (`rides-{v1,v2,v3}/{start,end}/<tier>/<period>.parquet`).
-		// Variants share schema; v1 = original cascade, v2 = consolidated
-		// cascade + `(cell, dt)` sort, v3 = S2-keyed (exact lineage). See
-		// `specs/done/rides-pyramid-{v1,v2,v3}.md` + `rides_v1.ts`.
-		const ridesMatch = url.pathname.match(/^\/api\/rides-(v[1235])(\/cells)?$/);
+		// /api/rides-{v3,v5}[/cells] — pyrmts-geo serving of rides
+		// pyramids (`rides-{v3,v5}/{start,end}/<tier>/…parquet`). v3 =
+		// S2-keyed rollback path; v5 = station-identity-keyed prod. See
+		// `specs/done/rides-pyramid-v3.md`, `specs/rides-v5.md` +
+		// `rides_v1.ts`. (h3-keyed v1/v2 GC'd 2026-08-15.)
+		const ridesMatch = url.pathname.match(/^\/api\/rides-(v[35])(\/cells)?$/);
 		if (ridesMatch) {
-			const variant = ridesMatch[1] as 'v1' | 'v2' | 'v3' | 'v5';
+			const variant = ridesMatch[1] as 'v3' | 'v5';
 			const cellsRoute = !!ridesMatch[2];
 			// Edge cache: rides-* cold queries are O(seconds) since they
 			// fan out to many R2 GETs + decode + filter + stitch. Mirroring
@@ -1378,8 +1378,6 @@ export default {
 				return new Response(hit.body, { status: hit.status, headers });
 			}
 			const serveByVariant = {
-				v1: { rollup: serveRidesV1, cells: serveRidesV1Cells },
-				v2: { rollup: serveRidesV2, cells: serveRidesV2Cells },
 				v3: { rollup: serveRidesV3, cells: serveRidesV3Cells },
 			} as const;
 			const tRidesStart = performance.now();

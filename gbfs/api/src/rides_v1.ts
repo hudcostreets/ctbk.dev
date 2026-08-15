@@ -1,20 +1,21 @@
 /**
- * pyrmts-geo CFW glue for ctbk's rides pyramids (`rides-v1`, `rides-v2`).
+ * pyrmts-geo CFW glue for ctbk's rides pyramids.
  *
- * Two variants × two anchors = four sibling pyramids, all built by
- * `ctbk/rides_v1.py`:
- *   rides-{v1,v2}/start/<tier>/<period>.parquet — `start_h3_cell`-anchored
- *   rides-{v1,v2}/end/<tier>/<period>.parquet   — `end_h3_cell`-anchored
+ * rides-v3 (S2-keyed, `ctbk/rides_v1.py`) is the rollback path behind
+ * prod's rides-v5 (engine-built, station-identity-keyed — see the v5
+ * section below). Two anchors = two sibling pyramids:
+ *   rides-v3/start/<tier>/<period>.parquet — `start_s2_cell`-anchored
+ *   rides-v3/end/<tier>/<period>.parquet   — `end_s2_cell`-anchored
  *
- * v1 vs v2: same schema; v2 has coarser shard sizes (~1000 bins each) and
- * `(cell, dt)` sort — see `specs/done/rides-pyramid-v2.md`. FE selects via
- * `?pyramid=v1|v2` (mapped to endpoint `/api/rides-v{1,2}[/cells]`).
+ * (The h3-keyed rides-v1/v2 forebears were GC'd 2026-08-15 — child hexes
+ * are neither necessary nor sufficient to cover their parent, so exact
+ * multi-resolution aggregation is unachievable on h3.)
  *
  * 11-tier ladder: 1h / 3h / 6h / 12h / 1d / 3d / 7d / 14d / 1mo / 3mo / 1y.
- * h3 resolutions: 9 / 7 / 5.
+ * S2 levels: 10..15.
  *
  *  Schema (per row, sum-monoid):
- *    {anchor}_h3_cell : STRING       (resolution encoded in high bits)
+ *    {anchor}_s2_cell : STRING       S2 token (level encoded in trailing bits)
  *    dt               : INT64        unix ms — bucket start
  *    gender           : STRING       'unknown' | 'male' | 'female'
  *    user_type        : STRING       'Subscriber' | 'Customer' | …
@@ -27,8 +28,8 @@
  *    duration_sumsq   : INT64        seconds²
  *
  * Endpoints (mounted from `index.ts`):
- *   GET /api/rides-v1?anchor=start|end&from=&to=&bbox=&bin_budget=&cell_budget=&reducer=
- *   GET /api/rides-v1/cells?anchor=start|end&… (per-cell breakdown)
+ *   GET /api/rides-v3?anchor=start|end&from=&to=&bbox=&bin_budget=&cell_budget=&reducer=
+ *   GET /api/rides-v3/cells?anchor=start|end&… (per-cell breakdown)
  *
  * Reducers (sum monoid → scalar collapse):
  *   `sum` (default)  → `sum`         (additive total)
@@ -83,10 +84,10 @@ export const ANCHORS = ['start', 'end'] as const;
 export type Anchor = typeof ANCHORS[number];
 const DEFAULT_ANCHOR: Anchor = 'start';
 
-export const VARIANTS = ['v1', 'v2', 'v3'] as const;
+export const VARIANTS = ['v3'] as const;
 export type Variant = typeof VARIANTS[number];
 
-const V2_TIERS: Tier[] = [
+const V3_TIERS: Tier[] = [
 	{ name: '1h',  bin: '1h',  shards: ['1mo'] },
 	{ name: '3h',  bin: '3h',  shards: ['3mo'] },
 	{ name: '6h',  bin: '6h',  shards: ['6mo'] },
@@ -100,39 +101,21 @@ const V2_TIERS: Tier[] = [
 	{ name: '1y',  bin: '1y',  shards: ['120y'] },
 ];
 
-/** v1: every tier 1h-12h on 1mo shards, every 1d-3mo tier on 1y, 1y on `all`.
- *  v2: consolidated cascade per `specs/done/rides-pyramid-v2.md` — ~1000
- *  bins per shard so a typical viewport reads one shard.
- *  v3: S2-keyed at levels 10..15, same cascade as v2 — see
+/** v3: S2-keyed at levels 10..15, consolidated cascade (~1000 bins per
+ *  shard so a typical viewport reads one shard) — see
  *  `specs/done/rides-pyramid-v3.md`. */
 const TIERS_BY_VARIANT: Record<Variant, Tier[]> = {
-	v1: [
-		{ name: '1h',  bin: '1h',  shards: ['1mo'] },
-		{ name: '3h',  bin: '3h',  shards: ['1mo'] },
-		{ name: '6h',  bin: '6h',  shards: ['1mo'] },
-		{ name: '12h', bin: '12h', shards: ['1mo'] },
-		{ name: '1d',  bin: '1d',  shards: ['1y']  },
-		{ name: '3d',  bin: '3d',  shards: ['1y']  },
-		{ name: '7d',  bin: '7d',  shards: ['1y']  },
-		{ name: '14d', bin: '14d', shards: ['1y']  },
-		{ name: '1mo', bin: '1mo', shards: ['1y']  },
-		{ name: '3mo', bin: '3mo', shards: ['1y']  },
-		{ name: '1y',  bin: '1y',  shards: ['120y'] },
-	],
-	v2: V2_TIERS,
-	v3: V2_TIERS,
+	v3: V3_TIERS,
 };
 
-/** v1/v2 use H3 (`<anchor>_h3_cell`); v3 uses S2 token (`<anchor>_s2_cell`). */
 function cellCol(anchor: Anchor, variant: Variant): string {
-	const idx = variant === 'v3' ? 's2' : 'h3';
-	return `${anchor}_${idx}_cell`;
+	return `${anchor}_s2_cell`;
 }
 
-/** Materialized resolutions per variant, finest-first (planner picks
- *  finest that fits cellBudget). v1/v2: H3 (9, 7, 5). v3: S2 (15..10). */
+/** Materialized S2 levels, finest-first (planner picks finest that fits
+ *  cellBudget). */
 function resolutions(variant: Variant): number[] {
-	return variant === 'v3' ? [15, 14, 13, 12, 11, 10] : [9, 7, 5];
+	return [15, 14, 13, 12, 11, 10];
 }
 
 function keyTemplate(anchor: Anchor, variant: Variant): string {
@@ -153,9 +136,7 @@ function makeBaseProps(bucket: R2Bucket, anchor: Anchor, variant: Variant): Omit
 		geo: {
 			cellCol: cellCol(anchor, variant),
 			resolutions: resolutions(variant),
-			// v3 wires S2 (exact lineage, perfect tiling). v1/v2 fall through
-			// to h3Index via `getSpatialIndex` default.
-			...(variant === 'v3' ? { index: s2Index } : {}),
+			index: s2Index,
 		},
 	};
 }
@@ -201,7 +182,7 @@ function applyReducer(n: number, sum: number, sumsq: number, r: Reducer): number
  *  returns rows untouched.
  *
  *  `dropCols` strips the named columns from each output row — used by the
- *  rollup handler to scrub the `{anchor}_h3_cell` value that pyrmts leaves
+ *  rollup handler to scrub the `{anchor}_s2_cell` value that pyrmts leaves
  *  on stitched rows (it's a stale label from one of the summed source rows
  *  — the rollup endpoint logically has no cell). */
 export function reduceRows(rows: Row[], reducer: Reducer, dropCols: string[] = []): Row[] {
@@ -349,7 +330,7 @@ async function serveRidesReduced(
 	// Cover semantics:
 	//   - No user cover: bbox-derived single-level (planner runs `pickResolution`).
 	//   - Single-level user cover (no excludes): exact-match push-down; rows
-	//     at the cover's own level survive (v1/v2 H3 path).
+	//     at the cover's own level survive.
 	//   - MIXED-level cover (possibly with excludes): algebraic mode. Push
 	//     down `cells IN [include ∪ exclude]` — every kept row's cell
 	//     equals one of the cover's tokens at its native level. Negate the
@@ -381,12 +362,9 @@ async function serveRidesReduced(
 	// in the debug response so callers can see the actual byte-range
 	// request distribution per parquet.
 	const trace: FetchTrace[] = debug ? [] : undefined as unknown as FetchTrace[];
-	// Push the cell list down as an RG-prune filter on the cellCol. For
-	// `(cell, dt)`-sorted shards (rides-v2), each RG covers a narrow cell
+	// Push the cell list down as an RG-prune filter on the cellCol:
+	// shards are `(cell, dt)`-sorted, so each RG covers a narrow cell
 	// range and ~70% of RGs can be skipped for a region-sized cell set.
-	// For `(dt, cell)`-sorted shards (rides-v1), RGs cover the full cell
-	// range per dt-bucket → the filter never prunes (but doesn't hurt
-	// either; the canSkipRowGroup check is cheap stats arithmetic).
 	//
 	// Push-down filter is exact `cellCol IN values`. Use:
 	//   - Single-level cover, no excludes: include cells as-is.
@@ -566,8 +544,8 @@ function parseAnchor(url: URL, cors: string | null): Anchor | Response {
 	return raw as Anchor;
 }
 
-/** HTTP handler for `/api/rides-{v1,v2,v3}` — bbox rollup, one row per
- *  (dt, dims). Strips the `{anchor}_h3_cell` column from response rows
+/** HTTP handler for `/api/rides-v3` — bbox rollup, one row per
+ *  (dt, dims). Strips the `{anchor}_s2_cell` column from response rows
  *  (rollup has no meaningful cell value).
  *
  *  All variants serve pure parquet. The v3 D1 hybrid (coarse tiers in
@@ -584,7 +562,7 @@ export async function serveRides(bucket: R2Bucket, request: Request, corsOrigin:
 	return serveRidesReduced(ridesPyramid(bucket, anchor, variant), request, cors, true);
 }
 
-/** HTTP handler for `/api/rides-{v1,v2,v3}/cells` — per-cell breakdown preserved. */
+/** HTTP handler for `/api/rides-v3/cells` — per-cell breakdown preserved. */
 export async function serveRidesCells(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant): Promise<Response> {
 	const cors = corsOrigin || null;
 	const url = new URL(request.url);
@@ -595,7 +573,7 @@ export async function serveRidesCells(bucket: R2Bucket, request: Request, corsOr
 
 // ─────────────────────────────────────────────────────────────────────
 // rides-v5: engine-built, station-identity-keyed, inventory-driven
-// (`specs/rides-v5.md`). Differences vs v1-3:
+// (`specs/rides-v5.md`). Differences vs v3:
 //   - keys: frozen vocab cells + `s:<short_name>` identity rows (drop-LUC)
 //     — user covers/bboxes translate to positive-only vocab covers via
 //     the station registry (raw S2 cover cells match no stored rows)
@@ -813,9 +791,5 @@ export async function serveRidesV5(
 }
 
 // Per-variant aliases used by `index.ts` route handlers.
-export const serveRidesV1 = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRides(bucket, request, corsOrigin, 'v1');
-export const serveRidesV1Cells = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRidesCells(bucket, request, corsOrigin, 'v1');
-export const serveRidesV2 = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRides(bucket, request, corsOrigin, 'v2');
-export const serveRidesV2Cells = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRidesCells(bucket, request, corsOrigin, 'v2');
 export const serveRidesV3 = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRides(bucket, request, corsOrigin, 'v3');
 export const serveRidesV3Cells = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRidesCells(bucket, request, corsOrigin, 'v3');

@@ -22,17 +22,12 @@ export const SYSTEM_BBOX = '40.5,-74.2,41.0,-73.7' as const
 const DATA_START_ISO = '2013-06-01T00:00:00Z'
 
 export type Anchor = 'start' | 'end'
-export type Pyramid = 'v1' | 'v2' | 'v3' | 'v5'
-
-/** Static h3 region-cells for v1/v2. v3 doesn't use a static asset —
- *  it computes a mixed-resolution `minimalCover` live from
- *  `stations-regional.json` (see `useRegionCoversV3`). */
-const REGION_CELLS_URL_H3 = '/assets/region-cells.json' as const
+export type Pyramid = 'v3' | 'v5'
 
 /** Which CFW worker to hit. `prod` = `ctbk-gbfs-api`, `dev` =
  *  `ctbk-gbfs-api-dev`. Use `dev` for iterating on backend changes
  *  (set up via `[env.dev]` in `gbfs/api/wrangler.toml`). Routed only for
- *  rides-v1/v2 hits — avail, station, totals stay on prod. */
+ *  rides hits — avail, station, totals stay on prod. */
 export type ApiTarget = 'prod' | 'dev'
 const API_BASE_BY_TARGET: Record<ApiTarget, string> = {
   prod: 'https://ctbk-gbfs-api.ryan-0dc.workers.dev',
@@ -61,7 +56,6 @@ interface RidesV1Response {
   }
 }
 
-type RegionCells = Record<Region, string[]>
 type RegionCovers = Record<Region, SpatialSet<string>>
 
 /** Stations static asset shape (written by `ctbk stations-regional`). */
@@ -86,22 +80,6 @@ const GENDER_MAP: Record<string, number> = {
   unknown: 0,
   male: 1,
   female: 2,
-}
-
-/** TSQ-cached fetch of the static h3 region → cells lookup (v1/v2).
- *  v3 takes the live `useRegionCoversV3` path instead. `enabled = false`
- *  short-circuits the fetch entirely for v3 — see `useRidesV1` call site. */
-function useRegionCellsH3(enabled: boolean): UseQueryResult<RegionCells> {
-  return useQuery<RegionCells>({
-    queryKey: ['region-cells', 'h3'],
-    enabled,
-    staleTime: Infinity,        // immutable static asset
-    queryFn: async () => {
-      const res = await fetch(REGION_CELLS_URL_H3)
-      if (!res.ok) throw new Error(`region-cells: HTTP ${res.status}`)
-      return res.json()
-    },
-  })
 }
 
 /** Compute v3 region covers via `s2Index.minimalCover`. For each region R:
@@ -153,11 +131,11 @@ interface UseRidesV1Args {
   to?: Date
   anchor?: Anchor
   /** If provided, fan out one query per region (each filtered to that
-   *  region's h3 cells). Output rows tagged with `Region`. If omitted,
+   *  region's cell cover). Output rows tagged with `Region`. If omitted,
    *  a single system-wide query runs and every row is tagged `'NYC'`. */
   regions?: readonly Region[]
-  /** Pyramid variant to query — selects between `/api/rides-v1` and
-   *  `/api/rides-v2`. Default `'v1'`. See `specs/done/rides-pyramid-v2.md`. */
+  /** Pyramid variant to query — selects between `/api/rides-v5` (prod)
+   *  and `/api/rides-v3` (rollback). Default `'v5'`. */
   pyramid?: Pyramid
   /** Which worker URL to hit. Default `'prod'`. `'dev'` points at the
    *  `ctbk-gbfs-api-dev` sibling worker for backend iteration without
@@ -170,25 +148,20 @@ export function useRidesV1({
   to,
   anchor = 'start',
   regions,
-  pyramid = 'v1',
+  pyramid = 'v5',
   api = 'prod',
 }: UseRidesV1Args = {}): UseQueryResult<ProcessedRow[]> {
   const apiBase = API_BASE_BY_TARGET[api]
   const fromIso = (from ?? new Date(DATA_START_ISO)).toISOString()
   const toIso = (to ?? defaultTo()).toISOString()
-  // v1/v2: static single-level h3 cells from a JSON asset.
-  // v3/v5: live minimalCover (mixed res + exclude) computed from
-  // stations-regional.json at FE startup, cached by TSQ. Each hook gates
-  // its own fetch on `enabled` — only the variant in use does I/O.
-  // v5 sends the same raw-S2 covers; the worker translates them to the
-  // station vocabulary (`v5UserCover`).
-  const isV3 = pyramid === 'v3' || pyramid === 'v5'
-  const staticCells = useRegionCellsH3(!isV3)
-  const minCovers = useRegionCoversV3(isV3)
+  // Region covers: live minimalCover (mixed res + exclude) computed from
+  // stations-regional.json at FE startup, cached by TSQ. v5 sends the
+  // same raw-S2 covers; the worker translates them to the station
+  // vocabulary (`v5UserCover`).
+  const minCovers = useRegionCoversV3()
 
-  const cellsByRegion = staticCells.data
   const coversByRegion = minCovers.data
-  const enabled = !regions || (isV3 ? !!coversByRegion : !!cellsByRegion)
+  const enabled = !regions || !!coversByRegion
 
   // Single TSQ query, region calls fanned out via Promise.all (parallel)
   // — total wall time = slowest region. Cold ~5-9s (worker still has to
@@ -204,11 +177,8 @@ export function useRidesV1({
       const specs: Spec[] = !regions
         ? [{ region: null, include: null, exclude: [] }]
         : regions.map((r) => {
-          if (isV3 && coversByRegion) {
-            const cov = coversByRegion[r]
-            return { region: r, include: cov.include, exclude: cov.exclude }
-          }
-          return { region: r, include: cellsByRegion![r], exclude: [] }
+          const cov = coversByRegion![r]
+          return { region: r, include: cov.include, exclude: cov.exclude }
         })
       const perRegion = await Promise.all(specs.map(async ({ region, include, exclude }) => {
         const url = new URL(`${apiBase}/api/rides-${pyramid}`)

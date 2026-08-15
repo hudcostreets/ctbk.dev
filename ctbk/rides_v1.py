@@ -1,13 +1,16 @@
-"""Build the v1 rides pyramid: two sibling h3-keyed sum-monoid pyramids
-(`rides-v1-start` / `rides-v1-end`) replacing legacy `trips/{agg,region,stations}`.
+"""Build the rides-v3 pyramid: two sibling S2-keyed sum-monoid pyramids
+(`rides-v3/{start,end}`), the rollback path behind prod's rides-v5.
 
-See `specs/rides-pyramid-v1.md` for the runbook + tier table.
+(Module name is historical: it once also built the h3-keyed rides-v1/v2
+pyramids, GC'd 2026-08-15 — child hexes are neither necessary nor
+sufficient to cover their parent, so exact multi-resolution aggregation
+is unachievable on h3. See `specs/done/rides-pyramid-v3.md`.)
 
-This module implements the finest tier (1h@1mo). Coarser tiers cascade via
-`pyrmts.cascade_tiers` (TODO: wire up).
+This module implements the finest tier (1h@1mo); coarser tiers cascade
+via `build_cascade_table`.
 
 Output schema (per anchor, per `pyrmts-geo` sum-monoid convention):
-    {anchor}_h3_cell : STRING   e.g. '892a1072117ffff' (mixed resolutions 9/7/5)
+    {anchor}_s2_cell : STRING   S2 token, levels 10..15 (LUC chains)
     dt               : INT64    bucket-start unix **milliseconds**
     gender           : STRING   'unknown' | 'male' | 'female'
     user_type        : STRING   'Subscriber' | 'Customer' | ...
@@ -31,7 +34,6 @@ from pathlib import Path
 from typing import Literal
 
 import boto3
-import h3
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -49,8 +51,8 @@ R2_BUCKET = 'ctbk'
 SRC_DIR = Path(f's3/{R2_BUCKET}/normalized')
 STATION_OBS_PATH = Path(f's3/{R2_BUCKET}/stations/station-observations.parquet')
 
-Variant = Literal['v1', 'v2', 'v3']
-VARIANTS: tuple[Variant, ...] = ('v1', 'v2', 'v3')
+Variant = Literal['v3']
+VARIANTS: tuple[Variant, ...] = ('v3',)
 
 # Earliest tripdata month. 'all'-sharded outputs span [genesis, now); any
 # full-history recompute must enumerate inputs from here, never from a
@@ -61,13 +63,6 @@ GENESIS_DATE = Date(2013, 6, 1)
 def dst_prefix(variant: Variant) -> str:
     return f'rides-{variant}'
 
-# v1/v2 use h3 resolutions {9, 7, 5}; v3 uses S2 levels (10..15).
-DEFAULT_RESOLUTIONS: tuple[int, ...] = (9, 7, 5)
-DEFAULT_RESOLUTIONS_BY_VARIANT: dict[Variant, tuple[int, ...]] = {
-    'v1': (9, 7, 5),
-    'v2': (9, 7, 5),
-    'v3': (10, 11, 12, 13, 14, 15),
-}
 
 # Citibike's `Gender` column: 0 unknown, 1 male, 2 female. (Removed 2021-02
 # alongside `Bike ID`; pre-2021 months have values.)
@@ -98,9 +93,7 @@ ANCHOR_CONFIG: dict[Anchor, dict[str, str]] = {
 
 
 def cell_col(anchor: Anchor, variant: Variant) -> str:
-    """Cell column name varies by variant: v1/v2 use h3, v3 uses s2."""
-    idx = 's2' if variant == 'v3' else 'h3'
-    return f'{anchor}_{idx}_cell'
+    return f'{anchor}_s2_cell'
 
 DIM_COLS = ['gender', 'user_type', 'bike_type']
 METRIC_NAMES = ['count', 'duration']
@@ -117,21 +110,9 @@ class TierSpec:
     derive_from: str | None    # None ⇒ built from normalized source
 
 
-V1_TIER_SPECS: dict[str, TierSpec] = {
-    '1h':  TierSpec('1h',  3600,    '1mo', None),
-    '3h':  TierSpec('3h',  10800,   '1mo', '1h'),
-    '6h':  TierSpec('6h',  21600,   '1mo', '1h'),
-    '12h': TierSpec('12h', 43200,   '1mo', '6h'),
-    '1d':  TierSpec('1d',  86400,   '1y',  '1h'),
-    '3d':  TierSpec('3d',  259200,  '1y',  '1d'),
-    '7d':  TierSpec('7d',  604800,  '1y',  '1d'),
-    '14d': TierSpec('14d', 1209600, '1y',  '7d'),
-    '1mo': TierSpec('1mo', None,    '1y',  '1d'),
-    '3mo': TierSpec('3mo', None,    '1y',  '1mo'),
-    '1y':  TierSpec('1y',  None,    'all', '1mo'),
-}
-
-V2_TIER_SPECS: dict[str, TierSpec] = {
+# Consolidated cascade (originated as rides-v2's ladder; v3 reuses it
+# verbatim — only cell-key column + level set differ).
+V3_TIER_SPECS: dict[str, TierSpec] = {
     '1h':  TierSpec('1h',  3600,    '1mo', None),
     '3h':  TierSpec('3h',  10800,   '3mo', '1h'),
     '6h':  TierSpec('6h',  21600,   '6mo', '1h'),
@@ -145,12 +126,7 @@ V2_TIER_SPECS: dict[str, TierSpec] = {
     '1y':  TierSpec('1y',  None,    'all', '1mo'),
 }
 
-# v3 reuses v2's cascade verbatim — only cell-key column + level set differ.
-V3_TIER_SPECS: dict[str, TierSpec] = V2_TIER_SPECS
-
 TIER_SPECS_BY_VARIANT: dict[Variant, dict[str, TierSpec]] = {
-    'v1': V1_TIER_SPECS,
-    'v2': V2_TIER_SPECS,
     'v3': V3_TIER_SPECS,
 }
 
@@ -160,20 +136,14 @@ def tier_specs(variant: Variant) -> dict[str, TierSpec]:
 
 
 def sort_cols(variant: Variant, cell_col: str) -> list[str]:
-    """v1: (dt, cell) — time-window queries prune via `dt` RG stats.
-    v2/v3: (cell, dt) — cell-filter queries prune via cell RG stats;
-    dims as tertiary keys for deterministic layout + better
-    dictionary/RLE encoding (rows within one (cell, dt) are the
-    handful of dim combos). Dims deliberately come AFTER dt: the
-    dominant query fetches the full dim cartesian over a time window,
-    which stays one contiguous range per cell; dims-before-dt would
-    shatter it into a range per combo.
+    """(cell, dt) — cell-filter queries prune via cell RG stats; dims as
+    tertiary keys for deterministic layout + better dictionary/RLE
+    encoding (rows within one (cell, dt) are the handful of dim combos).
+    Dims deliberately come AFTER dt: the dominant query fetches the full
+    dim cartesian over a time window, which stays one contiguous range
+    per cell; dims-before-dt would shatter it into a range per combo.
     """
-    if variant == 'v1':
-        return ['dt', cell_col]
-    if variant in ('v2', 'v3'):
-        return [cell_col, 'dt', *DIM_COLS]
-    raise ValueError(f"unknown variant: {variant!r}")
+    return [cell_col, 'dt', *DIM_COLS]
 
 
 def _add_months(t: datetime, n: int) -> datetime:
@@ -309,7 +279,7 @@ def r2_head(cli, key: str) -> dict | None:
         raise
 
 
-def output_key(anchor: Anchor, tier: str, period: str, variant: Variant = 'v1') -> str:
+def output_key(anchor: Anchor, tier: str, period: str, variant: Variant = 'v3') -> str:
     return f'{dst_prefix(variant)}/{anchor}/{tier}/{period}.parquet'
 
 
@@ -363,9 +333,9 @@ def canonical_station_map() -> dict[str, str]:
 def station_geo_lookup() -> dict[str, tuple[float, float]]:
     """Build station_id → (lat, lng) lookup from station-observations.
 
-    Used to recover h3 cells for rides whose source row has null lat/lng
-    but a known station_id. Picks the most-recent non-null, non-(0,0)
-    observation per id.
+    Used to recover coordinates for rides whose source row has null
+    lat/lng but a known station_id. Picks the most-recent non-null,
+    non-(0,0) observation per id.
     """
     import pandas as pd
     obs = pd.read_parquet(STATION_OBS_PATH, columns=['date', 'id', 'lat', 'lng'])
@@ -419,20 +389,17 @@ def _load_rides_for_anchor(ym: YM, anchor: Anchor) -> pd.DataFrame:
 def build_1h_month_table(
     ym: YM,
     anchor: Anchor,
-    resolutions: tuple[int, ...] | None = None,
-    variant: Variant = 'v1',
+    variant: Variant = 'v3',
 ) -> pa.Table | None:
     """Build one `rides-<variant>/<anchor>/1h/<YYYY-MM>.parquet` table.
 
-    Reads normalized rides for `ym`, cellizes each ride at every
-    requested resolution (h3 for v1/v2, S2 for v3), groups by
-    `(<anchor>_<idx>_cell, dt_hour, *dims)`, aggregates `count` +
+    Reads normalized rides for `ym`, materializes each ride at its
+    canonical station's L10..LUC S2 chain, groups by
+    `(<anchor>_s2_cell, dt_hour, *dims)`, aggregates `count` +
     `duration` with the sum monoid.
 
     Returns None if the source has no rides for this (ym, anchor).
     """
-    if resolutions is None:
-        resolutions = DEFAULT_RESOLUTIONS_BY_VARIANT[variant]
     cfg = ANCHOR_CONFIG[anchor]
     cc = cell_col(anchor, variant)
     df = _load_rides_for_anchor(ym, anchor)
@@ -457,23 +424,19 @@ def build_1h_month_table(
             df.loc[found_rows, cfg['lng_col']] = [geo[r][1] for r in found_rows]
             err(f"  {ym} [{anchor}]: filled {int(found_mask.sum()):,}/{n_initial_null:,} null lat/lng from station-observations")
 
-    # v3 keys by station identity, so coordinates only matter for the
-    # (unmapped-sid) fallback — null-coord rides with a known station id
-    # are kept (they were dropped under coordinate keying).
+    # Rides are keyed by station identity, so coordinates only matter for
+    # the (unmapped-sid) fallback — null-coord rides with a known station
+    # id are kept (they were dropped under coordinate keying).
     still_null = df[cfg['lat_col']].isna() | df[cfg['lng_col']].isna()
-    if variant == 'v3':
-        canon0 = canonical_station_map()
-        chains0, _ = luc_chains()
-        sids0 = df[sid_col].astype(str)
-        unmapped = ~sids0.map(lambda s: canon0.get(s, s)).isin(chains0.keys())
-        droppable = still_null & unmapped
-    else:
-        droppable = still_null
+    canon0 = canonical_station_map()
+    chains0, _ = luc_chains()
+    sids0 = df[sid_col].astype(str)
+    unmapped = ~sids0.map(lambda s: canon0.get(s, s)).isin(chains0.keys())
+    droppable = still_null & unmapped
     n_drop = int(droppable.sum())
     if n_drop:
         df = df[~droppable]
-        err(f"  {ym} [{anchor}]: dropped {n_drop:,} rides with no lat/lng"
-            + (" and no station-id mapping" if variant == 'v3' else " after fallback"))
+        err(f"  {ym} [{anchor}]: dropped {n_drop:,} rides with no lat/lng and no station-id mapping")
     err(f"  {ym} [{anchor}]: {len(df):,} rides")
 
     # Hour-floor dt → unix ms
@@ -492,55 +455,39 @@ def build_1h_month_table(
     lat = df[cfg['lat_col']].values
     lng = df[cfg['lng_col']].values
 
-    if variant == 'v3':
-        # LUC-anchored: each ride materializes at its CANONICAL
-        # station's L10..LUC chain (station identity, not per-ride
-        # coordinates — see `luc_chains` docstring / rides-v3-luc.md).
-        import itertools
-        import numpy as np
-        chains, luc_cells = luc_chains()
-        canon = canonical_station_map()
-        sids = df[sid_col].astype(str).values
-        ride_chains: list[tuple[str, ...]] = []
-        n_unknown = 0
-        for sid, la, ln in zip(sids, lat, lng):
-            ch = chains.get(canon.get(sid, sid))
-            if ch is None:
-                n_unknown += 1
-                ch = tuple(
-                    t for lvl in FALLBACK_LEVELS
-                    if (t := s2cell.lat_lon_to_token(la, ln, lvl)) not in luc_cells
-                )
-            ride_chains.append(ch)
-        if n_unknown:
-            err(f"  {ym} [{anchor}]: {n_unknown:,} rides with unmapped station id — "
-                f"coordinate fallback (LUC cells excluded)")
-        lens = np.fromiter((len(c) for c in ride_chains), dtype=np.int64, count=len(ride_chains))
-        rep = np.repeat(np.arange(len(ride_chains)), lens)
-        long_df = pd.DataFrame({
-            cc: list(itertools.chain.from_iterable(ride_chains)),
-            'dt': dt_hour_ms[rep],
-            'gender': gender[rep],
-            'user_type': user_type[rep],
-            'bike_type': bike_type[rep],
-            'duration_s': duration_s[rep],
-            'duration_sq': duration_sq[rep],
-        })
-    else:
-        # Inflate by len(resolutions) (one row per resolution), then groupby+sum.
-        chunks = []
-        for res in resolutions:
-            cells = [h3.latlng_to_cell(la, ln, res) for la, ln in zip(lat, lng)]
-            chunks.append(pd.DataFrame({
-                cc: cells,
-                'dt': dt_hour_ms,
-                'gender': gender,
-                'user_type': user_type,
-                'bike_type': bike_type,
-                'duration_s': duration_s,
-                'duration_sq': duration_sq,
-            }))
-        long_df = pd.concat(chunks, ignore_index=True)
+    # LUC-anchored: each ride materializes at its CANONICAL
+    # station's L10..LUC chain (station identity, not per-ride
+    # coordinates — see `luc_chains` docstring / rides-v3-luc.md).
+    import itertools
+    import numpy as np
+    chains, luc_cells = luc_chains()
+    canon = canonical_station_map()
+    sids = df[sid_col].astype(str).values
+    ride_chains: list[tuple[str, ...]] = []
+    n_unknown = 0
+    for sid, la, ln in zip(sids, lat, lng):
+        ch = chains.get(canon.get(sid, sid))
+        if ch is None:
+            n_unknown += 1
+            ch = tuple(
+                t for lvl in FALLBACK_LEVELS
+                if (t := s2cell.lat_lon_to_token(la, ln, lvl)) not in luc_cells
+            )
+        ride_chains.append(ch)
+    if n_unknown:
+        err(f"  {ym} [{anchor}]: {n_unknown:,} rides with unmapped station id — "
+            f"coordinate fallback (LUC cells excluded)")
+    lens = np.fromiter((len(c) for c in ride_chains), dtype=np.int64, count=len(ride_chains))
+    rep = np.repeat(np.arange(len(ride_chains)), lens)
+    long_df = pd.DataFrame({
+        cc: list(itertools.chain.from_iterable(ride_chains)),
+        'dt': dt_hour_ms[rep],
+        'gender': gender[rep],
+        'user_type': user_type[rep],
+        'bike_type': bike_type[rep],
+        'duration_s': duration_s[rep],
+        'duration_sq': duration_sq[rep],
+    })
 
     group_keys = [cc, 'dt', 'gender', 'user_type', 'bike_type']
     agg = (
@@ -582,7 +529,7 @@ def shard_table(df: pd.DataFrame, cc: str) -> pa.Table:
     return pa.Table.from_pandas(df[out_cols], schema=shard_schema(cc), preserve_index=False)
 
 
-def write_table_to_r2(cli, table: pa.Table, key: str, cell_col: str, variant: Variant = 'v1') -> int:
+def write_table_to_r2(cli, table: pa.Table, key: str, cell_col: str, variant: Variant = 'v3') -> int:
     """Serialize via `pyrmts.write_tier_parquet` (sort per `sort_cols(variant)` +
     pick RG size for hyparquet RG-pruning) and PUT to R2."""
     buf = io.BytesIO()
@@ -597,7 +544,7 @@ def write_table_to_r2(cli, table: pa.Table, key: str, cell_col: str, variant: Va
     return len(body)
 
 
-def write_table_to_local(table: pa.Table, path: Path, cell_col: str, variant: Variant = 'v1') -> int:
+def write_table_to_local(table: pa.Table, path: Path, cell_col: str, variant: Variant = 'v3') -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     buf = io.BytesIO()
     write_tier_parquet(table, out=buf, sort=sort_cols(variant, cell_col))
@@ -614,7 +561,7 @@ def read_shard(
     period: str,
     local_dir: str | None,
     cli=None,
-    variant: Variant = 'v1',
+    variant: Variant = 'v3',
 ) -> pa.Table | None:
     """Fetch one rides-<variant>/<anchor>/<tier>/<period>.parquet. None on 404."""
     key = output_key(anchor, tier, period, variant)
@@ -639,7 +586,7 @@ def input_periods_for_output(
     output_start: datetime,
     input_tier: str,
     all_dates: tuple[Date, Date] | None,
-    variant: Variant = 'v1',
+    variant: Variant = 'v3',
 ) -> list[str]:
     """Enumerate input-shard `period` strings overlapping one output shard window."""
     specs = tier_specs(variant)
@@ -663,7 +610,7 @@ def build_cascade_table(
     shard_start: datetime,
     local_dir: str | None,
     all_dates: tuple[Date, Date] | None = None,
-    variant: Variant = 'v1',
+    variant: Variant = 'v3',
 ) -> pa.Table | None:
     """Cascade one rides-<variant>/<anchor>/<tier>/<period>.parquet shard.
 
@@ -740,11 +687,10 @@ def _build_shard_task(
     shard_start_iso: str,
     anchor: Anchor,
     overwrite: bool,
-    resolutions: tuple[int, ...],
     local_dir: str | None,
     all_dates_iso: tuple[str, str] | None,
     full: bool = False,
-    variant: Variant = 'v1',
+    variant: Variant = 'v3',
 ) -> tuple[str, Anchor, str, int]:
     """Build + write one rides-<variant>/<anchor>/<tier>/<period>.parquet shard.
 
@@ -780,7 +726,7 @@ def _build_shard_task(
         if tier != '1h':
             raise RuntimeError(f"tier {tier!r} has no derive_from but isn't '1h'")
         ym = YM(t.strftime('%Y%m'))
-        table = build_1h_month_table(ym, anchor, resolutions, variant)
+        table = build_1h_month_table(ym, anchor, variant)
     else:
         ad = (
             (Date.fromisoformat(all_dates_iso[0]), Date.fromisoformat(all_dates_iso[1]))
@@ -831,18 +777,6 @@ def _parse_ym(s: str) -> YM:
     raise BadParameter(f"YM must be YYYYMM or YYYY-MM; got {s!r}")
 
 
-def _ym_range(date_from: str, date_to: str) -> list[YM]:
-    """Inclusive YM range `[date_from, date_to]` (both YYYY-MM)."""
-    f = _parse_ym(date_from)
-    t = _parse_ym(date_to)
-    out: list[YM] = []
-    cur = f
-    while cur <= t:
-        out.append(cur)
-        cur = cur + 1
-    return out
-
-
 @ctbk.command('rides-v1-build', help="Build rides-<variant>/<anchor>/<tier>/<period>.parquet shards.")
 @option('-a', '--anchor', type=str, default='both',
         help="'start' | 'end' | 'both' (default 'both').")
@@ -853,13 +787,10 @@ def _ym_range(date_from: str, date_to: str) -> list[YM]:
         help="Read/write local dir instead of R2 (prototype/smoke).")
 @option('-n', '--dry-run', is_flag=True)
 @option('-O', '--overwrite', '--force', is_flag=True, help="Rebuild even if output exists.")
-@option('-r', '--resolution', 'resolutions', multiple=True, type=int, default=(),
-        help="cell resolutions/levels (1h only; default per variant: v1/v2=9,7,5; v3=10..15).")
-@option('-t', '--tier', type=str, default='1h',
-        help="Tier name (depends on --variant; v1+v2 share the same tier names).")
+@option('-t', '--tier', type=str, default='1h', help="Tier name.")
 @option('-T', '--ym-to', 'ym_to', required=True, help="Inclusive end (YYYY-MM).")
-@option('-v', '--variant', type=str, default='v1',
-        help=f"Pyramid variant; one of {list(VARIANTS)} (default 'v1').")
+@option('-v', '--variant', type=str, default='v3',
+        help=f"Pyramid variant; one of {list(VARIANTS)} (default 'v3').")
 def rides_v1_build_cmd(
     anchor: str,
     concurrency: int,
@@ -868,7 +799,6 @@ def rides_v1_build_cmd(
     local_dir: str | None,
     dry_run: bool,
     overwrite: bool,
-    resolutions: tuple[int, ...],
     tier: str,
     ym_to: str,
     variant: str,
@@ -904,7 +834,6 @@ def rides_v1_build_cmd(
     err(f"rides-{variant}-build tier={tier} shard={spec.shard} anchors={anchors} "
         f"{len(starts)} shards in [{ym_from}, {ym_to}] (inclusive)")
 
-    res_tup = tuple(resolutions) if resolutions else DEFAULT_RESOLUTIONS_BY_VARIANT[variant]  # type: ignore[index]
     tasks = [(s.isoformat(), a) for s in starts for a in anchors]
 
     if dry_run:
@@ -918,7 +847,7 @@ def rides_v1_build_cmd(
     if concurrency <= 1:
         for s_iso, a in tasks:
             period, _a, status, n = _build_shard_task(
-                tier, s_iso, a, overwrite, res_tup, local_dir, all_dates_iso, full, variant,  # type: ignore[arg-type]
+                tier, s_iso, a, overwrite, local_dir, all_dates_iso, full, variant,  # type: ignore[arg-type]
             )
             err(f"  {status:5s} {a:5s} {period} ({n:,} B)")
             n_wrote += (status == 'wrote'); n_skip += (status == 'skip'); n_empty += (status == 'empty')
@@ -927,7 +856,7 @@ def rides_v1_build_cmd(
         with ProcessPoolExecutor(max_workers=concurrency) as pool:
             futs = {
                 pool.submit(
-                    _build_shard_task, tier, s_iso, a, overwrite, res_tup, local_dir, all_dates_iso, full, variant,  # type: ignore[arg-type]
+                    _build_shard_task, tier, s_iso, a, overwrite, local_dir, all_dates_iso, full, variant,  # type: ignore[arg-type]
                 ): (s_iso, a)
                 for s_iso, a in tasks
             }
@@ -938,94 +867,3 @@ def rides_v1_build_cmd(
                 bytes_total += n
 
     err(f"done: {n_wrote} wrote, {n_skip} skip, {n_empty} empty, {bytes_total:,} bytes total")
-
-
-# ─── Validation: cross-check vs legacy trips/agg/h1 ────────────────────
-
-REF_H1_DIR = Path(f'r2/{R2_BUCKET}/trips/agg/h1')
-
-
-def _ride_totals_for_anchor(
-    rv_path: Path,
-    anchor: Anchor,
-    pick_res: int = 9,
-) -> tuple[int, int, int]:
-    """Read rides-v1/<anchor>/1h/<period>.parquet, filter to one h3 resolution,
-    return (n_rides, duration_sum, duration_sumsq).
-
-    All resolutions contain the same total — picking one avoids 3× double-count.
-    """
-    df = pd.read_parquet(rv_path, columns=[
-        f'{anchor}_h3_cell', 'count_n', 'duration_sum', 'duration_sumsq',
-    ])
-    res = df[f'{anchor}_h3_cell'].apply(h3.get_resolution)
-    sub = df[res == pick_res]
-    return (
-        int(sub['count_n'].sum()),
-        int(sub['duration_sum'].sum()),
-        int(sub['duration_sumsq'].sum()),
-    )
-
-
-def _ref_totals_for_anchor(ref_path: Path, anchor: Anchor) -> tuple[int, int, int]:
-    df = pd.read_parquet(ref_path, columns=['side', 'count', 'duration_s', 'duration_s_sq'])
-    sub = df[df['side'] == anchor]
-    return (
-        int(sub['count'].sum()),
-        int(sub['duration_s'].sum()),
-        int(sub['duration_s_sq'].sum()),
-    )
-
-
-@ctbk.command('rides-v1-validate', help="Cross-check rides-v1 totals vs trips/agg/h1.")
-@option('-a', '--anchor', type=str, default='both', help="'start' | 'end' | 'both'.")
-@option('-f', '--ym-from', 'ym_from', required=True, help="Inclusive start (YYYY-MM).")
-@option('-l', '--local-dir', type=str, required=True,
-        help="Local dir with rides-v1/<anchor>/1h/<period>.parquet shards.")
-@option('-r', '--pick-res', type=int, default=9,
-        help="h3 resolution to filter on (default 9; all resolutions agree on totals).")
-@option('-T', '--ym-to', 'ym_to', required=True, help="Inclusive end (YYYY-MM).")
-def rides_v1_validate_cmd(
-    anchor: str,
-    ym_from: str,
-    local_dir: str,
-    pick_res: int,
-    ym_to: str,
-):
-    if anchor not in ('start', 'end', 'both'):
-        raise BadParameter(f"--anchor must be one of start/end/both; got {anchor!r}")
-    anchors: tuple[Anchor, ...] = ANCHORS if anchor == 'both' else (anchor,)  # type: ignore[assignment]
-    yms = _ym_range(ym_from, ym_to)
-
-    root = Path(local_dir)
-    n_ok = n_fail = n_skip = 0
-    fails: list[str] = []
-    for y in yms:
-        period = f'{str(y)[:4]}-{str(y)[4:6]}'
-        ref_path = REF_H1_DIR / f'{period}.parquet'
-        if not ref_path.exists():
-            err(f"  skip  {period}: no reference at {ref_path}")
-            n_skip += 1
-            continue
-        for a in anchors:
-            rv_path = root / output_key(a, '1h', period)
-            if not rv_path.exists():
-                err(f"  skip  {period} [{a}]: no rides-v1 at {rv_path}")
-                n_skip += 1
-                continue
-            rv_totals = _ride_totals_for_anchor(rv_path, a, pick_res)
-            ref_totals = _ref_totals_for_anchor(ref_path, a)
-            if rv_totals == ref_totals:
-                err(f"  ok    {period} [{a}]: n={rv_totals[0]:,} dur={rv_totals[1]:,} dur_sq={rv_totals[2]:,}")
-                n_ok += 1
-            else:
-                msg = (f"  FAIL  {period} [{a}]: rv={rv_totals} ref={ref_totals} "
-                       f"(Δn={rv_totals[0]-ref_totals[0]:+d} "
-                       f"Δdur={rv_totals[1]-ref_totals[1]:+d} "
-                       f"Δdur_sq={rv_totals[2]-ref_totals[2]:+d})")
-                err(msg)
-                fails.append(msg)
-                n_fail += 1
-    err(f"\nrides-v1-validate: {n_ok} ok, {n_fail} fail, {n_skip} skip")
-    if fails:
-        raise SystemExit(1)
