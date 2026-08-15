@@ -132,7 +132,11 @@ Matrix: {2013-07, 2019-06, 2024-06, 2026-06, 2026-07} × {start, end}; v3 freshl
 
 Operational lessons encoded in `rides-v5-extend`: fills must run UNCAPPED (a month-end range cap leaves coarse-rung holes — spans crossing the cap can't build, and monthly serve-time rebinning rides on `1d`); wholly-past-month-end 0-row shards are poison (present-but-empty = built) and must be swept from all THREE stores — R2, D1 `pyramid_shards`, and the per-prefix `manifest.jsonl`, which is the fill's presence source of truth.
 
-Remaining: ci.yml hook (call `rides-v5-extend` post-`cons create`; gated on GHA IAM Batch-submit), station-map/vocab regen folded into the same hook, residual cold-load footer parses (first uncached page load sheds 1-2 region queries → TSQ retry settles ~2s; same behavior the multi-select panels shipped with), then GC `rides-v1/2/3`.
+**Cadence landed 2026-08-15**: ci.yml runs `station-luc-build` + `vocab check` (new) before any build, then `rides-v5-extend` post-`update` before the www push (CI IAM user rotated to scoped `ctbk.dev@github` w/ resource-scoped `batch:SubmitJob`). Nonzero LUC churn pings Slack `:warning:` (moved LUCs = incremental-vs-scratch drift until ranges are invalidated). A 20th-of-month rehearsal cron re-runs the last processed month end-to-end (idempotent no-ops) to catch HEAD rot pre-drop.
+
+**Incremental ≡ from-scratch backtest (2026-08-15)**: from-scratch Batch rebuild of `[2026-02-01, 2026-08-01)` start-anchor into a scratch prefix (362 windows, 123.5M source rows, 125s wall) vs prod's incrementally-extended shards: 17/17 fully-in-window shards content-equal via `engine compare`; all 8 window-boundary shards exactly equal on every fully-covered bin (count deltas = out-of-window span portions only).
+
+Remaining: h3 GC ✅ (2026-08-15, `specs/done/h3-gc.md`); rides-v3 GC after v5 burn-in; residual cold-load footer parses (first uncached page load sheds 1-2 region queries → TSQ retry settles ~2s; same behavior the multi-select panels shipped with).
 
 ## Open questions
 
