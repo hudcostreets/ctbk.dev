@@ -9,7 +9,7 @@
 - Worker (`gbfs/api/src/rides_v1.ts`, `index.ts`): `VARIANTS=['v3']`, h3 spatial-index fallback and v1 tier ladder removed, `/api/rides-v{1,2}[/cells]` routes retired (regex now `v[35]`), `serveRidesV{1,2}*` exports deleted. Tests re-fixtured to `start_s2_cell`.
 - FE (`www/`): `Pyramid = 'v3' | 'v5'`; static region-cells fetch path (`useRegionCellsH3`) deleted; `public/assets/region-cells{,-s2}.json` deleted; Home's pyramid toggle now `[v3, v5]`.
 
-## Data GC (pending confirm)
+## Data GC (done 2026-08-15, user-confirmed)
 
 R2 `ctbk` bucket — no D1 registry rows exist for either (they predate `pyramid_shards`):
 
@@ -18,7 +18,7 @@ R2 `ctbk` bucket — no D1 registry rows exist for either (they predate `pyramid
 | `rides-v1/` | 1,436 | 9.79 GB |
 | `rides-v2/` | 536 | 7.73 GB |
 
-Delete both prefixes once the code GC is deployed (worker first, so the endpoints 404 by route rather than 500 on missing objects).
+Deleted via `ctbk gbfs r2 rm -p rides-v1/ rides-v2/` (prefix mode added to the CLI for this; will recur for the rides-v3 GC). Both prefixes verified empty after.
 
 ## Follow-up
 

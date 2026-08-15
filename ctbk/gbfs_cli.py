@@ -610,14 +610,45 @@ def gbfs_r2_put(content_type: str, src: str, key: str) -> None:
 	err(f'{src} → r2://{bucket}/{key} ({len(body):,} B)')
 
 
-@gbfs_r2.command('rm', help='Delete R2 keys (exact keys, no globbing).')
+@gbfs_r2.command('rm', help='Delete R2 keys — exact keys, or everything under a -p/--prefix.')
+@option('-n', '--dry-run', is_flag=True, help='With -p: list what would be deleted and exit.')
+@option('-p', '--prefix', is_flag=True, help='Treat each KEY as a prefix: page + batch-delete every object under it (1000/batch).')
 @argument('keys', metavar='KEY...', nargs=-1, required=True)
-def gbfs_r2_rm(keys: tuple[str, ...]) -> None:
+def gbfs_r2_rm(dry_run: bool, prefix: bool, keys: tuple[str, ...]) -> None:
 	client, bucket = _r2_client()
-	for key in keys:
-		client.head_object(Bucket=bucket, Key=key)  # type: ignore[attr-defined]  # raise if absent
-		client.delete_object(Bucket=bucket, Key=key)  # type: ignore[attr-defined]
-		err(f'deleted {key}')
+	if not prefix:
+		for key in keys:
+			client.head_object(Bucket=bucket, Key=key)  # type: ignore[attr-defined]  # raise if absent
+			client.delete_object(Bucket=bucket, Key=key)  # type: ignore[attr-defined]
+			err(f'deleted {key}')
+		return
+	paginator = client.get_paginator('list_objects_v2')  # type: ignore[attr-defined]
+	for pfx in keys:
+		todo = [
+			c['Key']
+			for page in paginator.paginate(Bucket=bucket, Prefix=pfx)
+			for c in page.get('Contents') or []
+		]
+		if not todo:
+			raise click.ClickException(f'no keys under {pfx}')
+		total = sum(1 for _ in todo)
+		if dry_run:
+			for k in todo[:10]:
+				err(f'  {k}')
+			err(f'would delete {total} keys under {pfx}')
+			continue
+		deleted = 0
+		for i in range(0, len(todo), 1000):
+			batch = todo[i:i + 1000]
+			resp = client.delete_objects(  # type: ignore[attr-defined]
+				Bucket=bucket,
+				Delete={'Objects': [{'Key': k} for k in batch], 'Quiet': True},
+			)
+			errors = resp.get('Errors') or []
+			if errors:
+				raise click.ClickException(f'{len(errors)} delete errors under {pfx}; first: {errors[0]}')
+			deleted += len(batch)
+		err(f'deleted {deleted} keys under {pfx}')
 
 
 # ─── Station-cell vocabulary (specs/drop-luc-station-keys.md) ───────────
