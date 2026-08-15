@@ -195,10 +195,12 @@ jobs:
               if ok else
               f":x: *tripdata {ym} processing failed* — <{run_url}|logs>"
           )
+          # Failures post top-level: a threaded :x: is invisible at channel
+          # level (the 202607 failures sat unnoticed in threads for a day).
           SlackClient(
               token=os.environ['SLACK_BOT_TOKEN'],
               channel='C0B5MKF28NP',
               username='ctbk-bot',
               icon_emoji=':bike:',
-          ).post(text, thread_id=os.environ['THREAD_TS'])
+          ).post(text, thread_id=os.environ['THREAD_TS'] if ok else None)
           PY

@@ -61,7 +61,7 @@
     "prebuild": "node scripts/gen-ymdgtb-index.js && node scripts/fetch-screenshots.js",
     "build": "vite build",
     "deploy:dev": "pnpm build && wrangler deploy --env dev",
-    "postbuild": "node scripts/gen-station-stubs.js",
+    "postbuild": "node scripts/gen-station-stubs.js && node scripts/gen-version.js",
     "preview": "vite preview",
     "preview:cf": "wrangler dev",
     "lint": "eslint .",

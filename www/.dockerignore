@@ -86,6 +86,7 @@
 !scripts/fetch-screenshots.js
 !scripts/gen-station-stubs.js
 !scripts/gen-station-urls.js
+!scripts/gen-version.js
 !scripts/gen-ymdgtb-index.js
 !scripts/push-screenshots.py
 !scrns.config.json

@@ -107,6 +107,21 @@ jobs:
       # custom domain (attached once in the dashboard — deliberately NOT
       # declared in wrangler.jsonc, so this narrow-scope token needs no
       # zone permissions).
+      # The live site self-reports its sha (`version.json`, written at
+      # postbuild) — capture it BEFORE deploying to get the previous
+      # deploy's sha for the Slack notify's compare range. Deterministic,
+      # unlike the GH API runs-list archaeology it replaced (eventual
+      # consistency mis-picked a week-old run as "previous deploy",
+      # 2026-08-15).
+      - name: Record previous deploy sha
+        id: prev
+        if: github.ref == 'refs/heads/www' || github.ref == 'refs/heads/dev'
+        env:
+          HOST: ${{ github.ref == 'refs/heads/dev' && 'dev.ctbk.dev' || 'ctbk.dev' }}
+        run: |
+          prev=$(curl -sf "https://$HOST/version.json" | jq -r '.sha // empty' || true)
+          echo "sha=$prev" >> $GITHUB_OUTPUT
+          echo "previous deploy: ${prev:-unknown (no version.json yet)}"
       - name: Deploy to Cloudflare Workers (ctbk-dev)
         id: deploy
         if: github.ref == 'refs/heads/www' || github.ref == 'refs/heads/dev'
@@ -129,6 +144,11 @@ jobs:
           # out-of-sync windows that needed a 5-min polling loop.
           for i in 1 2 3; do
             sleep 10
+            live=$(curl -sf "https://$HOST/version.json" | jq -r '.sha // empty' || true)
+            if [ "$live" != "${{ github.sha }}" ]; then
+              echo "  version.json sha: ${live:-none} != ${{ github.sha }}"
+              continue
+            fi
             html=$(curl -sf "https://$HOST/" || true)
             [ -z "$html" ] && continue
             chunks=$(echo "$html" | grep -oE 'assets/[A-Za-z0-9._/-]+\.(js|css)' | sort -u)
@@ -139,7 +159,7 @@ jobs:
               [ "$code" = "200" ] || { fail=1; echo "  $code  $c"; break; }
             done
             if [ "$fail" = "0" ]; then
-              echo "smoke OK: $(echo $chunks | wc -w) chunk(s) all 200"
+              echo "smoke OK: version.json matches, $(echo $chunks | wc -w) chunk(s) all 200"
               exit 0
             fi
           done
@@ -152,20 +172,24 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.sha }}
-          RUN_ID: ${{ github.run_id }}
+          PREV_SHA: ${{ steps.prev.outputs.sha }}
           MSG: ${{ github.event.head_commit.message }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           REPO_SLUG: ${{ github.repository }}
         run: |
           uv run --no-project --with 'thrds==0.4.0' --python 3.12 python - <<'PY'
-          import json, os, urllib.request
+          import json, os, subprocess, urllib.request
           from thrds import SlackClient, Thread
           gh_token = os.environ['GITHUB_TOKEN']
           sha = os.environ['SHA']
-          run_id = os.environ['RUN_ID']
           short = sha[:7]
-          subject = (os.environ.get('MSG') or '').splitlines()[0] if os.environ.get('MSG') else '(no message)'
+          # `head_commit` is absent on workflow_dispatch triggers; fall back
+          # to the checked-out commit's subject instead of "(no message)".
+          msg = os.environ.get('MSG') or subprocess.run(
+              ['git', 'log', '-1', '--format=%s'], capture_output=True, text=True,
+          ).stdout
+          subject = msg.splitlines()[0] if msg.strip() else '(no message)'
           repo = os.environ['REPO_URL']
           run_url = os.environ['RUN_URL']
           repo_slug = os.environ['REPO_SLUG']
@@ -178,29 +202,9 @@ jobs:
               with urllib.request.urlopen(req) as r:
                   return json.load(r)
 
-          # Range floor = last run that *actually deployed* (not just
-          # passed). Failed deploys stack between successes; the
-          # screenshot-regen branch of this workflow finishes successfully
-          # but skips the Deploy step. Querying `status=success` alone
-          # would pick up those no-op runs, so we additionally check each
-          # run's deploy-step conclusion.
-          prev_sha = None
-          runs = gh(f'/repos/{repo_slug}/actions/workflows/www.yml/runs?status=success&branch=www&per_page=10')
-          for r in runs.get('workflow_runs', []):
-              if str(r['id']) == run_id:
-                  continue   # belt-and-suspenders; shouldn't appear
-              jobs = gh(f'/repos/{repo_slug}/actions/runs/{r["id"]}/jobs')
-              # Old name kept so pre-CFW-migration runs still count as
-              # deploys when computing the compare range.
-              deploy_steps = ('Deploy to Cloudflare Workers (ctbk-dev)', 'Deploy to GH Pages')
-              deployed = any(
-                  s.get('name') in deploy_steps and s.get('conclusion') == 'success'
-                  for j in jobs.get('jobs', [])
-                  for s in j.get('steps', [])
-              )
-              if deployed:
-                  prev_sha = r['head_sha']
-                  break
+          # Range floor = what the live site served just before this
+          # deploy (its `version.json`, captured by the `prev` step).
+          prev_sha = os.environ.get('PREV_SHA') or None
 
           commits = []
           if prev_sha and prev_sha != sha:
@@ -255,10 +259,13 @@ jobs:
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           uv run --no-project --with 'thrds==0.4.0' --python 3.12 python - <<'PY'
-          import os
+          import os, subprocess
           from thrds import SlackClient
           sha = os.environ['SHA']
-          subject = (os.environ.get('MSG') or '').splitlines()[0] if os.environ.get('MSG') else '(no message)'
+          msg = os.environ.get('MSG') or subprocess.run(
+              ['git', 'log', '-1', '--format=%s'], capture_output=True, text=True,
+          ).stdout
+          subject = msg.splitlines()[0] if msg.strip() else '(no message)'
           SlackClient(
               token=os.environ['SLACK_BOT_TOKEN'],
               channel='C0B5MKF28NP',
