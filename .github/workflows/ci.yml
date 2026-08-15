@@ -171,6 +171,27 @@ jobs:
         if: steps.args.outputs.args
         run: ctbk ${{ steps.args.outputs.args }}
 
+      # ─── rides-v5 monthly cadence (specs/rides-v5.md; #185) ─────────
+      # Prod's Home chart reads rides-v5, so the month isn't "done" until
+      # the v5 pyramid has it. `rides-v5-extend` mirrors the consolidated
+      # parquet to its public plain key (the `dvc push` above uploaded the
+      # CA blob), journals the prev-month spillback invalidation, submits
+      # + watches the Batch fills for both anchors (scoped `batch:SubmitJob`
+      # on the CI IAM user), and backfills the RG manifest. Idempotent on
+      # re-runs. Runs BEFORE the www push so a fill failure blocks the
+      # deploy and pings `:x:` top-level. Station-map/vocab regen for
+      # brand-new stations is NOT covered (spec cadence item 4 — manual).
+      - name: Install gbfs/api deps (wrangler, for relic sweep)
+        if: steps.args.outputs.args && steps.args.outputs.ym
+        working-directory: gbfs/api
+        run: pnpm install --frozen-lockfile
+      - name: Extend rides-v5
+        if: steps.args.outputs.args && steps.args.outputs.ym
+        env:
+          CTBK_REGISTRY_SECRET: ${{ secrets.CTBK_REGISTRY_SECRET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: ctbk gbfs rides-v5-extend ${{ steps.args.outputs.ym }}
+
       - name: Deploy to www branch
         if: steps.args.outputs.args
         run: git push origin HEAD:www
