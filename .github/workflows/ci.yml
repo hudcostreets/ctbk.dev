@@ -168,9 +168,8 @@ jobs:
             dvc pull s3/ctbk/normalized/${prev}.parquet.dvc
             dvc pull s3/ctbk/aggregated/ymrgtbs_cd_*.parquet.dvc s3/ctbk/aggregated/ymrgtbe_cd_*.parquet.dvc
             dvc pull s3/ctbk/stations/station-observations.parquet.dvc
-            # station-history: historical canonicals for the station-luc
-            # refresh's joint-uniqueness pass
-            dvc pull s3/ctbk/stations/station-history.parquet.dvc
+            # (station-history.parquet — the luc refresh's historical
+            # canonicals — is git-tracked; no pull needed)
           fi
 
       # ─── Station registry refresh (spec cadence item 4) ─────────────
