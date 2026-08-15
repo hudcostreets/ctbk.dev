@@ -677,6 +677,33 @@ def gbfs_vocab_gen(out: str | None, registry: str | None, threshold: int) -> Non
 	err(f'{len(vocab)} vocab cells (T={threshold}, {len(stations)} stations) → {out_path}')
 
 
+@gbfs_vocab.command('check', help='Verify every station in station-luc.json is covered by the frozen vocab (its BASE_LEVEL cell is a vocab member). An uncovered station gets `s:` identity rows but NO cell rows — bbox/spatial queries silently miss it — and needs a deliberate vocab extension (re-keys shards). Exits nonzero listing uncovered stations.')
+@option('-r', '--registry', default=None, help='station-luc.json path [default: www/public/assets/station-luc.json].')
+@option('-v', '--vocab-path', default=None, help='Vocab path [default: configs/pyramids/station-vocab.json].')
+def gbfs_vocab_check(registry: str | None, vocab_path: str | None) -> None:
+	import s2cell
+	from ctbk.pyramid_cascade.vocab import BASE_LEVEL, load_vocab
+	root = Path(__file__).parents[1]
+	reg_path = Path(registry) if registry else root / 'www/public/assets/station-luc.json'
+	voc_path = Path(vocab_path) if vocab_path else root / 'configs/pyramids/station-vocab.json'
+	data = json.loads(reg_path.read_text())['by_short_name']
+	vocab = load_vocab(voc_path)
+	uncovered = sorted(
+		sn for sn, e in data.items()
+		if e.get('active', True) and s2cell.lat_lon_to_token(e['lat'], e['lng'], BASE_LEVEL) not in vocab
+	)
+	n_active = sum(1 for e in data.values() if e.get('active', True))
+	if uncovered:
+		for sn in uncovered:
+			e = data[sn]
+			err(f'  UNCOVERED {sn}: ({e["lat"]:.5f}, {e["lng"]:.5f})')
+		raise click.ClickException(
+			f'{len(uncovered)}/{n_active} active station(s) outside vocab coverage — '
+			f'extend the vocab deliberately (`vocab gen` re-keys shards; see specs/rides-v5.md)'
+		)
+	err(f'vocab check: all {n_active} active stations covered ({len(vocab)} vocab cells)')
+
+
 # ─── Lambda executor (specs/avail-v3-lambda-cascade.md) ────────────────
 
 LAMBDA_FUNC = 'ctbk-avail-cascade'

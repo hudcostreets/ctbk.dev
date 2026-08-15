@@ -9,6 +9,13 @@ on:
     workflows: ["Sync tripdata bucket"]
     types: [completed]
     branches: [main]
+  # Mid-month rehearsal: re-run the LAST processed month through the
+  # full pipeline (all stages idempotent / no-op) so pipeline rot on
+  # HEAD is caught ~2 weeks before the next tripdata drop, instead of
+  # failing the real ingest (as happened repeatedly pre-2026-08). Also
+  # doubles as the monthly `station-luc.json` refresh.
+  schedule:
+    - cron: '0 12 20 * *'
 permissions:
   contents: write
 env:
@@ -25,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     steps:
       - uses: actions/checkout@v5
@@ -35,7 +43,13 @@ jobs:
       - name: Detect args
         id: args
         run: |
-          if [ -n "${{ inputs.args }}" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # Rehearsal: latest already-processed month, full pipeline.
+            ym=$(ls s3/ctbk/normalized/*.parquet.dvc | grep -oE '[0-9]{6}' | sort | tail -1)
+            echo "ym=$ym" >> "$GITHUB_OUTPUT"
+            echo "rehearsal=true" >> "$GITHUB_OUTPUT"
+            echo "args=update -S -ccda $ym" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ inputs.args }}" ]; then
             echo "args=${{ inputs.args }}" >> "$GITHUB_OUTPUT"
             # Surface the month in Slack notifies too (else "month ?")
             ym=$(echo "${{ inputs.args }}" | grep -oE '20[0-9]{4}' | head -1)
@@ -104,6 +118,7 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           ARGS: ${{ steps.args.outputs.args }}
           YM: ${{ steps.args.outputs.ym }}
+          REHEARSAL: ${{ steps.args.outputs.rehearsal }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           uv run --no-project --with 'thrds==0.4.0' --python 3.12 python - <<'PY'
@@ -111,12 +126,13 @@ jobs:
           from thrds import SlackClient
           ym = os.environ.get('YM') or '?'
           args, run_url = os.environ['ARGS'], os.environ['RUN_URL']
+          verb = 'Rehearsing' if os.environ.get('REHEARSAL') else 'Processing new'
           msg = SlackClient(
               token=os.environ['SLACK_BOT_TOKEN'],
               channel='C0B5MKF28NP',
               username='ctbk-bot',
               icon_emoji=':bike:',
-          ).post(f":inbox_tray: *Processing new tripdata month {ym}* (`ctbk {args}`)… <{run_url}|run>")
+          ).post(f":inbox_tray: *{verb} tripdata month {ym}* (`ctbk {args}`)… <{run_url}|run>")
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'ts={msg.id}\n')
           PY
@@ -152,7 +168,54 @@ jobs:
             dvc pull s3/ctbk/normalized/${prev}.parquet.dvc
             dvc pull s3/ctbk/aggregated/ymrgtbs_cd_*.parquet.dvc s3/ctbk/aggregated/ymrgtbe_cd_*.parquet.dvc
             dvc pull s3/ctbk/stations/station-observations.parquet.dvc
+            # station-history: historical canonicals for the station-luc
+            # refresh's joint-uniqueness pass
+            dvc pull s3/ctbk/stations/station-history.parquet.dvc
           fi
+
+      # ─── Station registry refresh (spec cadence item 4) ─────────────
+      # Regen `station-luc.json` from the GBFS snapshot union BEFORE any
+      # pyramid build, so the month's rides-v3 rebuild (in `ctbk update`)
+      # and rides-v5 Batch fills both attribute rides at NEW stations to
+      # their identity keys instead of coordinate fallback. Writes the
+      # www asset (committed by `update`'s git step) + uploads to R2 (the
+      # Batch factory reads it live). New stations are additive-safe;
+      # MOVED LUCs leave historical rows keyed under the old cell until
+      # their range is invalidated — nonzero churn pings Slack for manual
+      # review rather than blocking the month. `vocab check` then guards
+      # against a new station landing outside the frozen vocab's
+      # coverage (its rides would be invisible to bbox queries; fixing
+      # that is a deliberate vocab extension + re-key).
+      - name: Refresh station-luc + vocab coverage check
+        id: luc
+        if: steps.args.outputs.args
+        run: |
+          ctbk station-luc-build
+          ctbk gbfs vocab check
+
+      - name: Notify Slack — LUC churn needs review
+        if: steps.args.outputs.args && steps.luc.outputs.luc_moved != '0' && steps.luc.outputs.luc_moved != ''
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          MOVED: ${{ steps.luc.outputs.luc_moved }}
+          MOVED_LIST: ${{ steps.luc.outputs.luc_moved_list }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          uv run --no-project --with 'thrds==0.4.0' --python 3.12 python - <<'PY'
+          import os
+          from thrds import SlackClient
+          moved, lst = os.environ['MOVED'], os.environ['MOVED_LIST']
+          SlackClient(
+              token=os.environ['SLACK_BOT_TOKEN'],
+              channel='C0B5MKF28NP',
+              username='ctbk-bot',
+              icon_emoji=':bike:',
+          ).post(
+              f":warning: *station LUC churn* — {moved} station(s) moved ({lst}); historical pyramid rows "
+              f"stay keyed under the old cells until their ranges are invalidated (manual review). "
+              f"<{os.environ['RUN_URL']}|run>"
+          )
+          PY
 
       - uses: actions/setup-node@v5
         if: steps.args.outputs.args
@@ -202,6 +265,7 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           YM: ${{ steps.args.outputs.ym }}
           STATUS: ${{ job.status }}
+          REHEARSAL: ${{ steps.args.outputs.rehearsal }}
           THREAD_TS: ${{ steps.slack_start.outputs.ts }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -211,11 +275,19 @@ jobs:
           ym = os.environ.get('YM') or '?'
           ok = os.environ['STATUS'] == 'success'
           run_url = os.environ['RUN_URL']
-          text = (
-              f":white_check_mark: *tripdata {ym} processed* — pushed to `www` (site deploy follows)"
-              if ok else
-              f":x: *tripdata {ym} processing failed* — <{run_url}|logs>"
-          )
+          rehearsal = bool(os.environ.get('REHEARSAL'))
+          if ok:
+              text = (
+                  f":white_check_mark: *tripdata {ym} rehearsal passed* — pipeline healthy for the next drop"
+                  if rehearsal else
+                  f":white_check_mark: *tripdata {ym} processed* — pushed to `www` (site deploy follows)"
+              )
+          else:
+              text = (
+                  f":x: *tripdata {ym} rehearsal FAILED* — pipeline rot on `main`; fix before the next drop — <{run_url}|logs>"
+                  if rehearsal else
+                  f":x: *tripdata {ym} processing failed* — <{run_url}|logs>"
+              )
           # Failures post top-level: a threaded :x: is invisible at channel
           # level (the 202607 failures sat unnoticed in threads for a day).
           SlackClient(

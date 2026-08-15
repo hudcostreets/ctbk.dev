@@ -49,6 +49,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from datetime import date as Date, datetime, timedelta, timezone
 
@@ -270,14 +271,31 @@ def station_luc_build_cmd(date_from: str, no_history: bool, date_to: str | None,
     err(f"  LUC distribution:")
     err(luc_distribution_summary(by_short_name))
 
+    moved: list[str] = []
+    new: list[str] = []
     if prev:
         moved = [
             sn for sn, v in by_short_name.items()
             if sn in prev and (v['cell'], v['level']) != (prev[sn]['cell'], prev[sn]['level'])
         ]
-        err(f"  LUC churn vs {LOCAL_PATH}: {len(moved)} stations moved")
+        new = sorted(sn for sn in by_short_name if sn not in prev)
+        err(f"  LUC churn vs {LOCAL_PATH}: {len(moved)} stations moved, {len(new)} new")
         for sn in sorted(moved)[:20]:
             err(f"    {sn}: L{prev[sn]['level']} {prev[sn]['cell']} -> L{by_short_name[sn]['level']} {by_short_name[sn]['cell']}")
+        for sn in new[:20]:
+            err(f"    new: {sn}")
+
+    # CI hook (`ci.yml` monthly cadence): machine-readable delta counts.
+    # `moved` LUCs mean historical shard rows keyed under the OLD cell —
+    # incremental fills won't re-key them (drift vs a from-scratch
+    # rebuild) until the affected range is invalidated; CI pings Slack
+    # for manual review when nonzero. `new` stations are additive-safe.
+    gh_out = os.environ.get('GITHUB_OUTPUT')
+    if gh_out:
+        with open(gh_out, 'a') as f:
+            f.write(f'luc_moved={len(moved)}\nluc_new={len(new)}\n')
+            f.write(f'luc_moved_list={",".join(sorted(moved)[:20])}\n')
+            f.write(f'luc_new_list={",".join(new[:20])}\n')
 
     body = json.dumps(
         {'by_short_name': by_short_name, 'by_uuid': by_uuid, 'merged': merged},
