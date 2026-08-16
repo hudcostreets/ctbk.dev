@@ -1,0 +1,41 @@
+.tip {
+    z-index: 3000;
+    max-width: 26em;
+    padding: 0.35em 0.55em;
+    border-radius: 4px;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    background: rgba(255, 255, 255, 0.97);
+    backdrop-filter: blur(6px);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+    color: #222;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 0.82rem;
+    line-height: 1.35;
+    white-space: normal;
+}
+
+:global([data-theme="dark"]) .tip {
+    border-color: rgba(255, 255, 255, 0.15);
+    background: rgba(28, 28, 28, 0.97);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+    color: #eee;
+}
+
+.rows {
+    border-collapse: collapse;
+}
+
+.rows th {
+    padding: 0.05em 0.6em 0.05em 0;
+    text-align: left;
+    font-weight: 400;
+    opacity: 0.65;
+    white-space: nowrap;
+}
+
+.rows td {
+    padding: 0.05em 0;
+    font-family: ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}

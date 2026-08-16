@@ -105,7 +105,6 @@
 !src/components/Heading.tsx
 !src/components/MonthRangePicker.tsx
 !src/components/OverviewAvailabilityChart.tsx
-!src/components/ParquetViewer.tsx
 !src/components/PipelineContext.tsx
 !src/components/PipelineDiagram.tsx
 !src/components/Radios.tsx
@@ -130,6 +129,8 @@
 !src/components/ThemeToggle.tsx
 !src/components/TileStyleButton.tsx
 !src/components/TimeAgo.tsx
+!src/components/Tip.module.css
+!src/components/Tip.tsx
 !src/components/icons/Bluesky.tsx
 !src/components/icons/Command.tsx
 !src/components/icons/GitHub.tsx
@@ -139,6 +140,8 @@
 !src/components/icons/S3.tsx
 !src/components/icons/Shift.tsx
 !src/components/icons/index.ts
+!src/components/parquetCells.module.css
+!src/components/parquetCells.tsx
 !src/contexts/FlagsContext.tsx
 !src/contexts/ThemeContext.tsx
 !src/controls.module.css

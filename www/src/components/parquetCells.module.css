@@ -1,0 +1,28 @@
+/* Right-justification for numeric cells. The parquet viewer's `<td>`
+   has no style hook, so this block wrapper fills the cell's content box
+   and aligns within it. */
+.rj {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Cue that the value shown is derived and the raw one is a hover away.
+   Without it there's no way to distinguish a formatted cell from a
+   literal one. */
+.derived {
+    text-decoration: underline dotted rgba(0, 0, 0, 0.35);
+    text-underline-offset: 2px;
+    cursor: help;
+}
+
+:global([data-theme="dark"]) .derived {
+    text-decoration-color: rgba(255, 255, 255, 0.3);
+}
+
+.chip {
+    display: inline-block;
+    padding: 0 0.35em;
+    border-radius: 3px;
+    background: rgba(127, 127, 127, 0.16);
+    font-variant-numeric: tabular-nums;
+}

@@ -6,7 +6,13 @@
 import { useMemo } from 'react'
 import { FileTree } from '@rdub/file-tree/react'
 import { HttpStore } from '@rdub/file-tree/stores/http'
-import { ParquetViewer } from '../components/ParquetViewer'
+import { makeParquetViewer } from '@rdub/file-tree/renderers/parquet'
+import { renderCell } from '../components/parquetCells'
+
+// Module scope, not inside render: a new component identity each render
+// would remount the viewer (and drop its row-group cache) on every
+// state change.
+const ParquetViewer = makeParquetViewer({ renderCell })
 
 // Default to prod worker so `pnpm dev` works without a local api.
 // Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
