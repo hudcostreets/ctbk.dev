@@ -24,15 +24,16 @@
  */
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Circle, CircleMarker, MapContainer, Polygon, Polyline, Rectangle, TileLayer, Tooltip, useMapEvents } from 'react-leaflet'
+import { Circle, CircleMarker, MapContainer, Polygon, Polyline, Rectangle, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { buildVocabGraph, isCellInCover, minimalCover, s2Index, vocabCover, type SpatialSet, type VocabGraph } from 'pyrmts-geo'
 import { llzParam, useUrlState } from 'use-prms'
 import type { LLZ, Param } from 'use-prms'
 import { s2 } from 's2js'
 import { API_BASE } from '../query/stations'
+import { isS2Token, s2CellBounds, s2CellVertices, s2ParentEdgeArcs } from '../lib/s2geo'
 
-const { cellid, Cell } = s2
+const { cellid } = s2
 
 type Region = 'NYC' | 'JC' | 'HOB' | 'Other'
 const REGIONS: Region[] = ['NYC', 'JC', 'HOB']
@@ -56,59 +57,6 @@ const REGION_COLOR: Record<Region, string> = {
 // COARSEST caps output cells (the v3/v5 builds materialize L10..15).
 const FINEST_LEVEL = 15
 const COARSEST_LEVEL = 10
-
-/** S2 cell → 4 sampled boundary arcs (edge k = vertex k → k+1, CCW).
- *  Each edge is a great-circle arc (constant u/v on the cube face = a
- *  plane through the origin), so sample along it — normalized lerp
- *  between the endpoint vectors stays on the arc. Straight lat/lng
- *  segments visibly bow off-course at coarse levels. Each arc includes
- *  both endpoints (polyline-ready). */
-function s2CellEdgeArcs(token: string): [number, number][][] {
-  const ci = cellid.fromToken(token)
-  const cell = Cell.fromCellID(ci)
-  const level = cellid.level(ci)
-  const perEdge = Math.max(1, Math.min(32, 2 ** (12 - level)))
-  const r2d = 180 / Math.PI
-  const edges: [number, number][][] = []
-  for (let i = 0; i < 4; i++) {
-    const a = cell.vertex(i), b = cell.vertex((i + 1) & 3)
-    const pts: [number, number][] = []
-    for (let s = 0; s <= perEdge; s++) {
-      const t = s / perEdge
-      const x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t, z = a.z + (b.z - a.z) * t
-      pts.push([Math.atan2(z, Math.hypot(x, y)) * r2d, Math.atan2(y, x) * r2d])
-    }
-    edges.push(pts)
-  }
-  return edges
-}
-
-function s2CellVertices(token: string): [number, number][] {
-  return s2CellEdgeArcs(token).flatMap((pts) => pts.slice(0, -1))
-}
-
-/** The edges of `token` that lie on its PARENT's boundary. Every cell is
- *  one quadrant of its parent, so exactly 2 adjacent edges qualify.
- *  Rendered thicker as a merge cue: when sibling cells jointly tile a
- *  parent, the thick edges form the parent's full ring with only thin
- *  seams inside — i.e. "these could collapse to the parent (± subtractions)".
- *  Vertex k ↔ uv corner in order (uLo,vLo),(uHi,vLo),(uHi,vHi),(uLo,vHi)
- *  (verified against s2js: sibling quadrants' facing edges coincide). */
-function s2ParentEdgeArcs(token: string): [number, number][][] {
-  const ci = cellid.fromToken(token)
-  const lvl = cellid.level(ci)
-  if (lvl === 0) return []
-  const uv = cellid.boundUV(ci)
-  const puv = cellid.boundUV(cellid.parent(ci, lvl - 1))
-  const eps = 1e-12
-  const shared = [
-    Math.abs(uv.y.lo - puv.y.lo) < eps,  // edge 0: v = vLo
-    Math.abs(uv.x.hi - puv.x.hi) < eps,  // edge 1: u = uHi
-    Math.abs(uv.y.hi - puv.y.hi) < eps,  // edge 2: v = vHi
-    Math.abs(uv.x.lo - puv.x.lo) < eps,  // edge 3: u = uLo
-  ]
-  return s2CellEdgeArcs(token).filter((_, k) => shared[k])
-}
 
 // ─── selection helpers ────────────────────────────────────────────────
 
@@ -176,6 +124,32 @@ const selParam: Param<Set<string>> = {
   decode: (raw) => new Set(raw ? raw.split(',').filter(Boolean) : []),
 }
 
+/** `?cell=<s2 token>`: deep-link one S2 cell. Written by the parquet
+ *  viewer's cell tooltips (`/files/*`), where a bare token like
+ *  `89c244c` is otherwise unlocatable. Invalid tokens decode to `null`
+ *  rather than throwing downstream in the geometry helpers. */
+const cellParam: Param<string | null> = {
+  encode: (v) => v ?? undefined,
+  decode: (raw) => (raw && isS2Token(raw) ? raw : null),
+}
+
+/** Fits the viewport to `?cell=` on mount and on token change.
+ *
+ *  Deliberately overrides a `?ll=` present in the same URL: the point of
+ *  the link is "show me this cell", and the `ll` a share carries is
+ *  whatever viewport the linker happened to be at. Panning afterwards
+ *  updates `ll` normally without re-triggering (the effect is keyed on
+ *  the token). */
+function FitCell({ token }: { token: string | null }) {
+  const map = useMap()
+  useEffect(() => {
+    if (!token) return
+    const b = s2CellBounds(token)
+    map.fitBounds([[b.latMin, b.lngMin], [b.latMax, b.lngMax]], { padding: [80, 80], maxZoom: 17 })
+  }, [map, token])
+  return null
+}
+
 /** Map click + zoom dispatcher for the selection tools / marker sizing. */
 function MapEvents({ onClick, onMoveEnd, onMove, onDown, onDblClick, disableDblZoom, disableDrag }: {
   onClick: (lat: number, lng: number) => void
@@ -217,6 +191,7 @@ export default function CellsDebug() {
   const [showCells, setShowCells] = useState(true)
   const [selected, setSelected] = useUrlState('sel', selParam)
   const [view, setView] = useUrlState('ll', viewParam)
+  const [focusCell] = useUrlState('cell', cellParam)
   const [tool, setTool] = useState<SelTool>('click')
   const [lassoPts, setLassoPts] = useState<[number, number][]>([])
   const [cursor, setCursor] = useState<[number, number] | null>(null)
@@ -758,6 +733,11 @@ export default function CellsDebug() {
         {highlightTok && (
           <Polygon positions={s2CellVertices(highlightTok)} interactive={false}
             pathOptions={{ color: '#1976d2', weight: 3, fill: false }} />
+        )}
+        <FitCell token={focusCell} />
+        {focusCell && (
+          <Polygon positions={s2CellVertices(focusCell)} interactive={false}
+            pathOptions={{ color: '#e53935', weight: 3, fillColor: '#e53935', fillOpacity: 0.06 }} />
         )}
         {lassoPts.length > 0 && (
           <>

@@ -30,6 +30,7 @@ import {
   type ParquetCellCtx, type ParquetColumn,
 } from '@rdub/file-tree/renderers/parquet'
 import { Tip, TipRows } from './Tip'
+import { CellValue, isVocabValue } from './S2CellTip'
 import css from './parquetCells.module.css'
 
 const { abs, max, sqrt } = Math
@@ -50,6 +51,10 @@ const BIKE_TYPE: Record<string, string> = {
   electric_bike: '⚡E',
   docked_bike: 'D',
 }
+
+/** Columns holding the pyramid's frozen vocabulary (S2 tokens +
+ *  `s:<short_name>` identity keys); see `S2CellTip`. */
+const CELL_COLUMNS = new Set(['cell', 's2_cell'])
 
 export function renderCell({ value, column, row, defaultNode }: ParquetCellCtx): ReactNode {
   const numeric = NUMERIC_PHYSICAL.has(column.physicalType ?? '')
@@ -83,6 +88,7 @@ export function renderCell({ value, column, row, defaultNode }: ParquetCellCtx):
   if (typeof value === 'string') {
     if (column.name === 'user_type' && USER_TYPE[value]) return <Chip label={USER_TYPE[value]} raw={value} />
     if (column.name === 'bike_type' && BIKE_TYPE[value]) return <Chip label={BIKE_TYPE[value]} raw={value} />
+    if (CELL_COLUMNS.has(column.name) && isVocabValue(value)) return <CellValue value={value} />
     const hist = parseHistogram(value)
     if (hist) return <Histogram entries={hist} raw={value} />
   }
