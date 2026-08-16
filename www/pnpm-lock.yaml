@@ -30,8 +30,8 @@ importers:
         specifier: 0.7.9
         version: 0.7.9(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@rdub/file-tree':
-        specifier: https://github.com/runsascoded/file-tree#c7553279a5e8ecbd5cf3769fdfe712353320a6f5
-        version: https://codeload.github.com/runsascoded/file-tree/tar.gz/c7553279a5e8ecbd5cf3769fdfe712353320a6f5(highlight.js@11.11.1)(hyparquet@1.25.6)(jq-web@0.6.2)(react-dom@18.3.1(react@18.3.1))(react-markdown@7.1.2(@types/react@18.3.27)(react@18.3.1))(react-router-dom@6.30.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)(remark-gfm@4.0.1)(use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/3db90a820b4372cea3efb7e02bac317dc049fa04(react@18.3.1))
+        specifier: https://github.com/runsascoded/file-tree#579fe01e8b18e20eed8b3f443fb99fb607328e97
+        version: https://codeload.github.com/runsascoded/file-tree/tar.gz/579fe01e8b18e20eed8b3f443fb99fb607328e97(highlight.js@11.11.1)(hyparquet@1.25.6)(jq-web@0.6.2)(react-dom@18.3.1(react@18.3.1))(react-markdown@7.1.2(@types/react@18.3.27)(react@18.3.1))(react-router-dom@6.30.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)(remark-gfm@4.0.1)(use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/3db90a820b4372cea3efb7e02bac317dc049fa04(react@18.3.1))
       '@rdub/icons':
         specifier: 0.1.0
         version: 0.1.0(@types/react@18.3.27)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -1140,9 +1140,9 @@ packages:
       react: ^18
       react-dom: ^18
 
-  '@rdub/file-tree@https://codeload.github.com/runsascoded/file-tree/tar.gz/c7553279a5e8ecbd5cf3769fdfe712353320a6f5':
-    resolution: {tarball: https://codeload.github.com/runsascoded/file-tree/tar.gz/c7553279a5e8ecbd5cf3769fdfe712353320a6f5}
-    version: 0.0.1-dist.3a5e02d
+  '@rdub/file-tree@https://codeload.github.com/runsascoded/file-tree/tar.gz/579fe01e8b18e20eed8b3f443fb99fb607328e97':
+    resolution: {tarball: https://codeload.github.com/runsascoded/file-tree/tar.gz/579fe01e8b18e20eed8b3f443fb99fb607328e97}
+    version: 0.0.1-dist.ac38c76
     peerDependencies:
       highlight.js: ^11
       hyparquet: ^1
@@ -4859,7 +4859,7 @@ snapshots:
       react-dom: 18.3.1(react@18.3.1)
       use-local-storage-state: 19.5.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
 
-  '@rdub/file-tree@https://codeload.github.com/runsascoded/file-tree/tar.gz/c7553279a5e8ecbd5cf3769fdfe712353320a6f5(highlight.js@11.11.1)(hyparquet@1.25.6)(jq-web@0.6.2)(react-dom@18.3.1(react@18.3.1))(react-markdown@7.1.2(@types/react@18.3.27)(react@18.3.1))(react-router-dom@6.30.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)(remark-gfm@4.0.1)(use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/3db90a820b4372cea3efb7e02bac317dc049fa04(react@18.3.1))':
+  '@rdub/file-tree@https://codeload.github.com/runsascoded/file-tree/tar.gz/579fe01e8b18e20eed8b3f443fb99fb607328e97(highlight.js@11.11.1)(hyparquet@1.25.6)(jq-web@0.6.2)(react-dom@18.3.1(react@18.3.1))(react-markdown@7.1.2(@types/react@18.3.27)(react@18.3.1))(react-router-dom@6.30.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)(remark-gfm@4.0.1)(use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/3db90a820b4372cea3efb7e02bac317dc049fa04(react@18.3.1))':
     dependencies:
       aws4fetch: 1.0.20
       highlight.js: 11.11.1

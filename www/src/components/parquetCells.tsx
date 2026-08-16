@@ -19,15 +19,23 @@
  *  - Nothing is *hidden*: every transform is reversible from the
  *    tooltip, because the raw value is what you'd paste into a query.
  *
- *  Alignment note: the viewer's `<td>` styling is fixed upstream (no
- *  className / style hook), so right-justification goes through a
- *  block wrapper that fills the cell rather than `text-align` on the
- *  cell itself. Asked for upstream in file-tree's
- *  `specs/column-hooks.md`. */
-import type { ReactNode } from 'react'
+ *  Alignment is the viewer's own (`alignNumeric`, on by default) since
+ *  file-tree's `specs/done/column-hooks.md` landed — numeric columns
+ *  right-align on `<td>` AND `<th>` with no wrapper here. The one
+ *  exception is the GBFS histogram columns, which are `BYTE_ARRAY`
+ *  physically but numeric to a reader, so they opt in by hand.
+ *
+ *  `renderHeader` carries a per-column raw/formatted toggle. The
+ *  inference is a guess and the formatting is opinionated, so the
+ *  honest complement is flipping any column back to its literal bytes
+ *  in place. State lives here (URL-bound in `pages/Files.tsx`) and
+ *  reaches the cells through context rather than through the options
+ *  bag — rebinding `makeParquetViewer` per toggle would remount the
+ *  viewer and drop its row-group cache. */
+import { createContext, useContext, type ReactNode } from 'react'
 import {
   formatTemporal, inferTemporalFormat,
-  type ParquetCellCtx, type ParquetColumn,
+  type ParquetCellCtx, type ParquetColumn, type ParquetColumnStats, type ParquetHeaderCtx,
 } from '@rdub/file-tree/renderers/parquet'
 import { Tip, TipRows } from './Tip'
 import { CellValue, isVocabValue } from './S2CellTip'
@@ -56,12 +64,48 @@ const BIKE_TYPE: Record<string, string> = {
  *  `s:<short_name>` identity keys); see `S2CellTip`. */
 const CELL_COLUMNS = new Set(['cell', 's2_cell'])
 
-export function renderCell({ value, column, row, defaultNode }: ParquetCellCtx): ReactNode {
+/** GBFS availability histogram columns. Named (not value-sniffed) only
+ *  because alignment is a per-COLUMN decision the viewer makes before
+ *  any row is read; the rendering itself still detects structurally. */
+const HISTOGRAM_COLUMNS = new Set(['bikes', 'ebikes', 'docks', 'disabled', 'pending'])
+
+/** Columns the reader has flipped back to raw, and the flip itself.
+ *  Defaults to a no-op so the renderers work outside a provider. */
+export interface RawCols { raw: Set<string>; toggle: (col: string) => void }
+const RawColsCtx = createContext<RawCols>({ raw: new Set(), toggle: () => {} })
+export const RawColsProvider = RawColsCtx.Provider
+
+export function renderCell(ctx: ParquetCellCtx): ReactNode {
+  return <CtbkCell {...ctx} />
+}
+
+export function renderHeader(ctx: ParquetHeaderCtx): ReactNode {
+  return <CtbkHeader {...ctx} />
+}
+
+/** Histogram columns read as quantities but are `BYTE_ARRAY`, so the
+ *  viewer's type-driven alignment (correctly) leaves them alone. */
+export function cellProps(col: ParquetColumn) {
+  return HISTOGRAM_COLUMNS.has(col.name) ? { className: css.rj } : undefined
+}
+export function headerProps(col: ParquetColumn) {
+  return HISTOGRAM_COLUMNS.has(col.name) ? { className: css.rj } : undefined
+}
+
+function CtbkCell(ctx: ParquetCellCtx) {
+  const { raw: rawCols } = useContext(RawColsCtx)
+  return <>{cellNode(ctx, rawCols)}</>
+}
+
+function cellNode({ value, column, row, defaultNode }: ParquetCellCtx, rawCols: Set<string>): ReactNode {
   const numeric = NUMERIC_PHYSICAL.has(column.physicalType ?? '')
 
-  // Nulls keep the upstream faded `·`, but adopt the column's
-  // justification so a sparse numeric column stays in one rail.
-  if (value === null || value === undefined) return numeric ? <Rj>{defaultNode}</Rj> : defaultNode
+  if (value === null || value === undefined) return defaultNode
+
+  // Raw mode bypasses the viewer's formatting too, not just ours —
+  // `defaultNode` would still render an inferred timestamp, and "raw"
+  // that isn't the literal value is worse than no toggle at all.
+  if (rawCols.has(column.name)) return raw(value)
 
   // Timestamps: same inference the viewer does, re-rendered with a real
   // tooltip instead of `title=`.
@@ -96,12 +140,62 @@ export function renderCell({ value, column, row, defaultNode }: ParquetCellCtx):
   return defaultNode
 }
 
-/** Right-justify inside the cell. The viewer's `<td>` has no style
- *  hook, so this block wrapper stretches to the cell's content box and
- *  aligns within it — equivalent to `text-align: right` on the cell for
- *  every column wider than its narrowest row. */
-function Rj({ children }: { children: ReactNode }) {
-  return <div className={css.rj}>{children}</div>
+// ----------------------------------------------------------------- header
+
+/** Column header: name + row-group stats on hover + a raw/formatted
+ *  toggle. The toggle is hover-revealed (and pinned visible while the
+ *  column is raw) — a control on all 17 headers at once reads as
+ *  chrome, and the columns worth flipping aren't knowable up front. */
+function CtbkHeader({ column, stats }: ParquetHeaderCtx) {
+  const { raw: rawCols, toggle } = useContext(RawColsCtx)
+  const isRaw = rawCols.has(column.name)
+  const rows = statRows(column, stats)
+  const label = rows.length
+    ? <Tip content={<TipRows rows={rows} />} placement="bottom"><span>{column.name}</span></Tip>
+    : <span>{column.name}</span>
+  return (
+    <span className={css.header}>
+      {label}
+      <button
+        type="button"
+        className={isRaw ? `${css.fmtToggle} ${css.fmtToggleOn}` : css.fmtToggle}
+        title={isRaw ? `show formatted ${column.name}` : `show raw ${column.name}`}
+        onClick={() => toggle(column.name)}
+      >{isRaw ? 'raw' : '⌗'}</button>
+    </span>
+  )
+}
+
+/** Row-group stats, formatted the same way the column's cells are — a
+ *  `duration_sum` range reads as intervals, a `dt` range as timestamps.
+ *  Parquet stats are raw per-type, so byte arrays are decoded first. */
+function statRows(column: ParquetColumn, stats?: ParquetColumnStats): [string, ReactNode][] {
+  if (!stats) return []
+  const rows: [string, ReactNode][] = []
+  const lo = fmtStat(stats.min, column), hi = fmtStat(stats.max, column)
+  if (lo !== null && hi !== null) rows.push(lo === hi ? ['value', lo] : ['range', `${lo} … ${hi}`])
+  if (stats.nullCount) rows.push(['nulls', fmtNum(stats.nullCount)])
+  rows.push(['type', column.physicalType ?? '?'])
+  return rows
+}
+
+function fmtStat(v: unknown, column: ParquetColumn): string | null {
+  if (v === null || v === undefined) return null
+  if (v instanceof Uint8Array) {
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(v) } catch { return null }
+  }
+  if (typeof v === 'string') return v
+  if (typeof v === 'number' || typeof v === 'bigint') {
+    const temporal = inferTemporalFormat(column, [v])
+    if (temporal) {
+      const s = formatTemporal(v, temporal)
+      if (s !== null) return s
+    }
+    const met = parseMetric(column.name)
+    const n = Number(v)
+    return met?.stat === 'sum' && SECONDS_BASES.has(met.base) ? fmtDuration(n) : fmtNum(n)
+  }
+  return null
 }
 
 // ---------------------------------------------------------------- metrics
@@ -147,7 +241,7 @@ function Metric({ value, column, row }: { value: number | bigint; column: Parque
   }
   if (met?.stat === 'sumsq' && SECONDS_BASES.has(met.base)) rows.push(['units', 's²'])
 
-  const body = <div className={derived ? `${css.rj} ${css.derived}` : css.rj}>{shown}</div>
+  const body = <span className={derived ? css.derived : undefined}>{shown}</span>
   // No tooltip when there's nothing the cell doesn't already say.
   if (!rows.length) return body
   return <Tip content={<TipRows rows={rows} />}>{body}</Tip>
@@ -212,7 +306,7 @@ function Histogram({ entries, raw: rawStr }: { entries: [number, number][]; raw:
   }
   return (
     <Tip content={<TipRows rows={rows} />}>
-      <div className={`${css.rj} ${css.derived}`}>{shown}</div>
+      <span className={css.derived}>{shown}</span>
     </Tip>
   )
 }
