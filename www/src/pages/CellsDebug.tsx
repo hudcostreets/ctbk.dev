@@ -31,6 +31,7 @@ import { llzParam, useUrlState } from 'use-prms'
 import type { LLZ, Param } from 'use-prms'
 import { s2 } from 's2js'
 import { API_BASE } from '../query/stations'
+import { useCellsDebugOmnibar } from '../hooks/useCellsDebugOmnibar'
 import { isS2Token, s2CellBounds, s2CellVertices, s2ParentEdgeArcs } from '../lib/s2geo'
 
 const { cellid } = s2
@@ -51,9 +52,16 @@ const REGION_COLOR: Record<Region, string> = {
 // Station leaves land at FINEST before `minimalCover` compacts them.
 // L15 is lossy: ~1100/2340 stations share their L15 cell with a neighbor
 // (LUC level ≥16), so a cover for one silently spans the other (e.g.
-// JC081 ⇒ its L14 also holds unselected JC075). The right system is LUC
-// cells, but pyrmts-geo's `minimalCover` currently requires a uniform-
-// level system — see pyrmts `specs/minimal-cover-mixed-levels.md`.
+// JC081 ⇒ its L14 also holds unselected JC075). The right system is
+// per-station LUC cells from `station-luc.json`.
+//
+// That used to be blocked on `minimalCover` requiring a uniform-level
+// system; it isn't since 2026-08-14 (pyrmts
+// `specs/minimal-cover-mixed-levels.md` — `buildTree` is now a
+// level-stratified deepest-first walk) and `www` already pins a dist
+// with the fix. What's left is switching the system here and deduping
+// the `_`-alias stations whose fallback cells nest real LUC cells —
+// tracked in `specs/pyrmts-geo-h3-removal.md` item 4.
 // COARSEST caps output cells (the v3/v5 builds materialize L10..15).
 const FINEST_LEVEL = 15
 const COARSEST_LEVEL = 10
@@ -374,6 +382,15 @@ export default function CellsDebug() {
     for (const id of ids) { if (all) next.delete(id); else next.add(id) }
     setSelected(next)
   }
+  // Omnibar (⌘K): every neighborhood set/group and every station.
+  useCellsDebugOmnibar({
+    stations,
+    sets: nbhdQ.data?.sets,
+    groups: nbhdGroups,
+    toggleStationIds,
+    toggleStation,
+  })
+
   /** Clicking a rendered cover cell toggles the stations inside it —
    *  the easy way to de-select a chunk (2nd click on a fully-selected
    *  cell removes its stations). */
@@ -814,11 +831,22 @@ export default function CellsDebug() {
             ...sLayers(cover.exclude, true),
           ]
         })()}
+        {/* Source polygons for any set with ≥1 selected station. Solid-ish
+            when fully selected, fainter when partial — a partially-selected
+            set is exactly when you most want to see where its boundary runs.
+            These are the *neighborhood* outlines, distinct from the green
+            cover cells: S2 cells ignore neighborhood boundaries entirely, so
+            a rolled-up cell routinely extends well outside the polygon that
+            sourced it (and a concave neighborhood like Bergen Hill reads as
+            disjoint when its cover splits across its lobes). */}
         {nbhdQ.data && nbhdQ.data.sets
-          .filter((s) => isAllSelected(s.stations))
-          .map((s) => (
+          .map((s) => ({ s, n: s.stations.filter((id) => selected.has(id)).length }))
+          .filter(({ n }) => n > 0)
+          .map(({ s, n }) => (
             <Polygon key={`nb-${s.id}`} positions={s.polys} interactive={false}
-              pathOptions={{ color: '#7b1fa2', weight: 1.5, dashArray: '2 4', fill: false }} />
+              pathOptions={n === s.stations.length
+                ? { color: '#7b1fa2', weight: 2.5, dashArray: '6 4', fill: true, fillColor: '#7b1fa2', fillOpacity: 0.07 }
+                : { color: '#7b1fa2', weight: 1.5, dashArray: '2 5', opacity: 0.7, fill: true, fillColor: '#7b1fa2', fillOpacity: 0.03 }} />
           ))}
         {showStations && vocabQ.data && vocabQ.data.leaves
           .filter((l) => !stations[l.key.slice(2)])

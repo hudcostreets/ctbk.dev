@@ -143,6 +143,57 @@ def slug(s: str) -> str:
     return ''.join(c if c.isalnum() else '-' for c in s.lower()).strip('-').replace('--', '-')
 
 
+# Manhattan's 60th St, as a line in (lng → lat). Manhattan's grid is rotated
+# ~29° so a constant-latitude cut is wrong by ~1.5km across the island's
+# width; this is fit through York Ave & 60th and 11th Ave & 60th, and checks
+# out at Lexington (40.7630 vs 40.7625 actual), 5th (40.7653 vs 40.7644) and
+# Columbus Circle (59th St, correctly just inside).
+CRZ_LNG0, CRZ_LAT0, CRZ_SLOPE = -73.9585, 40.7594, -0.4125
+# Governors/Ellis/Liberty Islands are Manhattan borough (they share an NTA
+# with the Battery) but sit outside the zone — ferry-only, no tolled entry.
+# The Battery's own docks are ≥40.701; the islands are ≤40.693.
+CRZ_LAT_MIN = 40.698
+
+
+def crz_contains(lat: float, lng: float) -> bool:
+    """Inside the Congestion Relief Zone: Manhattan south of 60th St."""
+    return CRZ_LAT_MIN < lat < CRZ_LAT0 + (lng - CRZ_LNG0) * CRZ_SLOPE
+
+
+def composite_sets(out_sets: list[dict], stations: dict) -> list[dict]:
+    """Derived sets that OVERLAP the source partition, so they're built from
+    already-assigned members rather than competing for stations in the
+    first-hit PIP loop.
+
+    `Manhattan CBD` = the congestion-pricing zone (Manhattan below 60th St).
+    Notable for `/cells-debug` as the worst realistic case for vocab-cover
+    size: long, skinny, and dense, so its boundary clips many vocab cells and
+    descends to per-station leaves along both waterfronts (~47 cover terms
+    for ~520 stations, vs 5 for compact Jersey City).
+    """
+    members, polys = [], []
+    for s in out_sets:
+        if s['region'] != 'NYC' or s['group'] != 'Manhattan':
+            continue
+        inside = [sid for sid in s['stations'] if crz_contains(stations[sid]['lat'], stations[sid]['lng'])]
+        if not inside:
+            continue
+        members.extend(inside)
+        # Show the constituent NTAs; the 60th St cut is a station-level
+        # predicate, so an NTA straddling it contributes its whole outline.
+        polys.extend(s['polys'])
+    if not members:
+        return []
+    return [{
+        'id': 'composite/manhattan-cbd',
+        'name': 'Manhattan CBD (congestion zone)',
+        'group': 'Composite',
+        'region': 'NYC',
+        'stations': sorted(members),
+        'polys': polys,
+    }]
+
+
 @ctbk.command('neighborhoods', help="Build `neighborhoods.json` (NYC NTA + JC neighborhood station-sets) for `/cells-debug`.")
 @option('-c', '--cache-dir', default='tmp/nbhd', help='Raw source GeoJSON cache dir (default tmp/nbhd).')
 @option('-o', '--output', 'output_path', default='www/public/assets/neighborhoods.json', help='Output JSON path.')
@@ -238,9 +289,13 @@ def neighborhoods_cmd(cache_dir: str, output_path: str, stations_path: str, tole
             'stations': members,
             'polys': polys,
         })
-    out_sets.sort(key=lambda s: (s['region'], s['group'], s['name']))
     err(f"{len(out_sets)} sets with ≥1 station "
         f"(dropped {len(raw_sets) - len(out_sets)} station-less source polygons)")
+    composites = composite_sets(out_sets, stations)
+    out_sets.extend(composites)
+    out_sets.sort(key=lambda s: (s['region'], s['group'], s['name']))
+    for c in composites:
+        err(f"+ composite {c['id']}: {len(c['stations'])} stations")
 
     dst = Path(output_path)
     dst.parent.mkdir(parents=True, exist_ok=True)

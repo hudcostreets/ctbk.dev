@@ -148,6 +148,7 @@
 !src/controls.module.css
 !src/data.ts
 !src/date-range.ts
+!src/hooks/useCellsDebugOmnibar.ts
 !src/hooks/useGlobalStationsOmnibar.ts
 !src/hooks/useIsInView.ts
 !src/hooks/useKeyboardShortcuts.ts
