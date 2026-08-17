@@ -30,7 +30,9 @@
  *
  */
 import {
+	PlanLimitError,
 	stitch,
+	type PlanLimits,
 	type Row,
 	type Tier,
 } from 'pyrmts';
@@ -47,8 +49,15 @@ import {
 	vocabCover,
 	type BBox,
 	type GeoPyramid,
+	type GeoQueryPlan,
 } from 'pyrmts-geo';
 import stationVocab from '../../../configs/pyramids/station-vocab.json';
+
+// Plan cost ceiling for the avail pyramids (pyrmts `PlanLimits`). Looser on
+// bins than rides (avail charts go down to 1h over long windows) and tighter
+// on keys: the Lambda cascade churns many small sub-shards, so an unbounded
+// window is far more likely to blow up on shard count than on bin count.
+const AVAIL_LIMITS: PlanLimits = { maxOutputBins: 8192, maxAtoms: 8192, maxKeys: 256 };
 
 const METRICS = ['bikes', 'ebikes', 'docks', 'disabled', 'pending'] as const;
 type Metric = typeof METRICS[number];
@@ -581,9 +590,21 @@ async function serveGeoReduced(
 
 	// `outputCells: {res, cells}` path bypasses `pickResolution`. See
 	// `pyrmts/specs/done/plan-geo-query-precomputed-cover.md`.
-	const plan = userCells !== null
-		? planGeoQueryFromInventory(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells }, watermarks, earliestPerShard }, registeredShards)
-		: planGeoQueryFromInventory(pyramid, { range: { from, to }, binBudget, bbox: bbox!, cellBudget, watermarks, earliestPerShard }, registeredShards);
+	// `limits` bounds plan cost (pyrmts `PlanLimits`); avail is Lambda-fed
+	// and churns far more shards than rides, so `maxKeys` is the binding
+	// constraint here — an unbounded window over the 1h tier can otherwise
+	// enumerate thousands of sub-shards and exhaust the isolate.
+	let plan: GeoQueryPlan;
+	try {
+		plan = userCells !== null
+			? planGeoQueryFromInventory(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells }, watermarks, earliestPerShard, limits: AVAIL_LIMITS }, registeredShards)
+			: planGeoQueryFromInventory(pyramid, { range: { from, to }, binBudget, bbox: bbox!, cellBudget, watermarks, earliestPerShard, limits: AVAIL_LIMITS }, registeredShards);
+	} catch (err) {
+		if (err instanceof PlanLimitError) {
+			return errorResponse(413, `plan too large: ${err.limit} ${err.requested} > ${err.allowed}`, cors);
+		}
+		throw err;
+	}
 
 	// Push the cell list down as an RG-prune filter on the cellCol. For
 	// `(cell, dt)`-sorted shards this lets hyparquet skip whole row groups

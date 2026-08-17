@@ -42,9 +42,12 @@
  * as hyparquet RG-prune filters via pyrmts §2 `FetchOptions.filters`.
  */
 import {
-	planQueryFromInventory,
+	parseDuration,
+	PlanLimitError,
 	stitch,
+	type Duration,
 	type FetchTrace,
+	type PlanLimits,
 	type Pyramid,
 	type Row,
 	type Tier,
@@ -579,12 +582,16 @@ export async function serveRidesCells(bucket: R2Bucket, request: Request, corsOr
 //     the station registry (raw S2 cover cells match no stored rows)
 //   - shards: multi-rung fixed-duration min-cover, resolved from the D1
 //     `pyramid_shards` inventory (same machinery as avail-v5/v6)
-//   - calendar bins: `bin=1mo|2mo|3mo|6mo|1y` plans via the pyrmts
-//     ragged-calendar planner (`targetBin`): a materialized+registered
-//     calendar tier serves whole bins where covered; the residue (and
-//     always the un-closed tip) het-tiles from whole-day fixed tiers,
-//     reaggregated at stitch (exact for sum monoids — month boundaries
-//     are whole days).
+//   - bins: `bin=<any pyrmts Duration>` (`4h`, `5d`, `1mo`, `4mo`, `2y`, …)
+//     plans via `targetBin`. Widths the ladder materializes serve directly;
+//     others decompose — fixed widths by DP over finer fixed tiers,
+//     calendar widths by greedy containment over finer *calendar* tiers
+//     first and whole-day fixed tiers for the residue (and always for the
+//     un-closed tip), reaggregated at stitch. Exact for sum monoids: month
+//     boundaries are whole days. Omit `bin=` and pass `bin_budget=N` to let
+//     the planner pick a materialized tier instead.
+//   - cost: every plan is bounded by `V5_LIMITS` (bins/atoms/keys); an
+//     over-budget request 413s rather than OOM-ing the isolate.
 
 export const RIDES_GENESIS = new Date('2013-06-01T00:00:00Z');
 
@@ -599,15 +606,77 @@ export const V5_TIERS: Tier[] = [
 	{ name: '3d',  bin: '3d',  shards: ['96d', '192d', '384d', '768d', '1536d', '3072d'] },
 	{ name: '7d',  bin: '7d',  shards: ['224d', '448d', '896d', '1792d', '3584d', '7168d'] },
 	{ name: '14d', bin: '14d', shards: ['448d', '896d', '1792d', '3584d', '7168d'] },
-	{ name: '1mo', bin: '1mo', shards: ['1y', '2y', '4y', '8y', '16y'] },
+	// `1mo` leads the rungs so closed months of the still-open year get
+	// their own shard the moment they close (`specs/rides-v5-calendar-tip-
+	// rung.md`). With `1y` as the finest rung, the min-cover expected
+	// NOTHING from this tier for the open year — not an unsealed shard, no
+	// shard — so every closed month of 2026 was invisible to the calendar
+	// family and fell through to `1d`/`3d`/`7d`. `1y` still covers closed
+	// years, so no historical rebuild; `1mo/1y/<Y>` becomes buildable from
+	// the twelve monthly shards at year close (pure concat, same tier).
+	{ name: '1mo', bin: '1mo', shards: ['1mo', '1y', '2y', '4y', '8y', '16y'] },
 	{ name: '2mo', bin: '2mo', shards: ['1y', '2y', '4y', '16y', '32y'] },
 	{ name: '3mo', bin: '3mo', shards: ['1y', '4y', '16y', '64y'] },
 	{ name: '6mo', bin: '6mo', shards: ['2y', '8y', '32y', '128y'] },
 	{ name: '1y',  bin: '1y',  shards: ['4y', '16y', '128y'] },
 ];
 
-const CALENDAR_BINS = ['1mo', '2mo', '3mo', '6mo', '1y'] as const;
-type CalendarBin = typeof CALENDAR_BINS[number];
+// Cost ceiling for v5 plans (pyrmts `PlanLimits`). Three independent axes —
+// they don't correlate, so capping only one leaves the others open:
+//   - bins:  response size + client render. 1h over 13y is ~115k bins but
+//            only ~150 keys.
+//   - atoms: pre-coalesce ragged packing atoms = source rows fetched and
+//            stitched. A badly-packed calendar target is few bins, many
+//            atoms (the axis calendar-tier composition improves).
+//   - keys:  distinct shards = R2 GETs + manifest lookups. The axis that
+//            costs money and drives tail latency.
+// Sized off observed good plans with headroom: the full-history Home query
+// is ~160 bins / 1 key; a het-tiled current-year month view is ~21 keys.
+// `maxAtoms` is a blowup backstop, NOT a cost model. Atom count alone does
+// not predict servability: over 2024 the widths that die (`5mo` 39, `7mo`
+// 60, `18mo` 64, `10d` 154, `5d` 222) all out-atom the ones that work
+// (`1mo` 12, `4mo` 6, `2y` 4) — but the production Home query (full
+// history, `bin=1mo`) plans **223** atoms and serves in ~6s. What actually
+// differs is which tiers the atoms come from: calendar-tier atoms are
+// cheap, `1d`/`3d`/`7d` atoms hold orders of magnitude more rows per key.
+// So this is set above real traffic (223) with headroom, and the tighter
+// `keys × cover-terms` guard below does the real work.
+const V5_LIMITS: PlanLimits = { maxOutputBins: 2048, maxAtoms: 512, maxKeys: 128 };
+
+// pyrmts' three axes don't capture what actually kills this worker: CF caps
+// subrequests per invocation, and the manifest path issues byte-range reads
+// per matched row-group per key, so cost scales as keys × cover-tokens —
+// neither factor alone. Measured against the deployed worker:
+//     1 key × 386 tokens → 0.6s ok        5 keys ×  12 tokens → ok
+//    11 keys ×   2 tokens → ok           21 keys ×  50 tokens → 8-11s ok
+//    21 keys × 100 tokens → CF 1102      99 keys ×  12 tokens → subrequest cap
+// so the cliff sits just above ~1050. Cap at 1000 and 413 — an actionable
+// error beats a 500 the caller can't interpret.
+//
+// KNOWN GAP: `5mo`/`7mo`/`18mo` over a region cover (11 keys × 60 terms =
+// 660) slip under this and still 503 with CF's CPU limit, because their
+// keys are fine-tier (`1d`/`3d`) shards that cost far more per key than the
+// calendar-tier shards this product implicitly assumes. Tightening the cap
+// enough to catch them also rejects the production Home query, so it's left
+// permissive on purpose. The real fix is upstream: those widths only touch
+// fine tiers because the current-year calendar shards aren't sealed — see
+// the un-sealed-tip note in `specs/rides-v5.md`.
+const V5_MAX_KEY_CELL_PRODUCT = 1000;
+
+/** Parse a caller-supplied `bin=`. Any pyrmts `Duration` is legal — fixed
+ *  widths decompose by DP over finer tiers, calendar widths het-tile from
+ *  the materialized calendar family (and, past `pyrmts@69de58b`, from
+ *  finer *calendar* tiers), so there's no closed list to validate against.
+ *  `Nmo` is unrestricted since pyrmts moved to year-0 month anchoring. */
+function parseBin(raw: string | null): Duration | null | undefined {
+	if (raw === null) return null;
+	try {
+		parseDuration(raw as Duration);
+		return raw as Duration;
+	} catch {
+		return undefined;
+	}
+}
 
 const V5_SHARD_TTL_MS = 60_000;
 const _v5ShardIndex: Record<string, ShardIndex> = {};
@@ -671,13 +740,19 @@ export async function serveRidesV5(
 	}
 	const reducer = reducerRaw as Reducer;
 	const binRaw = url.searchParams.get('bin');
-	if (binRaw !== null && !CALENDAR_BINS.includes(binRaw as CalendarBin)) {
-		return errorResponse(400, `bad bin '${binRaw}'; one of ${CALENDAR_BINS.join('|')} (or omit for bin_budget)`, cors);
+	const targetBin = parseBin(binRaw);
+	if (targetBin === undefined) {
+		return errorResponse(400, `bad bin '${binRaw}'; expected <count><min|h|d|mo|y> (or omit for bin_budget)`, cors);
 	}
-	const calendarBin = binRaw as CalendarBin | null;
-	// Ignored by the planner when `targetBin` (calendar mode) is set.
 	const binBudget = parsePositiveInt(url.searchParams.get('bin_budget'), 1024);
 	if (binBudget === null) return errorResponse(400, 'invalid bin_budget', cors);
+	// `binBudget` picks the tier when no `bin=` is given. With an explicit
+	// `bin=`, pyrmts ≥69de58b treats it as `maxOutputBins` if limits don't
+	// set one — we always set one, so an explicit `bin=` never inherits a
+	// caller's budget as a cost ceiling (the pre-re-pin contract was that
+	// `binBudget` is simply ignored under `targetBin`; silently turning a
+	// small budget into a hard error would be a BIC surprise).
+	const limits: PlanLimits = V5_LIMITS;
 
 	const cellsRaw = url.searchParams.get('cells');
 	const userCells = cellsRaw
@@ -707,17 +782,36 @@ export async function serveRidesV5(
 	const pyramid = ridesV5Pyramid(bucket, anchor, cellsRoute);
 	const pyramidName = `rides-v5-${anchor}`;
 	const registered = await v5ShardIndex(db, pyramidName).listShards(pyramidName, { range: { from, to } });
-	// Calendar mode plans through the core ragged-calendar planner
-	// (`targetBin`) — the geo wrapper doesn't forward it, and this path
-	// never uses per-segment geo cells (rows are filtered by `include`
-	// below), so the time-only plan is sufficient.
-	const plan = calendarBin !== null
-		? planQueryFromInventory(pyramid, { range: { from, to }, binBudget, targetBin: calendarBin }, registered)
-		: planGeoQueryFromInventory(
+	// One planner for both modes: pyrmts-geo forwards `targetBin` as of
+	// `69de58b`, so explicit-width queries no longer need the time-only
+	// planner detour (which cost `outputRes` and per-segment cells).
+	let plan: GeoQueryPlan;
+	try {
+		plan = planGeoQueryFromInventory(
 			pyramid,
-			{ range: { from, to }, binBudget, outputCells: { res: -1, cells: include } },
+			{
+				range: { from, to },
+				binBudget,
+				outputCells: { res: -1, cells: include },
+				...(targetBin !== null ? { targetBin } : {}),
+				limits,
+			},
 			registered,
 		);
+	} catch (err) {
+		// Cost ceiling — the caller asked for a plan we won't serve. 413
+		// rather than 500: the request is well-formed, just too expensive.
+		if (err instanceof PlanLimitError) {
+			return errorResponse(413, `plan too large: ${err.limit} ${err.requested} > ${err.allowed}`, cors);
+		}
+		throw err;
+	}
+	const keyCount = plan.segments.reduce((n, s) => n + s.keys.length, 0);
+	const keyCellProduct = keyCount * include.length;
+	if (keyCellProduct > V5_MAX_KEY_CELL_PRODUCT) {
+		return errorResponse(413, `plan too large: keys×cells ${keyCellProduct} > ${V5_MAX_KEY_CELL_PRODUCT} `
+			+ `(${keyCount} shards × ${include.length} cover terms) — narrow the range, the area, or use a coarser bin`, cors);
+	}
 	const rgFilters = parseDimFilters(url) ?? [];
 	// RG-manifest path (`specs/rg-manifest.md` P1+P3): serve from the D1
 	// row-group index — no footer parse, so segments fan out in parallel
@@ -777,8 +871,9 @@ export async function serveRidesV5(
 		plan: {
 			outputTier: plan.outputTier?.name ?? null,
 			outputBin: plan.outputBin,
-			outputRes: calendarBin !== null ? -1 : (plan as GeoQueryPlan).outputRes,
+			outputRes: plan.outputRes,
 			outputCells: include,
+			atomCount: plan.atomCount,
 			segments: plan.segments.map((s) => ({
 				tier: s.shardTier.name,
 				from: s.from.toISOString(),

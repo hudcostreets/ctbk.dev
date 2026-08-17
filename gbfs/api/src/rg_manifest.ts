@@ -25,10 +25,36 @@ import { acquireFooterSlot } from './fetch_guard';
 // range covers small footers in one read; big footers cost a second.
 const INITIAL_FETCH_SIZE = 64 * 1024;
 
-// D1 caps bind params at 100. Each include token costs 2 binds in the
-// cell-overlap predicate; beyond this we degrade to one conservative
-// [minTok, maxTok] range (correct superset — row-level filtering
-// downstream keeps exactness).
+// D1 caps bind params at 100. The match statement spends 5 on (pyramid,
+// key, shard_written_at, fromMs, toMs) and 2 more per include token in
+// the cell-overlap predicate, so at most 47 tokens fit in one statement.
+// We chunk at 45 (slack for future fixed binds) and issue one statement
+// per chunk inside the SAME `db.batch` — one round trip regardless of
+// token count, and the predicate stays exact at any width.
+//
+// D1 applies its per-query limits to each statement within a batch
+// individually, and caps neither statements per batch nor total binds,
+// so this scales to any cover width.
+//
+// The prior behavior degraded past the cap to a single [minTok, maxTok]
+// range predicate. Correct (row-level filtering downstream keeps
+// exactness) but it read every RG whose cell range overlapped the token
+// span: measured on `rides-v5/start/1h/32d/2026-07-06.parquet` (1749
+// RGs), a 46-token selection read 768 RGs / 35.3MB where the exact
+// predicate reads 61 RGs / 2.7MB — a 13x step off a one-token edge.
+//
+// Crossing 45 is not exotic. `vocabCover` rolls compact selections up
+// hard (all NYC+JC → 12 terms; Jersey City, 102 stations → 5), but cover
+// size tracks selection SHAPE, not station count. The Manhattan CBD
+// (congestion zone; `/cells-debug` composite set) needs 226 terms for
+// 386 stations, where a compact disc of the same 386 needs 37 — 6x, from
+// geometry alone. Two compounding causes, both visible in the cover's
+// composition: the zone is skinny, so no coarse (level ≤7) vocab cell
+// fits inside it (0 of 226 terms, vs 3 for the disc), and its long
+// boundary runs through dense waterfront, clipping cells that must
+// descend to per-station leaves (95, vs 14). Rollup-defeating picks
+// (checkerboard: every 2nd station) reach ~1242 terms / 28 chunks.
+// All exact.
 const MAX_CELL_TOKENS = 45;
 
 // Fill-worthiness floor: shards below this RG count have sub-MB footers
@@ -48,13 +74,60 @@ const MAX_CELL_TOKENS = 45;
 const MIN_FILL_RGS = 512;
 const minFillRgs = (pyramid: string): number => pyramid.startsWith('rides-') ? 0 : MIN_FILL_RGS;
 
-interface ManifestRg {
+export interface ManifestRg {
 	rg_idx: number;
 	row_start: number;
 	num_rows: number;
 	byte_start: number;
 	byte_end: number;
 	chunk_meta: string;
+}
+
+/** Split include tokens into per-statement chunks of `MAX_CELL_TOKENS`.
+ *  An empty token list yields one empty chunk — a match statement with
+ *  no cell predicate at all (every RG passes), which is what "no cell
+ *  restriction" means. */
+export function cellTokenChunks(tokens: string[]): string[][] {
+	if (tokens.length === 0) return [[]];
+	const chunks: string[][] = [];
+	for (let i = 0; i < tokens.length; i += MAX_CELL_TOKENS) {
+		chunks.push(tokens.slice(i, i + MAX_CELL_TOKENS));
+	}
+	return chunks;
+}
+
+/** SQL + binds for one chunk's matched-RG query. Each token contributes
+ *  an exact `(cell_min <= t AND cell_max >= t)` overlap term; terms OR
+ *  together, and chunks union at the caller (`mergeManifestRgs`). */
+export function matchQuery(
+	pyramid: string,
+	key: string,
+	writtenAt: number,
+	fromMs: number,
+	toMs: number,
+	chunk: string[],
+): { sql: string; binds: (string | number)[] } {
+	const conds = chunk.map(() => '(cell_min <= ? AND cell_max >= ?)');
+	const binds: (string | number)[] = [pyramid, key, writtenAt, fromMs, toMs];
+	for (const t of chunk) binds.push(t, t);
+	const sql = 'SELECT rg_idx, row_start, num_rows, byte_start, byte_end, chunk_meta FROM rg_manifest '
+		+ 'WHERE pyramid = ? AND key = ? AND shard_written_at = ? '
+		+ 'AND (dt_max IS NULL OR dt_max >= ?) AND (dt_min IS NULL OR dt_min < ?) '
+		+ (conds.length ? `AND (cell_min IS NULL OR ${conds.join(' OR ')}) ` : '')
+		+ 'ORDER BY rg_idx';
+	return { sql, binds };
+}
+
+/** Union per-chunk matches: an RG matching tokens in several chunks
+ *  appears once, and the result is rg_idx-ascending as
+ *  `decodeManifestRgs` requires. */
+export function mergeManifestRgs(chunks: ManifestRg[][]): ManifestRg[] {
+	if (chunks.length === 1) return chunks[0]!;
+	const byIdx = new Map<number, ManifestRg>();
+	for (const chunk of chunks) {
+		for (const rg of chunk) byIdx.set(rg.rg_idx, rg);
+	}
+	return [...byIdx.values()].sort((a, b) => a.rg_idx - b.rg_idx);
 }
 
 interface ChunkMeta {
@@ -114,32 +187,25 @@ export async function fetchShardRows(opts: SegmentFetchOpts): Promise<Row[]> {
 	const fromMs = opts.from.getTime();
 	const toMs = opts.to.getTime();
 
-	// Presence + matched RGs + schema, one D1 round trip.
-	const cellConds: string[] = [];
-	const cellBinds: (string | number)[] = [];
-	if (tokens.length > MAX_CELL_TOKENS) {
-		cellConds.push('(cell_min <= ? AND cell_max >= ?)');
-		cellBinds.push(tokens[tokens.length - 1], tokens[0]);
-	} else {
-		for (const t of tokens) {
-			cellConds.push('(cell_min <= ? AND cell_max >= ?)');
-			cellBinds.push(t, t);
-		}
-	}
+	// Presence + matched RGs (one statement per token chunk) + schema, all
+	// in ONE D1 round trip.
+	//
 	// Presence = the `rg_manifest_fills` sentinel, written LAST by
 	// `fillManifest` — a fill that dies midway leaves no sentinel, so
 	// partial rows are never trusted.
-	const [presence, matches, schemaRow] = await db.batch([
+	const chunks = cellTokenChunks(tokens);
+	const results = await db.batch([
 		db.prepare('SELECT n_rgs FROM rg_manifest_fills WHERE pyramid = ? AND key = ? AND shard_written_at = ?')
 			.bind(pyramid, key, writtenAt),
-		db.prepare(
-			'SELECT rg_idx, row_start, num_rows, byte_start, byte_end, chunk_meta FROM rg_manifest '
-			+ 'WHERE pyramid = ? AND key = ? AND shard_written_at = ? '
-			+ 'AND (dt_max IS NULL OR dt_max >= ?) AND (dt_min IS NULL OR dt_min < ?) '
-			+ `AND (cell_min IS NULL OR ${cellConds.join(' OR ')}) ORDER BY rg_idx`,
-		).bind(pyramid, key, writtenAt, fromMs, toMs, ...cellBinds),
+		...chunks.map((chunk) => {
+			const { sql, binds } = matchQuery(pyramid, key, writtenAt, fromMs, toMs, chunk);
+			return db.prepare(sql).bind(...binds);
+		}),
 		db.prepare('SELECT schema_json FROM rg_manifest_schema WHERE pyramid = ?').bind(pyramid),
 	]);
+	const presence = results[0]!;
+	const schemaRow = results[results.length - 1]!;
+	const matchResults = results.slice(1, -1);
 
 	const filled = (presence.results?.length ?? 0) > 0;
 	const schemaJson = (schemaRow.results?.[0] as { schema_json: string } | undefined)?.schema_json;
@@ -152,7 +218,7 @@ export async function fetchShardRows(opts: SegmentFetchOpts): Promise<Row[]> {
 		schemaCache.set(pyramid, s);
 		return s;
 	})();
-	const rgs = (matches.results ?? []) as unknown as ManifestRg[];
+	const rgs = mergeManifestRgs(matchResults.map((r) => (r.results ?? []) as unknown as ManifestRg[]));
 	if (rgs.length === 0) return [];
 
 	try {
