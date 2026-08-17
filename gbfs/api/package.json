@@ -19,9 +19,9 @@
     "@rdub/thrds": "https://github.com/runsascoded/thrds#ts-dist",
     "@resvg/resvg-wasm": "^2.6.2",
     "hyparquet": "https://github.com/runsascoded/hyparquet#0f355ea5a37dcb9b29a43e33a3d45ce660c80798",
-    "pyrmts": "https://github.com/runsascoded/pyrmts#60439222ad02c11da83b78ad17e1ef35b95d2baa&path:/js/packages/pyrmts",
-    "pyrmts-cfw": "https://github.com/runsascoded/pyrmts#60439222ad02c11da83b78ad17e1ef35b95d2baa&path:/js/packages/pyrmts-cfw",
-    "pyrmts-geo": "https://github.com/runsascoded/pyrmts#60439222ad02c11da83b78ad17e1ef35b95d2baa&path:/js/packages/pyrmts-geo",
+    "pyrmts": "https://github.com/runsascoded/pyrmts#5f22b1da73930adc23fd6f8fed2136261c0c4132&path:/js/packages/pyrmts",
+    "pyrmts-cfw": "https://github.com/runsascoded/pyrmts#5f22b1da73930adc23fd6f8fed2136261c0c4132&path:/js/packages/pyrmts-cfw",
+    "pyrmts-geo": "https://github.com/runsascoded/pyrmts#5f22b1da73930adc23fd6f8fed2136261c0c4132&path:/js/packages/pyrmts-geo",
     "satori": "^0.26.0"
   }
 }
