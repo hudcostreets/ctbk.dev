@@ -16,8 +16,8 @@
  * `v5UserCover`).
  *
  * The Cover dropdown also has a raw-S2 `minimalCover` (± green/red)
- * what-if baseline: stations as uniform-L15 point cells, no `s:`
- * terms (see the `FINEST_LEVEL` lossiness caveat below).
+ * what-if baseline: stations as their per-station LUC cells (mixed
+ * levels 10-20), no `s:` terms — see the system note below.
  *
  * Plus live rides/avail stats for the selection via the prod API.
  * Mount: `/cells-debug` (lazy via main.tsx).
@@ -49,22 +49,39 @@ const REGION_COLOR: Record<Region, string> = {
   Other: '#9e9e9e',
 }
 
-// Station leaves land at FINEST before `minimalCover` compacts them.
-// L15 is lossy: ~1100/2340 stations share their L15 cell with a neighbor
-// (LUC level ≥16), so a cover for one silently spans the other (e.g.
-// JC081 ⇒ its L14 also holds unselected JC075). The right system is
-// per-station LUC cells from `station-luc.json`.
+// The raw-S2 `minimalCover` system is per-station LUC cells from
+// `station-luc.json` — the *least unique cell* for each station, i.e.
+// the shallowest S2 cell holding that station and no other. Levels run
+// 10-20 across the fleet.
 //
-// That used to be blocked on `minimalCover` requiring a uniform-level
-// system; it isn't since 2026-08-14 (pyrmts
-// `specs/minimal-cover-mixed-levels.md` — `buildTree` is now a
-// level-stratified deepest-first walk) and `www` already pins a dist
-// with the fix. What's left is switching the system here and deduping
-// the `_`-alias stations whose fallback cells nest real LUC cells —
-// tracked in `specs/pyrmts-geo-h3-removal.md` item 4.
+// A uniform-L15 system (what this used until pyrmts
+// `specs/minimal-cover-mixed-levels.md` landed 2026-08-14) is lossy in a
+// way that quietly invalidates the page's whole premise: 1,122 of 2,340
+// stations have an LUC level ≥16, so they share an L15 cell with a
+// neighbor and a cover for station A also spans unselected station B
+// (pinned example: JC081 "Brunswick & 6th" yields an L14 cell that also
+// holds JC075 "Monmouth & 6th"; both live in L15 `89c2574b4`). Mixed
+// levels are what make the cover *exact*.
+//
 // COARSEST caps output cells (the v3/v5 builds materialize L10..15).
+// There's no FINEST any more — depth comes from the data.
 const FINEST_LEVEL = 15
 const COARSEST_LEVEL = 10
+
+/** LUC cell for a station id.
+ *
+ *  `stations-regional.json` carries three `_`-suffixed aliases
+ *  (`6569.09_`, `5308.04_`, `6517.08_`) that LUC resolved onto their
+ *  base station, so they have no entry of their own; they're the same
+ *  physical dock, and mapping them to the base's cell is both correct
+ *  and necessary — a lat/lng fallback would put an L15 cell into a
+ *  system that contains L16-20 cells nested inside it, and an ancestor
+ *  in the system is exactly the lineage conflict `minimalCover`'s DP
+ *  can't represent. With the alias strip, all 2,340 stations resolve
+ *  and the system is verified lineage-disjoint. */
+function lucCell(lucCells: Map<string, string>, id: string): string | undefined {
+  return lucCells.get(id) ?? lucCells.get(id.replace(/_$/, ''))
+}
 
 // ─── selection helpers ────────────────────────────────────────────────
 
@@ -249,7 +266,7 @@ export default function CellsDebug() {
   // leaves) — the graph `vocabCover` minimizes over. `leaves` spans the
   // full LUC universe (incl. retired stations), used for vocab-grid
   // counts and retired-leaf marker positions.
-  const vocabQ = useQuery<{ graph: VocabGraph; leaves: LucLeaf[]; leafKeys: Set<string>; cells: string[] }>({
+  const vocabQ = useQuery<{ graph: VocabGraph; leaves: LucLeaf[]; leafKeys: Set<string>; cells: string[]; lucCells: Map<string, string> }>({
     queryKey: ['station-vocab-graph'],
     queryFn: async () => {
       const [vocab, luc] = await Promise.all([
@@ -262,6 +279,7 @@ export default function CellsDebug() {
         leaves,
         leafKeys: new Set(leaves.map((l) => l.key)),
         cells: vocab.cells,
+        lucCells: new Map(Object.entries(luc.by_short_name).map(([sn, e]) => [sn, e.cell])),
       }
     },
     staleTime: Infinity,
@@ -297,10 +315,11 @@ export default function CellsDebug() {
 
   // ── covers for the current selection ──
   const customCovers = useMemo(() => {
-    if (!stationsQ.data || selected.size === 0) return null
+    if (!stationsQ.data || !vocabQ.data || selected.size === 0) return null
     const stations = stationsQ.data
+    const lucCells = vocabQ.data.lucCells
     const leafByStation = Object.entries(stations).map(([id, s]) => ({
-      id, cell: s2Index.latLngToCell(s.lat, s.lng, FINEST_LEVEL),
+      id, cell: lucCell(lucCells, id) ?? s2Index.latLngToCell(s.lat, s.lng, FINEST_LEVEL),
     }))
     const system = Array.from(new Set(leafByStation.map((x) => x.cell)))
     const includeCells = Array.from(new Set(
