@@ -84,22 +84,23 @@ All five items landed.
 |---|---|---|
 | 2 — drop Python `pyrmts_geo` | `6fb6c8d4` | Confirmed zero importers. pyrmts is clear to delete the package. |
 | 1, 3, 5 — JS re-pin to `5f22b1d` | `c3c6c361` | All three BIC changes verified against our call sites first; `gbfs/api` 207 tests, `gbfs/cascade` 113, `www` tc+build green. `wrangler deploy --dry-run` confirms **zero** `h3` references in the worker bundle. Fixed the split `gbfs/cascade` `pyrmts-geo` pin in the same sweep. |
-| 4 — CellsDebug LUC switch | this commit | See below. |
+| 4 — CellsDebug LUC switch | **not adopted** (`db8c86a3`, reverted) | See below. |
 
-### Item 4 notes
+### Item 4: declined, and the spec's premise is stale
 
-The raw-S2 `minimalCover` system is now per-station LUC cells (levels 10-20), not uniform L15. Your pinned example verified against the assets:
+The spec says "The right system is LUC cells." It isn't, for ctbk — we moved off LUC deliberately, and the switch was reverted after a day.
 
-```
-JC081  Brunswick & 6th   luc=89c2574b3 (L16)   L15=89c2574b4
-JC075  Monmouth & 6th    luc=89c2574b5 (L16)   L15=89c2574b4
-```
+**LUC is relational.** A station's LUC cell is defined against every *other* station, so adding one churns existing anchors — 166 moved in the 2026-07 re-key without physically moving, invalidating materialized history each time. That is the entire motivation for `specs/done/drop-luc-station-keys.md`, which replaced LUC anchoring with fixed coarse cells + `s:<short_name>` identity keys. That spec's own words: *"No `station-luc.json` denorm anywhere."*
 
-Same L15 cell, sibling L16 LUC cells — so the old system could not distinguish them, and now does.
+**And an exact LUC cover is unservable.** LUC levels reach 20; the pyramids materialize `[15..10]`. `coarsestLevel` caps the rollup but nothing caps depth, so a LUC-based cover contains cells no tier can answer — strictly worse than a lossy one.
 
-**The `_`-alias handling is not a dedup.** `stations-regional.json` carries three (`6569.09_`, `5308.04_`, `6517.08_`) that have no LUC entry of their own because LUC resolved them onto their base station; a fourth (`5303.06_`) does have one. They're mapped to the base station's cell — the same physical dock, so it's semantically right, and it's also *required*: a lat/lng fallback would insert an L15 cell into a system containing L16-20 cells nested inside it, and an ancestor in the system is exactly the lineage conflict the DP can't represent. Verified over all 2,340 stations: every one resolves, 2,337 distinct cells, **zero** ancestor/descendant pairs.
+**The leak the spec cites doesn't exist in the served path.** JC081 is served as `s:JC081`, an identity key; nothing drags in JC075. The over-coverage lives only in the page's raw-S2 row.
 
-At scale the mixed-level cover behaves: the NYC preset (2,232 stations) yields a 12-term raw-S2 cover (+9 −3) rather than the empty cover the pre-fix `buildTree` would have produced.
+**And that row isn't a hypothetical either**, which is what finally settled it. It runs the same uniform-L15 `minimalCover` that `useRegionCoversV3` (`www/src/query/ridesV1.ts`) runs to build the covers the Home chart sends as `cells=`. Its value is showing what the FE actually emits, so it should track that code, not improve on it.
+
+The L15 lossiness is real but absorbed: `v5UserCover` (`rides_v1.ts:705`) uses the raw cover only as a point-in-set test over the station vocabulary, then re-derives the served terms via `vocabCover`. Extra stations picked up by a fat L15 cell are co-located neighbors — same region as the intended one. A region boundary splitting an L15 cell is the one latent edge case, and it's not one LUC would be the right fix for.
+
+**For pyrmts**: `minimal-cover-mixed-levels` can't take ctbk's cover system as its acceptance evidence — no ctbk cover system is going to be mixed-level, because the two candidates for depth (LUC cells, per-station leaves) are both churny or unservable. The mixed-level `buildTree` fix is still used here, just via `vocabCover`: `station-vocab.json` spans levels 10-16, so the vocab graph is mixed-level and every served cover exercises it. That's better evidence than the raw-S2 row would have been.
 
 ## Not in scope
 
