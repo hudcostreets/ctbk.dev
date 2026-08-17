@@ -100,7 +100,11 @@ The spec says "The right system is LUC cells." It isn't, for ctbk — we moved o
 
 The L15 lossiness is real but absorbed: `v5UserCover` (`rides_v1.ts:705`) uses the raw cover only as a point-in-set test over the station vocabulary, then re-derives the served terms via `vocabCover`. Extra stations picked up by a fat L15 cell are co-located neighbors — same region as the intended one. A region boundary splitting an L15 cell is the one latent edge case, and it's not one LUC would be the right fix for.
 
-**For pyrmts**: `minimal-cover-mixed-levels` can't take ctbk's cover system as its acceptance evidence — no ctbk cover system is going to be mixed-level, because the two candidates for depth (LUC cells, per-station leaves) are both churny or unservable. The mixed-level `buildTree` fix is still used here, just via `vocabCover`: `station-vocab.json` spans levels 10-16, so the vocab graph is mixed-level and every served cover exercises it. That's better evidence than the raw-S2 row would have been.
+**For pyrmts**: `minimal-cover-mixed-levels` can't take ctbk's cover system as its acceptance evidence — no ctbk cover system is going to be mixed-level, because the two candidates for depth (LUC cells, per-station leaves) are both churny or unservable.
+
+Nor does anything else here substitute for it. `vocabCover` does handle a mixed-level vocabulary (`station-vocab.json` spans levels 10-16) and runs on every served query, but it's a **separate implementation** — `vocab-cover.ts` walks its own `VocabGraph`, and `buildTree` appears only inside `spatial-index-cover.ts`. So the rewritten `buildTree` is not on ctbk's serving path at all: our only `minimalCover` callers (`useRegionCoversV3`, the CellsDebug raw-S2 row) both pass uniform-L15 systems.
+
+Concretely: **ctbk exercises the mixed-level fix nowhere.** Closing that spec needs pyrmts-side fixtures, or a different consumer.
 
 ## Not in scope
 
