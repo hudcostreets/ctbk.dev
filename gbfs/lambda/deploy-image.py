@@ -235,9 +235,13 @@ def main(v5_only: bool, build_only: bool):
         description='avail-v3 cascade tick (image)',
         env_extra={'GC_ENABLED': os.environ.get('GC_ENABLED', '0'), 'FILL_ALL': '1'},
         reserved=1, memory_mb=MEMORY_MB)
-    ensure_schedule(events, lam, func_arn, func_name=FUNC, rule=f'{FUNC}-hourly',
-                    rate='cron(1/5 * * * ? *)', input_json=None,
-                    description='avail-v3 cascade fill')
+    # No avail-v3 schedule: `ctbk-avail-cascade-hourly` was disabled
+    # 2026-08-28 (avail-v6 has been the default since 08-10; v5 is the
+    # rollback, so v3 was two architectures back and still writing every
+    # 5 min). `ensure_schedule` does `put_rule(State='ENABLED')`, so
+    # leaving the call here would silently re-enable it on the next
+    # deploy. The function itself stays for manual ticks / rollback
+    # until the wholesale GC (`specs/gc-legacy-pyramids.md`).
     rebuild_arn = recreate_function(
         lam, role_arn, uri, name=REBUILD_FUNC,
         description='single-gap rebuild fan-out (image; no schedule)',

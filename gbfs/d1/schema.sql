@@ -75,3 +75,14 @@ CREATE TABLE IF NOT EXISTS trips_loaded (
   row_count INTEGER NOT NULL,
   PRIMARY KEY (ym, is_start)
 );
+
+-- `pyramid_shards` itself is created by pyrmts-cfw's `D1ShardIndex.ddl()`,
+-- not here — but that DDL emits no secondary index, so the serving path's
+-- windowed `listShards` (`WHERE pyramid = ? AND period_end > ? AND
+-- period_start < ?`) could only seek on the leading PK column and then
+-- scanned the whole pyramid partition: 14,561 rows read to return 17, and
+-- ~175M rows/day account-wide. With this index the same query reads 22.
+-- Applied by hand to prod 2026-08-28; kept here so a re-provision doesn't
+-- silently lose it. `pyrmts/specs/d1-shard-index-temporal.md` moves it into
+-- `ddl()`, at which point this becomes a redundant no-op rather than drift.
+CREATE INDEX IF NOT EXISTS pyramid_shards_period ON pyramid_shards (pyramid, period_end);
