@@ -1056,6 +1056,65 @@ RIDES_V5_ANCHOR_SPECS = (
 )
 
 
+@gbfs.command('rides-v5-sweep', help='Delete 0-row relic shards lying wholly at/after AFTER (YYYY-MM, default: the current month) from all three stores — R2, the D1 `pyramid_shards` registry, and each anchor\'s `manifest.jsonl`. Run after any uncapped `engine submit -f`: the fill\'s expected cover reaches `now`, so windows past the last published source month build as empty shards, and a present-but-empty shard reads as "built" to every later fill — permanently blocking its window once real data lands. Only the fixed-duration day tiers are swept; calendar-tier shards for the open month are the het-tiled tip by design.')
+@option('-a', '--after', default=None, help='Sweep 0-row shards whose period starts at/after this month (YYYY-MM) [default: current month].')
+@option('-n', '--dry-run', is_flag=True, help='List relics without deleting.')
+def rides_v5_sweep(after: str | None, dry_run: bool) -> None:
+	# Present-but-empty is indistinguishable from "built and genuinely
+	# empty" (an outage signal), so these have to go, and from ALL THREE
+	# stores: R2 holds the bytes, D1 answers the serving lookup, and
+	# `manifest.jsonl` is what the fill diffs against for presence.
+	from ctbk.pyramid_cascade.lite import r2_client as _lite_r2
+	if after is None:
+		now = datetime.now(timezone.utc)
+		m1 = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+	else:
+		y, _, mo = after.replace('/', '-').partition('-')
+		m1 = datetime(int(y), int(mo), 1, tzinfo=timezone.utc)
+	cli_r2 = _lite_r2()
+	paginator = cli_r2.get_paginator('list_objects_v2')
+	m1_ms = int(m1.timestamp()) * 1000
+	relics: list[tuple[str, str, str, str, int]] = []  # (key, pyramid, tier, shard_dur, period_start_ms)
+	for config_name, prefix, _ in RIDES_V5_ANCHOR_SPECS:
+		# Day tiers only: a calendar shard covering the open month is the
+		# het-tiled tip, not a relic.
+		for tier in ('1h', '3h', '6h', '12h', '1d', '3d', '7d', '14d'):
+			tier_prefix = f'{prefix}/{tier}/'
+			for page in paginator.paginate(Bucket='ctbk', Prefix=tier_prefix):
+				for o in page.get('Contents') or []:
+					if o['Size'] > 4096:
+						continue
+					shard, period = o['Key'][len(tier_prefix):-len('.parquet')].split('/')
+					p0_dt = datetime.strptime(period, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+					if int(p0_dt.timestamp()) * 1000 >= m1_ms:
+						relics.append((o['Key'], config_name, tier, shard, int(p0_dt.timestamp()) * 1000))
+	if not relics:
+		err(f'sweep: no 0-row relic shards at/after {m1:%Y-%m}')
+		return
+	err(f'sweep: {len(relics)} 0-row relic shard(s) at/after {m1:%Y-%m}')
+	for key, *_ in relics:
+		err(f'  {key}')
+	if dry_run:
+		return
+	for key, *_ in relics:
+		cli_r2.delete_object(Bucket='ctbk', Key=key)
+	conds = ' OR '.join(
+		f"(pyramid='{p}' AND tier='{t}' AND shard_dur='{s}' AND period_start={ms})"
+		for _, p, t, s, ms in relics
+	)
+	_run_wrangler_d1(f'DELETE FROM pyramid_shards WHERE {conds}', db='ctbk-gbfs', wrangler_cwd=DEFAULT_WRANGLER_CWD)
+	dropped = {k for k, *_ in relics}
+	for _config_name, prefix, _f in RIDES_V5_ANCHOR_SPECS:
+		mkey = f'{prefix}/manifest.jsonl'
+		body = cli_r2.get_object(Bucket='ctbk', Key=mkey)['Body'].read().decode()
+		recs = [json.loads(l) for l in body.splitlines() if l.strip()]
+		keep = [r for r in recs if r['key'] not in dropped]
+		if len(keep) != len(recs):
+			out = '\n'.join(json.dumps(r, separators=(',', ':')) for r in keep) + '\n'
+			cli_r2.put_object(Bucket='ctbk', Key=mkey, Body=out.encode(), ContentType='application/jsonl')
+			err(f'  {mkey}: {len(recs)} → {len(keep)} records')
+
+
 @gbfs.command('rides-v5-extend', help='Monthly rides-v5 cadence for one freshly-ingested month: (1) server-side copy `normalized/<YM>.parquet` from the DVC store to its public plain key (the Batch factory lists that prefix), (2) invalidate the previous month on the start anchor (spillback refold), (3) `engine submit -f` both anchors, UNCAPPED range + `--max-missing 0.01` (capping at month-end leaves coarse-rung holes; the tolerance covers the in-progress month, whose source is unpublished mid-month), (4) sweep post-month-end 0-row relic shards, (5) RG-manifest backfill. Station-map/vocab regen for new stations is NOT covered (spec cadence item 4). Needs AWS + R2 creds, CTBK_REGISTRY_SECRET, and `pyrmts-engine` on PATH.')
 @option('-n', '--dry-run', is_flag=True, help='Print planned actions (and engine submit commands); no writes or submits.')
 @argument('ym', metavar='YM')
@@ -1133,50 +1192,9 @@ def rides_v5_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
 		if rc:
 			raise click.ClickException(f'{config_name} fill failed (rc={rc})')
 
-	# 4. Sweep 0-row relic shards lying wholly past month-end: present-
-	# but-empty reads as "built" to later fills (an outage signal), so a
-	# relic blocks its window from ever filling once real data lands.
-	# Must be removed from all THREE stores — R2, the D1 registry, and
-	# the per-prefix `manifest.jsonl` (the fill's presence source).
-	from ctbk.pyramid_cascade.lite import r2_client as _lite_r2
-	cli_r2 = _lite_r2()
-	m1_ms = int(m1.timestamp()) * 1000
-	relics: list[tuple[str, str, str, str, int]] = []  # (key, pyramid, tier, shard_dur, period_start_ms)
-	for config_name, prefix, _ in RIDES_V5_ANCHOR_SPECS:
-		for tier in ('1h', '3h', '6h', '12h', '1d', '3d', '7d', '14d'):
-			tier_prefix = f'{prefix}/{tier}/'
-			resp = cli_r2.list_objects_v2(Bucket='ctbk', Prefix=tier_prefix)
-			for o in resp.get('Contents', []):
-				if o['Size'] > 4096:
-					continue
-				shard, period = o['Key'][len(tier_prefix):-len('.parquet')].split('/')
-				p0_dt = datetime.strptime(period, '%Y-%m-%d').replace(tzinfo=timezone.utc)
-				if int(p0_dt.timestamp()) * 1000 >= m1_ms:
-					relics.append((o['Key'], config_name, tier, shard, int(p0_dt.timestamp()) * 1000))
-	if relics:
-		err(f'sweep: {len(relics)} pure-future 0-row relic shard(s)')
-		for key, *_ in relics:
-			err(f'  {key}')
-		if not dry_run:
-			for key, *_ in relics:
-				cli_r2.delete_object(Bucket='ctbk', Key=key)
-			conds = ' OR '.join(
-				f"(pyramid='{p}' AND tier='{t}' AND shard_dur='{s}' AND period_start={ms})"
-				for _, p, t, s, ms in relics
-			)
-			_run_wrangler_d1(f'DELETE FROM pyramid_shards WHERE {conds}', db='ctbk-gbfs', wrangler_cwd=DEFAULT_WRANGLER_CWD)
-			for _config_name2, prefix2, _f in RIDES_V5_ANCHOR_SPECS:
-				mkey = f'{prefix2}/manifest.jsonl'
-				body = cli_r2.get_object(Bucket='ctbk', Key=mkey)['Body'].read().decode()
-				recs = [json.loads(l) for l in body.splitlines() if l.strip()]
-				dropped = {k for k, *_ in relics}
-				keep = [r for r in recs if r['key'] not in dropped]
-				if len(keep) != len(recs):
-					out = '\n'.join(json.dumps(r, separators=(',', ':')) for r in keep) + '\n'
-					cli_r2.put_object(Bucket='ctbk', Key=mkey, Body=out.encode(), ContentType='application/jsonl')
-					err(f'  {mkey}: {len(recs)} → {len(keep)} records')
-
-	# 4. RG-manifest rows for the new shards (serving falls back to
+	# 4. Sweep 0-row relic shards lying wholly past month-end.
+	ctx.invoke(rides_v5_sweep, after=f'{m1:%Y-%m}', dry_run=dry_run)
+	# 5. RG-manifest rows for the new shards (serving falls back to
 	# footer reads meanwhile, but big shards' footers are the expensive
 	# path the manifest exists to avoid).
 	ctx.invoke(gbfs_manifest_backfill, dry_run=dry_run)
@@ -1481,6 +1499,7 @@ def _engine_submit(
 @option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
 @option('-r', '--range', 'range_', default=None, help='Half-open build range `[FROM]/TO` (UTC ISO; FROM defaults to genesis).')
 @option('-s', '--source', 'source_rung', default='1m', show_default=True, help='Source tier, `tier` (min-cover: read the tier as stored) or `tier@shard_dur` (pin one rung, e.g. seeded scratch).')
+@option('-t', '--max-missing', type=float, default=None, help='Fraction of source periods allowed to be absent before the build fails (build --max-missing). An uncapped `-f` fill expects a cover reaching `now`, so the in-progress month\'s unpublished source is a legitimate miss; 0.01 tolerates it while a real 2-month hole still fails.')
 @option('-u', '--resume', is_flag=True, help='Skip shards already in the manifest (resume after a Spot reclaim).')
 @option('-V', '--vcpus', type=int, default=None, help='Override job vCPUs.')
 @option('-W', '--watch', is_flag=True, help='Tail the job log stream; exit with its status.')
@@ -1503,6 +1522,7 @@ def gbfs_engine_submit(
 	scratch_prefix: str | None,
 	range_: str | None,
 	source_rung: str,
+	max_missing: float | None,
 	resume: bool,
 	vcpus: int | None,
 	watch: bool,
@@ -1515,8 +1535,8 @@ def gbfs_engine_submit(
 		fill=fill, rg_size=rg_size, workers=workers, max_inflight=max_inflight,
 		close_workers=close_workers, memory=memory, manifest_name=manifest_name,
 		dry_run=dry_run, scratch_prefix=scratch_prefix, range_=range_,
-		source_rung=source_rung, resume=resume, vcpus=vcpus, watch=watch,
-		window=window, source_spec=source_spec,
+		source_rung=source_rung, max_missing=max_missing, resume=resume, vcpus=vcpus,
+		watch=watch, window=window, source_spec=source_spec,
 	))
 
 
