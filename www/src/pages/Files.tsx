@@ -1,8 +1,8 @@
 /** `/files/*` — `<FileTree>` from `@rdub/file-tree`.
  *
- *  PoC for the GBFS health page. Browses the production R2 bucket
- *  (`gbfs/`, `avail/` prefixes via the `R2Store` allow-list on the
- *  worker side). */
+ *  Browses the production R2 bucket (`gbfs/`, `avail/`, `rides-v5/`
+ *  prefixes via the `R2Store` allow-list on the worker side), with
+ *  ctbk-specific parquet cell rendering (`../components/parquetCells`). */
 import { useCallback, useMemo } from 'react'
 import { FileTree } from '@rdub/file-tree/react'
 import { HttpStore } from '@rdub/file-tree/stores/http'
@@ -52,7 +52,7 @@ export default function Files() {
         <FileTree
           store={store}
           routeBase="/files"
-          title="Files (PoC: @rdub/file-tree)"
+          title="Files"
           parquetRenderer={ParquetViewer}
         />
       </RawColsProvider>
