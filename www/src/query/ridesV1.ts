@@ -189,8 +189,10 @@ export function useRidesV1({
         sp.set('bbox', SYSTEM_BBOX)
         sp.set('reducer', 'sum')
         if (pyramid === 'v5') {
-          // v5 has no calendar tiers; the worker rebins the 1d tier to
-          // exact calendar months at serve time (`specs/rides-v5.md`).
+          // v5 materializes a calendar family ({1,2,3,6}mo + 1y), so `1mo`
+          // is served from the `1mo` tier where sealed; the un-closed tip
+          // het-tiles from finer tiers at serve time (`specs/rides-v5.md`).
+          // `bin=` accepts any pyrmts Duration now — not just calendar ones.
           sp.set('bin', '1mo')
         } else {
           sp.set('bin_budget', '200')

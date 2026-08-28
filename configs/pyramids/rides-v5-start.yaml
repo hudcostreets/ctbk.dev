@@ -47,7 +47,7 @@ tiers:
   # (exact — only divisors of one day divide months), 2mo ← 1mo,
   # 3mo ← 1mo, 6mo ← 3mo, 1y ← 6mo. Closed months immutable →
   # build-once, extend-monthly; the live tip is het-tiled at serve time.
-  - { name: 1mo, bin: 1mo, shards: [1y, 2y, 4y, 8y, 16y] }
+  - { name: 1mo, bin: 1mo, shards: [1mo, 1y, 2y, 4y, 8y, 16y] }
   - { name: 2mo, bin: 2mo, shards: [1y, 2y, 4y, 16y, 32y] }
   - { name: 3mo, bin: 3mo, shards: [1y, 4y, 16y, 64y] }
   - { name: 6mo, bin: 6mo, shards: [2y, 8y, 32y, 128y] }
