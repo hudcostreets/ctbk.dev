@@ -697,7 +697,7 @@ requires-dist = [
     { name = "botocore", specifier = ">=1.37.3" },
     { name = "click", specifier = ">=8.2.1" },
     { name = "dvc-s3", specifier = ">=3.2.2" },
-    { name = "dvx", specifier = "==0.5.0" },
+    { name = "dvx", git = "https://github.com/runsascoded/dvx.git?rev=9c22fc08c" },
     { name = "fsspec", specifier = ">=2025.5.1" },
     { name = "geopy", specifier = ">=2.4.1" },
     { name = "graphviz", specifier = ">=0.20.3" },
@@ -966,17 +966,13 @@ wheels = [
 
 [[package]]
 name = "dvx"
-version = "0.5.0"
-source = { registry = "https://pypi.org/simple" }
+version = "0.5.1.dev19+g9c22fc08c"
+source = { git = "https://github.com/runsascoded/dvx.git?rev=9c22fc08c#9c22fc08c303700335bc4269224610aed1fcf3e8" }
 dependencies = [
     { name = "click" },
     { name = "dffs" },
     { name = "dvc" },
     { name = "dvc-data" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/09/8e/328d686520674253c0e2e26b57e10ff41b1f12c88239fa2d40624b61c44e/dvx-0.5.0.tar.gz", hash = "sha256:6c95ac313670bb7495461808779fc6519e14687d3e3a9644b87beaafd86d30c3", size = 323976, upload-time = "2026-05-24T21:40:45.375Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/04/6b/88f054cb3e7f59ad30055ccab05afe33e247ceaccb765265fb26edc8d88c/dvx-0.5.0-py3-none-any.whl", hash = "sha256:02359f7a30724b88d68873cb1924c7cbf97fb9b49e3ad9ca036d1f803fc6e43b", size = 93821, upload-time = "2026-05-24T21:40:44.304Z" },
 ]
 
 [[package]]
