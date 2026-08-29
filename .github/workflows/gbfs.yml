@@ -55,6 +55,46 @@ jobs:
               - 'gbfs/cascade/**'
               - 'gbfs/lib/**'
 
+  d1-schema:
+    # pyrmts owns the `pyramid_shards` / `pyramid_watermarks` DDL, but nothing
+    # *runs* it as a migration — so a re-provisioned D1 comes back without
+    # `pyramid_shards_period` and the serving path silently returns to scanning
+    # whole pyramid partitions (14,561 rows read to return 17; ~175M rows/day
+    # account-wide before the index landed). Drift is invisible until someone
+    # reads a billing graph, which is exactly the "has to remember" problem.
+    #
+    # Deliberately NOT a gate on `deploy`: drift usually wants a schema fix,
+    # and blocking every worker deploy behind it would also block shipping
+    # that fix. A red check is the signal.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Install pyrmts-ops at the pinned rev
+        run: |
+          # Single source of truth: whatever `pyproject.toml` pins. Pasting
+          # the SHA here instead would be a second copy to drift.
+          rev=$(sed -nE 's/^pyrmts +=.*rev = "([0-9a-f]+)".*/\1/p' pyproject.toml)
+          [ -n "$rev" ] || { echo "no pyrmts rev found in pyproject.toml" >&2; exit 1; }
+          echo "pyrmts @ $rev"
+          base="git+https://github.com/runsascoded/pyrmts.git@$rev"
+          uv pip install --system \
+            "pyrmts @ $base#subdirectory=python/pyrmts" \
+            "pyrmts-engine @ $base#subdirectory=python/pyrmts_engine" \
+            "pyrmts-ops @ $base#subdirectory=python/pyrmts_ops"
+      - name: Verify D1 schema
+        run: |
+          id=$(sed -nE 's/^database_id = "([^"]+)"/\1/p' gbfs/api/wrangler.toml | head -1)
+          [ -n "$id" ] || { echo "no database_id in gbfs/api/wrangler.toml" >&2; exit 1; }
+          pyrmts-ops d1 verify -d "$id"
+        env:
+          # Its own token (`ctbk-gha-d1-read`), scoped to D1 Read and nothing
+          # else — this job only ever reads `sqlite_master` and PRAGMAs, so it
+          # has no business holding the deploy token's write scope. The CLI
+          # reads `CLOUDFLARE_API_TOKEN`, hence the rename here.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_GHA_D1_RO_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
   deploy:
     needs: detect-changes
     runs-on: ubuntu-latest

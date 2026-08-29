@@ -76,13 +76,20 @@ CREATE TABLE IF NOT EXISTS trips_loaded (
   PRIMARY KEY (ym, is_start)
 );
 
--- `pyramid_shards` itself is created by pyrmts-cfw's `D1ShardIndex.ddl()`,
--- not here — but that DDL emits no secondary index, so the serving path's
--- windowed `listShards` (`WHERE pyramid = ? AND period_end > ? AND
--- period_start < ?`) could only seek on the leading PK column and then
--- scanned the whole pyramid partition: 14,561 rows read to return 17, and
--- ~175M rows/day account-wide. With this index the same query reads 22.
--- Applied by hand to prod 2026-08-28; kept here so a re-provision doesn't
--- silently lose it. `pyrmts/specs/d1-shard-index-temporal.md` moves it into
--- `ddl()`, at which point this becomes a redundant no-op rather than drift.
-CREATE INDEX IF NOT EXISTS pyramid_shards_period ON pyramid_shards (pyramid, period_end);
+-- `pyramid_shards` / `pyramid_watermarks` are NOT declared here: pyrmts owns
+-- that DDL. Emit or apply it with
+--
+--   pyrmts-ops d1 schema
+--   pyrmts-ops d1 apply  -d <database-id>
+--   pyrmts-ops d1 verify -d <database-id>   # read-only; exits 1 on drift
+--
+-- which includes the `pyramid_shards_period` index — `(pyramid, period_end)`,
+-- without which the serving path's windowed `listShards` can only seek the
+-- leading PK column and scans the whole pyramid partition (14,561 rows read
+-- to return 17; ~175M rows/day account-wide). It was applied here by hand on
+-- 2026-08-28 and landed in pyrmts' own DDL the next day; `.github/workflows/
+-- gbfs.yml`'s `d1-schema` job now runs `verify` so drift can't go unnoticed.
+--
+-- The `CREATE INDEX` that briefly lived here could never have worked as part
+-- of this file anyway: a fresh `wrangler d1 execute --file` run has no
+-- `pyramid_shards` table to index — the workers create it at runtime.
