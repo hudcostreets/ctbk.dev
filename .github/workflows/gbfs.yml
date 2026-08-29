@@ -78,7 +78,10 @@ jobs:
           [ -n "$rev" ] || { echo "no pyrmts rev found in pyproject.toml" >&2; exit 1; }
           echo "pyrmts @ $rev"
           base="git+https://github.com/runsascoded/pyrmts.git@$rev"
-          uv pip install --system \
+          # Own venv rather than `--system`: the runner's /usr interpreter is
+          # externally managed (PEP 668) and rejects installs outright.
+          uv venv
+          uv pip install \
             "pyrmts @ $base#subdirectory=python/pyrmts" \
             "pyrmts-engine @ $base#subdirectory=python/pyrmts_engine" \
             "pyrmts-ops @ $base#subdirectory=python/pyrmts_ops"
@@ -86,7 +89,7 @@ jobs:
         run: |
           id=$(sed -nE 's/^database_id = "([^"]+)"/\1/p' gbfs/api/wrangler.toml | head -1)
           [ -n "$id" ] || { echo "no database_id in gbfs/api/wrangler.toml" >&2; exit 1; }
-          pyrmts-ops d1 verify -d "$id"
+          .venv/bin/pyrmts-ops d1 verify -d "$id"
         env:
           # Its own token (`ctbk-gha-d1-read`), scoped to D1 Read and nothing
           # else — this job only ever reads `sqlite_master` and PRAGMAs, so it
