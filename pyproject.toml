@@ -40,9 +40,9 @@ dependencies = [
 # dvx: pinned past v0.5.0 (PyPI's latest) for `cache comm` — the dir-manifest
 # audit tool — plus `gc --safe` and the `.dvc`-rewrite/gitignore fixes.
 dvx           = { git = "https://github.com/runsascoded/dvx.git", rev = "9c22fc08c" }
-pyrmts        = { git = "https://github.com/runsascoded/pyrmts.git", rev = "6378cdd", subdirectory = "python/pyrmts" }
-pyrmts-engine = { git = "https://github.com/runsascoded/pyrmts.git", rev = "6378cdd", subdirectory = "python/pyrmts_engine" }
-pyrmts-ops    = { git = "https://github.com/runsascoded/pyrmts.git", rev = "6378cdd", subdirectory = "python/pyrmts_ops" }
+pyrmts        = { git = "https://github.com/runsascoded/pyrmts.git", rev = "3ef0757", subdirectory = "python/pyrmts" }
+pyrmts-engine = { git = "https://github.com/runsascoded/pyrmts.git", rev = "3ef0757", subdirectory = "python/pyrmts_engine" }
+pyrmts-ops    = { git = "https://github.com/runsascoded/pyrmts.git", rev = "3ef0757", subdirectory = "python/pyrmts_ops" }
 # Local (dev) — swap all three together (the Python `pds l`): from ctbk, the
 # `pyrmts` entry here is what resolves `pyrmts-engine`'s own `pyrmts` dep (its
 # workspace source only applies inside the pyrmts repo). Don't commit this

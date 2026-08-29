@@ -1115,7 +1115,7 @@ def rides_v5_sweep(after: str | None, dry_run: bool) -> None:
 			err(f'  {mkey}: {len(recs)} → {len(keep)} records')
 
 
-@gbfs.command('rides-v5-extend', help='Monthly rides-v5 cadence for one freshly-ingested month: (1) server-side copy `normalized/<YM>.parquet` from the DVC store to its public plain key (the Batch factory lists that prefix), (2) invalidate the previous month on the start anchor (spillback refold), (3) `engine submit -f` both anchors, UNCAPPED range + `--max-missing 0.01` (capping at month-end leaves coarse-rung holes; the tolerance covers the in-progress month, whose source is unpublished mid-month), (4) sweep post-month-end 0-row relic shards, (5) RG-manifest backfill. Station-map/vocab regen for new stations is NOT covered (spec cadence item 4). Needs AWS + R2 creds, CTBK_REGISTRY_SECRET, and `pyrmts-engine` on PATH.')
+@gbfs.command('rides-v5-extend', help='Monthly rides-v5 cadence for one freshly-ingested month: (1) server-side copy `normalized/<YM>.parquet` from the DVC store to its public plain key (the Batch factory lists that prefix), (2) invalidate the previous month on the start anchor (spillback refold), (3) `engine submit -f` both anchors, UNCAPPED range (capping at month-end leaves coarse-rung holes; the in-progress month\'s unpublished source is expected-absent by open-period classification, so no `--max-missing` tolerance is needed), (4) sweep post-month-end 0-row relic shards, (5) RG-manifest backfill. Station-map/vocab regen for new stations is NOT covered (spec cadence item 4). Needs AWS + R2 creds, CTBK_REGISTRY_SECRET, and `pyrmts-engine` on PATH.')
 @option('-n', '--dry-run', is_flag=True, help='Print planned actions (and engine submit commands); no writes or submits.')
 @argument('ym', metavar='YM')
 @click.pass_context
@@ -1180,27 +1180,15 @@ def rides_v5_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
 			fill=True,
 			source_spec=factory,
 			watch=True,
-			# Meant to tolerate exactly the in-progress month's absent
-			# source: an uncapped fill's expected cover reaches `now`, so
-			# current-month shards want `normalized/<this-month>.parquet`,
-			# which never exists mid-month.
-			#
-			# BROKEN, and this ratio is why: `max_missing` divides by the
-			# sources THIS fill reads, not by all history. Under `-f` that
-			# is the gap set — the 2026-08-28 `1mo`-rung backfill read 8
-			# source months and failed at `1/8 = 0.125 > 0.01`. The
-			# 0.006 below assumed a denominator of ~160.
-			#
-			# The engine writes and registers its outputs before the guard
-			# fires, so a failed fill still SUCCEEDS at building; what it
-			# skips is everything after this `raise` — the relic sweep and
-			# the RG-manifest backfill. Unswept August relics found on
-			# 2026-08-28 date the last such abort. No fraction expresses
-			# "only months at/after the current one may be absent" when the
-			# gap set can be a single month, so fixing this needs the
-			# post-fill check to move to `pyramid-cascade` discovery
-			# (which can compare period starts) rather than a ratio.
-			max_missing=0.01,
+			# No `max_missing`: the in-progress month's source
+			# (`normalized/<this-month>.parquet`, unpublished mid-month) is
+			# now classified expected-absent by the engine itself, which
+			# compares each absent source's period against the range's
+			# `to` (pyrmts `72f2552`). A ratio never expressed this — its
+			# denominator is the sources THIS fill reads, so under `-f` the
+			# 2026-08-28 `1mo`-rung backfill read 8 source months and
+			# failed at `1/8 = 0.125 > 0.01`. Closed-period gaps still
+			# count, so the guard keeps its real job.
 			dry_run=dry_run,
 		)
 		if rc:
@@ -1513,7 +1501,7 @@ def _engine_submit(
 @option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
 @option('-r', '--range', 'range_', default=None, help='Half-open build range `[FROM]/TO` (UTC ISO; FROM defaults to genesis).')
 @option('-s', '--source', 'source_rung', default='1m', show_default=True, help='Source tier, `tier` (min-cover: read the tier as stored) or `tier@shard_dur` (pin one rung, e.g. seeded scratch).')
-@option('-t', '--max-missing', type=float, default=None, help='Fraction of source periods allowed to be absent before the build fails (build --max-missing). An uncapped `-f` fill expects a cover reaching `now`, so the in-progress month\'s unpublished source is a legitimate miss. NOTE the denominator is the sources THIS fill reads, not all history: a gap-fill touching 8 source months fails at 1/8=0.125, so 0.01 does not tolerate the open month on a small fill.')
+@option('-t', '--max-missing', type=float, default=None, help='Fraction of source periods allowed to be absent before the build fails (build --max-missing). An uncapped `-f` fill expects a cover reaching `now`, so the in-progress month\'s unpublished source is a legitimate miss. Open/future periods no longer count (either side of the ratio) unless `--strict-open-periods`, so the in-progress month needs no tolerance. NOTE the denominator is the sources THIS fill reads, not all history: a gap-fill touching 8 closed source months fails at 1/8=0.125.')
 @option('-u', '--resume', is_flag=True, help='Skip shards already in the manifest (resume after a Spot reclaim).')
 @option('-V', '--vcpus', type=int, default=None, help='Override job vCPUs.')
 @option('-W', '--watch', is_flag=True, help='Tail the job log stream; exit with its status.')
