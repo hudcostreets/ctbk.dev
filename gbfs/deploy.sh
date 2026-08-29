@@ -65,6 +65,25 @@ fi
 
 cd "$DIR"
 
+# ── one D1 database, five pasted ids ─────────────────────────────────
+# `database_id` can't reference anything in wrangler.toml, so the id is
+# copy-pasted into every worker that binds D1 (`infra/` declares the
+# database and exports the id, but nothing consumes that export). The
+# failure mode is a re-provision that updates four of the five: workers
+# then split across two databases, and the ones left behind read an empty
+# or stale D1 rather than failing. Cheap to rule out here, where every
+# deploy already passes through.
+D1_IDS="$(grep -rhoE '^database_id = "[^"]+"' "$REPO_ROOT"/gbfs/*/wrangler.toml | sort -u)"
+if [ "$(printf '%s\n' "$D1_IDS" | grep -c .)" -gt 1 ]; then
+    echo >&2
+    echo "  ✗ deploy blocked: gbfs/*/wrangler.toml disagree on database_id" >&2
+    printf '%s\n' "$D1_IDS" | sed 's/^/      /' >&2
+    echo >&2
+    echo "  All GBFS workers bind the same D1 database; a split means some" >&2
+    echo "  read the wrong one. Reconcile them before deploying." >&2
+    exit 1
+fi
+
 # ── read prod's stamp ────────────────────────────────────────────────
 # `deployments list --json` is chronological; the live one is last.
 PROD_MSG="$(npx --no-install wrangler deployments list --json 2>/dev/null \

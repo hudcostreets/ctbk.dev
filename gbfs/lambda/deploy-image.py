@@ -176,8 +176,31 @@ def recreate_function(
     return lam.get_function(FunctionName=name)['Configuration']['FunctionArn']
 
 
-def ensure_schedule(events, lam, func_arn: str, *, func_name: str, rule: str, rate: str, input_json: str | None, description: str) -> None:
-    rule_arn = events.put_rule(Name=rule, ScheduleExpression=rate, State='ENABLED', Description=description)['RuleArn']
+def ensure_schedule(
+    events,
+    lam,
+    func_arn: str,
+    *,
+    func_name: str,
+    rule: str,
+    rate: str,
+    input_json: str | None,
+    description: str,
+    enabled: bool | None = None,
+) -> None:
+    # `put_rule` has no "leave the state alone" mode, so a hardcoded
+    # State='ENABLED' silently resurrects any rule someone disabled out of
+    # band — which is why retiring the v3 tick (2026-08-28) first required
+    # deleting this call outright. `enabled=None` preserves the live state
+    # instead, so a disable sticks; `enabled=False` declares the retirement
+    # here rather than leaving it as account state plus a comment.
+    if enabled is None:
+        try:
+            enabled = events.describe_rule(Name=rule)['State'] == 'ENABLED'
+        except events.exceptions.ResourceNotFoundException:
+            enabled = True
+    state = 'ENABLED' if enabled else 'DISABLED'
+    rule_arn = events.put_rule(Name=rule, ScheduleExpression=rate, State=state, Description=description)['RuleArn']
     target: dict = {'Id': 'fn', 'Arn': func_arn}
     if input_json is not None:
         target['Input'] = input_json
@@ -192,7 +215,7 @@ def ensure_schedule(events, lam, func_arn: str, *, func_name: str, rule: str, ra
                            SourceArn=rule_arn)
     except lam.exceptions.ResourceConflictException:
         pass
-    err(f'schedule {rule}: {rate}' + (f' input={input_json}' if input_json else ''))
+    err(f'schedule {rule}: {rate} [{state}]' + (f' input={input_json}' if input_json else ''))
 
 
 @command()
@@ -235,13 +258,16 @@ def main(v5_only: bool, build_only: bool):
         description='avail-v3 cascade tick (image)',
         env_extra={'GC_ENABLED': os.environ.get('GC_ENABLED', '0'), 'FILL_ALL': '1'},
         reserved=1, memory_mb=MEMORY_MB)
-    # No avail-v3 schedule: `ctbk-avail-cascade-hourly` was disabled
-    # 2026-08-28 (avail-v6 has been the default since 08-10; v5 is the
-    # rollback, so v3 was two architectures back and still writing every
-    # 5 min). `ensure_schedule` does `put_rule(State='ENABLED')`, so
-    # leaving the call here would silently re-enable it on the next
-    # deploy. The function itself stays for manual ticks / rollback
-    # until the wholesale GC (`specs/gc-legacy-pyramids.md`).
+    # avail-v3 retired 2026-08-28: v6 has been the default since 08-10 and
+    # v5 is the rollback, so v3 was two architectures back and still writing
+    # every 5 min. Declared `enabled=False` rather than deleted, so "the v3
+    # tick is off" is a fact in this file instead of account state someone
+    # has to know about. The function stays deployable for manual ticks and
+    # rollback until the wholesale GC (`specs/gc-legacy-pyramids.md`).
+    ensure_schedule(events, lam, func_arn, func_name=FUNC, rule=f'{FUNC}-hourly',
+                    rate='cron(1/5 * * * ? *)', input_json=None,
+                    description='avail-v3 cascade fill (retired 2026-08-28)',
+                    enabled=False)
     rebuild_arn = recreate_function(
         lam, role_arn, uri, name=REBUILD_FUNC,
         description='single-gap rebuild fan-out (image; no schedule)',

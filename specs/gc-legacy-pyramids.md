@@ -17,7 +17,11 @@
 
 ## avail<6 GC (scope TBD, bigger)
 
-**Phase 0 done 2026-08-28**: `ctbk-avail-cascade-hourly` (the avail-v3 EventBridge rule, `cron(1/5 * * * ? *)` despite the name) **disabled**, and its `ensure_schedule` call removed from `gbfs/lambda/deploy-image.py` — `put_rule` passes `State='ENABLED'`, so leaving the call would have silently re-enabled it on the next deploy. v5/v6 are unaffected: the three ticks are independent staggered rules on a shared image, not a shared schedule. Reversible with `aws events enable-rule --name ctbk-avail-cascade-hourly`.
+**Phase 0 done 2026-08-28**: `ctbk-avail-cascade-hourly` (the avail-v3 EventBridge rule, `cron(1/5 * * * ? *)` despite the name) **disabled**. v5/v6 are unaffected: the three ticks are independent staggered rules on a shared image, not a shared schedule. Reversible with `aws events enable-rule --name ctbk-avail-cascade-hourly`.
+
+**Phase 0 follow-up 2026-08-29**: the retirement is now *declared* rather than merely absent. `ensure_schedule` takes `enabled: bool | None = None` — `None` reads the rule's live state through `describe_rule` and preserves it (a new rule defaults to enabled), so `put_rule` can no longer resurrect something disabled out of band; the v3 call is back with `enabled=False`. Deleting the call, as phase 0 did, left "v3 is off" living only in account state plus a comment.
+
+Also removed: `gbfs/lambda/deploy.py`, the pre-image zip deployer. It declared the same three functions as `deploy-image.py` but predated the v6 tick, forced `State='ENABLED'` on the v3 rule, and carried the constant-`StatementId` bug fixed in its sibling at `5451d708`. All three functions have been `PackageType=Image` since the image cutover, so its `update_function_code(ZipFile=…)` could not have targeted them anyway — a second, divergent copy of the resource graph with no path left to run. `specs/avail-v5-stack.md`'s references to it are historical.
 
 Rationale for going first: v6 has been the default since 08-10 and burned in against **v5**, so v5 is the rollback and v3 was two architectures back (the only non-`vocab` pyramid, i.e. pre-frozen-vocab) while still writing shards every 5 minutes. It contributes 22,516 of the 60,410 `pyramid_shards` rows — the single largest block.
 
