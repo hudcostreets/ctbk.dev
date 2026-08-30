@@ -30,6 +30,19 @@ else
     echo "entrypoint: no FARGATE_GITHUB_RW_TOKEN set; no git push-back" >&2
 fi
 
+# Configure the scratch `reproc` DVC remote from env — kept OUT of committed
+# config and the image; url/endpoint arrive as job-def env, creds via Secrets
+# Manager (R2_*). Idempotent (`-f`). The container talks only to this remote
+# (`dvx run --remote reproc`), so R2 keys suffice — no AWS/S3 creds needed.
+if [ -n "${REPROC_URL:-}" ]; then
+    ( cd /app
+      dvx remote add --local -f reproc "$REPROC_URL"
+      [ -n "${REPROC_ENDPOINT:-}" ] && dvx remote modify --local reproc endpointurl "$REPROC_ENDPOINT"
+      [ -n "${R2_ACCESS_KEY_ID:-}" ] && dvx remote modify --local reproc access_key_id "$R2_ACCESS_KEY_ID"
+      [ -n "${R2_SECRET_ACCESS_KEY:-}" ] && dvx remote modify --local reproc secret_access_key "$R2_SECRET_ACCESS_KEY" )
+    echo "entrypoint: configured reproc remote -> $REPROC_URL" >&2
+fi
+
 # Append the reproc target set to a `run` that names no explicit .dvc targets.
 is_run=no; has_target=no
 for a in "$@"; do
