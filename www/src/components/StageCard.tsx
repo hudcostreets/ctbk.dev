@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Box, Typography, Paper, Collapse, IconButton, Chip, LinearProgress } from '@mui/material'
 import { FiChevronDown, FiChevronRight } from 'react-icons/fi'
+import { dvcUrl } from '../lib/dataBase'
 
 export interface StageFile {
   path: string
@@ -10,11 +11,6 @@ export interface StageFile {
   cmd?: string
   params?: { groupBy?: string; aggBy?: string }
 }
-
-function md5ToS3Url(md5: string): string {
-  return `https://ctbk.s3.amazonaws.com/.dvc/files/md5/${md5.slice(0, 2)}/${md5.slice(2)}`
-}
-
 export interface Stage {
   key: string
   name: string
@@ -143,7 +139,7 @@ export function StageCard({ stage, maxSize }: StageCardProps) {
             <tbody>
               {stage.files.slice(0, 50).map((file) => {
                 const displayPath = file.path.replace('s3/ctbk/', '')
-                const s3Url = file.md5 ? md5ToS3Url(file.md5) : null
+                const s3Url = file.md5 ? dvcUrl(file.md5) : null
                 return (
                   <tr key={file.path}>
                     <td>

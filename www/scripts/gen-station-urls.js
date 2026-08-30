@@ -12,10 +12,10 @@ import YAML from 'yaml'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
 
-const S3_BASE = 'https://ctbk.s3.amazonaws.com/.dvc/files/md5'
+const DATA_BASE = process.env.VITE_DATA_BASE ?? 'https://data.ctbk.dev/.dvc/files/md5'
 
 function dvcUrl(md5) {
-  return `${S3_BASE}/${md5.substring(0, 2)}/${md5.substring(2)}`
+  return `${DATA_BASE}/${md5.substring(0, 2)}/${md5.substring(2)}`
 }
 
 function loadMd5(dvcPath) {

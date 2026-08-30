@@ -12,9 +12,9 @@
  *    comparison (`?tsrc=legacy`) until Phase E deletes the artifacts.
  */
 import { useEffect, useState } from 'react'
+import { dvcUrl } from '../lib/dataBase'
 
 const INDEX_URL = '/ymdgtb-index.json'
-const S3_BASE = 'https://ctbk.s3.amazonaws.com/.dvc/files/md5'
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
 const STATION_LUC_URL = '/assets/station-luc.json'
 // Rides history starts 2013-06; ~14y × 12mo ≈ 170 monthly bins.
@@ -39,9 +39,7 @@ export interface StationTripsRow {
   Duration: number
 }
 
-function trips_url(md5: string): string {
-  return `${S3_BASE}/${md5.slice(0, 2)}/${md5.slice(2)}`
-}
+const trips_url = dvcUrl
 
 // Module-level caches — same station page across navigations hits these.
 let indexPromise: Promise<TripsIndex> | null = null
