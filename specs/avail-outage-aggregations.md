@@ -1,79 +1,112 @@
-# avail: outage aggregations + plot issue-bands
+# avail: outage / reliability aggregations (v6 refresh)
 
-Status: proposed (captured 2026-07-13; separate direction from the
-rides+pyrmts refactor).
+Status: proposed. Original captured 2026-07-13 (pre-v6, pre-drop-LUC); this
+rewrite brings it to the avail-v6 serving surface and adds the concrete
+questions that motivate it (single-station reliability, group co-emptiness,
+peak-hour slicing).
 
 ## Goal
 
-Fast aggregate answers to "how often / how long is availability bad?"
-over any station set, plus visual annotation of problem windows on
-avail plots:
+Fast answers to "how often / how long is availability bad?" over any station
+set, plus visual annotation of problem windows on avail plots. Driving
+questions (user, 2026-08-29):
 
-1. **Fraction-of-time stats** — % of minutes at 0 bikes / 0 ebikes /
-   0 docks, or < N total, over a window and station set.
-2. **Span stats** — number and lengths of contiguous outage spans
-   (e.g. "0 bikes for ≥ 15 min"), incl. distributions.
-3. **Group emptiness** — for a station set, time at k stations empty
-   (k = 0, 1, 2, …) — "how often is the whole neighborhood dry?"
-4. **Plot issue-bands** — semi-transparent red vertical background
-   spans on avail plots over x-ranges where outages (or data issues)
-   occurred. Prior art: the homicides plot in `$hccs/crashes`
-   (`www/src/njsp/HomicidesComparisonPlot.tsx` + `src/annotations/*` —
-   `useAnnotations` → `toPlotLayers` → plotly shapes/layers), which
-   layers annotation ranges behind the traces with hover/click detail.
+- How often is a station **out of bikes** (0 total) or **out of ebikes**
+  (0 ebikes)? — the two primary metrics of interest.
+- How often are my 4 closest stations in that state **all at once**?
+- …restricted to **peak commute hours** (e.g. 7–10am weekdays).
 
-## What the pyramid already answers (cheap)
+(Not a priority: "classic-only" = `ebikes==0 AND bikes>0`. It's the one
+*joint-across-metrics* case and the only reason to touch two metrics together;
+demoted to the footnote below since the questions above don't need it.)
 
-(1) falls out of the histogram monoid today — proven during the OGI
-work: ONE `reducer=hist` query over 30d at a coarse tier returns
-per-bin `{value: minute_count}` histograms; merging gives
-`pct_zero = h[0]/Σh` and mean in O(bins) client-side. Works for any
-`cells=` station set, any window, no schema change. The og card's
-"% of the time no bikes, last 30d" stat is exactly this.
+## What already exists (don't rebuild)
 
-`< N total` similarly: `Σ_{v<N} h[v] / Σh`.
+- **Station sets.** `/stations` has a multi-select set (`?sel=` URL codec,
+  `www/src/pages/Stations.tsx`) and named sets via `neighborhoods.json`
+  (`ctbk neighborhoods`). "My 4 closest" is a `?sel=` set or a neighborhood.
+- **Per-metric histograms.** avail-v6 stores five histogram-monoid metrics —
+  `bikes`, `ebikes`, `docks`, `disabled`, `pending` — per (`s2_cell`, `dt`)
+  (`configs/pyramids/avail-v6.yaml`). GBFS `num_bikes_available` is TOTAL, so
+  classic = `bikes − ebikes`.
+- **Serving.** `/api/avail-v3[/cells]?from=&to=&cells=|bbox=&reducer=` (serves
+  the default pyramid = v6; the `-v3` in the path is legacy naming). `reducer`
+  ∈ `mean|min|max|p05|p25|p50|p75|p95|hist`; `hist` returns full per-metric
+  histograms. `/cells` returns one row per station; the rollup route collapses
+  `dims` and sums across the set (`gbfs/api/src/avail_geo.ts`).
+- **FE chart.** `StationAvailabilityChart.tsx` (uPlot) already renders a
+  station's series.
 
-Caveat: multi-station sets' histograms mix stations (a bin's histogram
-counts (station, minute) observations) — (1) then reads as "fraction
-of station-minutes", not "fraction of minutes where ANY/ALL empty".
-Per-station loops (one hist query per LUC cell) recover per-station
-stats; (3) needs more (below).
+## Monoidal (cheap, any tier/window) vs. joint (needs a fine scan)
 
-## What it doesn't (spans, group-k)
+The split is the whole design. A histogram monoid answers questions about ONE
+metric's MARGINAL distribution; anything joint (across metrics, or across
+stations, at a specific instant) is not recoverable from merged histograms.
 
-(2) and (3) are **not monoidal** — span boundaries don't survive
-histogram aggregation. Options:
+**Monoidal — cheap, any tier/window — and it covers both primary questions:**
 
-- **Query-time scan** of `/1m` (or `/5m`) bins over the window for the
-  set's cells: runs/spans computed in the worker (or FE) from the fine
-  series. Fine for ≤ ~a month of 1m bins × small sets; wide windows
-  want coarser bins with a "min" reducer (a 1h bin with min=0 ⇒ some
-  zero minute inside — conservative span detection at 1h resolution).
-- **Materialized runs**: a Lambda-side pass emitting per-station
-  outage-span records (start, end, metric, threshold) to a small
-  parquet/D1 table, maintained incrementally like the pyramid. Exact
-  spans, O(1) query; new moving part. Prefer starting with query-time
-  scan; materialize only if usage warrants.
+- `% time 0 bikes` for one station over a window = `h_bikes[0] / Σ h_bikes`.
+- `% time 0 ebikes` = `h_ebikes[0] / Σ h_ebikes`. **Also cheap** — it's the
+  `ebikes` metric's own bin 0, a separate marginal from `bikes`, so no joint is
+  involved. (`0 docks` likewise.) Proven during the OGI work (the og card's
+  "% of the time no bikes, last 30d" is exactly this shape).
+- `% time < N` = `Σ_{v<N} h[v] / Σh`.
+- Per-station stats over a set: one `/cells` request, fold each row.
 
-(3) group-k: needs per-station series aligned per bin → k(t) =
-#stations with value 0 at t. Query per-LUC-cell series (one request,
-`cells=` with per-cell grouping — the /cells route already returns
-per-cell rows) and fold client-side.
+  Caveat (unchanged): on the ROLLUP route the histogram mixes stations —
+  `h[0]/Σh` reads as "fraction of station-minutes empty", NOT "fraction of
+  minutes where ANY/ALL empty". Per-station needs `/cells`.
 
-## Issue-bands (4)
+So "how often is station X out of bikes / out of ebikes, last 30d" is a
+histogram read at any tier — the cheap path, shippable first.
 
-- Data source: outage spans from (2) (query-time at first).
-- Rendering: uPlot (StationDetail avail chart) supports background
-  band plugins; mirror the crashes annotations shape — bands behind
-  series, tooltip/hover shows span detail (metric, duration).
-- Also usable for *data* issues (feed gaps — the poller's missed
-  minutes are visible as absent observations; /health already knows
-  scrape gaps).
+**Joint — NOT monoidal, needs a scan of fine bins:**
 
-## Sketch of increments
+1. **Group co-emptiness** (k of N stations at 0 at the same t) — the "are all 4
+   dry at once?" question, and a joint ACROSS stations. Needs per-station series
+   aligned per bin, then `k(t) = #{stations : bikes(t)=0}` folded
+   client/worker-side. Simultaneity requires bins fine enough that a bin ≈ an
+   instant: at a coarse tier a station's bin is a distribution, and even
+   `reducer=min=0` only says "some minute in this bin was empty" without telling
+   you WHICH minute — so cross-station alignment is lost above the fine tiers.
+   The per-station "% time empty" fractions above are cheap; only their
+   *simultaneity* costs a scan.
+2. **Spans / runs** ("0 bikes for ≥15 min", count + length distribution) —
+   boundaries don't survive histogram aggregation. Same fine-scan path.
 
-1. Worker: `/api/avail-v3/stats?cells=…&from=…&to=…&thresholds=…` —
-   hist-based (1) + scan-based (2) over ≤ 31d windows.
-2. FE StationDetail: issue-bands from (2) + a small "reliability"
-   stat block (reuse og card's 30d numbers).
-3. Group page (post station-sets work): (3) fold + set-level bands.
+Footnote — **classic-only** (`ebikes==0 AND bikes>0`), not a current priority:
+a joint across two metrics. Marginals give `P(ebikes=0)` and `P(bikes=0)`
+separately, never the joint, so it'd need the same fine scan. Left out of the
+increments below.
+
+**Peak-hour slicing** is orthogonal to both: it's a periodic (hour-of-day,
+day-of-week) filter, not a window. Neither the monoid nor a plain window gives
+it — scan fine bins and bucket by `hour_of_day(dt)`. Cheap for bounded windows
+(a month of 1m bins × a handful of stations); wide windows want a coarser bin
+with a conservative reducer, accepting the simultaneity caveat above.
+
+## Increments
+
+1. **Worker `/api/avail-v3/stats?cells=&from=&to=&thresholds=&hours=`** —
+   monoidal fractions (1) from `hist` + fine-scan spans (3) over ≤ ~31d
+   windows; optional `hours=7-10` weekday-peak filter. Returns per-station
+   `{pct_zero_bikes, pct_zero_ebikes, pct_zero_docks, spans:[…]}` — all three
+   cheap from `hist` — and, with `group=1`, the co-emptiness histogram
+   `k → minutes` (1), the one part that scans.
+2. **FE reliability block** on StationDetail: reuse the og card's 30d numbers
+   (% time 0 bikes / 0 ebikes) and, for a `?sel=` set, the group-k summary.
+3. **Issue-bands** on the avail chart: semi-transparent red x-spans over
+   outage windows from (3). uPlot supports background-band plugins; mirror the
+   crashes annotations shape (`$hccs/crashes` `HomicidesComparisonPlot.tsx` +
+   `src/annotations/*` → `useAnnotations` → `toPlotLayers`), bands behind the
+   series with hover detail (metric, duration). Doubles for feed-gap bands
+   (`/health` already knows scrape gaps).
+
+## Materialization (only if usage warrants)
+
+Spans and co-outage records could be precomputed by a Lambda/engine pass into a
+small parquet/D1 table (start, end, metric, threshold, k), maintained
+incrementally like the pyramid — exact spans, O(1) query, new moving part.
+Start query-time; materialize only if the fine-scan windows people actually
+ask for get too wide. Group-k especially is a candidate: a "co-outage" metric
+keyed by a station SET is the one thing no per-station monoid can ever give.

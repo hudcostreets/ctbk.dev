@@ -710,9 +710,9 @@ requires-dist = [
     { name = "plotly", specifier = ">=6.1.2" },
     { name = "polars", specifier = ">=1.41.0" },
     { name = "pyarrow", specifier = "==22.0.0" },
-    { name = "pyrmts", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=fea864a" },
-    { name = "pyrmts-engine", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_engine&rev=fea864a" },
-    { name = "pyrmts-ops", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_ops&rev=fea864a" },
+    { name = "pyrmts", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=90896ec" },
+    { name = "pyrmts-engine", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_engine&rev=90896ec" },
+    { name = "pyrmts-ops", git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_ops&rev=90896ec" },
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
     { name = "s2cell", specifier = ">=1.8.0" },
     { name = "s3fs", specifier = ">=2025.5.1" },
@@ -2644,7 +2644,7 @@ wheels = [
 [[package]]
 name = "pyrmts"
 version = "0.0.0"
-source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=fea864a#fea864a40ab8252b97f5c5f9e2cae12ad085ad68" }
+source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts&rev=90896ec#90896ec5210729ef67770bfc6b57562becb1cf89" }
 dependencies = [
     { name = "pyarrow" },
     { name = "pyyaml" },
@@ -2653,7 +2653,7 @@ dependencies = [
 [[package]]
 name = "pyrmts-engine"
 version = "0.0.0"
-source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_engine&rev=fea864a#fea864a40ab8252b97f5c5f9e2cae12ad085ad68" }
+source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_engine&rev=90896ec#90896ec5210729ef67770bfc6b57562becb1cf89" }
 dependencies = [
     { name = "click" },
     { name = "polars" },
@@ -2663,7 +2663,7 @@ dependencies = [
 [[package]]
 name = "pyrmts-ops"
 version = "0.0.0"
-source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_ops&rev=fea864a#fea864a40ab8252b97f5c5f9e2cae12ad085ad68" }
+source = { git = "https://github.com/runsascoded/pyrmts.git?subdirectory=python%2Fpyrmts_ops&rev=90896ec#90896ec5210729ef67770bfc6b57562becb1cf89" }
 dependencies = [
     { name = "click" },
     { name = "pyrmts" },

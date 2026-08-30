@@ -1,0 +1,53 @@
+name: Infra drift
+
+# Periodic, read-only drift detection for infrastructure this repo deploys
+# imperatively (so there's no pinned artifact to verify on push):
+#
+#   - EventBridge schedules + their Lambda targets, via `pyrmts-ops aws verify`.
+#     The load-bearing check is invoke-permission: a rule that exists, is
+#     ENABLED, and resolves its target still fails silently at every tick if the
+#     function doesn't grant it permission — how the avail-v6 tick was lost
+#     (2026-08-06). Both live ticks share one function, which is exactly the
+#     shape that trips a constant StatementId.
+#
+# Not a gate on anything — a red run is the signal. Also runnable on demand.
+# (The D1 schema is verified separately in `gbfs.yml`, on the push that re-pins
+# pyrmts; this file is the piece with no push to hang off of.)
+on:
+  schedule:
+    - cron: '17 13 * * *'   # 13:17 UTC daily — off the top of the hour
+  workflow_dispatch:
+
+jobs:
+  aws-schedules:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Install pyrmts-ops at the pinned rev
+        run: |
+          # Same single-source-of-truth trick as gbfs.yml's d1-schema job:
+          # install whatever `pyproject.toml` pins, don't paste a second SHA.
+          rev=$(sed -nE 's/^pyrmts +=.*rev = "([0-9a-f]+)".*/\1/p' pyproject.toml)
+          [ -n "$rev" ] || { echo "no pyrmts rev found in pyproject.toml" >&2; exit 1; }
+          echo "pyrmts @ $rev"
+          base="git+https://github.com/runsascoded/pyrmts.git@$rev"
+          uv venv
+          uv pip install "boto3" \
+            "pyrmts @ $base#subdirectory=python/pyrmts" \
+            "pyrmts-engine @ $base#subdirectory=python/pyrmts_engine" \
+            "pyrmts-ops @ $base#subdirectory=python/pyrmts_ops"
+      - name: Verify avail EventBridge schedules
+        run: |
+          # The three avail cascade rules. Both the v5 and v6 ticks target the
+          # v5 function (v6 rides the same config-driven image); the v3 rule is
+          # retired and MUST stay DISABLED (`specs/gc-legacy-pyramids.md`).
+          .venv/bin/pyrmts-ops aws verify \
+            'ctbk-avail-cascade-v5-tick=ctbk-avail-cascade-v5@cron(3/5 * * * ? *)' \
+            'ctbk-avail-cascade-v6-tick=ctbk-avail-cascade-v5@cron(4/5 * * * ? *)' \
+            'ctbk-avail-cascade-hourly=ctbk-avail-cascade@cron(1/5 * * * ? *)' \
+            -d ctbk-avail-cascade-hourly
