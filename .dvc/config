@@ -5,3 +5,6 @@
     url = s3://ctbk/.dvc
 ['remote "e"']
     url = ssh://e/home/ubuntu/ctbk/.dvc/cache
+['remote "r2"']
+    url = s3://ctbk/.dvc
+    endpointurl = https://0dcad5654e9744de6616f74b8df4af63.r2.cloudflarestorage.com

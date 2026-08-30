@@ -237,6 +237,19 @@ jobs:
         if: steps.args.outputs.args
         run: ctbk ${{ steps.args.outputs.args }}
 
+      # ─── R2 dual-push (specs/s3-to-r2-migration.md) ────────────────
+      # The FE reads the DVX cache from R2 (data.ctbk.dev), so each
+      # month's new content-addressed blobs must land on R2 too. `ctbk
+      # update` above pushed them to the `s3` remote; mirror to `r2`.
+      # R2 creds differ from the AWS creds the `s3` remote uses, so
+      # inject them per-remote into config.local at runtime.
+      - name: Push DVX cache to R2
+        if: steps.args.outputs.args
+        run: |
+          dvx remote modify --local r2 access_key_id "$R2_ACCESS_KEY_ID"
+          dvx remote modify --local r2 secret_access_key "$R2_SECRET_ACCESS_KEY"
+          dvx push -r r2
+
       # ─── rides-v5 monthly cadence (specs/rides-v5.md; #185) ─────────
       # Prod's Home chart reads rides-v5, so the month isn't "done" until
       # the v5 pyramid has it. `rides-v5-extend` mirrors the consolidated
