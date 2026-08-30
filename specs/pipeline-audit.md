@@ -43,11 +43,11 @@ Nothing gets deleted before §4's reproducibility test passes. `normalized/` is 
 
 The `.dvc` sidecars **under-record** dependencies in three places, so a reachability query would *understate* what old artifacts are still inputs:
 
-1. **Consolidated** (`normalized/YYYYMM.parquet.dvc`) records `cmd` but **no `deps`** — the "built from all `normalized/*/` dirs" edge is unencoded. Deleting old `normalized/YYYYMM/` dirs wouldn't be flagged.
-2. **`ymrgtbs_cd` / `ymrgtbe_cd`** aggregates have **no `meta.computation`** — they look like imported leaves.
+1. **Consolidated** (`normalized/YYYYMM.parquet.dvc`): provenance is actually recorded for months **≤ 202511** — full `meta.computation` with `cmd` and the complete multi-source-month `deps` (e.g. 202006 lists 16 `normalized/*/…_202006.parquet` + `v0/…` inputs). But the **last 8 months (202512–202607) have *no* `meta.computation`** — bare `dvx add`-style outs. This is a **temporal regression at the head of the DAG** (consolidation stopped recording provenance ~Dec 2025), not the blanket "no deps" the first pass claimed. Verified 2026-08-30: 8 of 158 top-level consolidated `.dvc` lack a computation block, all contiguous at the head.
+2. **`ymrgtbs_cd` / `ymrgtbe_cd`** aggregates have **no `meta.computation`** (all months) — they look like imported leaves. (`ymrgtb_cd`, `e_c`, `se_c`, `s_c`, `meta_hists/{in,il}` all *do* record computation.)
 3. **`ymdgtb` / `station-observations`** are bare `dvx add` (no provenance). `ymdgtb` does a **whole-history rebuild** from *all* `ymrgtb{s,e}_cd_*` aggregates — those are load-bearing inputs across every month, not archival.
 
-These are latent bugs (missing dep declarations) — exactly the class the `dvx` reproc exercise is designed to catch. Fixing them is a precondition for any confident GC of trips-pipeline data.
+These are latent bugs (missing provenance) — exactly the class the `dvx` reproc exercise is designed to catch, and gap #1 additionally flags a **live** regression to fix in the `cons`/`ctbk update` write path (recent months should record computation like the backfilled ones do). Fixing them is a precondition for any confident GC of trips-pipeline data.
 
 ## 4. The reproducibility test (piggyback the `dvx` reproc work) — gate for any deletion
 
@@ -67,6 +67,14 @@ The `dvx` session (with its `crashes`/nj-crashes sibling) just built and hardene
 - `dvx audit` (blob taxonomy INPUT/GENERATED/FOREIGN/ORPHANED, offline `-S` snapshot mode) exists but is on the `audit` branch / draft PR only — track that branch if we want it.
 
 Cost/time on crashes' ~1,386 targets: ~$1–2, ~1–2 h on Fargate Spot. ctbk's trips DAG is comparable-order.
+
+### Operational specifics (resolved 2026-08-30)
+
+- **dvx pin.** ctbk currently pins dvx at `9c22fc08c` (Aug 28) in `pyproject.toml`, which **predates** `d507ed3aa` (`dvx run --remote`) and `fad202ac5` (parallel-mat fix) — the two features reproc needs. Bump to **v0.6.0 = `991de2871`** (contains both; the tag is unpushed but the SHA is reachable on `runsascoded/dvx` `main`, so a `rev = "991de2871"` git pin fetches it). `r/main` HEAD `95db406f7` additionally adds **AWS Batch Secrets-Manager creds** — prefer that SHA if reproc runs on Fargate/Batch (avoids baking creds into the container).
+- **Isolation, don't flag-day the pin.** Do the reproc run with v0.6.0 in an **isolated env** (scratch venv or `e`/Batch), leaving the project's `pyproject.toml` pin at `9c22fc08c` until the reproc test *itself* validates v0.6.0 against ctbk's DAG. Only then bump the committed pin.
+- **Reproc remote.** Add a **local** (`--local`, uncommitted) `reproc` remote pointing at a throwaway prefix — `s3://ctbk/.reproc` or R2 `.reproc` — so the audit never writes prod's `.dvc` store. Diff with `dvx cache comm remote:s3 remote:reproc --only 'reproc,!s3'`.
+- **Target set** (leaf `.dvc`, per month unless noted): `aggregated/{e_c,se_c,s_c,ymrgtb_cd,ymrgtbs_cd,ymrgtbe_cd}_YYYYMM.parquet`, `stations/meta_hists/{in,il}_YYYYMM.parquet`, `aggregated/YYYYMM/{stations.json,se_c.json}`, plus the whole-history `stations/ymdgtb` + `stations/station-observations`. Upstream: `normalized/YYYYMM.parquet` (cons) ← `normalized/YYYYMM/*.parquet` (norm) ← `s3://tripdata` zips. The **8 head months + the 3 gap stages** (§3) can't `dvx run` cleanly and will surface first.
+- **Run location** (needs sign-off — heavy compute + cloud cost): (a) *local slice* — a few months, `-j 1`, proves the mechanism, no cloud; (b) *`e`* — full DAG, ~1–2 h, requires starting the instance; (c) *Fargate/Batch* — full, ~$1–2, needs the Batch path + the `95db406f7` Secrets pin.
 
 ## 5. Documentation staleness (found during the audit — needs updating)
 
