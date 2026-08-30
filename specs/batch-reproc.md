@@ -62,6 +62,6 @@ This still gates step 4 (provisioning) and step 5 (spend) on a go. Steps 1–3 (
 
 ## Prereqs / phasing
 
-- **Phase 0 (account-agnostic, no spend):** `batch/Dockerfile` + `batch/reproc-targets` (enumerate the target set above) + the local `reproc` remote + the `audit`-branch entrypoint wrapper. Local arm64 image *build* smoke only (heavy DAG smokes go on Fargate/`e`, per crashes retro).
+- **Phase 0 (account-agnostic, no spend): DONE + validated 2026-08-30.** `batch/{Dockerfile,reproc-targets,reproc.sh,entrypoint.sh,README.md}` (commit `6f42d1dd`). arm64 build smoke green: image builds (1.44 GB), `uv sync --frozen` resolves, dvx overrides `9c22fc08c`→`95db406f7`, and `dvx run --remote` is present in the image (the feature the committed pin lacks). Still TODO in Phase 0 when Phase 1 starts: create the local `reproc` remote (`dvx remote add --local reproc s3://ctbk/.reproc`). Heavy DAG smokes go on Fargate/`e`, per crashes retro.
 - **Phase 1 (gated on the account decision + go):** `bootstrap`, first `submit --watch`, iterate rounds on the `audit` branch until green.
 - **Phase 2 (after green):** land §3 provenance fixes; classify divergences; unblock archival.
