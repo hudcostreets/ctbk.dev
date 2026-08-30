@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Print ctbk's *executable* data-DAG targets for a full reproc: every tracked
+# `.dvc` carrying a `cmd:`, minus those explicitly marked `side_effect: true`.
+#
+# The exclusion is derived, not hand-curated: `side_effect` is a dvx-native flag
+# (`dvx.run.dvc_files.DVCFileInfo.is_side_effect`), so marking a stage documents
+# its nature once, in the stage. ctbk's trips DAG currently has no side-effect S3
+# writers in scope (the `--s3` mirror was dropped at `a00af68c`), so nothing is
+# flagged yet.
+#
+# The orphaned `zip -> csv -> norm` extract stage (retired ~Feb 2025 at
+# `a00af68c`; `norm` reads `s3://tripdata` zips directly) needs no special
+# handling: its `csvs/*.csv.gz.dvc` record NO `cmd` (verified 2026-08-30), so
+# they're already out as cmd-less leaves — nothing deps on them either.
+#
+# NOTE — the §3 provenance-gap stages (`ymrgtb{s,e}_cd`, `ymdgtb`,
+# `station-observations`, and the 8 head-month `cons` 202512..202607) have NO
+# `cmd`, so they're *naturally excluded* here until their `meta.computation` is
+# declared (§3 fix). The first reproc covers the ~1.1k cmd-bearing stages; the
+# gap stages join once they're runnable.
+#
+# Cmd-less leaves (raw tripdata zips, `normalized/v0/` originals) are omitted
+# deliberately: `dvx run` can only pull them, and dvx materializes them as deps
+# of the stages below. `while read -r` (not `for`) handles the one `.dvc` with a
+# space in its name.
+#
+# Usage: dvx batch submit --force --remote reproc $(batch/reproc-targets)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+git ls-files '*.dvc' | while read -r f; do
+    case "$f" in */csvs/*) continue;; esac
+    grep -q '^    cmd:' "$f" || continue
+    grep -q '^    side_effect: true$' "$f" && continue
+    echo "$f"
+done

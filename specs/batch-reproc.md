@@ -22,7 +22,7 @@ The project pins dvx at `9c22fc08c` (Aug 28), which **predates** `d507ed3aa` (`d
 
 ## Target set
 
-Leaf `.dvc`, per month unless noted (≈158 months × 8 + 3 whole-history ≈ **1,270 targets**, comparable-order to crashes' ~1,400):
+**Measured 2026-08-30: 1,363 in-scope targets** = every tracked `.dvc` with a `cmd:`, minus `side_effect: true` (none flagged yet). What's *naturally excluded* and why it sequences cleanly: the retired `csvs/` extract stage records no `cmd` (cmd-less leaves, nothing deps on them); the §3 gap stages (`ymrgtb{s,e}_cd`, `ymdgtb`, `station-observations`, and the 8 head-month `cons` 202512..202607) also have no `cmd`, so they join the target set only **after** their `meta.computation` is declared (§3 fix) — the first reproc covers the cmd-bearing stages, the gap stages come with their fix. In-scope families, per month unless noted:
 
 | Family | Per-month | Notes |
 |---|---|---|
@@ -37,8 +37,8 @@ Upstream (materialized from the `reproc` remote or rebuilt): `normalized/YYYYMM.
 ## Runbook (mirrors crashes' resolved default)
 
 1. **Reproc remote** — local (`--local`, uncommitted) DVC remote at a throwaway prefix: `s3://ctbk/.reproc` or R2 `.reproc`. Never prod's `.dvc`.
-2. **`audit` branch, commit-as-you-go** — cut `audit` from the commit under test; submit with `dvx run --commit each --push each --remote reproc` + an entrypoint that `git push`es `audit` per level. This is the crashes FFR #1 fix: fresh containers resume from the last committed level instead of re-running early levels ~10× (quadratic). Without it, prod-md5 mismatch ⇒ nothing materializes ⇒ everything recomputes every round.
-3. **Container** — `batch/Dockerfile`: `FROM` the dvx-batch base @ `95db406f7` + ctbk checkout + `uv sync` (python only; no node — www build/deploy excluded). `dvx batch push <ecr-image>`.
+2. **Results branch, single atomic push** — the run is level-*parallel*, so per-stage `git commit`/`git push` **race** on the ref lock ("cannot lock ref … is at X but expected Y") and losing stages' commits never escape (crashes' round-1..10 lesson). So `dvx run --no-commit` (dvx still *writes* the regenerated `.dvc` md5s into the worktree — it just doesn't git-commit), and after the parallel run the entrypoint does **one** `git add -u && commit && push` to a `reproc-results/<UTC-ts>` branch. That branch, diffed against the base commit, **is** the reconciled result — every `.dvc` hash change is a finding. Cross-round resume: re-submit off that branch, so the last round's regenerated md5s are already recorded and their blobs are in `reproc` → passed stages materialize (fetch) instead of recomputing.
+3. **Container** — `batch/Dockerfile` (built): self-contained `python:3.13-slim` + `uv` + a blobless clone + `uv sync --frozen --no-dev`, then dvx **overridden** to `$DVX_REF` (default `95db406f7`) past the committed `9c22fc08c` pin. No node (www excluded). Entrypoint `batch/entrypoint.sh`. Build arm64, then `dvx batch push <ecr-image>`.
 4. **Bootstrap** — `dvx batch bootstrap -i <ecr-image> -a ARM64 -s S3_KEYS=<arn> …` creates the Spot compute-env + queue + job-def (Graviton, ~20% cheaper). **Provisions AWS resources** — the gated step.
 5. **Submit** — `dvx batch submit -f -r reproc -p each -w <targets>`. ~1–2 h wall on one 16-vCPU Graviton Spot task, ~$1–2. `-O` (on-demand) for a guaranteed no-reclaim pass (~3×).
 6. **Diff** — `dvx cache comm remote:s3 remote:reproc --only 'reproc,!s3'`: every blob reproc produced that prod's cache lacks = a changed output → an IDP bug, an undeclared dep, or benign writer/schema drift. Classify (crashes' `pqt-audit` split changed-md5 into identical/metadata/encoding/schema/content; **only `content` is a real divergence**). The `audit` branch diffed against the base commit *is* the reconciled result.
