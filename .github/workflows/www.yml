@@ -24,7 +24,7 @@ jobs:
           cache: 'pnpm'
           cache-dependency-path: www/pnpm-lock.yaml
       # uv for the Slack-deploy-notification step (`thrds`).
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
       - name: Install
         working-directory: www
         run: pnpm install

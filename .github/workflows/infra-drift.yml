@@ -27,7 +27,7 @@ jobs:
       AWS_DEFAULT_REGION: us-east-1
     steps:
       - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
       - name: Install pyrmts-ops at the pinned rev
         run: |
           # Same single-source-of-truth trick as gbfs.yml's d1-schema job:

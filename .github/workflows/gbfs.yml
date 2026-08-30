@@ -69,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
       - name: Install pyrmts-ops at the pinned rev
         run: |
           # Single source of truth: whatever `pyproject.toml` pins. Pasting

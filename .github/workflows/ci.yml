@@ -86,7 +86,7 @@ jobs:
             echo "args=update -S -ccda $ym" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         if: steps.args.outputs.args || steps.args.outputs.missing
         with:
           python-version: '3.12'
