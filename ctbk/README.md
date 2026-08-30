@@ -24,8 +24,8 @@ CLI for generating [ctbk.dev] datasets (derived from Citi Bike public data in [`
 ```mermaid
 flowchart LR;
 z["TripdataZips\ns3://tripdata"]
-c["TripdataCsvs\ns3://ctbk/csvs"]
-n["NormalizedMonths\ns3://ctbk/normalized/YYYYMM.parquet"]
+n["NormalizedMonths\ns3://ctbk/normalized/YYYYMM/*.parquet"]
+cons["ConsolidatedMonth\ns3://ctbk/normalized/YYYYMM.parquet"]
 agg_sc["AggregatedMonths(YYYYMM, 's', 'c')\ns3://ctbk/aggregated/s_c_YYYYMM.parquet"]
 agg_sec["AggregatedMonths(YYYYMM, 'se', 'c')\ns3://ctbk/aggregated/se_c_YYYYMM.parquet"]
 agg_ymrgtb["AggregatedMonths(YYYYMM, 'ymrgtb', 'cd')\ns3://ctbk/aggregated/ymrgtb_cd_YYYYMM.parquet"]
@@ -34,12 +34,12 @@ smh_il["StationMetaHists(YYYYMM, 'il')\ns3://ctbk/stations/meta_hists/il_YYYYMM.
 sm["StationModes\ns3://ctbk/aggregated/YYYYMM/stations.json"]
 spj["StationPairJsons\ns3://ctbk/aggregated/YYYYMM/se_c.json"]
 
-z --> c --> n
-n --> agg_sc
-n --> agg_sec
-n --> agg_ymrgtb
-n --> smh_in
-n --> smh_il
+z --> n --> cons
+cons --> agg_sc
+cons --> agg_sec
+cons --> agg_ymrgtb
+cons --> smh_in
+cons --> smh_il
 smh_in --> sm
 smh_il --> sm
 agg_sc --> sm
@@ -52,11 +52,12 @@ agg_sec --> spj
 - See [s3://tripdata](https://tripdata.s3.amazonaws.com/index.html)
 
 ### `TripdataCsvs` (a.k.a. `csv`s): unzipped and gzipped CSVs <a id="csvs"></a>
+> **Orphaned** (~Feb 2025): `norm` now reads the `.csv.zip`s from `s3://tripdata` directly, so this stage no longer runs in the pipeline. The `csv` subcommand and the `s3://ctbk/csvs/` archive (frozen at 202501) are retained for reference only.
 - Writes `<root>/ctbk/csvs/YYYYMM.csv`
 - See also: [s3://ctbk/csvs]
 
-### `NormalizedMonths` (a.k.a. `norm`s): normalize `csv`s <a id="normalized"></a>
-- Merge regions (NYC, JC) for the same month, harmonize columns drop duplicate data, etc.
+### `NormalizedMonths` (a.k.a. `norm`s): normalize tripdata `.csv.zip`s <a id="normalized"></a>
+- Read the `.csv.zip`s directly from `s3://tripdata` (no separate `csv` extract stage), merge regions (NYC, JC) for the same month, harmonize columns, drop duplicate data, etc.
 - Writes `<root>/ctbk/normalized/YYYYMM.parquet`
 - See also: [s3://ctbk/normalized]
 
@@ -135,7 +136,7 @@ Usage: ctbk [OPTIONS] COMMAND [ARGS]...
     ride's start and end stations (whereas `agg`'s rows are 1:1 with rides)
   - "agg_keys" can include id (i), name (n), and lat/lng (l); there are no "sum_keys"
     (only counting is supported)
-  - Writes `<root>/ctbk/stations/meta_hists/YYYYMM/KEYS.parquet`
+  - Writes `<root>/ctbk/stations/meta_hists/KEYS_YYYYMM.parquet`
   - See also: https://ctbk.s3.amazonaws.com/index.html#/stations/meta_hists
   ### `StationModes` (a.k.a. `sm`s): canonical {id,name,lat/lng} info for each station:
   - Computed from `StationMetaHist`s:
@@ -384,16 +385,13 @@ ctbk n -d2022- urls
 ## GitHub Actions <a id="ghas"></a>
 
 ### [`ci.yml`] <a id="ci-yml"></a>
-[`ci.yml`] breaks each derived dataset into a separate job, [for example](https://github.com/hudcostreets/ctbk.dev/actions/runs/4272517971):
-
-![ctbk dev gha dag](https://user-images.githubusercontent.com/465045/221387746-92200afa-9d9c-40c5-8066-166b10a9ad07.png)
-
-It also includes a final call to generate JSON used by the main plot at [ctbk.dev]:
+[`ci.yml`] ingests each newly-published month by running the whole pipeline in one call:
 ```bash
-ctbk ymrgtb-cd
+ctbk update -S <YYYYMM>
 ```
+(`norm` → `cons` → `smh` → `agg` ×5 → `sm` → `spj` → `station-trips-json` → www station-urls; see [`ctbk/update.py`](update.py)). The rides rollup-pyramid rebuild (R2-only) runs afterward as a separate best-effort step.
 
-Any changes are pushed to [the www branch], which triggers [the `www.yml` GHA](#www-yml).
+Any DVX/www changes are pushed to [the www branch], which triggers [the `www.yml` GHA](#www-yml).
 
 ### [`www.yml`] <a id="www-yml"></a>
 [The `www.yml` GHA][www GHA]:

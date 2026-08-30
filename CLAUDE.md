@@ -14,15 +14,22 @@ This is **ctbk.dev** - a data pipeline and visualization dashboard for NYC Citi 
 
 ### Data Pipeline Flow
 ```
-TripdataZips (s3://tripdata) → NormalizedMonths → ConsolidatedMonths → AggregatedMonths → StationModes → StationPairJsons
+s3://tripdata (.csv.zip) → norm → cons ─┬→ agg (histograms: e_c, se_c, ymrgtb_cd, ymrgtbs_cd, ymrgtbe_cd)
+                                        ├→ smh → sm → spj
+                                        └→ station-trips-json (per-station ymdgtb JSONs)
 ```
 
+The monthly driver is `ctbk update -S <YYYYMM>` (`ctbk/update.py`) — `norm` reads the `s3://tripdata` `.csv.zip`s **directly** (the old `csv` extract stage is orphaned). Stage outputs are content-addressed in the DVX cache (`s3://ctbk/.dvc/files/md5/…`, migrating to R2 behind `data.ctbk.dev`; see `specs/s3-to-r2-migration.md`).
+
+Two serving stacks sit on top of these outputs:
+- **Rides** (homepage + `/s/:slug` charts): the **pyrmts** rollup-pyramid — `normalized/*.parquet` tiles built on AWS Batch, registered in Cloudflare D1, served by the CF api worker (`/api/rides-v5` default, `/api/rides-v3` per-station). Superseded the legacy `ymrgtb_cd.json` / per-station-JSON flow (still reachable via `?tsrc=legacy`). The pyramid rebuild runs separately from `ctbk update` (R2-only writes).
+- **Availability**: the GBFS subsystem under `gbfs/` (see below).
+
 The pipeline processes raw Citi Bike `.csv.zip` files through multiple stages:
-1. **Extraction**: Download and unzip CSVs from public S3 bucket
-2. **Normalization**: Merge NYC/JC regions, harmonize columns, split by (source, start, end) months
-3. **Consolidation**: Combine all records ending in a given month into a single parquet
-4. **Aggregation**: Generate histograms by various dimensions (time, station, user type, etc.)
-5. **Station metadata**: Compute canonical station info and ride counts between station pairs
+1. **Normalization**: Read `.csv.zip`s straight from `s3://tripdata`; merge NYC/JC regions, harmonize columns, split by (source, start, end) months
+2. **Consolidation**: Combine all records ending in a given month into a single parquet
+3. **Aggregation**: Generate histograms by various dimensions (time, station, user type, etc.)
+4. **Station metadata**: Compute canonical station info and ride counts between station pairs
 
 ### Normalized vs Consolidated Structure
 The `s3/ctbk/normalized/` directory contains two types of DVC-tracked outputs per month:
@@ -94,7 +101,7 @@ npm run scrns       # Generate screenshots
 ```
 
 ### Testing and Quality
-- **Python**: Minimal test coverage - only `ctbk/tests/test_csvs.py` exists
+- **Python**: `ctbk/tests/` (`test_csvs`, `test_rides_v3_luc`, `test_avail_v3_cascade`, `test_lambda_exec`) + `ctbk/pyramid_cascade/tests/` (rides-source, rebuild, engine-check, vocab, …). Run with `pytest`.
 - **Frontend**: No unit tests configured, only linting/type checking
 - **No CI test execution**: GitHub Actions focus on data processing and deployment
 - **Linting**: Use `npm run lint` for frontend, no Python linting configured
@@ -115,7 +122,7 @@ npm run scrns       # Generate screenshots
 ### Storage and Versioning
 - **Local development**: Data in `s3/ctbk/` with `.dvc` tracking files
 - **Production**: Data synchronized to `s3://ctbk/` via DVC
-- **Public access**: Final datasets available at https://ctbk.s3.amazonaws.com/
+- **Public access**: Datasets served content-addressed from the DVX cache (`s3://ctbk/.dvc/files/md5/…`), migrating to R2 behind `data.ctbk.dev` (`specs/s3-to-r2-migration.md`). The frontend already reads `data.ctbk.dev`; the browsable `ctbk.s3.amazonaws.com/index.html` listing remains on S3.
 
 ## Automation
 
@@ -125,20 +132,13 @@ npm run scrns       # Generate screenshots
 - **No test automation**: Actions focus on ETL and deployment only
 
 ### Monthly Data Updates
-The system automatically polls for new Citi Bike data monthly and processes through the entire pipeline when found. The `update.sh` script shows the complete sequence of commands to process a new month:
+CI (`.github/workflows/ci.yml`) polls for new Citi Bike data monthly and runs the whole pipeline for the new month via a single driver, `ctbk update` (`ctbk/update.py`):
 
 ```bash
-ctbk norm create $month        # Normalize tripdata CSVs
-ctbk cons create $month        # Consolidate parquet files
-ctbk smh create -gil $month    # Station metadata (id+lat/lng)
-ctbk smh create -gin $month    # Station metadata (id+name)
-ctbk agg create -ge -ac $month # Aggregate by station end, count
-ctbk agg create -gse -ac $month # Aggregate by start+end stations, count
-ctbk agg create -g ymrgtb -acd $month # Aggregate by year/month/region/gender/type/bike
-ctbk sm create $month          # Station modes (canonical info)
-ctbk spj create $month         # Station pair JSONs
-ctbk ymrgtb-cd -f             # Update dashboard JSON
+ctbk update -S <YYYYMM>        # -S skips station-harmonize (whole-history; CI runs it separately)
 ```
+
+which runs, in order: `norm` → `cons` → `smh -gil` / `smh -gin` → `agg` ×5 (`-ge -ac`, `-gse -ac`, `-g ymrgtb -acd`, `-g ymrgtbs -acd`, `-g ymrgtbe -acd`) → `sm` → `spj` → `station-trips-json -a -d` (per-station ymdgtb JSONs) → `node www/scripts/gen-station-urls.js`. The rides rollup-pyramid rebuild (R2-only, no DVX artifacts) runs afterward as a separate best-effort CI step. The root `update.sh` is a thin deprecated pointer to this command.
 
 ## Development Notes
 

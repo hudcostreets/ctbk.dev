@@ -1,21 +1,12 @@
 #!/usr/bin/env bash
+# DEPRECATED: the monthly pipeline is now driven by `ctbk update` (ctbk/update.py),
+# a superset of the old command sequence this script used to hardcode. CI invokes
+# `ctbk update -S <YYYYMM>`. This shim just forwards to it.
 
 if [ $# -ne 1 ]; then
   echo "Usage: $0 yyyymm" >&2
   exit 1
 fi
-m="$1"; shift
 
-set -ex
-
-ctbk norm create $m
-ctbk cons create $m
-ctbk smh create -gil $m
-ctbk smh create -gin $m
-ctbk station-harmonize create
-ctbk agg create -ge -ac $m
-ctbk agg create -gse -ac $m
-ctbk agg create -g ymrgtb -acd $m
-ctbk sm create $m
-ctbk spj create $m
-node www/scripts/gen-station-urls.js
+echo "update.sh is deprecated; running: ctbk update -S $1" >&2
+exec ctbk update -S "$1"

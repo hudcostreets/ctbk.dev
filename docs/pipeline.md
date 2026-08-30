@@ -2,6 +2,14 @@
 
 This document describes the data pipeline stages and their dependencies.
 
+> **Current serving (2026-08):** the trips ETL below produces content-addressed
+> outputs in the DVX cache (`s3://ctbk/.dvc/files/md5/…`, migrating to R2 behind
+> `data.ctbk.dev`). On top of them, the **pyrmts rollup-pyramid** serves every
+> rides chart (homepage + `/s/:slug`) via the CF api worker (`/api/rides-v5` prod,
+> `/api/rides-v3` per-station) — it superseded the `ymrgtb_cd.json` / per-station-JSON
+> flow, which survives only as a `?tsrc=legacy` fallback. See `specs/rides-v5.md`.
+> The `csv` extract stage is **orphaned**: `norm` reads `s3://tripdata` zips directly.
+
 ## Pipeline Stages
 
 The `ctbk` CLI provides 8 core pipeline stages, each processing Citi Bike trip data:
@@ -18,18 +26,21 @@ The `ctbk` CLI provides 8 core pipeline stages, each processing Citi Bike trip d
 | `StationPairsJson` | `station-pairs-json`, `spj` | Station pair JSONs | by month |
 
 Plus utility stages:
-- `YmdgtbCdJson` (`ymdgtb-cd`): Per-station monthly trip aggregations (see *Per-Station Trips*, below)
+- `station-trips-json`: Per-station monthly trip JSONs — the `ymdgtb` artifact (see *Per-Station Trips*, below)
 - `Partition` (`partition`): v0 data splitting utility
 
 ## Per-Station Trips (`ymdgtb`)
 
-`/s/:slug` renders a monthly trips chart filtered to a single station. The underlying
-data is produced by running `agg` with a per-station group key:
+`/s/:slug` renders a monthly trips chart filtered to a single station. By default this
+is served by the rides pyramid (`/api/rides-v3`); the per-station JSONs below are the
+`?tsrc=legacy` fallback. They are (re)built each month by the `station-trips-json` stage
+(`ctbk update` runs `station-trips-json -a -d`), a whole-history rebuild from the
+`ymrgtb{s,e}_cd` aggregates — running `agg` with a per-station group key:
 
 - `agg -g ymsgtb -acd` — counts + durations keyed by (year, month, start station, gender, user type, bike type)
 - `agg -g ymegtb -acd` — same, keyed by *end* station
 
-The `YmdgtbCdJson` stage (`ymdgtb-cd`) fans these per-station aggregates into one JSON
+The `station-trips-json` stage fans these per-station aggregates into one JSON
 per canonical station under `s3/ctbk/stations/ymdgtb/<short_name>.json` (DVX-tracked
 via `s3/ctbk/stations/ymdgtb.dvc`).
 
@@ -43,6 +54,12 @@ Web side, `www/scripts/gen-ymdgtb-index.js` runs at `prebuild` time and emits
 which maps each station's short_name to the content-addressed URL of its per-station
 JSON on S3 (served via the DVX cache). The `useStationTrips` hook uses this index to
 lazy-fetch one station's JSON on demand — no per-station static pages, no backend.
+
+> **`normalized/` plain-key mirror.** Besides the content-addressed DVX blobs, `norm`
+> outputs are also mirrored to month-keyed plain keys (`s3://ctbk/normalized/YYYYMM.parquet`)
+> because the rides pyramid's Batch factory discovers months by *listing* that prefix
+> (content-addressed blobs aren't listable-by-month). This is the one live plain-key
+> mirror; it moves to R2 alongside the pyramid engine (`specs/s3-to-r2-migration.md`).
 
 ## Station Identity & Aliases
 
@@ -72,9 +89,10 @@ Consumed by `StationDetail`'s availability chart (`uPlot`) via `useStationRange`
 
 > **Cost note (2026-04)**: the loader pattern writes ~2,360 rows × 1,440 polls/day = ~102MM logical inserts/month into D1. Billed at ~150MM rows-written/month (incl. `INSERT OR REPLACE` re-writes when GBFS `last_updated` repeats across polls + auto-PK index updates) ≈ **$100/mo** at $1/MM beyond the 50MM free tier. Migration plan: replace the D1 loader with hourly R2-side compaction, serve availability from R2 parquet only. See `specs/gbfs-r2-only.md`.
 
-See `specs/multiscale-timeseries-backend.md` for the planned rollup-pyramid extension
-(minute → 5-min → hour → day → month tiers for both trips and availability), which the
-R2-only migration aligns with directly (`avail/n1/...` + `avail/agg/{tier}/...`).
+See `specs/multiscale-timeseries-backend.md` for the rollup-pyramid design
+(minute → 5-min → hour → day → month tiers for both trips and availability). The **rides**
+pyramid is shipped in prod (`/api/rides-v5`); the **availability** pyramid is being brought
+up alongside the R2-only migration (`avail/n1/...` + `avail/agg/{tier}/...`).
 
 ## Dependency Graph
 
@@ -142,14 +160,13 @@ R2-only migration aligns with directly (`avail/n1/...` + `avail/agg/{tier}/...`)
 
 ## Stage Details
 
-### Linear Pipeline (ZIP → CSV → NORM → CONS)
+### Linear Pipeline (ZIP → NORM → CONS)
 
 Each stage depends on the previous, processing one month at a time:
 
-1. **ZIP**: Downloads `.csv.zip` files from `s3://tripdata`
-2. **CSV**: Extracts and gzips individual CSV files
-3. **NORM**: Normalizes columns, merges NYC/JC regions, splits by (source, start, end) months
-4. **CONS**: Consolidates all records ending in a given month into a single parquet
+1. **ZIP**: `.csv.zip` files published at `s3://tripdata`
+2. **NORM**: Reads the zips **directly** (the separate `CSV` extract stage is orphaned as of ~Feb 2025), normalizes columns, merges NYC/JC regions, splits by (source, start, end) months
+3. **CONS**: Consolidates all records ending in a given month into a single parquet — this is the tile source for the rides pyramid
 
 ### Parameterized Stages
 

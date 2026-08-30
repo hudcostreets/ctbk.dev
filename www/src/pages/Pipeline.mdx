@@ -29,7 +29,7 @@ Each normalized month directory contains Parquet files split by start and end mo
 
 <H2 id="consolidation">Consolidation</H2>
 
-After [normalization], the "consolidation" stage combines all records that *end* in a given month into a single canonical Parquet file. This is the primary representation used for downstream analysis.
+After [normalization], the "consolidation" stage combines all records that *end* in a given month into a single canonical Parquet file. This is the primary representation used for downstream analysis — and the tile source for the **rides rollup-pyramid** that now serves every rides chart on the site (see [Serving](#serving) below).
 
 <StageByKey stageKey="cons" />
 
@@ -76,7 +76,7 @@ The "aggregation" stage computes histograms over each month's rides, grouping by
 - `c` (ride count)
 - `d` (total duration in seconds)
 
-For example, `aggregated/se_c_202306.parquet` groups by start and end station, summing ride counts.
+For example, `aggregated/se_c_202306.parquet` groups by start and end station, summing ride counts. These aggregates are build inputs (station-pair JSONs, the per-station `ymdgtb` JSONs, and the legacy `ymrgtb_cd.json`); the live rides charts are served from the pyramid, not these files directly.
 
 <StageByKey stageKey="agg" />
 
@@ -108,10 +108,12 @@ Finally, we generate JSON files with ride counts between each pair of stations, 
 
 Each `/s/:slug` detail page pulls two orthogonal data streams:
 
-- **Monthly trip history** via the `ymdgtb-cd` stage — per-station variants of `ymrgtb-cd` with start/end-station facets. One JSON per *canonical* station, indexed at build time into `ymdgtb-index.json`. Stations renumbered over time (e.g. `HB106` today, `HB609` pre-2025-06) share a file keyed by their canonical short_name; the index is enriched with alias entries so client lookups by either form resolve to the same data.
-- **Live availability** (per-minute bikes/docks/disabled snapshots) from a separate GBFS pipeline: a Cloudflare Worker polls `station_status` each minute into a D1 ring buffer (7d hot cache), with older data served from R2 parquet archives generated nightly by `compact-r2.py`.
+- **Monthly trip history**, by default from the **rides pyramid** (`/api/rides-v3`, per-station identity keys). The `ymdgtb-cd` stage — per-station variants of `ymrgtb-cd` with start/end-station facets, one JSON per *canonical* station indexed at build time into `ymdgtb-index.json` — remains as the `?tsrc=legacy` fallback. Stations renumbered over time (e.g. `HB106` today, `HB609` pre-2025-06) share a file keyed by their canonical short_name; the index is enriched with alias entries so client lookups by either form resolve to the same data.
+- **Live availability** (per-minute bikes/docks/disabled snapshots) from a separate GBFS pipeline: a Cloudflare Worker polls `station_status` each minute; recent data is served from a D1 hot cache and older data from R2 parquet archives (compacted by `compact-r2.py`). This serving path is mid-migration to R2-only (`specs/gbfs-r2-only.md`).
 
-See `specs/multiscale-timeseries-backend.md` for the planned rollup-pyramid extension (minute → 5-min → hour → day → month tiers).
+<H2 id="serving">Serving</H2>
+
+The homepage rides chart and every `/s/:slug` trips chart are served by the **pyrmts** rollup-pyramid — `normalized/*.parquet` tiles rolled up (minute → … → month) on AWS Batch, registered in a Cloudflare D1 shard registry, and served by the CF api worker (`/api/rides-v5` in prod, `/api/rides-v3` rollback). This superseded the single-plot `ymrgtb_cd.json` flow. See `specs/rides-v5.md` and `specs/multiscale-timeseries-backend.md`.
 
 </PipelineProvider>
 

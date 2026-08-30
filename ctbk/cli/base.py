@@ -99,7 +99,7 @@ CLI for generating ctbk.dev datasets (derived from Citi Bike public data in `s3:
   ride's start and end stations (whereas `agg`'s rows are 1:1 with rides)
 - "agg_keys" can include id (i), name (n), and lat/lng (l); there are no "sum_keys" 
   (only counting is supported)
-- Writes `<root>/ctbk/stations/meta_hists/YYYYMM/KEYS.parquet`
+- Writes `<root>/ctbk/stations/meta_hists/KEYS_YYYYMM.parquet`
 - See also: https://ctbk.s3.amazonaws.com/index.html#/stations/meta_hists
 
 ### `StationModes` (a.k.a. `sm`s): canonical {id,name,lat/lng} info for each station:
