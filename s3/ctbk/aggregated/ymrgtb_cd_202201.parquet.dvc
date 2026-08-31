@@ -8,4 +8,4 @@ meta:
     cmd: ctbk agg create -g ymrgtb -a cd 202201
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      s3/ctbk/normalized/202201.parquet: b97da5e65f542a7250a644a574ebc105
+      /s3/ctbk/normalized/202201.parquet: b97da5e65f542a7250a644a574ebc105

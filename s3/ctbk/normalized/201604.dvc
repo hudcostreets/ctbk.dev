@@ -8,5 +8,5 @@ meta:
     cmd: ctbk norm create -w0 201604
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      s3/tripdata/2016-citibike-tripdata.zip: a18d5376bcbc99caaef4800108f6223b
-      s3/tripdata/JC-201604-citibike-tripdata.csv.zip: f158870fad2a154690394553d20037ec
+      /s3/tripdata/2016-citibike-tripdata.zip: a18d5376bcbc99caaef4800108f6223b
+      /s3/tripdata/JC-201604-citibike-tripdata.csv.zip: f158870fad2a154690394553d20037ec

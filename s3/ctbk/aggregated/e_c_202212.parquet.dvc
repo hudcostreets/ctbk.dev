@@ -8,4 +8,4 @@ meta:
     cmd: ctbk agg create -g e -a c 202212
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      s3/ctbk/normalized/202212.parquet: ff53d25f6d0cb9d794ec4743aef98a84
+      /s3/ctbk/normalized/202212.parquet: ff53d25f6d0cb9d794ec4743aef98a84

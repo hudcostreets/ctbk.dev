@@ -8,4 +8,4 @@ meta:
     cmd: ctbk partition run 202011
     code_ref: b6e9002f07d3c2451a2e4ae97b3a69f118c056d0
     deps:
-      s3/ctbk/normalized/v0/202011.parquet: 05f086aa170420a01d8e47310f78094b
+      202011.parquet: 05f086aa170420a01d8e47310f78094b

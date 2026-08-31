@@ -8,4 +8,4 @@ meta:
     cmd: ctbk smh create -g il 202506
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      s3/ctbk/normalized/202506.parquet: 7a4dc92b868cf9bf623aef66f32c5577
+      /s3/ctbk/normalized/202506.parquet: 7a4dc92b868cf9bf623aef66f32c5577

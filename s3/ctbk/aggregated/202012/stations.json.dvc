@@ -8,6 +8,6 @@ meta:
     cmd: ctbk sm create 202012
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      s3/ctbk/stations/meta_hists/in_202012.parquet: 0d29d84291fbe6e90fd35dce65893311
-      s3/ctbk/stations/meta_hists/il_202012.parquet: 19d92b86ace0d190f6eb3a964d137872
-      s3/ctbk/aggregated/e_c_202012.parquet: 4b07d283fa00b9bdbac39ce4d05b300d
+      /s3/ctbk/stations/meta_hists/in_202012.parquet: 0d29d84291fbe6e90fd35dce65893311
+      /s3/ctbk/stations/meta_hists/il_202012.parquet: 19d92b86ace0d190f6eb3a964d137872
+      /s3/ctbk/aggregated/e_c_202012.parquet: 4b07d283fa00b9bdbac39ce4d05b300d

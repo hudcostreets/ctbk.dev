@@ -8,4 +8,4 @@ meta:
     cmd: ctbk smh create -g in 201709
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      s3/ctbk/normalized/201709.parquet: d82b6a8f1977cb5b408d310fc85b0f63
+      /s3/ctbk/normalized/201709.parquet: d82b6a8f1977cb5b408d310fc85b0f63
