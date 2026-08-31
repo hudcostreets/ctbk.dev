@@ -3,6 +3,7 @@ outs:
   size: 46288303
   hash: md5
   path: '202101'
+  nfiles: 14
 meta:
   computation:
     cmd: ctbk norm create -w0 202101

@@ -3,6 +3,7 @@ outs:
   size: 68943714
   hash: md5
   path: '202009'
+  nfiles: 2
 meta:
   computation:
     cmd: ctbk partition run 202009
