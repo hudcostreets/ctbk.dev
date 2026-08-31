@@ -108,65 +108,79 @@ class ConsolidatedMonth(MonthTable):
 
         Consolidated parquet for month M includes all rides *ending* in M,
         which can come from any normalized directory (rides from earlier months
-        that span into M). Uses glob to discover actual parquet files.
+        that span into M). Deps are the normalized **directories** that contain
+        at least one `*_{M}.parquet` file — identified by scanning each dir's DVC
+        `.dir` manifest (not a filesystem glob), so provenance is recordable from
+        the tracked `.dvc`s alone, without the normalized data materialized
+        locally (the `create` path still globs the actual files).
 
-        Returns file-level Artifacts for each parquet file, with hashes resolved
-        from the parent directory's DVC manifest. This provides fine-grained
-        invalidation - only changes to the specific parquet files trigger rebuild,
-        not changes to unrelated files in the same directory.
+        Deps are dir-level, not file-level, on purpose: a file *inside* a tracked
+        directory has no `.dvc` of its own, so `dvx run`'s ordering resolver
+        can't map a file dep back to the `norm` command that produces it (it only
+        matches a dep to a producer via an exact `.dvc` or an on-disk path) — a
+        file-level dep yields "no ordering edge" and `cons` races ahead of
+        `norm`. The dir *does* have a `.dvc` (with the `norm create` cmd), so a
+        dir-level dep forms the edge. The cost is coarser invalidation (any
+        change within a depended-on dir rebuilds `cons`), which is fine: a source
+        month changing is exactly when `cons` should rebuild.
 
-        For 202001-202101: also includes v0 parquets for backfilling.
+        For 202001-202101: also includes the v0 backfill directories.
 
         Raises:
-            RuntimeError: If the normalized directory for this month doesn't exist.
+            RuntimeError: If any normalized directory's `.dvc`/manifest in
+                GENESIS..M is missing (can't guarantee complete deps — upstream
+                data can have arbitrary month mappings, so any month could
+                contain rides ending in M).
         """
+        from pathlib import Path
         from dvx.run.artifact import Artifact
-        from os.path import exists
+        from dvx.run.dvc_files import read_dvc_file, read_dir_manifest
         from ctbk.util.ym import GENESIS
 
         ym = self.ym
         base_dir = self.dir  # s3/ctbk/normalized
+        suffix = f'_{ym}.parquet'
 
-        # ALL normalized directories from GENESIS to this month must exist.
-        # Upstream data can have arbitrary month mappings - any tripdata month
-        # could theoretically contain rides ending in any other month.
+        def dir_dep(dir_path: str) -> Artifact | None | bool:
+            """The dir-level Artifact if this normalized dir has a `*_{ym}`
+            file; ``False`` if the dir exists but has no match; ``None`` if the
+            dir's `.dvc`/manifest is unavailable."""
+            info = read_dvc_file(Path(dir_path))
+            if info is None or not info.is_dir or not info.md5:
+                return None
+            manifest = read_dir_manifest(info.md5)
+            if not manifest:
+                return None
+            if any(relpath.endswith(suffix) for relpath in manifest):
+                return Artifact(path=dir_path, md5=info.md5)
+            return False
+
+        artifacts: dict[str, Artifact] = {}
         missing = []
         for check_ym in GENESIS.until(ym + 1):
-            check_dir = f'{base_dir}/{check_ym}'
-            if not exists(check_dir):
+            dep = dir_dep(f'{base_dir}/{check_ym}')
+            if dep is None:
                 missing.append(str(check_ym))
+            elif dep:
+                artifacts[dep.path] = dep
 
         if missing:
             raise RuntimeError(
-                f"Cannot prep consolidated {ym}: {len(missing)} normalized directories missing. "
-                f"Missing: {', '.join(missing[:5])}{'...' if len(missing) > 5 else ''}. "
-                f"Run `ctbk norm create` for these months first."
+                f"Cannot prep consolidated {ym}: {len(missing)} normalized directory "
+                f"manifests missing. Missing: {', '.join(missing[:5])}"
+                f"{'...' if len(missing) > 5 else ''}. Run `ctbk norm create` (and fetch "
+                f"the `.dir` manifest blobs) for these months first."
             )
 
-        # Find all parquets with rides ending in this month
-        # Pattern: s3/ctbk/normalized/*/20*_{ym}.parquet
-        pqt_pattern = f'{base_dir}/20*/20*_{ym}.parquet'
-        pqt_paths = sorted(glob(pqt_pattern))
-
-        artifacts = []
-        for pqt_path in pqt_paths:
-            # Artifact.from_dvc now handles files inside DVC-tracked directories:
-            # it walks up to find the parent .dvc file and looks up the file hash
-            # from the directory manifest
-            artifact = Artifact.from_dvc(pqt_path)
-            if artifact and artifact not in artifacts:
-                artifacts.append(artifact)
-
-        # For 202001-202101: add v0 parquets for backfilling
+        # For 202001-202101: add v0 backfill directories (best-effort).
         if ym.y >= 2020 and ym <= YM(202101):
-            v0_pattern = f'{base_dir}/v0/20*/20*_{ym}.parquet'
-            v0_paths = sorted(glob(v0_pattern))
-            for pqt_path in v0_paths:
-                artifact = Artifact.from_dvc(pqt_path)
-                if artifact and artifact not in artifacts:
-                    artifacts.append(artifact)
+            for check_ym in GENESIS.until(ym + 1):
+                dep = dir_dep(f'{base_dir}/v0/{check_ym}')
+                if dep:
+                    artifacts[dep.path] = dep
 
-        return artifacts
+        # Deterministic order for stable `.dvc` output.
+        return [artifacts[p] for p in sorted(artifacts)]
 
     @property
     def save_kwargs(self):

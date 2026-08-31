@@ -8,4 +8,6 @@ meta:
     cmd: ctbk cons create 201309
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      201307/201307_201309.parquet: c7695dc0e76a3df95c7c152de9015548
+      '201307': e4dc210a5f726257d5b54cec867e8e9d
+      '201308': 3cc4c755542b92c7ea0024f830522151
+      '201309': 9675205a6359ac13bfb9dc4f7df25ecd

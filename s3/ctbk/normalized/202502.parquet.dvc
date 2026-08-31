@@ -7,3 +7,5 @@ meta:
   computation:
     cmd: ctbk cons create 202502
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
+    deps:
+      '202502': a0f447eec9c4b08c722fa86eb17dc9a4
