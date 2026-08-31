@@ -95,7 +95,7 @@ class ModesMonthJson(MonthTable):
 
     @property
     def cmd(self) -> str:
-        return f"ctbk sm create {self.ym}"
+        return f"ctbk sm create -w0 {self.ym}"
 
     def dep_artifacts(self):
         # Depends on StationMetaHist(in), StationMetaHist(il), AggregatedMonth(e,c)

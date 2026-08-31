@@ -21,7 +21,7 @@ class StationPairsJson(MonthTable):
 
     @property
     def cmd(self) -> str:
-        return f"ctbk spj create {self.ym}"
+        return f"ctbk spj create -w0 {self.ym}"
 
     def dep_artifacts(self):
         # Depends on ModesMonthJson (for id2idx) and AggregatedMonth(se,c)

@@ -5,7 +5,7 @@ outs:
   path: 201504.parquet
 meta:
   computation:
-    cmd: ctbk cons create 201504
+    cmd: ctbk cons create -w0 201504
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
       '201503': 215a68aa7bc3f3053e67fd386eafa075

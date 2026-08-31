@@ -5,7 +5,7 @@ outs:
   path: se_c.json
 meta:
   computation:
-    cmd: ctbk spj create 201812
+    cmd: ctbk spj create -w0 201812
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
       stations.json: d7da60a667a3df20ef0b5948cc5b8f57

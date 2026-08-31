@@ -5,7 +5,7 @@ outs:
   path: e_c_201709.parquet
 meta:
   computation:
-    cmd: ctbk agg create -g e -a c 201709
+    cmd: ctbk agg create -w0 -g e -a c 201709
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
       /s3/ctbk/normalized/201709.parquet: d82b6a8f1977cb5b408d310fc85b0f63

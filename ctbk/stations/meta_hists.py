@@ -56,7 +56,7 @@ class StationMetaHist(MonthTable):
 
     @property
     def cmd(self) -> str:
-        return f"ctbk smh create -g {self.group_by_keys.label} {self.ym}"
+        return f"ctbk smh create -w0 -g {self.group_by_keys.label} {self.ym}"
 
     def dep_artifacts(self):
         from dvx.run.artifact import Artifact

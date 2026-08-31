@@ -5,7 +5,7 @@ outs:
   path: il_201802.parquet
 meta:
   computation:
-    cmd: ctbk smh create -g il 201802
+    cmd: ctbk smh create -w0 -g il 201802
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
       /s3/ctbk/normalized/201802.parquet: 47e92e17d2a3fac43ef2c61b40d754ce

@@ -5,7 +5,7 @@ outs:
   path: stations.json
 meta:
   computation:
-    cmd: ctbk sm create 201710
+    cmd: ctbk sm create -w0 201710
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
       /s3/ctbk/stations/meta_hists/in_201710.parquet: 4083fd2b8f277071f2857fe64f9aec1c

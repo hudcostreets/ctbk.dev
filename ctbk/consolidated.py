@@ -107,7 +107,7 @@ class ConsolidatedMonth(MonthTable):
     @property
     def cmd(self) -> str:
         """CLI command that produces this consolidated month."""
-        return f"ctbk cons create {self.ym}"
+        return f"ctbk cons create -w0 {self.ym}"
 
     def dep_artifacts(self):
         """Return dependency artifacts for consolidated month.

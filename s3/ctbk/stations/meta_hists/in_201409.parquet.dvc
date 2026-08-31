@@ -5,7 +5,7 @@ outs:
   path: in_201409.parquet
 meta:
   computation:
-    cmd: ctbk smh create -g in 201409
+    cmd: ctbk smh create -w0 -g in 201409
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
       /s3/ctbk/normalized/201409.parquet: 2675d958e4089202c4a3ddf346f15e59

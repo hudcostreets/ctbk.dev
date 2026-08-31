@@ -5,7 +5,7 @@ outs:
   path: 201811.parquet
 meta:
   computation:
-    cmd: ctbk cons create 201811
+    cmd: ctbk cons create -w0 201811
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
       '201810': 3e24533f496e18b0f9f938ccb89e3089

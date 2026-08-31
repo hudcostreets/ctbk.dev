@@ -86,7 +86,7 @@ class AggregatedMonth(MonthTable):
 
     @property
     def cmd(self) -> str:
-        return f"ctbk agg create -g {self.group_by_keys.label} -a {self.aggregate_by_keys.label} {self.ym}"
+        return f"ctbk agg create -w0 -g {self.group_by_keys.label} -a {self.aggregate_by_keys.label} {self.ym}"
 
     def dep_artifacts(self):
         from dvx.run.artifact import Artifact

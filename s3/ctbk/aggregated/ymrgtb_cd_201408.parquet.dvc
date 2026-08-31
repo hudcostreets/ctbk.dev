@@ -5,7 +5,7 @@ outs:
   path: ymrgtb_cd_201408.parquet
 meta:
   computation:
-    cmd: ctbk agg create -g ymrgtb -a cd 201408
+    cmd: ctbk agg create -w0 -g ymrgtb -a cd 201408
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
       /s3/ctbk/normalized/201408.parquet: 421ace8740b51aa3d81ba3b180331111
