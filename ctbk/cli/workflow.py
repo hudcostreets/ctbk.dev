@@ -63,6 +63,7 @@ def run_workflow(
     paths: list[str],
     workflow: int | Workflow,
     commit_msg: str | None = None,
+    artifacts: "list | None" = None,
 ):
     """Execute post-computation workflow steps.
 
@@ -70,6 +71,13 @@ def run_workflow(
         paths: List of output paths (data files, not .dvc files)
         workflow: Workflow level to execute
         commit_msg: Git commit message (required for level >= COMMIT)
+        artifacts: Optional `dvx.run.artifact.Artifact`s carrying each output's
+            `Computation` (cmd + deps). When given, the ADD level records
+            provenance via the same `Artifact.write_dvc()` recorder the `prep`
+            and `run` paths use — so `create`-path .dvc files carry
+            `meta.computation` and stay reproc-eligible. Without it (legacy
+            callers), the ADD level falls back to a bare `dvx add` that records
+            outs only (the provenance gap that left CI-added months un-reproc-able).
     """
     from pathlib import Path
     from utz import run, err
@@ -79,14 +87,24 @@ def run_workflow(
     if level < Workflow.ADD:
         return  # Nothing to do
 
-    # Level 1+: dvx add (compute hash, add to cache, update .dvc)
-    for path in paths:
-        p = Path(path)
-        if p.exists():
-            run('dvx', 'add', str(p))
-            err(f"Added {p}")
-        else:
-            err(f"Warning: {path} does not exist, skipping dvx add")
+    # Level 1+: record each output's .dvc (hash + provenance).
+    if artifacts is not None:
+        for artifact in artifacts:
+            if Path(artifact.path).exists():
+                artifact.write_dvc()
+                err(f"Recorded {artifact.path} (+ provenance)")
+            else:
+                err(f"Warning: {artifact.path} does not exist, skipping")
+        paths = [a.path for a in artifacts]
+    else:
+        # Legacy path: bare `dvx add` (outs only, no meta.computation).
+        for path in paths:
+            p = Path(path)
+            if p.exists():
+                run('dvx', 'add', str(p))
+                err(f"Added {p}")
+            else:
+                err(f"Warning: {path} does not exist, skipping dvx add")
 
     if level < Workflow.COMMIT:
         return

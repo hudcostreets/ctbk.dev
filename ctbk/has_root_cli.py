@@ -108,9 +108,11 @@ class HasRootCLI(Tasks, ABC):
                     argv = ['ctbk', *args]
                 commit_msg = f"`{' '.join(argv)}`"
 
-                # Run workflow steps
+                # Run workflow steps, recording provenance (cmd + deps) so
+                # create-path .dvc files stay reproc-eligible (not bare `dvx add`).
+                artifacts = [child.to_artifact() for child in tasks.children]
                 paths = [child.url for child in tasks.children]
-                run_workflow(paths, workflow, commit_msg)
+                run_workflow(paths, workflow, commit_msg, artifacts=artifacts)
 
         if prep:
             @cmd(help="Generate .dvc specs with computation provenance (DVX prep phase)")
@@ -162,7 +164,7 @@ class HasRootCLI(Tasks, ABC):
                                 argv = ['ctbk', *args]
                             commit_msg = f"`{' '.join(argv)}`"
                             paths = [a.path for a in computed]
-                            run_workflow(paths, workflow, commit_msg)
+                            run_workflow(paths, workflow, commit_msg, artifacts=computed)
                     else:
                         err("All artifacts are fresh")
 
