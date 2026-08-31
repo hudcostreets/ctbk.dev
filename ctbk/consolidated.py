@@ -10,6 +10,7 @@ from utz.ym import Monthy
 
 from ctbk.has_root_cli import yms_arg, HasRootCLI
 from ctbk.month_table import MonthTable
+from ctbk.paths import S3
 from ctbk.normalized import DIR, OUT_FIELD_ORDER, dedupe_sort, NormalizedMonth, parquet_engine_opt, ParquetEngine
 from ctbk.tasks import MonthsTables
 
@@ -26,9 +27,14 @@ def get_dvc_blob_path(dvc_path: str):
 
 
 def load_dvc_parquets(ym: YM, subdir: str | None = None):
-    dir = 's3/ctbk/normalized'
+    # `paths.S3` is cwd-relative (computed from the package location), so this
+    # glob resolves correctly whether `ctbk cons create` runs from the repo root
+    # or from the `.dvc`'s own directory (how `dvx run` invokes it). A hardcoded
+    # `s3/ctbk/normalized` would double to `s3/ctbk/normalized/s3/ctbk/…` under
+    # the latter and glob nothing.
+    dir = join(S3, 'ctbk', 'normalized')
     if subdir:
-        dir += f"/{subdir}"
+        dir = join(dir, subdir)
     pqt_paths = glob(f'{dir}/20*/20*_{ym}.parquet')
     dfs = []
     for pqt_path in pqt_paths:

@@ -1,6 +1,6 @@
 from glob import glob
 from os import makedirs
-from os.path import dirname, exists
+from os.path import dirname, exists, join
 from pathlib import Path
 
 import click
@@ -10,8 +10,12 @@ from utz import YM, err
 from ctbk.cli.base import ctbk
 from ctbk.has_root_cli import yms_arg
 from ctbk.normalized import normalize_df
+from ctbk.paths import S3
 
-V0_DIR = 's3/ctbk/normalized/v0'
+# `paths.S3` is cwd-relative, so v0 paths resolve whether `ctbk partition run`
+# runs from the repo root or from the `.dvc`'s own dir (how `dvx run` invokes
+# it). A hardcoded `s3/ctbk/normalized/v0` would double under the latter.
+V0_DIR = join(S3, 'ctbk', 'normalized', 'v0')
 
 
 V0_START = YM(202001)
