@@ -697,7 +697,7 @@ requires-dist = [
     { name = "botocore", specifier = ">=1.37.3" },
     { name = "click", specifier = ">=8.2.1" },
     { name = "dvc-s3", specifier = ">=3.2.2" },
-    { name = "dvx", git = "https://github.com/runsascoded/dvx.git?rev=9c22fc08c" },
+    { name = "dvx", git = "https://github.com/runsascoded/dvx.git?rev=f5a483f31" },
     { name = "fsspec", specifier = ">=2025.5.1" },
     { name = "geopy", specifier = ">=2.4.1" },
     { name = "graphviz", specifier = ">=0.20.3" },
@@ -966,8 +966,8 @@ wheels = [
 
 [[package]]
 name = "dvx"
-version = "0.5.1.dev19+g9c22fc08c"
-source = { git = "https://github.com/runsascoded/dvx.git?rev=9c22fc08c#9c22fc08c303700335bc4269224610aed1fcf3e8" }
+version = "0.5.1.dev32+gf5a483f31"
+source = { git = "https://github.com/runsascoded/dvx.git?rev=f5a483f31#f5a483f31f6dc60a6db92f260dd78a930fb77fa9" }
 dependencies = [
     { name = "click" },
     { name = "dffs" },
