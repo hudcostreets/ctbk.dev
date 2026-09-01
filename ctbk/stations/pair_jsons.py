@@ -25,11 +25,15 @@ class StationPairsJson(MonthTable):
 
     def dep_artifacts(self):
         # Depends on ModesMonthJson (for id2idx) and AggregatedMonth(se,c)
+        from dvx.run.artifact import Artifact
         mmj = ModesMonthJson(self.ym)
         agg_sec = AggregatedMonth(self.ym, 'se', 'c')
+        # Load dep md5s from their committed `.dvc`s (like `agg`/`norm`) so deps
+        # aren't dropped when the outputs aren't materialized locally; a bare
+        # `to_artifact()` leaves md5=None and `get_dep_hashes` silently omits it.
         return [
-            mmj.to_artifact(),
-            agg_sec.to_artifact(),
+            Artifact.from_dvc(mmj.url) or mmj.to_artifact(),
+            Artifact.from_dvc(agg_sec.url) or agg_sec.to_artifact(),
         ]
 
     def _df(self) -> DataFrame:

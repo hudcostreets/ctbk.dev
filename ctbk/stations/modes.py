@@ -99,13 +99,18 @@ class ModesMonthJson(MonthTable):
 
     def dep_artifacts(self):
         # Depends on StationMetaHist(in), StationMetaHist(il), AggregatedMonth(e,c)
+        from dvx.run.artifact import Artifact
         smh_in = StationMetaHist(self.ym, 'in')
         smh_il = StationMetaHist(self.ym, 'il')
         agg_ec = AggregatedMonth(self.ym, 'e', 'c')
+        # Load each dep's md5 from its committed `.dvc` (like `agg`/`norm`), not a
+        # bare `to_artifact()` — the latter leaves md5=None when the output isn't
+        # materialized locally, and `get_dep_hashes` then silently drops the dep.
+        # These deps are files (no `.dir`), so `from_dvc`'s hash is exact.
         return [
-            smh_in.to_artifact(),
-            smh_il.to_artifact(),
-            agg_ec.to_artifact(),
+            Artifact.from_dvc(smh_in.url) or smh_in.to_artifact(),
+            Artifact.from_dvc(smh_il.url) or smh_il.to_artifact(),
+            Artifact.from_dvc(agg_ec.url) or agg_ec.to_artifact(),
         ]
 
     @staticmethod
