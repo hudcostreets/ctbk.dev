@@ -3,3 +3,8 @@ outs:
   size: 231740259
   hash: md5
   path: 202606.parquet
+meta:
+  computation:
+    cmd: ctbk cons create -w0 202606
+    deps:
+      '202606': c412f8d58b6927b88886ea59f81b8377

@@ -3,3 +3,9 @@ outs:
   size: 90464231
   hash: md5
   path: '202512'
+meta:
+  computation:
+    cmd: ctbk norm create -w0 202512
+    deps:
+      /s3/tripdata/202512-citibike-tripdata.zip: 989105f12c8bb831a4c8418d92138a4b
+      /s3/tripdata/JC-202512-citibike-tripdata.csv.zip: 637918782fba94f6c86c33363bcd95a9

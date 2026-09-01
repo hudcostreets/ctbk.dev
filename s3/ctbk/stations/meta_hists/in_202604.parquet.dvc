@@ -3,3 +3,8 @@ outs:
   size: 55339
   hash: md5
   path: in_202604.parquet
+meta:
+  computation:
+    cmd: ctbk smh create -w0 -g in 202604
+    deps:
+      /s3/ctbk/normalized/202604.parquet: ded324c1018a5fff1ba194493e7f156b

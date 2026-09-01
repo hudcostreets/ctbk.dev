@@ -3,3 +3,10 @@ outs:
   size: 202001
   hash: md5
   path: stations.json
+meta:
+  computation:
+    cmd: ctbk sm create -w0 202512
+    deps:
+      /s3/ctbk/stations/meta_hists/in_202512.parquet: 442c6fc89968669c39edb8a48a833a48
+      /s3/ctbk/stations/meta_hists/il_202512.parquet: efa667eb5b918fce43b1b5761133ce3b
+      /s3/ctbk/aggregated/e_c_202512.parquet: a06fb2c47ae86e4b652e59ec9d132aec

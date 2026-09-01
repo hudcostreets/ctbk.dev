@@ -3,3 +3,8 @@ outs:
   size: 27778
   hash: md5
   path: e_c_202606.parquet
+meta:
+  computation:
+    cmd: ctbk agg create -w0 -g e -a c 202606
+    deps:
+      /s3/ctbk/normalized/202606.parquet: 9fc9fd06d38e60eda02d59f5d2a904ce
