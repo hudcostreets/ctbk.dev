@@ -4,12 +4,12 @@
 # Once dvx publishes its `dvx-batch` base image (`~/c/dvx/specs/batch-executor.md`
 # §1) this can become `FROM dvx-batch:<rev>` + clone + sync.
 #
-# The committed `pyproject.toml` pins dvx at `9c22fc08c`, which predates
-# `dvx run --remote` (`d507ed3aa`) and the parallel-materialization fix
-# (`fad202ac5`) — both required by the reproc. So we override dvx to
-# `$DVX_REF` (default `95db406f7`, `r/main` HEAD: adds `run --remote`, the
-# parallel-mat fix, and AWS Batch Secrets-Manager creds) AFTER `uv sync`.
-# The project pin is intentionally left alone until the run validates this rev.
+# The committed `pyproject.toml` now pins dvx at `f5a483f31` (validated by the
+# first full reproc's `95db406f7` lineage). We still override dvx to `$DVX_REF`
+# AFTER `uv sync` to guarantee the `[s3]` extra (boto3/s3fs) is present; the
+# default matches the project pin. `f5a483f31` = `95db406f7` + git-critical-
+# section serialization + `write_dvc()` preserve-outs (both inert in this
+# reproc's `--commit never` + single-end-commit entrypoint).
 #
 # The clone (not COPY) keeps the build context tiny and gives dvx the `.git`
 # objects for any `git_deps` hashing. `--filter=blob:none` (blobless): full
@@ -35,7 +35,7 @@ RUN uv sync --frozen --no-dev
 
 # Override dvx past the committed pin (see header). `[s3]` extra is idempotent
 # if ctbk's own deps already cover it.
-ARG DVX_REF=95db406f7
+ARG DVX_REF=f5a483f31
 RUN uv pip install --python /app/.venv \
     "dvx[s3] @ git+https://github.com/runsascoded/dvx@${DVX_REF}"
 

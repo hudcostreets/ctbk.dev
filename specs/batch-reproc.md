@@ -63,5 +63,42 @@ This still gates step 4 (provisioning) and step 5 (spend) on a go. Steps 1–3 (
 ## Prereqs / phasing
 
 - **Phase 0 (account-agnostic, no spend): DONE + validated 2026-08-30.** `batch/{Dockerfile,reproc-targets,reproc.sh,entrypoint.sh,README.md}` (commit `6f42d1dd`). arm64 build smoke green: image builds (1.44 GB), `uv sync --frozen` resolves, dvx overrides `9c22fc08c`→`95db406f7`, and `dvx run --remote` is present in the image (the feature the committed pin lacks). Still TODO in Phase 0 when Phase 1 starts: create the local `reproc` remote (`dvx remote add --local reproc s3://ctbk/.reproc`). Heavy DAG smokes go on Fargate/`e`, per crashes retro.
-- **Phase 1 (gated on the account decision + go):** `bootstrap`, first `submit --watch`, iterate rounds on the `audit` branch until green.
-- **Phase 2 (after green):** land §3 provenance fixes; classify divergences; unblock archival.
+- **Phase 1 (in progress, 2026-08-31):** `bootstrap`, first `submit --watch`, iterate rounds on the results branch until green. Progress + the reproc-readiness fixes it forced (below).
+- **Phase 2 (after green):** land the bucket-C provenance fixes; classify divergences; unblock archival.
+
+## Reproc-readiness fixes (Phase 1 pre-work, 2026-08-31)
+
+The first Batch smoke (target `e_c_202506`) surfaced that ctbk's committed `.dvc`s were **not** `dvx run`-executable, for two orthogonal reasons — both fixed on the `reproc` branch (pushed to `h`), neither a path the container could self-heal:
+
+1. **Stale dep-path convention → silent doubling** (commit `fd8ebe33`). ctbk's `.dvc`s predate dvx's April-2026 relative-path convention (`dvx@83ae45e49`, `@c15bf3250`): cross-directory `meta.computation.deps` keys were bare *repo-root-relative*. The current resolver (`_resolve_dep_paths`) reads that form correctly only for deps *inside* the `.dvc`'s own dir; an out-of-dir bare key falls through to "treat as `.dvc`-dir-relative" and **doubles** (`s3/ctbk/aggregated/s3/ctbk/normalized/…`), so the ordering edge never forms and the upstream isn't materialized → `FileNotFoundError`. `ctbk prep` can't fix it: `write_dvc_file` relativizes correctly but dvx's rewrite-fidelity (`@9907bb396`) preserves the existing spelling on merge. Fix: one-time canonicalization of every dep key through dvx's own `_relativize_dep_paths` — in-dir → bare `foo`, out-of-dir → `/repo-root` shorthand. 1980 keys / 1230 `.dvc`s, pure rename.
+2. **`cons` recorded no deps** (commit `a22e1839`). `ConsolidatedMonth.dep_artifacts()` discovered its `*_{M}.parquet` inputs by globbing the normalized parquet *files on local disk*, so it could only record provenance where the (multi-GB) data was materialized — 133 of ~150 `cons` `.dvc`s had a `cmd` but no `deps`, so under parallel `--force` `cons` races ahead of `norm`. Fixed `dep_artifacts` to read each normalized dir's DVC `.dir` manifest instead (offline-capable; `create`/glob path unchanged), and backfilled the 133 missing edges (ruamel write preserves the published `outs`, which `ctbk cons prep` drops when the output isn't local).
+
+After both: **1363 fully reproc-ready targets (cmd + deps, every edge resolves), zero cmd-but-no-deps.** The full reproc-readiness matrix:
+
+| Bucket | Count | State |
+|---|---:|---|
+| cmd + deps (ready) | 1363 | norm, cons, e_c, se_c, ymrgtb_cd, sm, spj, smh |
+| cmd, no deps | 0 | (was 133 cons — fixed) |
+| no computation | 797 | 266 legit-exclude (`csvs/` retired, `v0/` inputs) + ~531 bucket-C gaps |
+
+**Bucket C (~531 real gaps) is Phase 2**, not a path problem: `ymrgtbs_cd`/`ymrgtbe_cd` (316; the FE histograms, never had provenance), `s_c` (138; triage whether still live), 8 head-month cons/agg, and the `ymdgtb`/`station-observations` singletons. Root cause of the recent-month gaps: `ctbk <stage> create` / `ctbk update` (CI's monthly driver) writes `.dvc`s via a bare `dvx add` (outs only, no `meta.computation`) — only the separate `ctbk <stage> prep` records cmd+deps. So provenance exists where `prep` was backfilled (through ~202511) and every CI-added month since is bare. The Phase-2 recorder fix (make `create`/`run_workflow` record computation) stops bucket C regrowing ~8 `.dvc`s/month.
+
+### Container / infra state (2026-08-31)
+- Image `ctbk-reproc:a22e1839` built (arm64) + pushed to ECR (`006196295121…/ctbk-reproc`, pyrmts acct).
+- The Batch job def is the account-shared `dvx` name (collides with nj-crashes' reproc — last bootstrap wins the latest revision). Re-registered `dvx:35` → `ctbk-reproc:a22e1839`, same 3 Secrets-Manager creds (`FARGATE_GITHUB_RW_TOKEN`, `R2_ACCESS_KEY_ID/SECRET`) + `REPROC_URL`/`REPROC_ENDPOINT` env as ctbk's rev 31. **Re-register `dvx` right before any ctbk submit** if crashes has bootstrapped since.
+- Submit via `uvx --with boto3 --from "dvx[s3] @ …@95db406f7" dvx batch submit -f -r reproc -p each -w …` (the committed pin `9c22fc08c` lacks batch `-r/--remote` + boto3).
+
+## Results — first full reproc (2026-08-31): GREEN
+
+`Executed: 1363, Skipped: 0`, 16-way parallel on one Graviton, **39 min**, zero failures — the entire cmd-bearing trips DAG rebuilt from primary inputs (tripdata zips + v0). **Zero content divergences:** the 163 `.dvc`s the run regenerated differ from committed only by a `+nfiles: N` field on directory outputs (a dir file-count the current container dvx records and the older-dvx-written committed specs omitted) — every output md5/size identical. Normalized into the committed norm `.dvc`s (commit `1bbfb28e`) so future reprocs diff clean: a `.dvc` change now means a real content finding, not `nfiles` noise.
+
+## Phase 2 progress (2026-08-31)
+
+- **Recorder fix (`ce8b85cb`).** `create`/`update` recorded `.dvc`s via a bare `dvx add` (outs only) — the root of bucket C's recent-month regrowth. Routed the ADD level through DVX's `Artifact.write_dvc()` recorder (the one `prep`/`run` already use), so every CI-added month now carries `cmd`+`deps` automatically. Bucket C stops regrowing. TFFP: `ctbk/tests/test_workflow_provenance.py`.
+- **dvx pin bumped `9c22fc08c` → `f5a483f31` (`4b78687f`).** The prior "do not bump until the run validates it" gate is satisfied (the first reproc validated the `95db406f7` lineage). `f5a483f31` adds `write_dvc()` preserving committed `outs` when the output isn't materialized locally (dvx `specs/done/write-dvc-preserve-committed-outs.md`) — which makes `ctbk <stage> prep` a download-free provenance backfill. The Dockerfile's `DVX_REF` default was aligned to `f5a483f31` (superset of `95db406f7`; the extra commits — git-critical-section serialization, preserve-outs — are inert in the reproc's `--commit never` + single-end-commit entrypoint, so no behavioral change to the run path).
+- **`sm`/`spj` dep-recording fix (`c9eaf294`).** Surfaced by the backfill: `ModesMonthJson`/`StationPairsJson` built deps from bare `dep.to_artifact()` (md5=None unless the output is local), so `get_dep_hashes()` silently dropped every dep when outputs weren't materialized. Load dep md5s from the committed `.dvc` via `Artifact.from_dvc` (matching `agg`/`norm`). TFFP: `ctbk/tests/test_dep_artifacts_md5.py`.
+- **Head-month provenance backfilled (`2a7c77cf`).** `ctbk <stage> prep -d 202512-202608` across the 9 families (norm, cons, agg {e_c,se_c,ymrgtb_cd}, smh {in,il}, sm, spj) = **72 `.dvc`s**, 202512–202607. Every one keeps its committed outs (zero md5 deltas — pure provenance add) and gains cmd + fully-resolved deps. These stages now enter `batch/reproc-targets` (~1363 → ~1435).
+
+**Second reproc (2026-08-31, in flight):** image rebuilt at the backfill HEAD, `~1435` targets — same artifacts expected everywhere, now *also* verifying the 202512–202607 DAGs that the first run had no provenance to cover.
+
+**Still bucket C (unchanged, separate from the head-month gap):** `ymrgtbs_cd`/`ymrgtbe_cd` (158 each) and `s_c` (138) have never had provenance at any month — their `prep` was never wired. Next Phase-2 increment.
