@@ -38,10 +38,13 @@ dependencies = [
 [tool.uv.sources]
 # Pinned (default):
 # dvx: pinned past v0.5.0 (PyPI's latest) for `cache comm` — the dir-manifest
-# audit tool — plus `gc --safe`, the `.dvc`-rewrite/gitignore fixes, and
-# `write_dvc()` preserving committed `outs` when the output isn't local
-# (f5a483f31) so `prep` backfills provenance without materializing outputs.
-dvx           = { git = "https://github.com/runsascoded/dvx.git", rev = "f5a483f31" }
+# audit tool — plus `gc --safe`, the `.dvc`-rewrite/gitignore fixes,
+# `write_dvc()` preserving committed `outs` when the output isn't local (so
+# `prep` backfills provenance without materializing outputs), and
+# `39062ef09`: record a tracked dep's `.dvc` out-hash on rewrite (not a
+# worktree re-hash) — kills the phantom leaf-dep-hash a level-parallel `-f`
+# reproc would otherwise record, which our audit diff must not see as a finding.
+dvx           = { git = "https://github.com/runsascoded/dvx.git", rev = "39062ef09" }
 pyrmts        = { git = "https://github.com/runsascoded/pyrmts.git", rev = "90896ec", subdirectory = "python/pyrmts" }
 pyrmts-engine = { git = "https://github.com/runsascoded/pyrmts.git", rev = "90896ec", subdirectory = "python/pyrmts_engine" }
 pyrmts-ops    = { git = "https://github.com/runsascoded/pyrmts.git", rev = "90896ec", subdirectory = "python/pyrmts_ops" }
