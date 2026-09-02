@@ -1,6 +1,6 @@
 outs:
-- md5: 62d00ce83e00c045cb0b047974d858b4
-  size: 21733
+- md5: f8223b1ecebd46f8befa005ead73d71d
+  size: 21749
   hash: md5
   path: il_201612.parquet
 meta:
@@ -8,4 +8,4 @@ meta:
     cmd: ctbk smh create -w0 -g il 201612
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      /s3/ctbk/normalized/201612.parquet: bc8409bba5f036591a8bda481dde7d88
+      /s3/ctbk/normalized/201612.parquet: facec62ffbca6cf9129198fd91481a37
