@@ -72,6 +72,33 @@ def merge_dupes(df: DataFrame, cols: tuple[str, ...]) -> DataFrame:
     return r1.to_frame().T.astype(df.dtypes)
 
 
+def resolve_cross_dump_dups(df: DataFrame, name: str) -> DataFrame:
+    """Resolve the same ride appearing in multiple source dumps.
+
+    A ride spanning two months is published in more than one Citi Bike dump — the
+    start-month dump and the end-month dump — and its attributes can drift between
+    publications (last-ULP float noise on lat/lng, the occasional station-ID
+    fixup). When consolidating end-month M we glob every source dir with a
+    `*_{M}.parquet`, so such a ride is read once per dump. Keep the copy from the
+    latest source dump: it is the most recently published (hence most-corrected)
+    version, and the one an incremental `ctbk update {M}` build reads (only the
+    freshly-materialized month-M dir is on disk, so the recorded dir-level deps
+    are a superset of what that build actually consumed). Generalizes the
+    `201306/201307_201307.parquet` special-case skip in `load_dvc_parquets`.
+    """
+    keys = ['Start Time', 'Stop Time']
+    if 'Ride ID' in df:
+        keys.append('Ride ID')
+    dup_msk = df.duplicated(subset=keys, keep=False)
+    if not dup_msk.any():
+        return df
+    src = df['file'].str.split('/').str[0]
+    ordered = df.assign(_src=src).sort_values([*keys, '_src'])
+    kept = ordered.drop_duplicates(subset=keys, keep='last').drop(columns='_src')
+    err(f"{name}: resolved {len(df) - len(kept)} cross-dump dup rows (kept latest source dump)")
+    return kept
+
+
 def get_station_id(df: DataFrame) -> str | None:
     if len(df) == 1:
         return None
@@ -314,6 +341,7 @@ class ConsolidatedMonth(MonthTable):
             for col in backfill_cols:
                 fill_col(col)
 
+        d1 = resolve_cross_dump_dups(d1, name=f"{ym}")
         d1 = dedupe_sort(d1, name=f"{ym}")
         d1 = d1.drop(columns='file')
         expected_cols = [*OUT_FIELD_ORDER]
