@@ -12,22 +12,22 @@ This document describes the data pipeline stages and their dependencies.
 
 ## Pipeline Stages
 
-The `ctbk` CLI provides 8 core pipeline stages, each processing Citi Bike trip data:
+The `ctbk` CLI provides 7 core pipeline stages, each processing Citi Bike trip data:
 
 | Stage | CLI aliases | Description | Parameterized |
 |-------|-------------|-------------|---------------|
 | `TripdataZips` | `zip` | Import from s3://tripdata | by month |
-| `TripdataCsvs` | `csv` | Extract and gzip CSVs | by month |
-| `NormalizedMonth` | `normalized`, `norm`, `n` | Normalize & merge regions | by month |
+| `NormalizedMonth` | `normalized`, `norm`, `n` | Normalize & merge regions (reads zips directly) | by month |
 | `ConsolidatedMonth` | `consolidated`, `cons`, `con` | Consolidate by end month | by month |
 | `AggregatedMonth` | `aggregated`, `agg`, `a` | Histogram aggregations | by month + keys |
 | `StationMetaHist` | `station-meta-hist`, `smh` | Station metadata histograms | by month + keys |
 | `ModesMonthJson` | `station-modes-json`, `sm`, `smj` | Canonical station info | by month |
 | `StationPairsJson` | `station-pairs-json`, `spj` | Station pair JSONs | by month |
 
-Plus utility stages:
+Plus utility / legacy stages:
 - `station-trips-json`: Per-station monthly trip JSONs — the `ymdgtb` artifact (see *Per-Station Trips*, below)
 - `Partition` (`partition`): v0 data splitting utility
+- `TripdataCsvs` (`csv`): **orphaned** as of ~Feb 2025 — `norm` now reads the `.csv.zip`s directly, so nothing depends on the extracted/gzipped CSVs. The stage class + CLI subcommand still exist but are not part of the live DAG (and are absent from the `/pipeline` diagram).
 
 ## Per-Station Trips (`ymdgtb`)
 
@@ -106,14 +106,8 @@ up alongside the R2-only migration (`avail/n1/...` + `avail/agg/{tier}/...`).
                                     │       ZIP (TripdataZips)            │
                                     │         per month                   │
                                     └──────────────┬──────────────────────┘
-                                                   │
-                                                   ▼
-                                    ┌─────────────────────────────────────┐
-                                    │       CSV (TripdataCsvs)            │
-                                    │         per month                   │
-                                    └──────────────┬──────────────────────┘
-                                                   │
-                                                   ▼
+                                                   │  (norm reads zips directly;
+                                                   ▼   the CSV extract stage is orphaned)
                                     ┌─────────────────────────────────────┐
                                     │      NORM (NormalizedMonth)         │
                                     │   per month, split by src/end       │
@@ -155,8 +149,17 @@ up alongside the R2-only migration (`avail/n1/...` + `avail/agg/{tier}/...`).
         ┌──────────────────────────┐
         │   YMRGTB_CD (dashboard)  │
         │   aggregates all months  │
+        │   (legacy: ?tsrc=legacy) │
         └──────────────────────────┘
 ```
+
+This is the *logical* stage DAG (and, like `ctbk dag`'s ASCII/Mermaid output, is
+hand-maintained — see *Stage-Level vs Instance-Level DAG*, below, for what's actually
+derived from `dvx`). Note the live rides serving path — the pyrmts rollup-pyramid built
+from CONS tiles — is **not** in
+this graph: it writes to R2 only (no DVX artifacts), so it has no `.dvc` provenance to
+appear here. `YMRGTB_CD` is the pyramid's serving-superseded predecessor (still built +
+tracked, served only under `?tsrc=legacy`).
 
 ## Stage Details
 
@@ -167,6 +170,8 @@ Each stage depends on the previous, processing one month at a time:
 1. **ZIP**: `.csv.zip` files published at `s3://tripdata`
 2. **NORM**: Reads the zips **directly** (the separate `CSV` extract stage is orphaned as of ~Feb 2025), normalizes columns, merges NYC/JC regions, splits by (source, start, end) months
 3. **CONS**: Consolidates all records ending in a given month into a single parquet — this is the tile source for the rides pyramid
+
+   A ride spanning two months is published in **both** the start-month and end-month tripdata dumps, occasionally with drifted attributes (last-ULP lat/lng noise, station-ID fixups). Since CONS globs every `20*/20*_<M>.parquet` (all source dumps whose rides end in `M`), both copies are read. `resolve_cross_dump_dups` (`ctbk/consolidated.py`) keeps the copy from the **latest** source dump — keyed exactly as `dedupe_sort` (`Ride ID` from 2020 on, else `Bike ID`) — before the uniqueness assert. This makes CONS reproducible regardless of which source dumps happen to be materialized locally. (The lone `201306/201307_201307.parquet` skip is a separate hardcoded precedent for the same class of issue.)
 
 ### Parameterized Stages
 
@@ -218,20 +223,11 @@ def dep_artifacts(self):
     return [smh_in.to_artifact(), smh_il.to_artifact(), agg_ec.to_artifact()]
 ```
 
-To make this fully programmatic, options include:
+The `ctbk dag` command (`ctbk/stage_dag.py`) renders this stage-level abstraction — but
+mind which formats are authoritative:
 
-1. **Class attribute** (recommended): Add `STAGE_DEPS` to each stage class:
-   ```python
-   class ModesMonthJson(MonthTask):
-       STAGE_DEPS = [(StationMetaHist, {'in', 'il'}), (AggregatedMonth, {'e,c'})]
-   ```
+- `ctbk dag -f json` — **derived from `dvx dag --json`**: shells out to it and collapses the instance-level graph (~150+ nodes, one per month per stage) down to the stage types. This is the ground truth (and the shape `www/public/assets/dag.json` is built from). `-i <file>` reformats a saved `dvx dag --json` dump instead of re-running it; `-o <file>` writes to a file.
+- `ctbk dag` / `ctbk dag -f ascii` — a **hardcoded string literal**.
+- `ctbk dag -f mermaid` — rendered from a **hand-maintained `STAGE_DEPS` dict** in `stage_dag.py`.
 
-2. **Introspection**: Instantiate a sample task and inspect what types it references in `dep_artifacts()`
-
-3. **Registry pattern**: Each stage registers itself and its dependencies with a central `StageRegistry`
-
-A future `ctbk dag` command could:
-1. Show the abstract stage-level DAG (this document's diagram)
-2. Optionally expand to show parameterization options (e.g., `--params`)
-3. Output formats: ASCII art, Mermaid, DOT/Graphviz
-4. Link to `dvx dag` for full instance-level detail
+So ascii/mermaid (and this document's graph) are documentation mirrors that can drift; only `-f json` reflects the recorded provenance. To sanity-check the mirrors, diff their edges against `ctbk dag -f json`.

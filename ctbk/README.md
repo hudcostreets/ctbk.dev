@@ -119,10 +119,13 @@ Usage: ctbk [OPTIONS] COMMAND [ARGS]...
   - Released as NYC and JC `.csv.zip` files at s3://tripdata
   - See https://tripdata.s3.amazonaws.com/index.html
   ### `TripdataCsvs` (a.k.a. `csv`s): unzipped and gzipped CSVs
+  - **Orphaned** (~Feb 2025): `norm` reads the `.csv.zip`s directly, so this stage no longer
+  runs; the `csv` subcommand + `s3://ctbk/csvs/` archive are retained for reference only.
   - Writes `<root>/ctbk/csvs/YYYYMM.csv`
   - See also: https://ctbk.s3.amazonaws.com/index.html#/csvs
-  ### `NormalizedMonths` (a.k.a. `norm`s): normalize `csv`s
-  - Merge regions (NYC, JC) for the same month, harmonize columns drop duplicate data, etc.
+  ### `NormalizedMonths` (a.k.a. `norm`s): normalize tripdata `.csv.zip`s
+  - Read the `.csv.zip`s directly from `s3://tripdata` (no separate `csv` extract stage),
+  merge regions (NYC, JC) for the same month, harmonize columns, drop duplicate data, etc.
   - Writes `<root>/ctbk/normalized/YYYYMM.parquet`
   - See also: https://ctbk.s3.amazonaws.com/index.html#/normalized
   ### `AggregatedMonths` (a.k.a. `agg`s): compute histograms over each month's rides:
@@ -156,20 +159,44 @@ Usage: ctbk [OPTIONS] COMMAND [ARGS]...
   - See also: https://ctbk.s3.amazonaws.com/index.html#/aggregated
 
 Options:
-  --help            Show this message and exit.
+  --help  Show this message and exit.
 
 Commands:
-  zip                 Read .csv.zip files from s3://tripdata
-  csv                 Extract CSVs from "tripdata" .zip files.
-  normalized          Normalize "tripdata" CSVs (combine regions for each...
-  partition           Separate pre-2024 parquets (`normalized/v0`) by...
-  consolidate         Consolidate `normalized/YM/YM_YM.parquet` files...
-  aggregated          Aggregate normalized ride entries by various...
-  ymrgtb-cd           Read aggregated...
-  station-meta-hist   Aggregate station name, lat/lng info from ride...
-  station-modes-json  Compute canonical station names, lat/lngs from...
-  station-pairs-json  Write station-pair ride_counts keyed by...
-  yms                 Print one or more YM (year-month) ranges, e.g.:
+  import                    Import s3://tripdata `.zip` files.
+  zip                       Read .csv.zip files from s3://tripdata
+  csv                       Extract CSVs from "tripdata" .zip files.
+  normalized                Normalize "tripdata" CSVs (combine regions...
+  consolidated              Consolidate normalized parquet files (combine...
+  aggregated                Aggregate normalized ride entries by various...
+  station-meta-hist         Aggregate station name, lat/lng info from...
+  station-modes-json        Compute canonical station names, lat/lngs...
+  station-pairs-json        Write station-pair ride_counts keyed by...
+  partition                 Separate pre-2024 parquets (`normalized/v0`)...
+  dag                       Show stage-level pipeline DAG
+  tripdata-summary          Emit `tripdata/latest.json` summary to stdout.
+  update                    Run full pipeline for a month: normalize...
+  trips-per-station         Emit per-canonical-station raw-ride parquets...
+  trips-region-h1           Build hour-level region rollup for a (region,...
+  trips-region-n1           Build minute-level region rollup for a...
+  avail-agg-h1              Build daily h1 (1-hour bucket) histogram from...
+  avail-agg-d1              Build monthly d1 (1-day bucket) histogram...
+  avail-agg-mo1             Build yearly mo1 (1-month bucket) histogram...
+  avail-raw-day             Build per-day raw availability bundle from h1...
+  trips-agg-h1              Build h1 (1-hour bucket, 1-month file) trips...
+  trips-agg-d1              Build d1 (1-day bucket, 1-year file) trips agg.
+  trips-agg-mo1             Build mo1 (1-month bucket, 1-decade file)...
+  avail-v3-build            Build <prefix>/<tier>/<period>.parquet shards...
+  avail-v3-cascade-from-1m  Single-pass cascade: emit all 17 derived...
+  avail-loader-replay       Backfill gbfs/avail/agg=1m/cons=1m/ from WAL...
+  rides-v1-build            Build...
+  rides-v3-extend           Monthly rides-v3 (rollback pyramid) extension...
+  station-luc-build         Build station-luc.json (canonical short_name...
+  neighborhoods             Build `neighborhoods.json` (NYC NTA + JC...
+  pyramid-cascade           Report missing (tier, shard_dur, period)...
+  gbfs                      GBFS pipeline ops: D1 queries, cascade ticks,...
+  station-harmonize         Station harmonization: map all historical IDs...
+  station-trips-json        Generate per-station ymdgtb_cd.json files...
+  yms                       Print one or more YM (year-month) ranges, e.g.:
 ```
 </details>
 
@@ -187,6 +214,8 @@ Options:
 
 Commands:
   urls  Print URLs for selected datasets
+  prep  Generate .dvc specs with computation provenance (DVX prep phase)
+  run   Execute stale computations via DVX (run phase)
 ```
 </details>
 
@@ -204,6 +233,8 @@ Options:
 Commands:
   urls    Print URLs for selected datasets
   create  Create selected datasets
+  prep    Generate .dvc specs with computation provenance (DVX prep phase)
+  run     Execute stale computations via DVX (run phase)
   sort    Sort one or more `.csv{,.gz}`'s in-place, remove empty lines
 ```
 </details>
@@ -225,6 +256,8 @@ Options:
 Commands:
   urls    Print URLs for selected datasets
   create  Create selected datasets
+  prep    Generate .dvc specs with computation provenance (DVX prep phase)
+  run     Execute stale computations via DVX (run phase)
 ```
 </details>
 
@@ -232,12 +265,16 @@ Commands:
 <details><summary><code>ctbk partition --help</code></summary>
 
 ```
-Usage: ctbk partition [OPTIONS] [YM_RANGES_STR]
+Usage: ctbk partition [OPTIONS] COMMAND [ARGS]...
 
   Separate pre-2024 parquets (`normalized/v0`) by {src,start,end} months.
 
 Options:
   --help  Show this message and exit.
+
+Commands:
+  prep  Generate .dvc specs with computation provenance (DVX prep phase).
+  run   Execute partition for given months.
 ```
 </details>
 
@@ -245,17 +282,22 @@ Options:
 <details><summary><code>ctbk consolidate --help</code></summary>
 
 ```
-Usage: ctbk consolidate [OPTIONS] [YM_RANGES_STR]
+Usage: ctbk consolidate [OPTIONS] COMMAND [ARGS]...
 
-  Consolidate `normalized/YM/YM_YM.parquet` files into a single
-  `normalized/YM.parquet`, containing all rides ending in the given month.
+  Consolidate normalized parquet files (combine regions for each month,
+  harmonize column names, etc. Populates directory
+  `<root>/ctbk/normalized/YYYYMM/` with files of the form
+  `YYYYMM_YYYYMM.parquet`, for each pair of (start,end) months found in a
+  given month's CSVs.
 
 Options:
-  -c, --col TEXT  Columns to backfill; default: ['Birth Year', 'Gender', 'Bike
-                  ID']
-  -n, --dry-run   Print stats about fields that would be backfilled, but don't
-                  perform any writes
-  --help          Show this message and exit.
+  --help  Show this message and exit.
+
+Commands:
+  urls    Print URLs for selected datasets
+  create  Create selected datasets
+  prep    Generate .dvc specs with computation provenance (DVX prep phase)
+  run     Execute stale computations via DVX (run phase)
 ```
 </details>
 
@@ -274,6 +316,8 @@ Options:
 Commands:
   urls    Print URLs for selected datasets
   create  Create selected datasets
+  prep    Generate .dvc specs with computation provenance (DVX prep phase)
+  run     Execute stale computations via DVX (run phase)
 ```
 </details>
 
@@ -292,6 +336,8 @@ Options:
 Commands:
   urls    Print URLs for selected datasets
   create  Create selected datasets
+  prep    Generate .dvc specs with computation provenance (DVX prep phase)
+  run     Execute stale computations via DVX (run phase)
 ```
 </details>
 
@@ -310,6 +356,8 @@ Options:
 Commands:
   urls    Print URLs for selected datasets
   create  Create selected datasets
+  prep    Generate .dvc specs with computation provenance (DVX prep phase)
+  run     Execute stale computations via DVX (run phase)
 ```
 </details>
 
@@ -328,6 +376,8 @@ Options:
 Commands:
   urls    Print URLs for selected datasets
   create  Create selected datasets
+  prep    Generate .dvc specs with computation provenance (DVX prep phase)
+  run     Execute stale computations via DVX (run phase)
 ```
 </details>
 

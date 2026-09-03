@@ -79,11 +79,12 @@ CLI for generating ctbk.dev datasets (derived from Citi Bike public data in `s3:
 - See https://tripdata.s3.amazonaws.com/index.html
 
 ### `TripdataCsvs` (a.k.a. `csv`s): unzipped and gzipped CSVs
+- **Orphaned** (~Feb 2025): `norm` reads the `.csv.zip`s directly, so this stage no longer runs; the `csv` subcommand + `s3://ctbk/csvs/` archive are retained for reference only.
 - Writes `<root>/ctbk/csvs/YYYYMM.csv`
 - See also: https://ctbk.s3.amazonaws.com/index.html#/csvs
 
-### `NormalizedMonths` (a.k.a. `norm`s): normalize `csv`s
-- Merge regions (NYC, JC) for the same month, harmonize columns drop duplicate data, etc.
+### `NormalizedMonths` (a.k.a. `norm`s): normalize tripdata `.csv.zip`s
+- Read the `.csv.zip`s directly from `s3://tripdata` (no separate `csv` extract stage), merge regions (NYC, JC) for the same month, harmonize columns, drop duplicate data, etc.
 - Writes `<root>/ctbk/normalized/YYYYMM.parquet`
 - See also: https://ctbk.s3.amazonaws.com/index.html#/normalized
 
