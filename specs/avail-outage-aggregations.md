@@ -1,6 +1,8 @@
 # avail: outage / reliability aggregations (v6 refresh)
 
-Status: proposed. Original captured 2026-07-13 (pre-v6, pre-drop-LUC); this
+Status: **superseded** by [`avail-empty-bitmaps.md`](./avail-empty-bitmaps.md) (2026-09-04) — the stats endpoint / `n_empty` / keyed-pyramid ideas here are replaced by dense minute×station bitmaps. Kept for the driving questions and the monoid-vs-joint analysis.
+
+Original status: proposed. Original captured 2026-07-13 (pre-v6, pre-drop-LUC); this
 rewrite brings it to the avail-v6 serving surface and adds the concrete
 questions that motivate it (single-station reliability, group co-emptiness,
 peak-hour slicing).

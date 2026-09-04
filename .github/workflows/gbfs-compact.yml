@@ -50,6 +50,16 @@ jobs:
       - name: Compact WAL → parquet
         run: python3 gbfs/compact-r2.py all ${{ steps.date.outputs.date }}
 
+      # Empty/full station bitmaps (`specs/avail-empty-bitmaps.md`): the day's four
+      # planes → `empty-v1/` Zarr day-shards, from the daily parquet just written.
+      # `-V` range-reads one hour of every shard back through the reference reader.
+      - name: Build empty-v1 bitmaps for the day
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: ctbk gbfs empty build -C -V ${{ steps.date.outputs.date }}
+
       - name: Build /h1 avail-agg for the day
         run: |
           python3 -c "from ctbk.avail_agg import AvailAggH1Day; AvailAggH1Day('${{ steps.date.outputs.date }}').create()"

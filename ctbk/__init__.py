@@ -10,5 +10,6 @@ from . import zips, import_zips, csvs, normalized, partition, consolidated, aggr
 from . import trips_per_station, trips_region_rollup, avail_agg, avail_raw_day, trips_agg, avail_v3, avail_loader_replay, rides_v1, station_luc, neighborhoods
 from .pyramid_cascade import cli as _pyramid_cascade_cli  # noqa: F401 — registers CLI
 from . import gbfs_cli as _gbfs_cli  # noqa: F401 — registers `ctbk gbfs` group
+from . import gbfs_empty as _gbfs_empty  # noqa: F401 — registers `ctbk gbfs empty` group
 from .stations import meta_hists, modes, pair_jsons, harmonize, trips_jsons
 from .cli import yms

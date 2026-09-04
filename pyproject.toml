@@ -33,6 +33,7 @@ dependencies = [
     "SQLAlchemy>=2.0.41",
     "utz>=0.20.0",
     "dvx",
+    "zarr>=2.18.3",
 ]
 
 [tool.uv.sources]
