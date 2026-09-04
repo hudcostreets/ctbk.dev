@@ -168,6 +168,7 @@ class DayPlanes:
     n_rows: int
     n_spill: int
     added: list[str]
+    lu_ts: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))  # sorted distinct feed `last_updated` (epoch s) in the day
 
     def strict(self, plane: str) -> np.ndarray:
         """The condition as actually reported: filled bits masked by `observed`."""
@@ -223,6 +224,7 @@ def build_planes(df: pd.DataFrame, d: date, vocab: Vocab, seed: np.ndarray | Non
     in_day = (tidx >= 0) & (tidx < MINUTES_PER_DAY)
     n_spill = int((~in_day).sum())
     df = df[in_day].assign(_t=tidx[in_day])
+    lu_ts = np.unique(df['ts'].to_numpy()).astype(np.int64)  # every in-day feed update, before per-minute dedup
     df = df.sort_values(['station_id', '_t', 'ts'], kind='mergesort').drop_duplicates(['station_id', '_t'], keep='last')
     added = vocab.extend(df['station_id'].unique())
     sidx = df['station_id'].map(vocab.index).to_numpy()
@@ -246,7 +248,7 @@ def build_planes(df: pd.DataFrame, d: date, vocab: Vocab, seed: np.ndarray | Non
         a = np.zeros((MINUTES_PER_DAY, S_MAX), dtype=bool)
         a[t[m], sidx[m]] = True
         planes[k] = a
-    return DayPlanes(day=d, planes=ffill_planes(planes, seed), n_rows=len(df), n_spill=n_spill, added=added)
+    return DayPlanes(day=d, planes=ffill_planes(planes, seed), n_rows=len(df), n_spill=n_spill, added=added, lu_ts=lu_ts)
 
 
 # ─── Shard byte access + the reference range-reader (what the worker will do) ──
@@ -372,7 +374,36 @@ def coverage_doc(dp: DayPlanes) -> dict:
         'live': live,
         'observed_minutes': int((~gap).sum()),
         'gaps': gaps,
+        **lu_cadence(dp),
         'counts': [int(c) for c in counts],
+    }
+
+
+LU_SKIP_S = 90  # an interval this long or longer between feed updates = ≥1 skipped ~60 s cycle
+
+
+def lu_cadence(dp: DayPlanes) -> dict:
+    """Feed `last_updated` cadence for the day: distinct updates per UTC hour (60 expected),
+    skipped cycles per hour (Σ round(interval/60) − 1 over intervals ≥ `LU_SKIP_S`, credited to
+    the hour the interval starts in), and interval quantiles. Intervals are within-day only.
+    The feed ticks every 60 ± 1 s, so "> 60 s" is noise; skipped cycles are the signal — each
+    one is a minute with no LU record for any station, i.e. a fleet-wide lost minute."""
+    ts = dp.lu_ts
+    day0 = int(datetime.combine(dp.day, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    hours = ((ts - day0) // 3600).clip(0, 23)
+    per_hour = np.bincount(hours, minlength=24)[:24]
+    gaps = np.diff(ts)
+    skips = np.zeros(24, dtype=int)
+    big = gaps >= LU_SKIP_S
+    if big.any():
+        np.add.at(skips, hours[:-1][big], np.rint(gaps[big] / 60).astype(int) - 1)
+    q = (lambda p: int(np.percentile(gaps, p))) if len(gaps) else (lambda p: 0)
+    return {
+        'lu_updates': int(len(ts)),
+        'lu_per_hour': [int(x) for x in per_hour],
+        'lu_skips_per_hour': [int(x) for x in skips],
+        'lu_skips': int(skips.sum()),
+        'lu_interval': {'p50': q(50), 'p99': q(99), 'max': int(gaps.max()) if len(gaps) else 0},
     }
 
 
@@ -726,6 +757,23 @@ def backfill_cmd(cache: Path, no_cache: bool, from_: str | None, force: bool, la
     days = [d for d in days if lo <= d <= hi]
     err(f"backfill {layout}: {len(days)} candidate days {days[0]} → {days[-1]}")
     _build_days(LAYOUTS[layout], days, None if no_cache else cache, store, force, verify)
+
+
+@empty.command('coverage', help='(Re)write `empty-v1p/coverage/<day>.json` for a day range from the daily status parquets, without rewriting shards (default: every day with a parquet, through yesterday).')
+@cache_opt
+@no_cache_opt
+@option('-f', '--from', 'from_', default=None)
+@option('-t', '--to', default=None)
+def coverage_cmd(cache: Path, no_cache: bool, from_: str | None, to: str | None) -> None:
+    cli = r2_client()
+    vocab = load_vocab(cli) or init_vocab(cli)
+    days = _status_days(cli)
+    lo = _parse_day(from_) if from_ else days[0]
+    hi = _parse_day(to) if to else (datetime.now(timezone.utc).date() - timedelta(days=1))
+    for d in [x for x in days if lo <= x <= hi]:
+        dp = build_planes(load_status_day(cli, d, None if no_cache else cache), d, vocab)
+        cov = write_coverage(cli, dp)
+        err(f"{d}: coverage={cov['observed_minutes']}/1440 gaps={len(cov['gaps'])} lu_updates={cov['lu_updates']} skips={cov['lu_skips']} p99={cov['lu_interval']['p99']}s")
 
 
 @empty.command('verify', help='Per layout: days with a daily status parquet but missing/partial shards (through yesterday), and shard-days with no source parquet.')

@@ -104,10 +104,20 @@ def test_coverage_doc():
     counts = [0] * MINUTES_PER_DAY
     for t in (0, 1, 2, 3, 480, 481):
         counts[t] = 1
+    per_hour = [0] * 24
+    per_hour[0], per_hour[8] = 7, 3                # distinct `ts` (pre-dedup, incl. unobserved rows): minutes 0..6; 480, 480+30s, 481
+    intervals = [60] * 6 + [(480 - 6) * 60, 30, 30]
+    skips = [0] * 24
+    skips[0] = round(intervals[6] / 60) - 1          # the one long interval, minute 6 → 480, credited to hour 0
     assert {k: v for k, v in doc.items() if k != 'counts'} == {
         'day': '2026-08-25',
         'live': 3,
         'observed_minutes': 0,                   # 1 of 3 live stations observed is below the 50% gap threshold everywhere
         'gaps': [[0, MINUTES_PER_DAY, 0]],
+        'lu_updates': 10,
+        'lu_per_hour': per_hour,
+        'lu_skips_per_hour': skips,
+        'lu_skips': 473,
+        'lu_interval': {'p50': 60, 'p99': int(np.percentile(intervals, 99)), 'max': 28440},
     }
     assert doc['counts'] == counts
