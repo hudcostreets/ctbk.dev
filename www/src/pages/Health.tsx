@@ -5,7 +5,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Tooltip } from '@mui/material'
-import type { CSSProperties } from 'react'
+import { useState, type CSSProperties } from 'react'
 
 // Default to prod worker so `pnpm dev` works without a local api.
 // Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
@@ -346,7 +346,137 @@ function FeedSection({ feed }: { feed: FeedHealth }) {
           </tbody>
         </table>
       </div>
+      <CoverageHistory />
     </Section>
+  )
+}
+
+/** `/api/coverage` — fleet-wide observed-minute coverage per UTC day, from the empty-bitmap
+ *  builder's `observed` plane (`specs/avail-empty-bitmaps.md` §9.2). Unlike the poll-file
+ *  count above, it sees partial-feed minutes, and its gap *runs* tell a continuous outage
+ *  (one long run) from a sagging `last_updated` cadence (many 1-minute runs). */
+interface CoverageDay {
+  day: string
+  live: number
+  observed_minutes: number
+  gaps: Array<[number, number, number]>  // [start_minute, length, min_observed_count]
+}
+interface CoverageRange { from: string; to: string; days: CoverageDay[]; missing: string[] }
+
+const COVERAGE_GENESIS = '2026-04-07'
+const COVERAGE_PRESETS: Array<{ label: string; days: number | null }> = [
+  { label: '30d', days: 30 }, { label: '90d', days: 90 }, { label: 'all', days: null },
+]
+
+function utcDayOffset(offset: number): string {
+  return new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10)
+}
+
+async function fetchCoverage(from: string, to: string): Promise<CoverageRange> {
+  const res = await fetch(`${API_BASE}/api/coverage?from=${from}&to=${to}`)
+  if (!res.ok) throw new Error(`coverage ${res.status}`)
+  return res.json()
+}
+
+function fmtMin(m: number): string {
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
+}
+
+function CoverageHistory() {
+  const [open, setOpen] = useState(false)
+  const [preset, setPreset] = useState(0)
+  const to = utcDayOffset(-1)
+  const days = COVERAGE_PRESETS[preset].days
+  const from = days === null ? COVERAGE_GENESIS : utcDayOffset(-days)
+  const { data, error, isLoading } = useQuery({
+    queryKey: ['gbfs-coverage', from, to],
+    queryFn: () => fetchCoverage(from, to),
+    enabled: open,
+    staleTime: 3_600_000,
+  })
+  return (
+    <div style={{ marginTop: '0.8em' }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, fontSize: '0.9em', opacity: 0.8 }}
+      >
+        {open ? '▾' : '▸'} Observed-minute history
+        <Hint>per-minute station coverage from the bitmaps; gap runs show outage vs. feed cadence</Hint>
+      </button>
+      {open && (
+        <div style={{ marginTop: '0.5em' }}>
+          <div style={{ display: 'flex', gap: '0.5em', fontSize: '0.85em', marginBottom: '0.4em' }}>
+            {COVERAGE_PRESETS.map((p, i) => (
+              <button
+                key={p.label}
+                onClick={() => setPreset(i)}
+                style={{
+                  cursor: 'pointer', padding: '0.1em 0.6em', borderRadius: 3, border: '1px solid rgba(127,127,127,0.4)',
+                  background: i === preset ? 'rgba(127,127,127,0.25)' : 'none', color: 'inherit',
+                }}
+              >{p.label}</button>
+            ))}
+            <span style={{ opacity: 0.6, alignSelf: 'center' }}>{from} → {to} UTC</span>
+          </div>
+          {isLoading && <Loading />}
+          {error && <Err msg={String(error)} />}
+          {data && <CoverageTable range={data} />}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CoverageTable({ range }: { range: CoverageRange }) {
+  const rows = [...range.days].reverse()
+  return (
+    <table style={{ borderCollapse: 'collapse', fontSize: '0.85em' }}>
+      <thead>
+        <tr style={{ opacity: 0.6 }}>
+          <th style={cellStyle('left')}>Date</th>
+          <th style={cellStyle('right')}>Live</th>
+          <th style={cellStyle('right')}>Minutes</th>
+          <th style={cellStyle('right')}>%</th>
+          <th style={cellStyle('right')}>Gap runs</th>
+          <th style={cellStyle('right')}>Longest</th>
+          <th style={cellStyle('left')}>Day (UTC 00→24; red = gap)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((d) => {
+          const pct = d.observed_minutes / 1440
+          const longest = d.gaps.reduce((m, g) => Math.max(m, g[1]), 0)
+          return (
+            <tr key={d.day}>
+              <td style={cellStyle('left')}>{d.day}</td>
+              <td style={cellStyle('right')}>{d.live}</td>
+              <td style={cellStyle('right')}>{d.observed_minutes}</td>
+              <td style={cellStyle('right', pct >= 0.99 ? 'inherit' : pct >= 0.95 ? '#cc9933' : 'salmon')}>{(100 * pct).toFixed(1)}%</td>
+              <td style={cellStyle('right')}>{d.gaps.length}</td>
+              <td style={cellStyle('right', longest >= 30 ? 'salmon' : longest >= 5 ? '#cc9933' : 'inherit')}>{longest ? `${longest}m` : '—'}</td>
+              <td style={cellStyle('left')}><GapStrip gaps={d.gaps} /></td>
+            </tr>
+          )
+        })}
+        {range.missing.length > 0 && (
+          <tr><td colSpan={7} style={{ ...cellStyle('left'), opacity: 0.6 }}>no coverage doc yet: {range.missing.join(', ')}</td></tr>
+        )}
+      </tbody>
+    </table>
+  )
+}
+
+/** One day as a 1440-minute strip: green ground, a red rect per gap run (hover for the run's time span). */
+function GapStrip({ gaps }: { gaps: CoverageDay['gaps'] }) {
+  return (
+    <svg viewBox="0 0 1440 12" preserveAspectRatio="none" style={{ width: 288, height: 12, display: 'block' }}>
+      <rect x={0} y={0} width={1440} height={12} fill="#5db75d" opacity={0.55} />
+      {gaps.map(([start, len, minCount], i) => (
+        <rect key={i} x={start} y={0} width={Math.max(len, 2)} height={12} fill="salmon">
+          <title>{`${fmtMin(start)}–${fmtMin(start + len)} UTC · ${len} min · min observed ${minCount}`}</title>
+        </rect>
+      ))}
+    </svg>
   )
 }
 

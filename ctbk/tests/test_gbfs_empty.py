@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from ctbk.gbfs_empty import (
-    LAYOUTS, MINUTES_PER_DAY, PLANES, LocalShard, Vocab, build_planes, day_idx, open_group, open_store,
+    LAYOUTS, MINUTES_PER_DAY, PLANES, S_MAX, LocalShard, Vocab, build_planes, coverage_doc, day_idx, open_group, open_store,
 )
 
 DAY = date(2026, 8, 25)
@@ -48,9 +48,29 @@ def test_build_planes():
     assert (dp.n_rows, dp.n_spill) == (9, 2)
     a, b, c = 1, 0, 2
     assert coords(dp.planes['observed']) == [(0, a), (1, a), (2, a), (3, a), (480, b), (481, c)]
+    # strict = as reported
+    assert coords(dp.strict('no_bikes')) == [(1, a)]
+    assert coords(dp.strict('no_ebikes')) == [(1, a), (2, a), (480, b)]
+    assert coords(dp.strict('full')) == [(3, a), (481, c)]
+    # stored = forward-filled over unobserved minutes, uncapped within the day, zero before first observation
     assert coords(dp.planes['no_bikes']) == [(1, a)]
-    assert coords(dp.planes['no_ebikes']) == [(1, a), (2, a), (480, b)]
-    assert coords(dp.planes['full']) == [(3, a), (481, c)]
+    assert coords(dp.planes['no_ebikes']) == sorted([(1, a), (2, a)] + [(t, b) for t in range(480, MINUTES_PER_DAY)])
+    assert coords(dp.planes['full']) == sorted([(t, a) for t in range(3, MINUTES_PER_DAY)] + [(t, c) for t in range(481, MINUTES_PER_DAY)])
+    assert dp.carry.shape == (3, S_MAX)
+    assert [(int(i), int(j)) for i, j in zip(*np.nonzero(dp.carry[:, :3]))] == [(1, b), (2, a), (2, c)]
+
+
+def test_build_planes_seeded():
+    """The previous day's carry fills a station's minutes before its first observation."""
+    vocab = Vocab([B, A, C])
+    seed = np.zeros((3, S_MAX), dtype=bool)
+    seed[0, 2] = True   # C carried in as no_bikes
+    seed[2, 0] = True   # B carried in as full
+    dp = build_planes(pd.DataFrame(ROWS), DAY, vocab, seed)
+    b, c = 0, 2
+    assert coords(dp.planes['no_bikes'][:, [b, c]]) == [(t, 1) for t in range(0, 481)]          # C until its 481 observation (docks=0, bikes=5)
+    assert coords(dp.planes['full'][:, [b, c]]) == sorted([(t, 0) for t in range(0, 480)] + [(t, 1) for t in range(481, MINUTES_PER_DAY)])
+    assert coords(dp.planes['observed'][:, [b, c]]) == [(480, 0), (481, 1)]
 
 
 def test_round_trip_and_range_reader(tmp_path: Path):
@@ -66,12 +86,28 @@ def test_round_trip_and_range_reader(tmp_path: Path):
     def shards(shard: int):
         return {'_': LocalShard(tmp_path / L.keys(DAY, shard)[0])}
 
-    # reference range-reader vs. the built planes: hours 0 and 8 of shard 0 carry bits; shard 1 is absent
-    for hour in (0, 8):
+    # reference range-reader vs. the built planes: every hour of shard 0 carries bits (A's `full` is forward-filled
+    # from minute 3 through the day); station-shard 1 is an absent object
+    for hour in (0, 1, 8, 23):
         got = L.read_hour(shards(0), hour)
         assert np.array_equal(got, dp.hour(hour, 0)), hour
-    assert L.read_hour(shards(0), 1) is None          # hour 1: no bits in any plane ⇒ empty chunk
-    assert L.read_hour(shards(1), 0) is None          # station-shard 1: absent object
+    assert L.read_hour(shards(1), 0) is None
     # subset of planes (what a single-condition query fetches)
     sub = L.read_hour(shards(0), 8, ('observed', 'no_ebikes'))
     assert np.array_equal(sub, dp.hour(8, 0)[[0, 2]])
+
+
+def test_coverage_doc():
+    vocab = Vocab([B, A])
+    dp = build_planes(pd.DataFrame(ROWS), DAY, vocab)
+    doc = coverage_doc(dp)
+    counts = [0] * MINUTES_PER_DAY
+    for t in (0, 1, 2, 3, 480, 481):
+        counts[t] = 1
+    assert {k: v for k, v in doc.items() if k != 'counts'} == {
+        'day': '2026-08-25',
+        'live': 3,
+        'observed_minutes': 0,                   # 1 of 3 live stations observed is below the 50% gap threshold everywhere
+        'gaps': [[0, MINUTES_PER_DAY, 0]],
+    }
+    assert doc['counts'] == counts

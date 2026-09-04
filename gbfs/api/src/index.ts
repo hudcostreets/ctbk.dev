@@ -491,6 +491,7 @@ import { monthsInDashed } from './planQuery';
 import { R2Store } from '@rdub/file-tree/stores/r2';
 import { createHandlers } from '@rdub/file-tree/server';
 import { computeAndStoreHealthSnapshot, readCachedHealthSnapshot } from './health';
+import { coverageKey, coverageRange, defaultCoverageRange, isDay, type CoverageDay } from './coverage';
 import { runAlerts } from './alerts';
 import { DEFAULT_PYRAMID, repairGeneration, serveAvailV3, serveAvailV3Cells } from './avail_geo';
 import { serveRidesV3, serveRidesV3Cells, serveRidesV5 } from './rides_v1';
@@ -1244,6 +1245,37 @@ export default {
 				return errorResponse(`unknown op ${body.op}`, 400, env);
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'registry proxy failed', 500, env);
+			}
+		}
+
+		// /api/coverage?from=&to=[&counts=1] and /api/coverage/<day> — fleet-wide
+		// observed-minute coverage from the empty-bitmap builder's per-day docs
+		// (`empty-v1p/coverage/<day>.json`; see ./coverage.ts). Past days are
+		// immutable, so cache for a day; a range ending today (no doc yet) lists
+		// it under `missing`.
+		const coverageDayMatch = url.pathname.match(/^\/api\/coverage\/(\d{4}-\d{2}-\d{2})$/);
+		if (url.pathname === '/api/coverage' || coverageDayMatch) {
+			try {
+				const getDoc = async (key: string): Promise<CoverageDay | null> => {
+					const obj = await env.R2.get(key);
+					return obj ? ((await obj.json()) as CoverageDay) : null;
+				};
+				if (coverageDayMatch) {
+					const day = coverageDayMatch[1];
+					if (!isDay(day)) return errorResponse(`bad day: ${day}`, 400, env);
+					const doc = await getDoc(coverageKey(day));
+					if (!doc) return errorResponse(`no coverage for ${day}`, 404, env);
+					return jsonResponse(doc, env, { headers: { 'Cache-Control': 'public, max-age=86400' } });
+				}
+				const dflt = defaultCoverageRange();
+				const from = url.searchParams.get('from') ?? dflt.from;
+				const to = url.searchParams.get('to') ?? dflt.to;
+				const withCounts = url.searchParams.get('counts') === '1';
+				const range = await coverageRange(getDoc, from, to, withCounts);
+				const maxAge = range.missing.length ? 300 : 86400;
+				return jsonResponse(range, env, { headers: { 'Cache-Control': `public, max-age=${maxAge}` } });
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'coverage failed', 400, env);
 			}
 		}
 

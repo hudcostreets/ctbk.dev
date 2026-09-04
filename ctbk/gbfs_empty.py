@@ -164,10 +164,19 @@ def load_status_day(cli, d: date, cache: Path | None) -> pd.DataFrame:
 @dataclass
 class DayPlanes:
     day: date
-    planes: dict[str, np.ndarray]  # each (1440, S_MAX) bool
+    planes: dict[str, np.ndarray]  # each (1440, S_MAX) bool; condition planes forward-filled (see `ffill_planes`)
     n_rows: int
     n_spill: int
     added: list[str]
+
+    def strict(self, plane: str) -> np.ndarray:
+        """The condition as actually reported: filled bits masked by `observed`."""
+        return self.planes[plane] & self.planes['observed']
+
+    @property
+    def carry(self) -> np.ndarray:
+        """`(3, S_MAX)` bool: the filled state at the last minute of the day — the seed for the next day."""
+        return np.stack([self.planes[p][-1] for p in PLANES[1:]])
 
     def packed(self, plane: str) -> np.ndarray:
         return np.packbits(self.planes[plane], axis=1)  # (1440, S_BYTES) uint8
@@ -182,9 +191,32 @@ class DayPlanes:
         return np.stack([self.planes[p][t0:t1, shard * SHARD_STATIONS:(shard + 1) * SHARD_STATIONS] for p in PLANES])
 
 
-def build_planes(df: pd.DataFrame, d: date, vocab: Vocab) -> DayPlanes:
-    """Pivot a day's status rows into the four bit planes. Extends `vocab` in place with
-    any station ids it hasn't seen (appended in sorted order)."""
+def ffill_planes(planes: dict[str, np.ndarray], seed: np.ndarray | None = None) -> dict[str, np.ndarray]:
+    """Forward-fill the condition planes over unobserved minutes, uncapped within the day: minute
+    `t` takes the condition at the station's last observed minute ≤ t, or `seed` (`(3, S)` bool,
+    the previous day's carry) before its first observation. `observed` is left raw, so the stored
+    planes are lossless: strict = filled & observed, and any fill horizon N is recoverable from
+    the lengths of the unobserved runs. (An un-ticked feed means "unchanged", not "unknown".)"""
+    obs = planes['observed']
+    T, S = obs.shape
+    last = np.maximum.accumulate(np.where(obs, np.arange(T)[:, None], -1), axis=0)  # (T, S) last observed minute ≤ t
+    take = np.clip(last, 0, None)
+    out = {'observed': obs}
+    for i, p in enumerate(PLANES[1:]):
+        c = planes[p]
+        filled = np.take_along_axis(c, take, axis=0)
+        if seed is not None:
+            filled = np.where(last >= 0, filled, seed[i][None, :])
+        else:
+            filled = np.where(last >= 0, filled, False)
+        out[p] = filled
+    return out
+
+
+def build_planes(df: pd.DataFrame, d: date, vocab: Vocab, seed: np.ndarray | None = None) -> DayPlanes:
+    """Pivot a day's status rows into the four bit planes (condition planes forward-filled, seeded
+    from the previous day's carry). Extends `vocab` in place with any station ids it hasn't seen
+    (appended in sorted order)."""
     day_start_min = int(datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc).timestamp() // 60)
     minute = (df['ts'] // 60).to_numpy()
     tidx = minute - day_start_min
@@ -214,7 +246,7 @@ def build_planes(df: pd.DataFrame, d: date, vocab: Vocab) -> DayPlanes:
         a = np.zeros((MINUTES_PER_DAY, S_MAX), dtype=bool)
         a[t[m], sidx[m]] = True
         planes[k] = a
-    return DayPlanes(day=d, planes=planes, n_rows=len(df), n_spill=n_spill, added=added)
+    return DayPlanes(day=d, planes=ffill_planes(planes, seed), n_rows=len(df), n_spill=n_spill, added=added)
 
 
 # ─── Shard byte access + the reference range-reader (what the worker will do) ──
@@ -306,6 +338,50 @@ def hour_chunk_bytes(shard, hour: int) -> bytes | None:
     return gzip.decompress(shard.range(off, n))
 
 
+COVERAGE_PREFIX = 'empty-v1p/coverage'
+GAP_FRACTION = 0.5  # a minute is a "gap" when fewer than this fraction of the day's live stations were observed
+
+
+def coverage_key(d: date) -> str:
+    return f'{COVERAGE_PREFIX}/{d.strftime(ISO_DAY)}.json'
+
+
+def coverage_doc(dp: DayPlanes) -> dict:
+    """Fleet-wide observed-minute coverage for one day, from the `observed` plane: per-minute
+    count of observed stations, the day's live-station count, and gap runs (`[start_minute,
+    length, min_count]`) where fewer than `GAP_FRACTION` of live stations were observed. This
+    is the "lost minutes" signal for the health page — it sees partial-feed minutes, which a
+    poll-file count can't."""
+    obs = dp.planes['observed']
+    counts = obs.sum(1)
+    live = int(obs.any(0).sum())
+    gap = counts < GAP_FRACTION * live
+    gaps = []
+    t = 0
+    while t < MINUTES_PER_DAY:
+        if gap[t]:
+            u = t
+            while u < MINUTES_PER_DAY and gap[u]:
+                u += 1
+            gaps.append([int(t), int(u - t), int(counts[t:u].min())])
+            t = u
+        else:
+            t += 1
+    return {
+        'day': dp.day.strftime(ISO_DAY),
+        'live': live,
+        'observed_minutes': int((~gap).sum()),
+        'gaps': gaps,
+        'counts': [int(c) for c in counts],
+    }
+
+
+def write_coverage(cli, dp: DayPlanes) -> dict:
+    doc = coverage_doc(dp)
+    cli.put_object(Bucket=BUCKET, Key=coverage_key(dp.day), Body=json.dumps(doc, separators=(',', ':')).encode(), ContentType='application/json')
+    return doc
+
+
 # ─── Layouts ──────────────────────────────────────────────────────────────
 
 class Layout:
@@ -395,6 +471,17 @@ def open_group(layout: Layout, store):
     return g
 
 
+def carry_from_r2(cli, layout: Layout, d: date, n_shards: int) -> np.ndarray:
+    """The previous day's carry (`(3, S_MAX)` bool: filled state at its minute 1439) read from its
+    shards' last hour chunk; zeros where the shard is absent."""
+    seed = np.zeros((N_PLANES - 1, S_MAX), dtype=bool)
+    for j in range(n_shards):
+        blk = read_hour(cli, layout, d - timedelta(days=1), CHUNKS_PER_SHARD - 1, j)
+        if blk is not None:
+            seed[:, j * SHARD_STATIONS:(j + 1) * SHARD_STATIONS] = blk[1:, -1, :]
+    return seed
+
+
 def read_hour(cli, layout: Layout, d: date, hour: int, shard: int, planes=PLANES, fetch: Fetch | None = None) -> np.ndarray | None:
     shards = {'_': R2Shard(cli, layout.keys(d, shard, planes)[0], fetch)}
     return layout.read_hour(shards, hour, planes)
@@ -404,11 +491,13 @@ def read_hour(cli, layout: Layout, d: date, hour: int, shard: int, planes=PLANES
 
 @dataclass
 class QueryResult:
-    stations: list[str]
+    stations: list[str]     # members with ≥1 observation in the window (the joint is over these)
+    dropped: list[str]      # members never observed in the window (dead / not yet installed)
     planes: tuple[str, ...]
-    n_minutes: int          # minutes in the window with every selected station observed
-    pct: dict[str, dict[str, float]]   # plane → station → fraction of that station's observed minutes
-    k_of_n: dict[str, dict[int, int]]  # plane → k → minutes with exactly k selected stations in that state
+    ffill: int | None       # None = as stored (filled), 0 = strict (observed only), N = fill ≤N-minute gaps
+    n_minutes: int          # minutes in the window with every member's state known
+    pct: dict[str, dict[str, float]]   # plane → station → fraction of that station's known minutes
+    k_of_n: dict[str, dict[int, int]]  # plane → k → minutes with exactly k members in that state
     fetch: Fetch
     seconds: float
 
@@ -417,10 +506,14 @@ def query(
     cli, layout: Layout, vocab: Vocab, stations: list[str],
     from_: date, to: date, hours: list[int], dows: list[int], tz: str,
     planes: tuple[str, ...] = PLANES[1:], strategy: str = 'range', workers: int = 16,
+    ffill: int | None = None,
 ) -> QueryResult:
     """Strided-window query: local `hours` × `dows` over [from_, to] for a station set.
     `strategy`: `range` = index tail + one range GET per needed hour, per object;
-    `whole` = one GET per object, index parsed locally."""
+    `whole` = one GET per object, index parsed locally.
+    `ffill`: None = the stored (forward-filled) planes, every minute known; 0 = strict, only
+    observed minutes count; N = filled bits kept only within ≤N consecutive unobserved minutes
+    (run length measured within the assembled window, so approximate at its hour boundaries)."""
     need = tuple(p for p in PLANES if p == 'observed' or p in planes)
     zone = ZoneInfo(tz)
     # (utc_day, utc_hour) pairs whose local start lies in the requested hours × dows
@@ -464,13 +557,26 @@ def query(
                     series[p][s].append(blk[i, :, col] if blk is not None else np.zeros(CHUNK_MINUTES, bool))
     S = {p: {s: np.concatenate(v) for s, v in d_.items()} for p, d_ in series.items()}
     obs = np.stack([S['observed'][s] for s in stations])          # (K, T)
-    all_obs = obs.all(0)
-    pct = {p: {s: float(S[p][s].sum() / max(S['observed'][s].sum(), 1)) for s in stations} for p in planes}
-    k_of_n = {}
+    live = obs.any(1)
+    dropped = [s for s, l in zip(stations, live) if not l]
+    members = [s for s, l in zip(stations, live) if l]
+    obs = obs[live]
+    T = obs.shape[1]
+    if ffill is None:
+        known = np.ones_like(obs)
+    elif ffill == 0:
+        known = obs
+    else:
+        last = np.maximum.accumulate(np.where(obs, np.arange(T)[None, :], -1), axis=1)
+        known = obs | ((last >= 0) & (np.arange(T)[None, :] - last <= ffill))
+    all_known = known.all(0)
+    pct, k_of_n = {}, {}
     for p in planes:
-        k = np.stack([S[p][s] for s in stations])[:, all_obs].sum(0)
+        st = np.stack([S[p][s] for s in members]) & known
+        pct[p] = {s: float(st[i].sum() / max(known[i].sum(), 1)) for i, s in enumerate(members)}
+        k = st[:, all_known].sum(0)
         k_of_n[p] = {int(i): int(n) for i, n in zip(*np.unique(k, return_counts=True))}
-    return QueryResult(stations, planes, int(all_obs.sum()), pct, k_of_n, fetch, time.time() - t_start)
+    return QueryResult(members, dropped, planes, ffill, int(all_known.sum()), pct, k_of_n, fetch, time.time() - t_start)
 
 
 class _Absent:
@@ -545,23 +651,31 @@ def _build_days(layout: Layout, days: list[date], cache: Path | None, store: str
         err(f"initialized vocab: {len(vocab.stations)} stations")
     built = set() if force else _built_days(cli, layout, vocab.n_shards)
     g = open_group(layout, open_store(store or layout.store_url()))
+    prev: DayPlanes | None = None
     for d in days:
         if d in built:
             err(f"{layout.name} {d}: built, skipping")
+            prev = None
             continue
         df = load_status_day(cli, d, cache)
-        dp = build_planes(df, d, vocab)
+        if prev is not None and prev.day == d - timedelta(days=1):
+            seed = prev.carry
+        else:
+            seed = carry_from_r2(cli, layout, d, vocab.n_shards)
+        dp = build_planes(df, d, vocab, seed)
+        prev = dp
         if dp.added:
             save_vocab(cli, vocab)
             err(f"{d}: vocab += {len(dp.added)} stations → {len(vocab.stations)}")
         n_objs = layout.write_day(g, dp)
+        cov = write_coverage(cli, dp)
         obs = dp.planes['observed']
         n_obs = int(obs.sum())
-        dens = {p: int(dp.planes[p].sum()) / max(n_obs, 1) for p in PLANES[1:]}
+        dens = {p: int(dp.strict(p).sum()) / max(n_obs, 1) for p in PLANES[1:]}
         err(
             f"{layout.name} {d}: rows={dp.n_rows:,} spill={dp.n_spill} observed={n_obs:,} "
             + ' '.join(f"{p}={v:.1%}" for p, v in dens.items())
-            + f" objects={n_objs}"
+            + f" objects={n_objs} coverage={cov['observed_minutes']}/1440 gaps={len(cov['gaps'])}"
         )
         if verify:
             _verify_day(cli, layout, dp)
@@ -657,7 +771,7 @@ def stats_cmd(cache: Path, no_cache: bool, encoding: bool, days: tuple[str, ...]
     print(f"days={len(ds)} minutes={T} stations={S} observed station-minutes={n_obs:,} / {T * S:,} = {n_obs / (T * S):.1%}")
     live = obs.sum(0) > 0
     for p in PLANES[1:]:
-        a = A[p][:, :S]
+        a = A[p][:, :S] & obs
         ps = (a.sum(0) / np.maximum(obs.sum(0), 1))[live]
         q = np.quantile(ps, [.1, .25, .5, .75, .9, .99])
         print(f"{p:10s} overall={a.sum() / n_obs:6.2%}   per-station p10/25/50/75/90/99 = "
@@ -712,6 +826,7 @@ def read_cmd(day: str, hour: int, layout: str, stations: tuple[str, ...]) -> Non
 def _query_opts(f):
     for o in reversed([
         option('-d', '--dows', default='0,1,2,3,4', help='Local days of week, 0=Mon (default weekdays)'),
+        option('-F', '--ffill', type=int, default=None, help='Fill horizon in minutes: omit = as stored (forward-filled), 0 = strict (observed minutes only), N = fill gaps ≤N minutes'),
         option('-f', '--from', 'from_', required=True, help='First local day, YYYY-MM-DD'),
         option('-H', '--hours', default='8', help='Local hours of day, comma-separated (default 8 = 8–9am)'),
         option('-p', '--planes', default='no_bikes,no_ebikes,full', help='Condition planes to report (observed is always fetched)'),
@@ -725,7 +840,10 @@ def _query_opts(f):
 
 
 def _print_result(r: QueryResult) -> None:
-    print(f"minutes with all {len(r.stations)} stations observed: {r.n_minutes:,}")
+    if r.dropped:
+        print(f"dropped (never observed in window): {' '.join(r.dropped)}")
+    fill = 'as stored (forward-filled)' if r.ffill is None else ('strict' if r.ffill == 0 else f'ffill ≤{r.ffill}m')
+    print(f"minutes with all {len(r.stations)} stations known [{fill}]: {r.n_minutes:,}")
     for p in r.planes:
         print(f"{p}:")
         for s in r.stations:
@@ -739,13 +857,13 @@ def _print_result(r: QueryResult) -> None:
 @layout_opt
 @option('-S', '--strategy', type=Choice(['range', 'whole']), default='range', help='`range`: index tail + range GET per hour; `whole`: one GET per object')
 @_query_opts
-def query_cmd(layout: str, strategy: str, dows: str, from_: str, hours: str, planes: str, to: str, workers: int, tz: str, stations: tuple[str, ...]) -> None:
+def query_cmd(layout: str, strategy: str, ffill: int | None, dows: str, from_: str, hours: str, planes: str, to: str, workers: int, tz: str, stations: tuple[str, ...]) -> None:
     cli = r2_client()
     vocab = load_vocab(cli)
     r = query(
         cli, LAYOUTS[layout], vocab, list(stations), _parse_day(from_), _parse_day(to),
         [int(h) for h in hours.split(',')], [int(x) for x in dows.split(',')], tz,
-        tuple(planes.split(',')), strategy, workers,
+        tuple(planes.split(',')), strategy, workers, ffill,
     )
     _print_result(r)
     err(f"{layout}/{strategy}: {r.fetch.rpcs} RPCs, {r.fetch.nbytes:,} B, {r.seconds:.2f}s ({workers} workers)")
@@ -754,7 +872,7 @@ def query_cmd(layout: str, strategy: str, dows: str, from_: str, hours: str, pla
 @empty.command('bench', help='Run the same query under every layout × fetch strategy × {all planes, one plane}; assert identical answers; print RPCs / bytes / wall time.')
 @option('-n', '--repeat', type=int, default=3, help='Runs per cell (best-of)')
 @_query_opts
-def bench_cmd(repeat: int, dows: str, from_: str, hours: str, planes: str, to: str, workers: int, tz: str, stations: tuple[str, ...]) -> None:
+def bench_cmd(repeat: int, ffill: int | None, dows: str, from_: str, hours: str, planes: str, to: str, workers: int, tz: str, stations: tuple[str, ...]) -> None:
     cli = r2_client()
     vocab = load_vocab(cli)
     hs, ds = [int(h) for h in hours.split(',')], [int(x) for x in dows.split(',')]
@@ -765,7 +883,7 @@ def bench_cmd(repeat: int, dows: str, from_: str, hours: str, planes: str, to: s
             for pl in (tuple(planes.split(',')), ('no_bikes',)):
                 times = []
                 for _ in range(repeat):
-                    r = query(cli, L, vocab, list(stations), _parse_day(from_), _parse_day(to), hs, ds, tz, pl, strategy, workers)
+                    r = query(cli, L, vocab, list(stations), _parse_day(from_), _parse_day(to), hs, ds, tz, pl, strategy, workers, ffill)
                     times.append(r.seconds)
                 key = (r.n_minutes, {p: r.pct[p] for p in pl}, {p: r.k_of_n[p] for p in pl})
                 if pl == tuple(planes.split(',')):

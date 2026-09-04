@@ -1,6 +1,6 @@
 # avail: empty/full bitmaps — exact station-set reliability over strided time windows
 
-Status: in progress (2026-09-04) — increment 1 (Python builder + backfill, both layouts) landed and the layout bake-off is decided (§9: packed + whole-shard reads). Next: forward-fill semantics (§9), then increment 2 (worker). Supersedes [`avail-outage-aggregations.md`] (the `/api/avail-v3/stats` + `n_empty`-per-cell + keyed week-hour-pyramid line of thinking); see "What this retires" below. Experiments in §1 are done (`tmp/empty-bitmap-exp.py`, output in `tmp/empty-bitmap-exp.out`).
+Status: in progress (2026-09-04) — increment 1 landed (builder + backfill, packed layout, forward-filled planes, coverage artifacts; bake-off in §9). Next: increment 2 (worker `/api/empty`, `/api/coverage`) and the health-page history view (§9.2). Supersedes [`avail-outage-aggregations.md`] (the `/api/avail-v3/stats` + `n_empty`-per-cell + keyed week-hour-pyramid line of thinking); see "What this retires" below. Experiments in §1 are done (`tmp/empty-bitmap-exp.py`, output in `tmp/empty-bitmap-exp.out`).
 
 ## Goal
 
@@ -51,12 +51,12 @@ Taller inner chunks gain ≤25% ratio while quadrupling over-read for hour-align
 
 | plane | bit = 1 when |
 |---|---|
-| `observed` | an observation exists for this `(minute, station)` **and** the station is live (`is_renting == 1`, not "dead": see §1a) |
-| `no_bikes` | `observed && num_bikes_available == 0` |
-| `no_ebikes` | `observed && num_ebikes_available == 0` |
-| `full` | `observed && num_docks_available == 0` |
+| `observed` | an observation exists for this `(minute, station)` **and** the station is live (`is_installed & is_renting`, and not `0 bikes & 0 docks`) — stored raw, never filled |
+| `no_bikes` | `num_bikes_available == 0` at the station's last observed minute ≤ t (forward-filled; see below) |
+| `no_ebikes` | `num_ebikes_available == 0`, likewise |
+| `full` | `num_docks_available == 0`, likewise |
 
-`observed` is the denominator for every ratio (the role `Σh` plays for the histograms); a bare `0` in a condition plane is otherwise ambiguous between "had bikes" and "not observed". Absent chunk ≡ all-zero ≡ unobserved.
+**Condition planes are stored forward-filled; `observed` is stored raw.** An un-ticked feed means "unchanged", not "unknown", so minute *t* carries the condition from the station's last observed minute ≤ *t* — uncapped within the day, seeded at midnight from the previous day's carry (its filled state at minute 1439, read from the prior day-shard's last chunk), zero before a station's first-ever observation. This is lossless: `strict = filled & observed` recovers exactly what was reported, and any fill horizon *N* is recoverable at query time from the lengths of the unobserved runs (mask filled bits at run position > *N*). It also removes the reader's dependence on the chunk *before* a window (an 8:00 bit already holds the 7:58 state). Readers pick the semantics per view (`query --ffill`: as stored / strict / ≤N); nothing about fill is decided by the index. Absent chunk ≡ all-zero ≡ unobserved.
 
 `num_bikes_available` is the GBFS total (classic + e-bike), so `no_bikes` is "no bike of either type". Nothing else is needed for the two "empty" kinds of interest.
 
@@ -91,7 +91,7 @@ The raw status data already has exactly the immutable-write cascade this needs. 
 |---|---|---|---|---|
 | n0 | poller (`gbfs/worker`, `* * * * *`) writes `gbfs/status/<day>/HH-MM.json` | `empty-v1/n0/<day>/HH-MM.bin` | ~1.3 KB (4 planes × 320 B, packbits, all stations) | one extra `put` per tick |
 | h1 | compactor (`gbfs/compactor`, `5 * * * *`) writes `gbfs/avail/h1/<day>/HH.parquet` | `empty-v1/h1/<day>/HH.bin` | ~1–4 KB/plane, gzip | same bytes as the inner chunks the day-shard will contain |
-| d1 | daily GHA (`compact-r2.py`) writes `gbfs/status/<day>.parquet` | the Zarr day-shards (§2.3), 5 objects/plane | ~133 KB/day total | built from the daily parquet by `ctbk gbfs empty build <day>` |
+| d1 | daily GHA (`compact-r2.py`) writes `gbfs/status/<day>.parquet` | the Zarr day-shards (§2.3), 5 objects, plus `empty-v1p/coverage/<day>.json` | ~130 KB/day + ~6 KB | built from the daily parquet by `ctbk gbfs empty build <day>` |
 
 Every object is written once; nothing is mutated. No coarsening cascade is needed (the archival unit is uniform), so pyrmts is not involved. The day-shard array holds **complete days only** (a partial trailing Zarr chunk would require rewriting the chunk + metadata — exactly the torn-read problem to avoid).
 
@@ -179,6 +179,10 @@ The bench's joint distribution requires **all K selected stations observed in th
 - **The K=20 / K=2,537 zeros are dead stations, not gaps.** 3 of the 20 spread stations (and 44 of 2,537 overall) have zero live days in the window, so no minute can ever satisfy "all observed". Fix: a station set is evaluated over its members that are live in the window (dead members are dropped, and reported), and the joint is over minutes where all *live* members are observed. K=3 (JC) loses only 3 pts to the strict rule (80.6% qualifying vs the 83.8% ceiling).
 - **Missing minutes are fleet-wide, not per-station.** Every live station's observed fraction over its live days sits at 83.8% (p10 = p50 = p90): the gaps are whole minutes with no LU-minute record for *anyone* — the feed's `last_updated` not advancing, or a missed poll — so they drop out of every denominator uniformly and don't bias per-station or joint rates. Weekly rate among live stations: **~80% before 2026-08-04, ~96% from 2026-08-04** (the LU-attributed poller; pre-v2 files were named by poll minute and deduped to LU minutes, losing ~1 in 6). The worst single days (50–65%) are outages, visible as weekly `min day` dips.
 - **Health page**: `/health` already shows the fleet-wide poll-minute count vs 1,440 for today and the last 7 days (`feed.todayCount / todayExpected`, `last7Days`) plus feed-staleness drift, which post-2026-08-04 *is* this observed rate; it doesn't show the long-run series or that pre-08-04 counts overstated coverage. The bitmaps give the full-history per-day rate for free (`observed` plane popcount ÷ live stations) — worth a sparkline there.
-- **Forward-fill** is still worth doing, but for a different reason than first stated: filling a station's last state across ≤N consecutive missing minutes (N≈5; longer = outage, leave unobserved) makes hour windows dense and reflects the feed's own semantics (an un-ticked feed means "unchanged", not "unknown"). It changes no per-station ratio materially; it makes the FE's minute strips and the tail view continuous.
+- **Forward-fill lives in the stored planes, losslessly** (§2.1), not in the reader: `observed` stays raw, so strict and any-horizon views are query-time choices. Rebuilt 2026-09-04.
+
+### 9.2 Coverage artifact and the health page
+
+`build` also writes `empty-v1p/coverage/<day>.json` — `{day, live, observed_minutes, gaps: [[start_minute, length, min_count], …], counts: [1440 per-minute observed-station counts]}` — the fleet-wide "lost minutes" signal at minute resolution, for the whole history. Unlike the poll-file count on `/health` today (files per day vs 1,440), it sees partial-feed minutes and is correct before 2026-08-04. Reconstructing the 2026-08-30/31 dip from the `observed` plane: 182 + 121 lost minutes, **not** a continuous outage — ~300 separate runs, none ≥5 minutes, every one a whole-fleet miss (0 stations, no partial minutes), i.e. the feed's `last_updated` failing to advance (or missed polls) scattered through both days. That's a question the daily bars can't answer and the per-day JSON can (`gaps` lists every run). Health-page increment — DONE 2026-09-04: `gbfs/api/src/coverage.ts` serves `GET /api/coverage?from=&to=[&counts=1]` (fan-out over the per-day JSONs, `missing` for days without a doc, 1-day cache for closed ranges) and `GET /api/coverage/<day>`; `www/src/pages/Health.tsx` adds an "Observed-minute history" expander under the 7-day table with 30d / 90d / all presets, one row per day (live stations, minutes, %, gap-run count, longest run) and a 1,440-minute SVG strip with a red rect per gap run (hover = time span + min count). Verified in Chrome against a local worker with remote bindings: the pre-2026-08-04 days read as ~51% with ~700 runs of ≤2 min (every other minute deduped away, not outages), 08-04 shows the cutover mid-day, and 07-29's single 8-minute run stands out as a real gap. Not yet shown: per-station gaps (the bitmaps have them; a station page could show its own strip).
 
 [`avail-outage-aggregations.md`]: ./avail-outage-aggregations.md
