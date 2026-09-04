@@ -5,7 +5,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Tooltip } from '@mui/material'
-import { useState, type CSSProperties } from 'react'
+import type { CSSProperties } from 'react'
 
 // Default to prod worker so `pnpm dev` works without a local api.
 // Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
@@ -346,175 +346,11 @@ function FeedSection({ feed }: { feed: FeedHealth }) {
           </tbody>
         </table>
       </div>
-      <CoverageHistory />
+      <div style={{ marginTop: '0.6em', fontSize: '0.9em' }}>
+        <Link to="/health/feed">Feed metrics →</Link>
+        <Hint>full-history observed-minute coverage, gap runs, and the feed's update-interval histogram</Hint>
+      </div>
     </Section>
-  )
-}
-
-/** `/api/coverage` — fleet-wide observed-minute coverage per UTC day, from the empty-bitmap
- *  builder's `observed` plane (`specs/avail-empty-bitmaps.md` §9.2). Unlike the poll-file
- *  count above, it sees partial-feed minutes, and its gap *runs* tell a continuous outage
- *  (one long run) from a sagging `last_updated` cadence (many 1-minute runs). */
-interface CoverageDay {
-  day: string
-  live: number
-  observed_minutes: number
-  gaps: Array<[number, number, number]>  // [start_minute, length, min_observed_count]
-  /** Feed `last_updated` cadence: distinct updates (60/h expected), skipped ~60 s cycles per UTC hour. */
-  lu_updates?: number
-  lu_per_hour?: number[]
-  lu_skips_per_hour?: number[]
-  lu_skips?: number
-  lu_interval?: { p50: number; p99: number; max: number }
-}
-interface CoverageRange { from: string; to: string; days: CoverageDay[]; missing: string[] }
-
-const COVERAGE_GENESIS = '2026-04-07'
-const COVERAGE_PRESETS: Array<{ label: string; days: number | null }> = [
-  { label: '30d', days: 30 }, { label: '90d', days: 90 }, { label: 'all', days: null },
-]
-
-function utcDayOffset(offset: number): string {
-  return new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10)
-}
-
-async function fetchCoverage(from: string, to: string): Promise<CoverageRange> {
-  const res = await fetch(`${API_BASE}/api/coverage?from=${from}&to=${to}`)
-  if (!res.ok) throw new Error(`coverage ${res.status}`)
-  return res.json()
-}
-
-function fmtMin(m: number): string {
-  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
-}
-
-function CoverageHistory() {
-  const [open, setOpen] = useState(false)
-  const [preset, setPreset] = useState(0)
-  const to = utcDayOffset(-1)
-  const days = COVERAGE_PRESETS[preset].days
-  const from = days === null ? COVERAGE_GENESIS : utcDayOffset(-days)
-  const { data, error, isLoading } = useQuery({
-    queryKey: ['gbfs-coverage', from, to],
-    queryFn: () => fetchCoverage(from, to),
-    enabled: open,
-    staleTime: 3_600_000,
-  })
-  return (
-    <div style={{ marginTop: '0.8em' }}>
-      <button
-        onClick={() => setOpen((o) => !o)}
-        style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, fontSize: '0.9em', opacity: 0.8 }}
-      >
-        {open ? '▾' : '▸'} Observed-minute history
-        <Hint>per-minute station coverage from the bitmaps; gap runs show outage vs. feed cadence</Hint>
-      </button>
-      {open && (
-        <div style={{ marginTop: '0.5em' }}>
-          <div style={{ display: 'flex', gap: '0.5em', fontSize: '0.85em', marginBottom: '0.4em' }}>
-            {COVERAGE_PRESETS.map((p, i) => (
-              <button
-                key={p.label}
-                onClick={() => setPreset(i)}
-                style={{
-                  cursor: 'pointer', padding: '0.1em 0.6em', borderRadius: 3, border: '1px solid rgba(127,127,127,0.4)',
-                  background: i === preset ? 'rgba(127,127,127,0.25)' : 'none', color: 'inherit',
-                }}
-              >{p.label}</button>
-            ))}
-            <span style={{ opacity: 0.6, alignSelf: 'center' }}>{from} → {to} UTC</span>
-          </div>
-          {isLoading && <Loading />}
-          {error && <Err msg={String(error)} />}
-          {data && <CoverageTable range={data} />}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function CoverageTable({ range }: { range: CoverageRange }) {
-  const rows = [...range.days].reverse()
-  return (
-    <table style={{ borderCollapse: 'collapse', fontSize: '0.85em' }}>
-      <thead>
-        <tr style={{ opacity: 0.6 }}>
-          <th style={cellStyle('left')}>Date</th>
-          <th style={cellStyle('right')}>Live</th>
-          <th style={cellStyle('right')}>Minutes</th>
-          <th style={cellStyle('right')}>%</th>
-          <th style={cellStyle('right')}>Gap runs</th>
-          <th style={cellStyle('right')}>Longest</th>
-          <th style={cellStyle('right')}>
-            <Tooltip title="feed last_updated cadence: skipped ~60 s update cycles (each = a fleet-wide lost minute) · p99 interval" arrow>
-              <span>Skips · p99</span>
-            </Tooltip>
-          </th>
-          <th style={{ ...cellStyle('left'), whiteSpace: 'nowrap' }}>
-            <Tooltip title="one UTC day, 00→24. Top strip: red = minutes with <50% of live stations observed. Bottom strip: amber = skipped feed update cycles per hour (hover for counts)." arrow>
-              <span>Day (gap minutes / skipped cycles)</span>
-            </Tooltip>
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((d) => {
-          const pct = d.observed_minutes / 1440
-          const longest = d.gaps.reduce((m, g) => Math.max(m, g[1]), 0)
-          const skips = d.lu_skips
-          return (
-            <tr key={d.day}>
-              <td style={{ ...cellStyle('left'), whiteSpace: 'nowrap' }}>{d.day}</td>
-              <td style={cellStyle('right')}>{d.live}</td>
-              <td style={cellStyle('right')}>{d.observed_minutes}</td>
-              <td style={cellStyle('right', pct >= 0.99 ? 'inherit' : pct >= 0.95 ? '#cc9933' : 'salmon')}>{(100 * pct).toFixed(1)}%</td>
-              <td style={cellStyle('right')}>{d.gaps.length}</td>
-              <td style={cellStyle('right', longest >= 30 ? 'salmon' : longest >= 5 ? '#cc9933' : 'inherit')}>{longest ? `${longest}m` : '—'}</td>
-              <td style={cellStyle('right', skips === undefined ? 'inherit' : skips >= 60 ? 'salmon' : skips >= 15 ? '#cc9933' : 'inherit')}>
-                {skips === undefined ? '—' : `${skips} · ${d.lu_interval?.p99 ?? '—'}s`}
-              </td>
-              <td style={cellStyle('left')}>
-                <GapStrip gaps={d.gaps} />
-                {d.lu_skips_per_hour && <SkipStrip skips={d.lu_skips_per_hour} updates={d.lu_per_hour ?? []} />}
-              </td>
-            </tr>
-          )
-        })}
-        {range.missing.length > 0 && (
-          <tr><td colSpan={8} style={{ ...cellStyle('left'), opacity: 0.6 }}>no coverage doc yet: {range.missing.join(', ')}</td></tr>
-        )}
-      </tbody>
-    </table>
-  )
-}
-
-/** One day as a 1440-minute strip: green ground, red for gap runs. All runs go in ONE `<path>`
- *  (a day of cadence sag has ~700 runs; 150 rows × 700 rects made the page unpaintable). */
-function GapStrip({ gaps }: { gaps: CoverageDay['gaps'] }) {
-  const d = gaps.map(([start, len]) => `M${start} 0h${Math.max(len, 2)}v12h-${Math.max(len, 2)}z`).join('')
-  const longest = gaps.reduce((m, g) => (g[1] > m[1] ? g : m), [0, 0, 0] as [number, number, number])
-  const lost = gaps.reduce((n, g) => n + g[1], 0)
-  return (
-    <svg viewBox="0 0 1440 12" preserveAspectRatio="none" style={{ width: 288, height: 12, display: 'block' }}>
-      <title>{gaps.length ? `${lost} gap minutes in ${gaps.length} runs · longest ${longest[1]} min at ${fmtMin(longest[0])}–${fmtMin(longest[0] + longest[1])} UTC` : 'no gap minutes'}</title>
-      <rect x={0} y={0} width={1440} height={12} fill="#5db75d" opacity={0.55} />
-      {d && <path d={d} fill="salmon" />}
-    </svg>
-  )
-}
-
-/** Skipped feed-update cycles per UTC hour (amber intensity; hover for updates/skips). */
-function SkipStrip({ skips, updates }: { skips: number[]; updates: number[] }) {
-  const max = Math.max(1, ...skips)
-  return (
-    <svg viewBox="0 0 24 6" preserveAspectRatio="none" style={{ width: 288, height: 6, display: 'block', marginTop: 1 }}>
-      <rect x={0} y={0} width={24} height={6} fill="rgba(127,127,127,0.15)" />
-      {skips.map((n, h) => (
-        <rect key={h} x={h} y={0} width={1} height={6} fill="#cc9933" opacity={n ? 0.25 + 0.75 * (n / max) : 0}>
-          <title>{`${String(h).padStart(2, '0')}h UTC · ${updates[h] ?? '?'} updates · ${n} skipped cycles`}</title>
-        </rect>
-      ))}
-    </svg>
   )
 }
 

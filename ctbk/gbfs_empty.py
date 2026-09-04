@@ -398,12 +398,15 @@ def lu_cadence(dp: DayPlanes) -> dict:
     if big.any():
         np.add.at(skips, hours[:-1][big], np.rint(gaps[big] / 60).astype(int) - 1)
     q = (lambda p: int(np.percentile(gaps, p))) if len(gaps) else (lambda p: 0)
+    secs, n = np.unique(gaps, return_counts=True)
     return {
         'lu_updates': int(len(ts)),
         'lu_per_hour': [int(x) for x in per_hour],
         'lu_skips_per_hour': [int(x) for x in skips],
         'lu_skips': int(skips.sum()),
         'lu_interval': {'p50': q(50), 'p99': q(99), 'max': int(gaps.max()) if len(gaps) else 0},
+        # interval histogram, exact seconds → count (sparse: a normal day is ~3 keys around 60 s)
+        'lu_hist': {str(int(sec)): int(c) for sec, c in zip(secs, n)},
     }
 
 

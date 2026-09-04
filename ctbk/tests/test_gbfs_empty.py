@@ -119,5 +119,6 @@ def test_coverage_doc():
         'lu_skips_per_hour': skips,
         'lu_skips': 473,
         'lu_interval': {'p50': 60, 'p99': int(np.percentile(intervals, 99)), 'max': 28440},
+        'lu_hist': {'30': 2, '60': 6, '28440': 1},
     }
     assert doc['counts'] == counts

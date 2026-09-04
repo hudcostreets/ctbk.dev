@@ -43,6 +43,7 @@ const StationDetail = lazy(() => import("./pages/StationDetail"))
 const PipelineMdx = lazy(() => import("./pages/Pipeline.mdx"))
 const Files = lazy(() => import("./pages/Files"))
 const Health = lazy(() => import("./pages/Health"))
+const FeedHealth = lazy(() => import("./pages/FeedHealth"))
 const CellsDebug = lazy(() => import("./pages/CellsDebug"))
 
 function Pipeline() {
@@ -77,6 +78,7 @@ function AppContent() {
           <Route path="/files" element={<Files />} />
           <Route path="/files/*" element={<Files />} />
           <Route path="/health" element={<Health />} />
+          <Route path="/health/feed" element={<FeedHealth />} />
           <Route path="/cells-debug" element={<CellsDebug />} />
           {/* Catch-all: the CFW assets router SPA-fallbacks unknown paths
               to index.html with a 200 (specs/done/www-cfw-migration.md),

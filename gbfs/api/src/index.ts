@@ -1272,7 +1272,9 @@ export default {
 				const to = url.searchParams.get('to') ?? dflt.to;
 				const withCounts = url.searchParams.get('counts') === '1';
 				const range = await coverageRange(getDoc, from, to, withCounts);
-				const maxAge = range.missing.length ? 300 : 86400;
+				// Closed ranges are stable day to day, but docs do get regenerated
+				// (`ctbk gbfs empty coverage`), so don't cache them for a day.
+				const maxAge = range.missing.length ? 300 : 3600;
 				return jsonResponse(range, env, { headers: { 'Cache-Control': `public, max-age=${maxAge}` } });
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'coverage failed', 400, env);
