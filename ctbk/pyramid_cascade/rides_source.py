@@ -122,6 +122,17 @@ class MonthlyRidesSource(TiledSource):
                 tiles.append(spill)
         return tiles
 
+    def present_keys(self, tiles: list[Tile]) -> set[str]:
+        """Tiles live on S3, not the pyramid's R2 storage (the chassis
+        default would LIST R2 and find none of them); `available_months`
+        already IS the S3 listing. The engine's fill mode consults this
+        before the walk: an absent OPEN month (the one in progress) defers
+        its shards; an absent CLOSED month — published mid-following-month,
+        so the whole gap between month-end and publication — holds them
+        and fails fast, instead of writing 0-row shards and then tripping
+        the coverage guard (2026-09-07: 12 relics per anchor)."""
+        return {t.key for t in tiles if f'{t.period.start:%Y%m}' in self._available}
+
     def fetch(self, key: str) -> bytes | None:
         return self._fetch_fn(key)
 

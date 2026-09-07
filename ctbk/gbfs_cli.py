@@ -1189,7 +1189,11 @@ def rides_v5_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
 			# denominator is the sources THIS fill reads, so under `-f` the
 			# 2026-08-28 `1mo`-rung backfill read 8 source months and
 			# failed at `1/8 = 0.125 > 0.01`. Closed-period gaps still
-			# count, so the guard keeps its real job.
+			# count, so the guard keeps its real job — and since pyrmts
+			# `a174254` it fires BEFORE the walk (`MonthlyRidesSource.
+			# present_keys` = the S3 listing): an unpublished closed month
+			# holds its shards and exits 4 with nothing written, instead of
+			# 12 zero-row relics per anchor for step 4 to sweep.
 			dry_run=dry_run,
 		)
 		if rc:

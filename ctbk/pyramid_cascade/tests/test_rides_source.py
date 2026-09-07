@@ -248,6 +248,18 @@ def test_identity_sid_maps_to_own_chain(pyramid):
     )
 
 
+def test_present_keys_is_the_available_months_set(pyramid):
+    # The engine's pre-walk presence check must not LIST the pyramid's
+    # (R2) storage — tiles live on S3 — so presence comes from
+    # `available_months`. June published, July not: a start-anchor window
+    # over both asks for June, July (and no August spillback, unavailable).
+    src = make_source(pyramid, {'202606': []})
+    tiles = src.tiles_for(JUN, AUG)
+    assert [t.key for t in tiles] == ['normalized/202606.parquet', 'normalized/202607.parquet']
+    assert src.present_keys(tiles) == {'normalized/202606.parquet'}
+    assert list(pyramid.storage.list('normalized/')) == []
+
+
 def test_missing_mid_history_month_is_coverage_miss(pyramid):
     # A window over a month whose parquet is absent: strict coverage
     # miss (the engine's `max_missing_source` guard turns it into a

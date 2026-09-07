@@ -80,7 +80,10 @@ jobs:
       # Uncapped range (genesis → now): the base image (pyrmts ≥ 22a5f32) DEFERS the
       # trailing rungs over today's not-yet-existing source parquet (an open period)
       # instead of writing them as 0-row shards — nothing to sweep, exit 0, and the
-      # next day's run builds them. Memory budget: the submitter (pyrmts ≥ c594d6b)
+      # next day's run builds them. An absent CLOSED day (a compaction that never
+      # ran) fails this step BEFORE anything is written (pyrmts ≥ a174254, exit 4);
+      # the `smg backfill` step above is what heals that, so a failure here means
+      # the day has no status parquet either. Memory budget: the submitter (pyrmts ≥ c594d6b)
       # pins `-b` to 70% of the job definition's memory, so the engine's in-container
       # detection (which misreads Fargate's host memory) is never consulted.
       - name: Fill smg-v1 pyramid (Batch)
