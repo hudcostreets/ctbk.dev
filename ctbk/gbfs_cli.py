@@ -1487,7 +1487,7 @@ def _engine_submit(
 
 @gbfs_engine.command('submit', help='Submit an engine build of the scratch prefix to AWS Batch (`pyrmts-engine batch submit` passthrough with the standard ctbk args).')
 @option('-a', '--aligned', default=None, help='Smoke range: DUR[:N] = first N epoch-aligned DUR periods after genesis.')
-@option('-b', '--mem-budget', default=None, help='Window-admission byte budget, e.g. 24g (build -b; default 70% of the cgroup limit).')
+@option('-b', '--mem-budget', default=None, help='Window-admission byte budget, e.g. 24g (build -b; default: the submitter pins 70% of the job memory — `-M`, else the job definition\'s).')
 @option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
 @option('-c', '--close-chunk', default=None, help='Target combined-long bytes per close chunk, e.g. 1g (build -c).')
 @option('-e', '--env', 'envs', multiple=True, help='Extra container env var NAME=VALUE (repeatable).')
@@ -1640,25 +1640,34 @@ def _period_from_key(prefix: str, key: str) -> tuple[str, str, datetime, datetim
 
 @gbfs_engine.command('sweep', help='Delete shards whose period extends past CUTOFF (UTC ISO) from all three stores — R2, the D1 `pyramid_shards` registry, and the prefix\'s manifest. Run after an UNCAPPED `engine submit -f` on an engine without open-period classification (base image < pyrmts 72f2552): the fill\'s expected cover reaches `now`, so shards spanning source days that don\'t exist yet build with 0 rows for those days (or partial rows, for a shard straddling the last real day) and read as "built" to every later fill. Then re-fill CAPPED: `engine submit -f -r /CUTOFF`. Candidates = manifest records ∪ R2 listing (keys missing from the manifest are reported).')
 @option('-C', '--config', 'config_name', default='smg-v1', show_default=True, help='Pyramid config basename (registry name and prefix default to it).')
+@option('-k', '--key', 'keys_only', multiple=True, help='Sweep exactly these R2 keys instead of a CUTOFF (repeatable) — for a few known-bad shards inside a live tip, where a cutoff would also take legitimate neighbours.')
 @option('-m', '--manifest', 'manifest_name', default='manifest.jsonl', show_default=True, help='Manifest object name under the prefix.')
 @option('-n', '--dry-run', is_flag=True, help='List affected shards; no deletes.')
 @option('-p', '--prefix', default=None, help='R2 key prefix [default: <config>].')
 @option('-P', '--pyramid', 'pyramid_name', default=None, help='Registry pyramid name [default: <config>].')
-@argument('cutoff', metavar='CUTOFF')
+@argument('cutoff', metavar='CUTOFF', required=False)
 def gbfs_engine_sweep(
 	config_name: str,
+	keys_only: tuple[str, ...],
 	manifest_name: str,
 	dry_run: bool,
 	prefix: str | None,
 	pyramid_name: str | None,
-	cutoff: str,
+	cutoff: str | None,
 ) -> None:
 	from ctbk.pyramid_cascade.d1_http import d1_query
 	prefix = prefix or config_name
 	pyramid_name = pyramid_name or config_name
-	cut = datetime.fromisoformat(cutoff)
-	cut = cut.replace(tzinfo=timezone.utc) if cut.tzinfo is None else cut.astimezone(timezone.utc)
-	cut_ms = int(cut.timestamp()) * 1000
+	if (cutoff is None) == (not keys_only):
+		raise click.UsageError('pass exactly one of CUTOFF or -k/--key')
+	if cutoff is not None:
+		cut = datetime.fromisoformat(cutoff)
+		cut = cut.replace(tzinfo=timezone.utc) if cut.tzinfo is None else cut.astimezone(timezone.utc)
+		cut_ms = int(cut.timestamp()) * 1000
+		cut_desc = f'extend past {cut.isoformat()}'
+	else:
+		cut_ms = None
+		cut_desc = f'match {len(keys_only)} explicit key(s)'
 	client, bucket = _r2_client()
 	mkey = f'{prefix}/{manifest_name}'
 	recs = _load_manifest(f's3://{bucket}/{mkey}')
@@ -1681,12 +1690,12 @@ def gbfs_engine_sweep(
 		else:
 			tier, shard, s, e = _period_from_key(prefix, key)
 			p0, p1 = int(s.timestamp()) * 1000, int(e.timestamp()) * 1000
-		if p1 > cut_ms:
+		if (p1 > cut_ms) if cut_ms is not None else (key in keys_only):
 			victims.append((key, tier, shard, p0, p1))
 	if not victims:
-		err(f'sweep: no shards under {prefix}/ extend past {cut.isoformat()}')
+		err(f'sweep: no shards under {prefix}/ {cut_desc}')
 		return
-	err(f'sweep: {len(victims)} shard(s) under {prefix}/ extend past {cut.isoformat()}:')
+	err(f'sweep: {len(victims)} shard(s) under {prefix}/ {cut_desc}:')
 	fmt = lambda ms: datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M')
 	for key, _t, _s, p0, p1 in victims:
 		err(f'  {key}  [{fmt(p0)}, {fmt(p1)})')

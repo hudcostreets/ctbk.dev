@@ -46,9 +46,9 @@ dependencies = [
 # worktree re-hash) — kills the phantom leaf-dep-hash a level-parallel `-f`
 # reproc would otherwise record, which our audit diff must not see as a finding.
 dvx           = { git = "https://github.com/runsascoded/dvx.git", rev = "39062ef09" }
-pyrmts        = { git = "https://github.com/runsascoded/pyrmts.git", rev = "90896ec", subdirectory = "python/pyrmts" }
-pyrmts-engine = { git = "https://github.com/runsascoded/pyrmts.git", rev = "90896ec", subdirectory = "python/pyrmts_engine" }
-pyrmts-ops    = { git = "https://github.com/runsascoded/pyrmts.git", rev = "90896ec", subdirectory = "python/pyrmts_ops" }
+pyrmts        = { git = "https://github.com/runsascoded/pyrmts.git", rev = "22a5f32", subdirectory = "python/pyrmts" }
+pyrmts-engine = { git = "https://github.com/runsascoded/pyrmts.git", rev = "22a5f32", subdirectory = "python/pyrmts_engine" }
+pyrmts-ops    = { git = "https://github.com/runsascoded/pyrmts.git", rev = "22a5f32", subdirectory = "python/pyrmts_ops" }
 # Local (dev) — swap all three together (the Python `pds l`): from ctbk, the
 # `pyrmts` entry here is what resolves `pyrmts-engine`'s own `pyrmts` dep (its
 # workspace source only applies inside the pyrmts repo). Don't commit this
