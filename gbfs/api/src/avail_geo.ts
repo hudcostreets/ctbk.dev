@@ -116,7 +116,18 @@ const KEY_TEMPLATE = 'avail-v3/{tier}/{shard}/{period}.parquet';
  *  engine-backfilled, vocab-keyed successor (`specs/avail-v5-stack.md`),
  *  default 2026-07-29 → 2026-08-10; v3 (`avail`) stays addressable
  *  behind the explicit param until retirement. */
-const PYRAMIDS: Record<string, { name: string; keyTemplate: string; vocab?: boolean }> = {
+interface ServedPyramid {
+	name: string;
+	keyTemplate: string;
+	vocab?: boolean;
+	/** Histogram metric columns; absent ⇒ the avail `METRICS`. */
+	metrics?: readonly string[];
+}
+/** SMG state ids (`specs/avail-smg-pyramid.md`; `SMG_STATES` in `ctbk/gbfs_empty.py`):
+ *  0 no_poll 1 stale_feed 2 absent 3 offline 4 bogus 5 empty 6 full 7 full_no_ebikes
+ *  8 classic_only 9 ok. `state` is raw; `state_ff` forward-fills the nullish ids. */
+export const SMG_METRICS = ['state', 'state_ff'] as const;
+const PYRAMIDS: Record<string, ServedPyramid> = {
 	'avail': { name: 'avail', keyTemplate: KEY_TEMPLATE },
 	'avail-v5': { name: 'avail-v5', keyTemplate: 'avail-v5/{tier}/{shard}/{period}.parquet', vocab: true },
 	// LU-attributed successor (engine raw-ingest regen, `specs/lu-attribution.md`);
@@ -124,6 +135,10 @@ const PYRAMIDS: Record<string, { name: string; keyTemplate: string; vocab?: bool
 	// burn-in: recent windows byte-equal to v5, tip freshness equal,
 	// historical deltas = the intended LU re-attribution correction).
 	'avail-v6': { name: 'avail-v6', keyTemplate: 'avail-v6/{tier}/{shard}/{period}.parquet', vocab: true },
+	// Station-minute state histograms — the categorical sibling of avail-v6
+	// (same ladder/cells/vocab keys); `reducer=hist` is the meaningful reducer
+	// since the bins are state ids.
+	'smg-v1': { name: 'smg-v1', keyTemplate: 'smg-v1/{tier}/{shard}/{period}.parquet', vocab: true, metrics: SMG_METRICS },
 };
 
 /** The pyramid served when `?pyramid=` is absent. Also folded into the
@@ -161,7 +176,7 @@ const RESOLUTIONS = [15, 14, 13, 12, 11, 10];
  *  both workers so cover math agrees on the closed-history region. */
 export const AVAIL_GENESIS = new Date('2026-04-07T01:15:00Z');
 
-function makeBaseProps(bucket: R2Bucket, keyTemplate: string = KEY_TEMPLATE): Omit<GeoPyramid, 'dims'> {
+function makeBaseProps(bucket: R2Bucket, keyTemplate: string = KEY_TEMPLATE, metrics: readonly string[] = METRICS): Omit<GeoPyramid, 'dims'> {
 	return {
 		storage: parquetBackend(retryingStorage(r2Storage(bucket))),
 		// Unified `{tier}/{shard}/{period}` template per unified-shard-ladder
@@ -171,7 +186,7 @@ function makeBaseProps(bucket: R2Bucket, keyTemplate: string = KEY_TEMPLATE): Om
 		keyTemplate,
 		axis: 'time',
 		binCol: 'dt',
-		metrics: METRICS.map((name) => ({ name, monoid: 'histogram' as const })),
+		metrics: metrics.map((name) => ({ name, monoid: 'histogram' as const })),
 		tiers: TIERS,
 		geo: { cellCol: 's2_cell', resolutions: RESOLUTIONS, index: s2Index },
 	};
@@ -179,14 +194,14 @@ function makeBaseProps(bucket: R2Bucket, keyTemplate: string = KEY_TEMPLATE): Om
 
 /** Rollup pyramid — empty `dims` so `stitch` collapses cells, leaving
  *  one row per (dt) summed across the bbox/cells covering set. */
-export function availV3Pyramid(bucket: R2Bucket, keyTemplate?: string): GeoPyramid {
-	return { ...makeBaseProps(bucket, keyTemplate), dims: [] };
+export function availV3Pyramid(bucket: R2Bucket, keyTemplate?: string, metrics?: readonly string[]): GeoPyramid {
+	return { ...makeBaseProps(bucket, keyTemplate, metrics), dims: [] };
 }
 
 /** Per-cell pyramid — adds `s2_cell` to dims so stitch preserves
  *  cell-level breakdown. */
-export function availV3CellsPyramid(bucket: R2Bucket, keyTemplate?: string): GeoPyramid {
-	return { ...makeBaseProps(bucket, keyTemplate), dims: [{ name: 's2_cell', type: 'string' }] };
+export function availV3CellsPyramid(bucket: R2Bucket, keyTemplate?: string, metrics?: readonly string[]): GeoPyramid {
+	return { ...makeBaseProps(bucket, keyTemplate, metrics), dims: [{ name: 's2_cell', type: 'string' }] };
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -268,12 +283,13 @@ function applyOne(h: Record<string, number>, r: Reducer): number | null {
  *  rows untouched (caller wants the full distribution). */
 export function reduceRows(rows: Row[], reducer: Reducer): Row[] {
 	if (reducer === 'hist') return rows;
-	const metricsSet = new Set<string>(METRICS);
+	// Histogram metrics are the object-valued columns (dims and `dt` are scalars),
+	// whichever pyramid's metric set produced them (avail `METRICS`, `SMG_METRICS`).
 	return rows.map((row) => {
 		const out: Row = {};
 		for (const k in row) {
 			const v = row[k];
-			if (metricsSet.has(k) && typeof v === 'object' && v !== null) {
+			if (typeof v === 'object' && v !== null) {
 				out[k] = applyOne(v as Record<string, number>, reducer);
 			} else {
 				out[k] = v;
@@ -714,7 +730,7 @@ async function serveGeoReduced(
 
 /** `?pyramid=` override: select a serving pyramid from `PYRAMIDS`;
  *  absent → `DEFAULT_PYRAMID`. Unknown value → null (caller 400s). */
-function pyramidParam(request: Request): { name: string; keyTemplate: string } | null {
+function pyramidParam(request: Request): ServedPyramid | null {
 	const v = new URL(request.url).searchParams.get('pyramid');
 	if (v === null) return PYRAMIDS[DEFAULT_PYRAMID]!;
 	return PYRAMIDS[v] ?? null;
@@ -724,12 +740,12 @@ function pyramidParam(request: Request): { name: string; keyTemplate: string } |
 export async function serveAvailV3(bucket: R2Bucket, db: D1Database, request: Request, corsOrigin: string, defer: (p: Promise<unknown>) => void = () => {}): Promise<Response> {
 	const p = pyramidParam(request);
 	if (p === null) return errorResponse(400, 'unknown pyramid', corsOrigin || null);
-	return serveGeoReduced(availV3Pyramid(bucket, p.keyTemplate), bucket, db, request, corsOrigin || null, p.name, defer);
+	return serveGeoReduced(availV3Pyramid(bucket, p.keyTemplate, p.metrics), bucket, db, request, corsOrigin || null, p.name, defer);
 }
 
 /** HTTP handler for `/api/avail-v3/cells` — v3 per-cell rows preserved. */
 export async function serveAvailV3Cells(bucket: R2Bucket, db: D1Database, request: Request, corsOrigin: string, defer: (p: Promise<unknown>) => void = () => {}): Promise<Response> {
 	const p = pyramidParam(request);
 	if (p === null) return errorResponse(400, 'unknown pyramid', corsOrigin || null);
-	return serveGeoReduced(availV3CellsPyramid(bucket, p.keyTemplate), bucket, db, request, corsOrigin || null, p.name, defer);
+	return serveGeoReduced(availV3CellsPyramid(bucket, p.keyTemplate, p.metrics), bucket, db, request, corsOrigin || null, p.name, defer);
 }
