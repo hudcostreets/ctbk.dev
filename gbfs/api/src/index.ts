@@ -1837,7 +1837,7 @@ export default {
 		if (url.pathname.startsWith('/api/files/')) {
 			const handlers = createHandlers(
 				R2Store(env.R2, {
-					prefixes: ['gbfs/', 'avail/', 'avail-v3/', 'avail-v5/', 'avail-v6/', 'rides-v5/'],
+					prefixes: ['gbfs/', 'avail/', 'avail-v3/', 'avail-v5/', 'avail-v6/', 'smg-v1/', 'rides-v5/'],
 					publicBaseUrl: env.R2_PUBLIC_BASE_URL,
 					presign: {
 						endpoint: env.R2_S3_ENDPOINT,

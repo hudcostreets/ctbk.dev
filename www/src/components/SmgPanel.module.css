@@ -1,0 +1,27 @@
+.panel {
+    width: 100%;
+}
+
+.toolbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.3em 1em;
+    margin-bottom: 0.35em;
+    font-size: 0.9em;
+}
+
+.chart {
+    width: 100%;
+    transition: opacity 120ms;
+}
+
+.status {
+    font-size: 0.85em;
+    opacity: 0.7;
+}
+
+.error {
+    font-size: 0.85em;
+    color: #d32f2f;
+}

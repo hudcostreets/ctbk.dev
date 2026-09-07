@@ -434,6 +434,8 @@ const HEALTH_PYRAMIDS: { name: string; keyPrefix: string; rides?: boolean }[] = 
 	{ name: 'avail', keyPrefix: 'avail-v3' },
 	{ name: 'avail-v5', keyPrefix: 'avail-v5' },
 	{ name: 'avail-v6', keyPrefix: 'avail-v6' },
+	// Station-minute states: avail-v6's ladder + genesis (`configs/pyramids/smg-v1.yaml`).
+	{ name: 'smg-v1', keyPrefix: 'smg-v1' },
 	{ name: 'rides-v5-start', keyPrefix: 'rides-v5/start', rides: true },
 	{ name: 'rides-v5-end', keyPrefix: 'rides-v5/end', rides: true },
 ];

@@ -4,6 +4,8 @@ import { Box, CircularProgress, Typography } from '@mui/material'
 import css from '../index.module.css'
 import controlCss from '../controls.module.css'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
+import SmgPanel from '../components/SmgPanel'
+import { smgCellsFor } from '../query/smg'
 import { RangeWidthControl } from '../components/RangeWidthControl'
 import { BinSelect, BIN_PRESETS } from '../components/BinSelect'
 import RidesTable from '../components/RidesTable'
@@ -219,6 +221,19 @@ export default function StationDetail() {
   )
   const data = rangeQuery.data ?? null
   const error = rangeQuery.error ? String(rangeQuery.error) : null
+
+  // Drag-pan commit, shared by the availability + station-state charts.
+  const onAvailPan = useCallback((minS: number, maxS: number) => {
+    const duration = roundDuration((maxS - minS) * 1000)
+    const nowS = Date.now() / 1000
+    // Snap to Latest when drag ends within 10 min of now (matches awair UX).
+    const snapToLatest = maxS >= nowS - 10 * 60
+    setRange({
+      timestamp: snapToLatest ? null : new Date(maxS * 1000),
+      duration,
+    })
+  }, [setRange])
+  const smgSel = useMemo(() => (info?.short_name ? smgCellsFor([info.short_name]) : null), [info?.short_name])
 
   // Prefetch handler for hovered map circles. Reuses the current page's
   // (bufFromS, bufToS, binS) so the prefetched cache entries match the next
@@ -527,16 +542,7 @@ export default function StationDetail() {
                 visibleFromS={fromS}
                 visibleToS={toS}
                 binS={data.binS}
-                onPan={(minS, maxS) => {
-                  const duration = roundDuration((maxS - minS) * 1000)
-                  const nowS = Date.now() / 1000
-                  // Snap to Latest when drag ends within 10 min of now (matches awair UX).
-                  const snapToLatest = maxS >= nowS - 10 * 60
-                  setRange({
-                    timestamp: snapToLatest ? null : new Date(maxS * 1000),
-                    duration,
-                  })
-                }}
+                onPan={onAvailPan}
               />
             </Box>
             {rangeQuery.isFetching && (
@@ -560,6 +566,24 @@ export default function StationDetail() {
         * plot showing the full station history. It's been folded into the
         * main chart's controls (Range + Bin selectors above) — pick e.g.
         * Range=1y, Bin=1d to reproduce that view. Removed 2026-05-01. */}
+
+      {/* Station-minute states (`smg-v1`): the same window as the chart
+        * above (`r`), its own auto bin; drag-pan moves both. */}
+      {info?.short_name && (
+        <Box sx={{ mt: 2, mx: { xs: -1, sm: -2, md: -3 } }}>
+          <Typography variant="h6" sx={{ px: { xs: 1, sm: 2, md: 3 }, mb: 0.5 }}>Station state</Typography>
+          <Box sx={{ px: { xs: 1, sm: 2, md: 3 } }}>
+            <SmgPanel
+              sel={smgSel}
+              fromS={fromS}
+              toS={toS}
+              onPan={onAvailPan}
+              clampMinS={GENESIS_S}
+              height={220}
+            />
+          </Box>
+        </Box>
+      )}
 
       {mapCenter && mapShortName && (
         <>

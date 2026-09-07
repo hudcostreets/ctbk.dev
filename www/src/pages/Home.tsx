@@ -50,6 +50,21 @@ import {
 import { buildTraces, monthToDate } from '../chart/ymrgtb-traces'
 import { buildLayout } from '../chart/ymrgtb-layout'
 import { useRidesV1, type Pyramid, type ApiTarget } from '../query/ridesV1'
+import SmgPanel from '../components/SmgPanel'
+import { RangeWidthControl, type DurationPreset } from '../components/RangeWidthControl'
+import { SMG_GENESIS_S, SYSTEM_BBOX } from '../query/smg'
+import { rangeToUnixSeconds, roundDuration, timeRangeParam } from '../time-range'
+
+const { floor, max } = Math
+const DAY_MS = 24 * 60 * 60 * 1000
+const SMG_RANGE_PRESETS: readonly DurationPreset[] = [
+  { label: '1d', ms: DAY_MS },
+  { label: '7d', ms: 7 * DAY_MS },
+  { label: '1mo', ms: 30 * DAY_MS },
+  { label: '3mo', ms: 90 * DAY_MS },
+  { label: 'All', ms: 2 * 365 * DAY_MS },
+]
+const SMG_SYSTEM_SEL = { kind: 'bbox', bbox: SYSTEM_BBOX } as const
 
 const Pyramids: Pyramid[] = ['v3', 'v5']
 const ApiTargets: ApiTarget[] = ['prod', 'dev']
@@ -111,6 +126,24 @@ export default function Home() {
   const showLegendValue = showLegend === null ? (stackBy !== 'None' || rollingAvgs.length > 0) : showLegend
   const [windowWidth, setWindowWidth] = useState(() => typeof window !== 'undefined' ? window.innerWidth : 800)
   const [snapCounter, setSnapCounter] = useState(0)
+
+  // System-wide station-state chart (`smg-v1`; `specs/avail-smg-pyramid.md`
+  // §5 "L"): own window param `ar` (Latest-anchored, default 30d). "Now"
+  // is 15-min quantized so the TSQ key and the worker's edge-cache key stay
+  // stable across renders; the pyramid's tip is a day old anyway.
+  const [smgRange, setSmgRange] = useUrlState('ar', timeRangeParam(30 * DAY_MS))
+  const smgNowS = floor(Date.now() / 900_000) * 900
+  const [smgFromS, smgToS] = useMemo(() => {
+    const [f, t] = smgRange.timestamp === null
+      ? [smgNowS - floor(smgRange.duration / 1000), smgNowS]
+      : rangeToUnixSeconds(smgRange)
+    return [max(SMG_GENESIS_S, f), t]
+  }, [smgRange, smgNowS])
+  const onSmgPan = useCallback((minS: number, maxS: number) => {
+    const duration = roundDuration((maxS - minS) * 1000)
+    const timestamp = maxS >= floor(Date.now() / 1000) - 600 ? null : new Date(Math.ceil(maxS) * 1000)
+    setSmgRange({ timestamp, duration })
+  }, [setSmgRange])
 
   // Keyboard shortcuts (use-kbd) — registers Date Range / Stack By /
   // Y-Axis / Toggle / Other action groups. The `?` shortcut to open
@@ -414,6 +447,21 @@ export default function Home() {
         <hr />
 
         <div className={css.row}>
+          <h3 id="states">Station states</h3>
+          <p>Every station-minute since April 2026, classified from the live GBFS feed: OK, no e-bikes, full, empty, offline, or unmeasured (drag to pan; click a legend entry to solo it). Rebuilt daily from the <Link to="/health/feed">feed archive</Link>.</p>
+          <SmgPanel
+            sel={SMG_SYSTEM_SEL}
+            fromS={smgFromS}
+            toS={smgToS}
+            onPan={onSmgPan}
+            clampMinS={SMG_GENESIS_S}
+            clampMaxS={smgNowS}
+            height={300}
+            toolbar={<RangeWidthControl value={smgRange} onChange={setSmgRange} presets={SMG_RANGE_PRESETS} />}
+          />
+
+          <hr />
+
           <h4>Examples</h4>
           <ul>
             <li><Link to="/?r=jh">JC + Hoboken</Link> (<Link to="/?r=jh&s=r">stacked</Link>)</li>

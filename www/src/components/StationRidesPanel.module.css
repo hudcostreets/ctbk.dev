@@ -102,6 +102,37 @@
     color: #c0392b;
 }
 
+.viewToggle {
+    display: inline-flex;
+    border: 1px solid rgba(0, 0, 0, 0.25);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+:global([data-theme="dark"]) .viewToggle {
+    border-color: rgba(255, 255, 255, 0.3);
+}
+
+.viewBtn {
+    border: none;
+    background: none;
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.8em;
+    padding: 0.15em 0.6em;
+    opacity: 0.7;
+}
+
+.viewBtnActive {
+    opacity: 1;
+    background: rgba(0, 0, 0, 0.12);
+    font-weight: 600;
+}
+
+:global([data-theme="dark"]) .viewBtnActive {
+    background: rgba(255, 255, 255, 0.18);
+}
+
 .clearBtn {
     border: none;
     background: none;

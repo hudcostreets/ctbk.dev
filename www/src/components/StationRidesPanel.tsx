@@ -12,11 +12,13 @@
  * greyed out until pyrmts #122 lands (`specs/rides-v5.md`).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { intParam, useUrlState } from 'use-prms'
+import { codeParam, intParam, useUrlState } from 'use-prms'
 import { BIN_PRESETS, BinSelect } from './BinSelect'
 import { RangeWidthControl, type DurationPreset } from './RangeWidthControl'
 import StationRidesChart, { ENDS_COLOR, STARTS_COLOR } from './StationRidesChart'
+import SmgPanel from './SmgPanel'
 import { useMultiStationRides } from '../query/ridesMulti'
+import { SMG_GENESIS_S, smgCellsFor } from '../query/smg'
 import { formatDuration, rangeToUnixSeconds, roundDuration, timeRangeParam } from '../time-range'
 import type { Stations } from './StationMap'
 import css from './StationRidesPanel.module.css'
@@ -55,9 +57,17 @@ interface Props {
   onClear: () => void
 }
 
+/** Which series the sheet shows for the set: rides (starts/ends) or the
+ *  station-minute state partition (`smg-v1`). One at a time keeps the
+ *  sheet's height; both share the window (`rr`). */
+type PanelView = 'rides' | 'states'
+const PANEL_VIEWS: [PanelView, string][] = [['rides', 'r'], ['states', 's']]
+
 export default function StationRidesPanel({ shortNames, stations, onRemove, onClear }: Props) {
   const [range, setRange] = useUrlState('rr', timeRangeParam(YEAR_MS))
   const [binMs, setBinMs] = useUrlState('rb', intParam(0))
+  const [view, setView] = useUrlState('rv', codeParam<PanelView>('rides', PANEL_VIEWS))
+  const showStates = view === 'states'
 
   // Chart viewport width → auto bin + bin_budget.
   const chartWrapRef = useRef<HTMLDivElement>(null)
@@ -86,12 +96,13 @@ export default function StationRidesPanel({ shortNames, stations, onRemove, onCl
   const fromS = max(rawFromS, RIDES_GENESIS_S)
 
   const rides = useMultiStationRides(
-    shortNames,
+    showStates ? [] : shortNames,
     fromS,
     toS,
     viewportPx,
     binMs > 0 ? binMs / 1000 : undefined,
   )
+  const smgSel = useMemo(() => (showStates ? smgCellsFor(shortNames) : null), [showStates, shortNames])
 
   const onPan = useCallback((minS: number, maxS: number) => {
     const duration = roundDuration((maxS - minS) * 1000)
@@ -129,26 +140,55 @@ export default function StationRidesPanel({ shortNames, stations, onRemove, onCl
           <button type="button" className={css.clearBtn} onClick={onClear}>clear</button>
         </div>
         <div className={css.controls}>
-          <span className={css.legend}>
-            <span className={css.swatch} style={{ background: STARTS_COLOR }} />
-            starts
-            <span className={css.swatch} style={{ background: ENDS_COLOR }} />
-            ends
+          <span className={css.viewToggle} role="group" aria-label="Panel view">
+            {PANEL_VIEWS.map(([v]) => (
+              <button
+                key={v}
+                type="button"
+                className={`${css.viewBtn} ${view === v ? css.viewBtnActive : ''}`}
+                onClick={() => setView(v)}
+              >
+                {v}
+              </button>
+            ))}
           </span>
+          {!showStates && (
+            <span className={css.legend}>
+              <span className={css.swatch} style={{ background: STARTS_COLOR }} />
+              starts
+              <span className={css.swatch} style={{ background: ENDS_COLOR }} />
+              ends
+            </span>
+          )}
           <RangeWidthControl value={range} onChange={setRange} presets={RANGE_PRESETS} />
-          <BinSelect
-            value={binMs > 0 ? binMs : undefined}
-            onChange={(ms) => setBinMs(ms ?? 0)}
-            presets={RIDES_BIN_PRESETS}
-            disabledMs={CALENDAR_BIN_MS}
-            disabledTitle="Calendar bins pending (pyrmts #122)"
-          />
-          {binS != null && <span className={css.binLabel}>served: {formatDuration(binS * 1000)}</span>}
-          {rides.isFetching && <span className={css.status}>loading…</span>}
-          {rides.isError && <span className={css.error}>rides fetch failed</span>}
+          {!showStates && (
+            <>
+              <BinSelect
+                value={binMs > 0 ? binMs : undefined}
+                onChange={(ms) => setBinMs(ms ?? 0)}
+                presets={RIDES_BIN_PRESETS}
+                disabledMs={CALENDAR_BIN_MS}
+                disabledTitle="Calendar bins pending (pyrmts #122)"
+              />
+              {binS != null && <span className={css.binLabel}>served: {formatDuration(binS * 1000)}</span>}
+              {rides.isFetching && <span className={css.status}>loading…</span>}
+              {rides.isError && <span className={css.error}>rides fetch failed</span>}
+            </>
+          )}
         </div>
       </div>
-      <div ref={chartWrapRef}>
+      {showStates && (
+        <SmgPanel
+          sel={smgSel}
+          fromS={max(fromS, SMG_GENESIS_S)}
+          toS={toS}
+          onPan={onPan}
+          clampMinS={SMG_GENESIS_S}
+          clampMaxS={nowS}
+          height={200}
+        />
+      )}
+      <div ref={chartWrapRef} hidden={showStates}>
         {rows.length > 0 && binS != null && (
           <StationRidesChart
             rows={rows}
