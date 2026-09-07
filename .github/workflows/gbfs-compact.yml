@@ -46,6 +46,8 @@ jobs:
           echo "trigger_mo1=$([ "$NEXT_MONTH" = "01" ] && [ "$DOM" = "01" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "ym=$(echo $DATE | cut -c 1-7)" >> "$GITHUB_OUTPUT"
           echo "year=$(echo $DATE | cut -c 1-4)" >> "$GITHUB_OUTPUT"
+          # Pyramid fills are capped at the end of DATE: the last day whose source exists.
+          echo "range_to=$(date -u -d "$DATE +1 day" +%Y-%m-%dT00:00)" >> "$GITHUB_OUTPUT"
 
       - name: Compact WAL → parquet
         run: python3 gbfs/compact-r2.py all ${{ steps.date.outputs.date }}
@@ -60,12 +62,31 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: ctbk gbfs empty build -C -V ${{ steps.date.outputs.date }}
 
-      # SMG pyramid (`specs/avail-smg-pyramid.md`): `empty build` above also wrote the
-      # day's `gbfs/smg/<day>.parquet`; a declarative Batch gap-fill (`-f`) builds only
-      # the rungs that new day completes, into the REAL prefix (`-p smg-v1` — the
-      # default would be the `-engine-check` scratch prefix). Own AWS env: the
-      # job-level `AWS_*` above point at R2, and Batch is real AWS (us-east-1).
-      # `-W` tails the job so a failed fill fails this step.
+      # SMG source (`specs/avail-smg-pyramid.md`): `empty build` above also wrote the
+      # day's `gbfs/smg/<day>.parquet`. This self-heals any day that has a status
+      # parquet but no SMG parquet (a missed run, or days compacted before the SMG
+      # step existed) — a no-op when nothing is missing — so the fill below never
+      # sees a real source hole.
+      - name: Build any missing gbfs/smg day parquets
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: ctbk gbfs smg backfill -C -k -t ${{ steps.date.outputs.date }}
+
+      # SMG pyramid: a declarative Batch gap-fill (`-f`) builds only the rungs the new
+      # day completes, into the REAL prefix (`-p smg-v1` — the default would be the
+      # `-engine-check` scratch prefix). Own AWS env: the job-level `AWS_*` above
+      # point at R2, and Batch is real AWS (us-east-1). `-W` tails the job so a
+      # failed fill fails this step.
+      # `-r /<range_to>` CAPS the range at the end of the day just built: the Batch
+      # base image (pyrmts ed50cdb) predates open-period classification, so an
+      # uncapped fill would (a) fail the strict missing-source check on today's
+      # not-yet-existing parquet and (b) first write 0-row shards over it, which
+      # every later fill then treats as built (`ctbk gbfs engine sweep` undoes that).
+      # `-b 20g`: the engine's default budget (70% of the cgroup limit) reads the
+      # Fargate HOST here (46 GB in a 32 GiB container → OOM on the first full
+      # build); an explicit budget under the container size keeps a catch-up safe.
       - name: Fill smg-v1 pyramid (Batch)
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -76,7 +97,7 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CTBK_REGISTRY_SECRET: ${{ secrets.CTBK_REGISTRY_SECRET }}
-        run: ctbk gbfs engine submit -C smg-v1 -p smg-v1 -x ctbk_engine_src:smg_daily -f -W
+        run: ctbk gbfs engine submit -C smg-v1 -p smg-v1 -x ctbk_engine_src:smg_daily -f -W -b 20g -w 1h -r /${{ steps.date.outputs.range_to }}
 
       - name: Build /h1 avail-agg for the day
         run: |

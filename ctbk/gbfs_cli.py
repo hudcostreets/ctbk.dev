@@ -12,6 +12,7 @@ Groups (subcommands add here as they're needed):
 from __future__ import annotations
 
 import json
+import re
 import os
 import subprocess
 import sys
@@ -1594,10 +1595,15 @@ def gbfs_engine_register(
 
 @gbfs_engine.command('manifest', help='Summarize a build manifest (local path or `s3://` URL): shard counts per (tier, rung), period span; optionally diff key sets vs another manifest.')
 @option('-d', '--diff', 'other', default=None, help='Second manifest; report key-set differences.')
+@option('-H', '--head', 'head_n', type=int, default=0, help='Print the first N raw records (JSONL) instead of the summary.')
 @argument('path', metavar='PATH')
-def gbfs_engine_manifest(other: str | None, path: str) -> None:
+def gbfs_engine_manifest(other: str | None, head_n: int, path: str) -> None:
 	load = _load_manifest
 	recs = load(path)
+	if head_n:
+		for r in recs[:head_n]:
+			print(json.dumps(r, separators=(',', ':')))
+		return
 	by_rung = Counter((r['tier'], r['shard_dur']) for r in recs)
 	starts = [r['period_start'] for r in recs]
 	ends = [r['period_end'] for r in recs]
@@ -1614,6 +1620,162 @@ def gbfs_engine_manifest(other: str | None, path: str) -> None:
 				print(f'  {k}')
 		if a != b:
 			sys.exit(1)
+
+
+def _period_from_key(prefix: str, key: str) -> tuple[str, str, datetime, datetime]:
+	"""`(tier, shard_dur, period_start, period_end)` for a `{prefix}/{tier}/{shard}/{label}.parquet` key.
+	Labels are the engine's period labels (`2026-09-07`, `2026-09-07T03-10`, …)."""
+	from pyrmts import shard_periods_covering
+	rel = key[len(prefix) + 1:]
+	if not rel.endswith('.parquet'):
+		raise click.ClickException(f'not a shard key: {key}')
+	tier, shard, label = rel[:-len('.parquet')].split('/')
+	iso = re.sub(r'T(\d\d)-(\d\d)', r'T\1:\2', label)
+	start = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
+	p = shard_periods_covering(start, start + timedelta(milliseconds=1), shard)[0]
+	if p.start != start:
+		raise click.ClickException(f'{key}: label {label!r} is not {shard}-aligned (period starts {p.start.isoformat()})')
+	return tier, shard, p.start, p.end
+
+
+@gbfs_engine.command('sweep', help='Delete shards whose period extends past CUTOFF (UTC ISO) from all three stores — R2, the D1 `pyramid_shards` registry, and the prefix\'s manifest. Run after an UNCAPPED `engine submit -f` on an engine without open-period classification (base image < pyrmts 72f2552): the fill\'s expected cover reaches `now`, so shards spanning source days that don\'t exist yet build with 0 rows for those days (or partial rows, for a shard straddling the last real day) and read as "built" to every later fill. Then re-fill CAPPED: `engine submit -f -r /CUTOFF`. Candidates = manifest records ∪ R2 listing (keys missing from the manifest are reported).')
+@option('-C', '--config', 'config_name', default='smg-v1', show_default=True, help='Pyramid config basename (registry name and prefix default to it).')
+@option('-m', '--manifest', 'manifest_name', default='manifest.jsonl', show_default=True, help='Manifest object name under the prefix.')
+@option('-n', '--dry-run', is_flag=True, help='List affected shards; no deletes.')
+@option('-p', '--prefix', default=None, help='R2 key prefix [default: <config>].')
+@option('-P', '--pyramid', 'pyramid_name', default=None, help='Registry pyramid name [default: <config>].')
+@argument('cutoff', metavar='CUTOFF')
+def gbfs_engine_sweep(
+	config_name: str,
+	manifest_name: str,
+	dry_run: bool,
+	prefix: str | None,
+	pyramid_name: str | None,
+	cutoff: str,
+) -> None:
+	from ctbk.pyramid_cascade.d1_http import d1_query
+	prefix = prefix or config_name
+	pyramid_name = pyramid_name or config_name
+	cut = datetime.fromisoformat(cutoff)
+	cut = cut.replace(tzinfo=timezone.utc) if cut.tzinfo is None else cut.astimezone(timezone.utc)
+	cut_ms = int(cut.timestamp()) * 1000
+	client, bucket = _r2_client()
+	mkey = f'{prefix}/{manifest_name}'
+	recs = _load_manifest(f's3://{bucket}/{mkey}')
+	by_key = {r['key']: r for r in recs}
+	paginator = client.get_paginator('list_objects_v2')
+	r2_keys = [
+		o['Key']
+		for page in paginator.paginate(Bucket=bucket, Prefix=f'{prefix}/')
+		for o in page.get('Contents') or []
+		if o['Key'].endswith('.parquet')
+	]
+	unlisted = sorted(set(r2_keys) - set(by_key))
+	if unlisted:
+		err(f'sweep: {len(unlisted)} R2 shard(s) not in {mkey}: ' + ', '.join(unlisted[:5]) + (', …' if len(unlisted) > 5 else ''))
+	victims: list[tuple[str, str, str, int, int]] = []  # (key, tier, shard_dur, period_start_ms, period_end_ms)
+	for key in sorted(set(r2_keys) | set(by_key)):
+		r = by_key.get(key)
+		if r is not None:
+			tier, shard, p0, p1 = r['tier'], r['shard_dur'], r['period_start'], r['period_end']
+		else:
+			tier, shard, s, e = _period_from_key(prefix, key)
+			p0, p1 = int(s.timestamp()) * 1000, int(e.timestamp()) * 1000
+		if p1 > cut_ms:
+			victims.append((key, tier, shard, p0, p1))
+	if not victims:
+		err(f'sweep: no shards under {prefix}/ extend past {cut.isoformat()}')
+		return
+	err(f'sweep: {len(victims)} shard(s) under {prefix}/ extend past {cut.isoformat()}:')
+	fmt = lambda ms: datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M')
+	for key, _t, _s, p0, p1 in victims:
+		err(f'  {key}  [{fmt(p0)}, {fmt(p1)})')
+	if dry_run:
+		return
+	keys = [v[0] for v in victims]
+	for i in range(0, len(keys), 1000):
+		client.delete_objects(Bucket=bucket, Delete={'Objects': [{'Key': k} for k in keys[i:i + 1000]], 'Quiet': True})  # type: ignore[attr-defined]
+	err(f'  deleted {len(keys)} R2 object(s)')
+	for i in range(0, len(keys), 50):
+		chunk = keys[i:i + 50]
+		d1_query(f"DELETE FROM pyramid_shards WHERE pyramid = ? AND key IN ({', '.join('?' * len(chunk))})", [pyramid_name, *chunk])
+	err(f'  dropped {len(keys)} registry row(s) (pyramid={pyramid_name}, where present)')
+	dropped = set(keys)
+	keep = [r for r in recs if r['key'] not in dropped]
+	if len(keep) != len(recs):
+		out = '\n'.join(json.dumps(r, separators=(',', ':')) for r in keep) + '\n'
+		client.put_object(Bucket=bucket, Key=mkey, Body=out.encode(), ContentType='application/jsonl')  # type: ignore[attr-defined]
+		err(f'  {mkey}: {len(recs)} → {len(keep)} records')
+
+
+@gbfs_engine.command('adopt', help='Adopt R2 shards that a build flushed but never recorded (the job died after the PUT — OOM, Spot reclaim): append them to the prefix\'s manifest (HEAD for bytes, streamed md5) and register them in D1. Default KEYS = every `.parquet` under the prefix missing from the manifest (what `sweep` reports as "not in manifest").')
+@option('-C', '--config', 'config_name', default='smg-v1', show_default=True, help='Pyramid config basename (registry name and prefix default to it).')
+@option('-m', '--manifest', 'manifest_name', default='manifest.jsonl', show_default=True, help='Manifest object name under the prefix.')
+@option('-n', '--dry-run', is_flag=True, help='List the shards that would be adopted; no writes.')
+@option('-p', '--prefix', default=None, help='R2 key prefix [default: <config>].')
+@option('-P', '--pyramid', 'pyramid_name', default=None, help='Registry pyramid name [default: <config>].')
+@argument('keys', metavar='KEYS', nargs=-1)
+def gbfs_engine_adopt(
+	config_name: str,
+	manifest_name: str,
+	dry_run: bool,
+	prefix: str | None,
+	pyramid_name: str | None,
+	keys: tuple[str, ...],
+) -> None:
+	from hashlib import md5
+	from ctbk.pyramid_cascade.d1_http import d1_query
+	prefix = prefix or config_name
+	pyramid_name = pyramid_name or config_name
+	client, bucket = _r2_client()
+	mkey = f'{prefix}/{manifest_name}'
+	recs = _load_manifest(f's3://{bucket}/{mkey}')
+	listed = {r['key'] for r in recs}
+	if not keys:
+		paginator = client.get_paginator('list_objects_v2')
+		keys = tuple(sorted(
+			o['Key']
+			for page in paginator.paginate(Bucket=bucket, Prefix=f'{prefix}/')
+			for o in page.get('Contents') or []
+			if o['Key'].endswith('.parquet') and o['Key'] not in listed
+		))
+	else:
+		dup = [k for k in keys if k in listed]
+		if dup:
+			raise click.ClickException(f'already in {mkey}: {dup}')
+	if not keys:
+		err(f'adopt: every shard under {prefix}/ is already in {mkey}')
+		return
+	err(f'adopt: {len(keys)} shard(s) → {mkey} + pyramid_shards({pyramid_name}):')
+	for k in keys:
+		err(f'  {k}')
+	if dry_run:
+		return
+	new: list[dict] = []
+	for k in keys:
+		tier, shard, s, e = _period_from_key(prefix, k)
+		obj = client.get_object(Bucket=bucket, Key=k)  # type: ignore[attr-defined]
+		h = md5()
+		n = 0
+		for chunk in obj['Body'].iter_chunks(8 << 20):
+			h.update(chunk)
+			n += len(chunk)
+		new.append({
+			'pyramid': pyramid_name, 'tier': tier, 'shard_dur': shard,
+			'period_start': int(s.timestamp()) * 1000, 'period_end': int(e.timestamp()) * 1000,
+			'key': k, 'written_at': int(obj['LastModified'].timestamp() * 1000),
+			'md5': h.hexdigest(), 'bytes': n,
+		})
+		err(f'  {k}: {n:,} B md5={h.hexdigest()}')
+	out = '\n'.join(json.dumps(r, separators=(',', ':')) for r in recs + new) + '\n'
+	client.put_object(Bucket=bucket, Key=mkey, Body=out.encode(), ContentType='application/jsonl')  # type: ignore[attr-defined]
+	err(f'  {mkey}: {len(recs)} → {len(recs) + len(new)} records')
+	cols = '(pyramid, tier, shard_dur, period_start, period_end, key, written_at)'
+	params: list = []
+	for r in new:
+		params += [r['pyramid'], r['tier'], r['shard_dur'], r['period_start'], r['period_end'], r['key'], r['written_at']]
+	d1_query(f"INSERT OR REPLACE INTO pyramid_shards {cols} VALUES {', '.join(['(?, ?, ?, ?, ?, ?, ?)'] * len(new))}", params)
+	err(f'  registered {len(new)}')
 
 
 @gbfs_r2.command('pq', help='Inspect a parquet object on R2: schema + row count; optionally head rows and row-group metadata (range reads, no full download).')

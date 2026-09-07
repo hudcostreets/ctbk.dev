@@ -39,6 +39,8 @@ Every `(station, UTC wall-minute)` is in exactly **one** state; the partition su
 
 (Counts are station-minutes out of 2509 × 1440 = 3,612,960; `ctbk gbfs smg hist 2026-08-15`. `state_ff` moves the 32,617 stale minutes into the measured states pro rata.)
 
+**Heartbeat era**: `gbfs/heartbeat/` begins 2026-05-03 ~12:20 UTC. Before that, a minute with no LU snapshot has no heartbeat either, so it classifies as `no_poll` — there, id 0 means "unpolled *or* stale", and `stale_feed` is identically 0. Cross-era comparisons should fold 0+1 (`Σ nullish` is era-independent; the split is only meaningful from 2026-05-03). The backfill log confirms: `polled=0/1440` through 2026-05-02, `701/1440` on 05-03, `1440/1440` after.
+
 0–2 are **nullish** (no measurement), 3–4 are **measured-but-unusable**, 5–9 are the **usable measurements**. The usable five are the full rent-side × return-side grid — rent ∈ {empty, classic-only, ok} × return ∈ {full, not-full}, minus the impossible `empty ∧ full` (that's `bogus`) — so no bitmap condition is lost: `no_ebikes = empty + full_no_ebikes + classic_only`, `full = full + full_no_ebikes`. (A first cut folded `full_no_ebikes` into `full`; the bitmap identity check caught the 7,755 station-minutes it dropped.) Consumers fold as needed: "% empty" = `empty / Σ(5..9)`; "% no e-bikes" = `(empty + full_no_ebikes + classic_only) / Σ(5..9)`; "% of the time we couldn't tell" = `Σ(0..2) / total`; "% of listed stations offline" = `offline / Σ(3..9)`. 0 and 1 are system-wide (identical for every station in the minute) — stored per station anyway so the partition is complete and sums are trivial.
 
 Not a state: `stale_station` (`last_reported` lagging the feed). Excluding offline rows, lag > 10 min is ≈0.03% of rows — not worth baking a threshold in. Revisit if it grows.
@@ -75,7 +77,15 @@ Long form, one row per `(station, minute)`: `station_id: str`, `dt: int64 ms`, `
 - `ctbk/pyramid_cascade/smg_source.py`: `SmgDailySource(TiledSource)` — `tile_at` = one UTC day → `gbfs/smg/<day>.parquet`; `parse` → `unpivot(state, state_ff)` → join chains (`station_id → [ancestor s2 cells…, s:<short_name>]`, the frozen vocab expansion `avail_daily_status` already builds) → `group_by(s2_cell, dt, metric, state).count`. Same contract as `DailyStatusSource`.
 - `gbfs/engine/ctbk_engine_src.py`: `smg_daily(pyramid, filter)` factory (chains built exactly as `avail_daily_status`). `gbfs/engine/Dockerfile`: `COPY ctbk/pyramid_cascade/smg_source.py /app/ctbk_smg_source.py`; rebuild/push the derived image (`pyrmts-engine batch push …`, header of the Dockerfile).
 - `configs/pyramids/smg-v1.yaml`: clone of `avail-v6.yaml` with `key: "smg-v1/{tier}/{shard}/{period}.parquet"` and `metrics: [{state, histogram}, {state_ff, histogram}]`; identical tiers ladder (`1m … 7d`) and `geo.resolutions: [15..10]`.
-- Backfill: `ctbk gbfs engine submit -C smg-v1 -x ctbk_engine_src:smg_daily -f` (Batch; declarative gap-fill, genesis → last compacted day). Runs off-laptop.
+- Stand-up (once per new prod pyramid, in this order; done 2026-09-07 from `e`):
+  1. `ctbk gbfs engine config -C smg-v1 -R -u` — PUT the merged-ladder config at its **real** prefix (`r2://ctbk/smg-v1/config.yaml`). The engine reads the config from there, so without this the Batch job dies at startup with `config not found` (first attempt did exactly that).
+  2. `pyrmts-engine batch push -c . -f gbfs/engine/Dockerfile -p linux/arm64 …/ctbk-engine:<sha>` then `ctbk gbfs engine jobdef …/ctbk-engine:<sha>` — the image must carry `ctbk_smg_source.py`, and `engine submit` always uses the latest `pyrmts-engine` job-definition revision (rev 12 = `f5fefbe1`).
+  3. `ctbk gbfs engine submit -C smg-v1 -p smg-v1 -x ctbk_engine_src:smg_daily -f -W -r /<last-source-day+1>T00:00 -w 1h -b 24g -k 3 -c 2g -V 16 -M 49152` (`-p` = real prefix; the default is the `-engine-check` scratch prefix; the dials are avail-v5's proven full-backfill set). Declarative gap-fill, genesis → cap. Two things the first attempts got wrong:
+     - **Always pass `-b`.** With the default (70% of the cgroup limit) the engine read 46 GB inside the 32 GiB Fargate container and was OOM-killed (exit 137) at 96/307 × 12h windows. The resume (`-f` skipped the 9 shards already flushed) ran at 25.8 GB budget, 16 workers × 1h windows, ~35 min for 236 shards. Filed as `specs/engine-fargate-mem-budget.md` in pyrmts.
+     - **Always cap `-r` at the end of the last day that has a source parquet.** The Batch base image (`pyrmts-engine:ed50cdb`, 2026-08-10) predates the engine's open-period classification (pyrmts `72f2552`, 2026-08-28), so an uncapped fill's expected cover runs to `now`: it (a) writes 0-row shards for the trailing rungs over not-yet-existing days, which every later `-f` then treats as built, and (b) exits non-zero on the strict missing-source check after all outputs are written. The first full build did exactly this (21 trailing shards over 09-06/09-07); `ctbk gbfs engine sweep -C smg-v1 2026-09-06T00:00` removed them from R2 + D1 + manifest. Bumping the base image lifts both caveats (then the daily step can go uncapped like rides-v5's); that's a pyrmts-release + shared-job-definition change, so it's a separate piece of work.
+  4. Registration: `engine submit` does **not** write D1. `ctbk gbfs engine register -P smg-v1 s3://ctbk/smg-v1/manifest.jsonl` registered the 223 manifest shards; `ctbk gbfs engine adopt -C smg-v1` picked up the one shard the OOM'd job flushed but never recorded (`2m/4d/2026-04-13`, 11.9M rows — HEAD/md5 → manifest + D1). Steady state: the api worker's cron `reconcileRegistry` (`RECONCILE_PYRAMIDS` in `gbfs/api/src/index.ts`) now includes `smg-v1`, so each daily fill's new shards self-register (expected-cover ∩ R2 HEAD). D1 after stand-up: 224 `smg-v1` rows, cover [2026-04-07, 2026-09-06).
+
+Prerequisite for step 3 (and for the daily step): every source day in the range exists, i.e. `ctbk gbfs smg backfill -k` has run (152 days 2026-04-07 → 2026-09-05 as of stand-up; ~8 s/day on `e`).
 
 ### 3. Serving
 
@@ -83,7 +93,12 @@ Long form, one row per `(station, minute)`: `station_id: str`, `dt: int64 ms`, `
 
 ### 4. Daily cadence
 
-`gbfs-compact.yml` already runs `ctbk gbfs empty build` per day; that now also writes `gbfs/smg/<day>.parquet`. Add a following step: `ctbk gbfs engine submit -C smg-v1 -x ctbk_engine_src:smg_daily -f` (fills only the new day's rungs). Tip latency = one day, same as the source parquet. The Lambda tick's WAL `raw_fill` path is *not* wired for SMG in v1 (it would need the classifier + heartbeats in the Lambda); revisit if same-day currency matters.
+`gbfs-compact.yml` already runs `ctbk gbfs empty build` per day; that now also writes `gbfs/smg/<day>.parquet`. Two steps follow it:
+
+1. `ctbk gbfs smg backfill -C -k -t <day>` — self-heal: builds any day that has a status parquet but no SMG parquet (a missed run; the days compacted before this step shipped). No-op when nothing is missing, so the fill never meets a real source hole.
+2. `ctbk gbfs engine submit -C smg-v1 -p smg-v1 -x ctbk_engine_src:smg_daily -f -W -b 20g -w 1h -r /<day+1>T00:00` — capped gap-fill (see stand-up step 3 for why `-r` and `-b`). Fills only the rungs the new day completes; the worker's reconcile registers them.
+
+Tip latency = one day + the GHA schedule lag (the `00:15 UTC` cron has actually fired at 04:20–04:35 UTC every day this week). The Lambda tick's WAL `raw_fill` path is *not* wired for SMG in v1 (it would need the classifier + heartbeats in the Lambda); revisit if same-day currency matters.
 
 ### 5. FE
 
@@ -105,15 +120,16 @@ Exact cross-checks against the bitmaps, same day, same station(s), via `/api/emp
 - `state_ff` totals vs. the bitmaps' stored (forward-filled) planes: `no_bikes_ff = empty_ff`, etc.
 - partition: `Σ all states = live × 1440` per day; `no_poll + stale_feed` minutes = `1440 − |LU minutes|`, split by heartbeat count.
 
-Plus engine-vs-source parity the way v6 was validated (`ctbk gbfs engine build/compare` on a scratch prefix).
+Engine-vs-source parity, checked end-to-end through the deployed worker on 2026-09-07 (`/api/avail-v3?pyramid=smg-v1&reducer=hist&bbox=40.5,-74.3,41.0,-73.6&from=2026-08-15&to=2026-08-16&bin_budget=1`, served from `smg-v1/1d/16d/2026-08-07.parquet`): every `state` bin equals the source-parquet table above **exactly** — 32,617 / 161,446 / 877 / 106,867 / 333,359 / 7,755 / 311,971 / 2,658,068, Σ = 3,612,960 = 2509 × 1440; `state_ff` Σ is the same 3,612,960 with bin 1 redistributed into 3–9. The `/cells` variant returns 12 level-10 cells whose bins sum to the same totals.
 
 ## Increments
 
-1. **Source parquet**: classifier + `state_ff` + heartbeat/LU inputs in `gbfs_empty.py`; `ctbk gbfs smg build/backfill`; emit from `empty build`; backfill 150 days (on `e`/GHA). Cross-check vs `/api/empty` per the table above.
-2. **Pyramid**: `SmgDailySource`, factory, Dockerfile, `smg-v1.yaml`, image push, Batch `-f` backfill; parity check.
-3. **Serving**: per-pyramid metrics in `avail_geo.ts`; register `smg-v1`; verify `reducer=hist` end-to-end against the source parquet.
+1. ✅ **Source parquet**: classifier + `state_ff` + heartbeat/LU inputs in `gbfs_empty.py`; `ctbk gbfs smg build/backfill`; emit from `empty build`; 152 days backfilled on `e` 2026-09-07 (`-k`: every day's bitmap identities held).
+2. ✅ **Pyramid**: `SmgDailySource`, factory, Dockerfile, `smg-v1.yaml`, image `ctbk-engine:f5fefbe1` (job-def rev 12), Batch `-f` backfill → 224 shards, cover [2026-04-07, 2026-09-06); swept/adopted per stand-up steps 3–4.
+3. ✅ **Serving**: per-pyramid metrics in `avail_geo.ts`; `smg-v1` in `PYRAMIDS` + `RECONCILE_PYRAMIDS`; 224 rows registered in D1. End-to-end `reducer=hist` check against the source parquet: after the worker deploys.
 4. **FE**: `SmgChart` (L first, then WH/HH) on `/`, `/s/:slug`, `?sel=`.
-5. **Cadence**: `gbfs-compact.yml` engine `-f` step; `/health` coverage of the new pyramid's tip.
+5. ✅ **Cadence**: `gbfs-compact.yml` self-heal + capped `-f` steps; `/health` coverage of the new pyramid's tip still to do.
+6. **Base image bump** (unblocks uncapped daily fills + correct default `mem_budget`): rebuild `pyrmts-engine` at a commit ≥ `72f2552` with the mem-budget fix from `specs/engine-fargate-mem-budget.md` (pyrmts), re-derive `ctbk-engine`, re-validate v6/rides on the shared job definition.
 
 ## Storage / cost
 
