@@ -416,6 +416,159 @@ def write_coverage(cli, dp: DayPlanes) -> dict:
     return doc
 
 
+# ─── SMG: station-minute state histograms (specs/avail-smg-pyramid.md) ────
+# Every (live station, UTC wall-minute) is in exactly one state; the per-day parquet
+# `gbfs/smg/<day>.parquet` is the engine source for the `smg-v1` s2×time pyramid.
+
+SMG_PREFIX = 'gbfs/smg'
+HEARTBEAT_PREFIX = 'gbfs/heartbeat'
+SMG_STATES = ('no_poll', 'stale_feed', 'absent', 'offline', 'bogus', 'empty', 'full', 'full_no_ebikes', 'classic_only', 'ok')
+SMG_NO_POLL, SMG_STALE_FEED, SMG_ABSENT, SMG_OFFLINE, SMG_BOGUS, SMG_EMPTY, SMG_FULL, SMG_FULL_NO_EBIKES, SMG_CLASSIC_ONLY, SMG_OK = range(10)
+SMG_FIRST_MEASURED = SMG_OFFLINE  # ids ≥ this are measured; below are nullish and forward-filled in `state_ff`
+
+
+def smg_key(d: date) -> str:
+    return f'{SMG_PREFIX}/{d.strftime(ISO_DAY)}.parquet'
+
+
+def heartbeat_minutes(cli, d: date) -> np.ndarray:
+    """`(1440,)` bool: minutes whose cron tick wrote `gbfs/heartbeat/<day>/HH-MM.txt` (the poller's
+    first action each tick, so absence ⇒ CF skipped the trigger, not a failed fetch)."""
+    polled = np.zeros(MINUTES_PER_DAY, dtype=bool)
+    pag = cli.get_paginator('list_objects_v2')
+    for page in pag.paginate(Bucket=BUCKET, Prefix=f'{HEARTBEAT_PREFIX}/{d.strftime(ISO_DAY)}/'):
+        for o in page.get('Contents', []):
+            hhmm = o['Key'].rsplit('/', 1)[-1]
+            if len(hhmm) == 9 and hhmm.endswith('.txt'):
+                polled[int(hhmm[:2]) * 60 + int(hhmm[3:5])] = True
+    return polled
+
+
+@dataclass
+class SmgDay:
+    day: date
+    stations: list[str]      # live that day (≥1 row), sorted
+    state: np.ndarray        # (1440, K) int8, raw
+    state_ff: np.ndarray     # (1440, K) int8, nullish minutes forward-filled from the last measured state
+    lu_minutes: np.ndarray   # (1440,) bool: a fresh feed snapshot landed in the minute
+    polled: np.ndarray       # (1440,) bool: a cron heartbeat exists for the minute
+
+    @property
+    def carry(self) -> dict[str, int]:
+        """Last-minute `state_ff` per station — the next day's fill seed."""
+        return {s: int(v) for s, v in zip(self.stations, self.state_ff[-1])}
+
+    def hist(self, ff: bool = False) -> dict[str, int]:
+        a = self.state_ff if ff else self.state
+        return {name: int((a == i).sum()) for i, name in enumerate(SMG_STATES)}
+
+
+def classify_day(df: pd.DataFrame, d: date, polled: np.ndarray, seed: dict[str, int] | None = None) -> SmgDay:
+    """Assign each (live station, minute) its SMG state. Precedence, first match: a minute with no
+    heartbeat is `no_poll`; with a heartbeat but no fresh snapshot, `stale_feed`; a snapshot that
+    omits the station, `absent`; then per-row `offline` (not installed / not renting), `bogus`
+    (0 bikes ∧ 0 docks), `empty`, `full`, `classic_only`, `ok`. `state_ff` replaces the nullish
+    ids with the station's last measured state (seeded by `seed`, the previous day's carry)."""
+    day_start_min = int(datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc).timestamp() // 60)
+    minute = (df['ts'] // 60).to_numpy()
+    tidx = minute - day_start_min
+    in_day = (tidx >= 0) & (tidx < MINUTES_PER_DAY)
+    df = df[in_day].assign(_t=tidx[in_day])
+    lu = np.zeros(MINUTES_PER_DAY, dtype=bool)
+    lu[np.unique(df['_t'].to_numpy())] = True
+    df = df.sort_values(['station_id', '_t', 'ts'], kind='mergesort').drop_duplicates(['station_id', '_t'], keep='last')
+    stations = sorted(df['station_id'].unique())
+    index = {s: i for i, s in enumerate(stations)}
+    K = len(stations)
+    # System-wide default per minute: measured minutes default to `absent` until a row fills them.
+    default = np.where(lu, SMG_ABSENT, np.where(polled, SMG_STALE_FEED, SMG_NO_POLL)).astype(np.int8)
+    state = np.repeat(default[:, None], K, axis=1)
+    t = df['_t'].to_numpy()
+    sidx = df['station_id'].map(index).to_numpy()
+    bikes = df['num_bikes_available'].fillna(0).to_numpy()
+    ebikes = df['num_ebikes_available'].fillna(0).to_numpy()
+    docks = df['num_docks_available'].fillna(0).to_numpy()
+    offline = (df['is_installed'].fillna(0).to_numpy() != 1) | (df['is_renting'].fillna(0).to_numpy() != 1)
+    row_state = np.select(
+        [offline, (bikes == 0) & (docks == 0), bikes == 0, (docks == 0) & (ebikes == 0), docks == 0, ebikes == 0],
+        [SMG_OFFLINE, SMG_BOGUS, SMG_EMPTY, SMG_FULL_NO_EBIKES, SMG_FULL, SMG_CLASSIC_ONLY],
+        default=SMG_OK,
+    ).astype(np.int8)
+    state[t, sidx] = row_state
+    # Forward-fill nullish minutes from the last measured state; before the first, the seed.
+    measured = state >= SMG_FIRST_MEASURED
+    T = MINUTES_PER_DAY
+    last = np.maximum.accumulate(np.where(measured, np.arange(T)[:, None], -1), axis=0)
+    filled = np.take_along_axis(state, np.clip(last, 0, None), axis=0)
+    if seed:
+        seed_row = np.array([seed.get(s, -1) for s in stations], dtype=np.int8)
+        before = np.where(seed_row[None, :] >= SMG_FIRST_MEASURED, seed_row[None, :], state)
+    else:
+        before = state
+    state_ff = np.where(last >= 0, filled, before).astype(np.int8)
+    return SmgDay(day=d, stations=stations, state=state, state_ff=state_ff, lu_minutes=lu, polled=polled)
+
+
+def smg_table(smg: SmgDay):
+    """Long-form `(station_id, dt, state, state_ff)`, station-major so state runs compress."""
+    import pyarrow as pa
+    K = len(smg.stations)
+    day_start_ms = int(datetime.combine(smg.day, datetime.min.time(), tzinfo=timezone.utc).timestamp()) * 1000
+    dt = day_start_ms + np.arange(MINUTES_PER_DAY, dtype=np.int64) * 60_000
+    return pa.table({
+        'station_id': pa.array(np.repeat(np.array(smg.stations, dtype=object), MINUTES_PER_DAY)),
+        'dt': pa.array(np.tile(dt, K), type=pa.int64()),
+        'state': pa.array(smg.state.T.reshape(-1), type=pa.int8()),
+        'state_ff': pa.array(smg.state_ff.T.reshape(-1), type=pa.int8()),
+    })
+
+
+def write_smg(cli, smg: SmgDay) -> int:
+    import io
+    import pyarrow.parquet as pq
+    buf = io.BytesIO()
+    pq.write_table(smg_table(smg), buf, compression='zstd', row_group_size=MINUTES_PER_DAY * 64)
+    body = buf.getvalue()
+    cli.put_object(Bucket=BUCKET, Key=smg_key(smg.day), Body=body, ContentType='application/vnd.apache.parquet')
+    return len(body)
+
+
+def load_smg_carry(cli, d: date) -> dict[str, int] | None:
+    """The previous day's last-minute `state_ff` per station (the fill seed for `d`), or None."""
+    import io
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+    prev = d - timedelta(days=1)
+    try:
+        body = cli.get_object(Bucket=BUCKET, Key=smg_key(prev))['Body'].read()
+    except cli.exceptions.NoSuchKey:
+        return None
+    t = pq.read_table(io.BytesIO(body), columns=['station_id', 'dt', 'state_ff'])
+    last_dt = pc.max(t['dt']).as_py()
+    t = t.filter(pc.equal(t['dt'], last_dt))
+    return dict(zip(t['station_id'].to_pylist(), t['state_ff'].to_pylist()))
+
+
+def build_smg(cli, df: pd.DataFrame, d: date, seed: dict[str, int] | None) -> SmgDay:
+    return classify_day(df, d, heartbeat_minutes(cli, d), seed)
+
+
+def smg_check(smg: SmgDay, dp: DayPlanes) -> dict[str, tuple[int, int]]:
+    """Exact identities between SMG and the bitmaps for the same day (spec § Verification):
+    `Σ measured-usable = observed`, `empty = no_bikes`, `full + full_no_ebikes = full`,
+    `empty + full_no_ebikes + classic_only = no_ebikes` (strict planes), and the partition total.
+    Returns {name: (smg, bitmaps)}."""
+    h = smg.hist()
+    usable = h['empty'] + h['full'] + h['full_no_ebikes'] + h['classic_only'] + h['ok']
+    return {
+        'usable=observed': (usable, int(dp.planes['observed'].sum())),
+        'empty=no_bikes': (h['empty'], int(dp.strict('no_bikes').sum())),
+        'full+full_no_ebikes=full': (h['full'] + h['full_no_ebikes'], int(dp.strict('full').sum())),
+        'empty+full_no_ebikes+classic_only=no_ebikes': (h['empty'] + h['full_no_ebikes'] + h['classic_only'], int(dp.strict('no_ebikes').sum())),
+        'partition=live×1440': (sum(h.values()), len(smg.stations) * MINUTES_PER_DAY),
+    }
+
+
 # ─── Layouts ──────────────────────────────────────────────────────────────
 
 class Layout:
@@ -686,10 +839,12 @@ def _build_days(layout: Layout, days: list[date], cache: Path | None, store: str
     built = set() if force else _built_days(cli, layout, vocab.n_shards)
     g = open_group(layout, open_store(store or layout.store_url()))
     prev: DayPlanes | None = None
+    prev_smg: SmgDay | None = None
     for d in days:
         if d in built:
             err(f"{layout.name} {d}: built, skipping")
             prev = None
+            prev_smg = None
             continue
         df = load_status_day(cli, d, cache)
         if prev is not None and prev.day == d - timedelta(days=1):
@@ -703,13 +858,23 @@ def _build_days(layout: Layout, days: list[date], cache: Path | None, store: str
             err(f"{d}: vocab += {len(dp.added)} stations → {len(vocab.stations)}")
         n_objs = layout.write_day(g, dp)
         cov = write_coverage(cli, dp)
+        # SMG source parquet for the same day (specs/avail-smg-pyramid.md), seeded like the planes.
+        smg_seed = prev_smg.carry if prev_smg is not None and prev_smg.day == d - timedelta(days=1) else load_smg_carry(cli, d)
+        smg = build_smg(cli, df, d, smg_seed)
+        prev_smg = smg
+        smg_bytes = write_smg(cli, smg)
+        for name, (a, b) in smg_check(smg, dp).items():
+            if a != b:
+                raise RuntimeError(f"{d}: SMG/bitmap mismatch {name}: {a} != {b}")
         obs = dp.planes['observed']
         n_obs = int(obs.sum())
         dens = {p: int(dp.strict(p).sum()) / max(n_obs, 1) for p in PLANES[1:]}
+        h = smg.hist()
         err(
             f"{layout.name} {d}: rows={dp.n_rows:,} spill={dp.n_spill} observed={n_obs:,} "
             + ' '.join(f"{p}={v:.1%}" for p, v in dens.items())
             + f" objects={n_objs} coverage={cov['observed_minutes']}/1440 gaps={len(cov['gaps'])}"
+            + f" smg={smg_bytes / 1e6:.1f}MB no_poll={h['no_poll']} stale_feed={h['stale_feed']} offline={h['offline']:,}"
         )
         if verify:
             _verify_day(cli, layout, dp)
@@ -902,6 +1067,92 @@ def _print_result(r: QueryResult) -> None:
         K = len(r.stations)
         dist = '  '.join(f"{k}/{K}: {r.k_of_n[p].get(k, 0) / max(r.n_minutes, 1):.1%}" for k in range(K + 1))
         print(f"  k-of-{K} (all observed): {dist}")
+
+
+@gbfs.group('smg', help='Station-minute state histograms: per-day `gbfs/smg/<day>.parquet` source for the `smg-v1` pyramid (`specs/avail-smg-pyramid.md`).')
+def smg() -> None:
+    pass
+
+
+def _smg_days(cli, days: list[date], cache: Path | None, force: bool, check: bool) -> None:
+    vocab = load_vocab(cli) or init_vocab(cli)
+    have = set() if force else _smg_built_days(cli)
+    prev: SmgDay | None = None
+    for d in days:
+        if d in have:
+            err(f"smg {d}: built, skipping")
+            prev = None
+            continue
+        df = load_status_day(cli, d, cache)
+        seed = prev.carry if prev is not None and prev.day == d - timedelta(days=1) else load_smg_carry(cli, d)
+        s = build_smg(cli, df, d, seed)
+        prev = s
+        n = write_smg(cli, s)
+        h = s.hist()
+        line = f"smg {d}: stations={len(s.stations)} {n / 1e6:.1f}MB polled={int(s.polled.sum())}/1440 lu={int(s.lu_minutes.sum())}/1440 " + ' '.join(f"{k}={v:,}" for k, v in h.items())
+        if check:
+            dp = build_planes(df, d, vocab)
+            for name, (a, b) in smg_check(s, dp).items():
+                if a != b:
+                    raise RuntimeError(f"{d}: SMG/bitmap mismatch {name}: {a} != {b}")
+            line += ' ✓bitmaps'
+        err(line)
+
+
+def _smg_built_days(cli) -> set[date]:
+    pag = cli.get_paginator('list_objects_v2')
+    out = set()
+    for page in pag.paginate(Bucket=BUCKET, Prefix=f'{SMG_PREFIX}/'):
+        for o in page.get('Contents', []):
+            k = o['Key']
+            if k.endswith('.parquet'):
+                out.add(date.fromisoformat(k.split('/')[-1][:-8]))
+    return out
+
+
+@smg.command('build', help='Build `gbfs/smg/<day>.parquet` for one or more days (`YYYY-MM-DD`) from the daily status parquet + cron heartbeats.')
+@cache_opt
+@no_cache_opt
+@option('-f', '--force', is_flag=True, help='Rebuild days that already have a parquet')
+@option('-k', '--check', is_flag=True, help='Also build the day\'s bit planes and assert the SMG↔bitmap identities')
+@argument('days', nargs=-1, required=True)
+def smg_build_cmd(cache: Path, no_cache: bool, force: bool, check: bool, days: tuple[str, ...]) -> None:
+    _smg_days(r2_client(), [_parse_day(d) for d in days], None if no_cache else cache, force, check)
+
+
+@smg.command('backfill', help='Build every day with a daily status parquet and no SMG parquet yet, oldest first (default: through yesterday).')
+@cache_opt
+@no_cache_opt
+@option('-f', '--from', 'from_', default=None, help='First day (default: first status parquet)')
+@option('-F', '--force', is_flag=True, help='Rebuild days that already have a parquet')
+@option('-k', '--check', is_flag=True, help='Assert the SMG↔bitmap identities per day')
+@option('-t', '--to', default=None, help='Last day, inclusive (default: yesterday UTC)')
+def smg_backfill_cmd(cache: Path, no_cache: bool, from_: str | None, force: bool, check: bool, to: str | None) -> None:
+    cli = r2_client()
+    days = _status_days(cli)
+    lo = _parse_day(from_) if from_ else days[0]
+    hi = _parse_day(to) if to else (datetime.now(timezone.utc).date() - timedelta(days=1))
+    days = [d for d in days if lo <= d <= hi]
+    err(f"smg backfill: {len(days)} candidate days {days[0]} → {days[-1]}")
+    _smg_days(cli, days, None if no_cache else cache, force, check)
+
+
+@smg.command('hist', help='Print the state histogram (raw and forward-filled) of one built day, from its parquet.')
+@argument('day')
+def smg_hist_cmd(day: str) -> None:
+    import io
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+    cli = r2_client()
+    d = _parse_day(day)
+    t = pq.read_table(io.BytesIO(cli.get_object(Bucket=BUCKET, Key=smg_key(d))['Body'].read()))
+    n = t.num_rows
+    print(f"{d}: {n:,} station-minutes ({n // MINUTES_PER_DAY} stations)")
+    print(f"{'state':13s} {'raw':>10s} {'raw %':>7s} {'ff':>10s} {'ff %':>7s}")
+    for i, name in enumerate(SMG_STATES):
+        a = pc.sum(pc.equal(t['state'], i)).as_py() or 0
+        b = pc.sum(pc.equal(t['state_ff'], i)).as_py() or 0
+        print(f"{name:13s} {a:10,d} {a / n:7.2%} {b:10,d} {b / n:7.2%}")
 
 
 @empty.command('query', help='Reference `/api/empty`: strided window (local hours × days-of-week over [from, to]) for a station set → per-station % in each condition + the k-of-K joint distribution. Prints RPC/byte/time budget to stderr.')

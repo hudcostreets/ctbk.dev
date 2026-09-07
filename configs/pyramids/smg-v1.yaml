@@ -1,0 +1,53 @@
+# ctbk smg-v1 pyramid config: station-minute state histograms
+# (`specs/avail-smg-pyramid.md`) — the categorical sibling of avail-v6.
+#
+# Same ladder / geo / vocab chains as avail-v6; the only differences are
+# the key prefix and the metrics: two categorical histograms whose bins
+# are SMG state ids (see `SMG_STATES` in `ctbk/gbfs_empty.py`):
+#   0 no_poll  1 stale_feed  2 absent  3 offline  4 bogus
+#   5 empty  6 full  7 full_no_ebikes  8 classic_only  9 ok
+# `state` is the raw partition; `state_ff` forward-fills the nullish ids
+# (0–2) from each station's last measured state. Built by the engine from
+# the per-day `gbfs/smg/<day>.parquet` source (`ctbk gbfs smg build`) via
+# `ctbk gbfs engine submit -C smg-v1 -x ctbk_engine_src:smg_daily -f`.
+chains: vocab
+
+storage:
+  type: s3
+  bucket: ctbk
+  key: "smg-v1/{tier}/{shard}/{period}.parquet"
+
+defaults:
+  rg_size: 2048
+
+axis: time
+binCol: dt
+
+dims:
+  - { name: s2_cell, type: string }
+
+metrics:
+  - { name: state,    monoid: histogram }
+  - { name: state_ff, monoid: histogram }
+
+# Tiers in canonical (finest → coarsest) order — the avail-v6 ladder.
+tiers:
+  - { name: 1m,  bin: 1min,  shards: [5min, 10min, 30min, 1h, 3h, 6h, 12h], lambda_shards: [1d, 2d] }
+  - { name: 2m,  bin: 2min,  shards: [10min, 30min, 1h, 3h, 6h, 12h, 1d], lambda_shards: [2d, 4d] }
+  - { name: 3m,  bin: 3min,  shards: [15min, 30min, 1h, 3h, 6h, 12h, 1d, 2d], lambda_shards: [4d, 8d] }
+  - { name: 5m,  bin: 5min,  shards: [15min, 30min, 1h, 3h, 6h, 12h, 1d, 2d], lambda_shards: [4d, 8d] }
+  - { name: 10m, bin: 10min, shards: [30min, 1h, 3h, 6h, 12h, 1d, 2d, 4d], lambda_shards: [8d, 16d] }
+  - { name: 15m, bin: 15min, shards: [1h, 3h, 6h, 12h, 1d, 2d, 4d, 8d], lambda_shards: [16d, 32d] }
+  - { name: 30m, bin: 30min, shards: [2h, 6h, 12h, 1d, 2d, 4d, 8d, 16d], lambda_shards: [32d, 64d] }
+  - { name: 1h,  bin: 1h,    shards: [3h, 6h, 12h, 1d, 2d, 4d, 8d, 16d, 32d], lambda_shards: [64d, 128d] }
+  - { name: 2h,  bin: 2h,    shards: [6h, 12h, 1d, 2d, 4d, 8d, 16d, 32d, 64d], lambda_shards: [128d, 256d] }
+  - { name: 3h,  bin: 3h,    shards: [12h, 1d, 2d, 4d, 8d, 16d, 32d, 64d], lambda_shards: [128d, 256d, 512d] }
+  - { name: 6h,  bin: 6h,    shards: [1d, 2d, 4d, 8d, 16d, 32d, 64d, 128d], lambda_shards: [256d, 512d, 1024d] }
+  - { name: 12h, bin: 12h,   shards: [2d, 4d, 8d, 16d, 32d, 64d, 128d, 256d], lambda_shards: [512d, 1024d, 2048d] }
+  - { name: 1d,  bin: 1d,    shards: [4d, 8d, 16d, 32d, 64d, 128d, 256d, 512d], lambda_shards: [1024d, 2048d] }
+  - { name: 3d,  bin: 3d,    shards: [12d, 24d, 48d, 96d, 192d, 384d, 768d, 1536d], lambda_shards: [3072d] }
+  - { name: 7d,  bin: 7d,    shards: [28d, 56d, 112d, 224d, 448d, 896d, 1792d, 3584d], lambda_shards: [7168d] }
+
+geo:
+  cellCol: s2_cell
+  resolutions: [15, 14, 13, 12, 11, 10]

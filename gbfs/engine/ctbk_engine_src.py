@@ -12,20 +12,15 @@ def avail_1m_2d(pyramid, filter):
     return WideShardSource(pyramid, tier_name='1m', shard_dur='2d', filter=filter)
 
 
-def avail_daily_status(pyramid, filter):
-    """Raw-ingest source for the avail-v6 LU-attributed regen (pyrmts
-    `specs/engine-raw-ingest.md`): daily status parquets → every rung
-    including `/1m`. Chains = frozen ragged vocabulary (bundled
-    `station-vocab.json`) + `s:<short_name>` identity keys, expanded
-    from the station registry (`station-luc.json`, read through the
-    pyramid's storage — only its stable identity fields; mirrors
-    `lambda_exec._vocab_chains`)."""
+def _vocab_chains(pyramid) -> dict[str, list[str]]:
+    """Station UUID → key rows: frozen ragged vocabulary (bundled
+    `station-vocab.json`) ancestor cells + the `s:<short_name>` identity
+    key, expanded from the station registry (`station-luc.json`, read
+    through the pyramid's storage — only its stable identity fields;
+    mirrors `lambda_exec._vocab_chains`)."""
     import json
     from pathlib import Path
-    from ctbk_raw_source import DailyStatusSource
     from ctbk_vocab import load_vocab, station_chain
-    if filter:
-        raise ValueError(f'avail_daily_status: no filter dims supported, got {filter!r}')
     vocab = load_vocab(Path(__file__).parent / 'station-vocab.json')
     data = json.loads(pyramid.storage.get('station-luc.json'))
     chains = {}
@@ -34,7 +29,28 @@ def avail_daily_status(pyramid, filter):
         if not e:
             continue
         chains[uuid] = station_chain(e['lat'], e['lng'], short_name, vocab)
-    return DailyStatusSource(pyramid, chains)
+    return chains
+
+
+def avail_daily_status(pyramid, filter):
+    """Raw-ingest source for the avail-v6 LU-attributed regen (pyrmts
+    `specs/engine-raw-ingest.md`): daily status parquets → every rung
+    including `/1m`. Chains per `_vocab_chains`."""
+    from ctbk_raw_source import DailyStatusSource
+    if filter:
+        raise ValueError(f'avail_daily_status: no filter dims supported, got {filter!r}')
+    return DailyStatusSource(pyramid, _vocab_chains(pyramid))
+
+
+def smg_daily(pyramid, filter):
+    """Raw-ingest source for the `smg-v1` station-minute state histograms
+    (`specs/avail-smg-pyramid.md`): per-day `gbfs/smg/<day>.parquet`
+    (station, minute, state, state_ff) → every rung. Same chains as
+    `avail_daily_status`."""
+    from ctbk_smg_source import SmgDailySource
+    if filter:
+        raise ValueError(f'smg_daily: no filter dims supported, got {filter!r}')
+    return SmgDailySource(pyramid, _vocab_chains(pyramid))
 
 
 def _rides(pyramid, filter, anchor: str):
