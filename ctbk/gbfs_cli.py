@@ -1214,16 +1214,19 @@ def gbfs_engine() -> None:
 	pass
 
 
-def _engine_range(aligned: str | None, range_: str | None) -> tuple[datetime, datetime]:
-	from ctbk.pyramid_cascade.engine_check import aligned_range
-	from ctbk.pyramid_cascade.lite import AVAIL_GENESIS
+def _engine_range(aligned: str | None, range_: str | None, config_name: str | None = None) -> tuple[datetime, datetime]:
+	"""`-a DUR[:N]` or `-r [FROM]/TO` → (from, to). An omitted FROM is the
+	config's genesis: `RIDES_GENESIS` for the rides anchors, else `AVAIL_GENESIS`."""
+	from ctbk.pyramid_cascade.engine_check import _rides_anchor, aligned_range
+	from ctbk.pyramid_cascade.lite import AVAIL_GENESIS, RIDES_GENESIS
 	if (aligned is None) == (range_ is None):
 		raise click.UsageError('exactly one of -a/--aligned or -r/--range is required')
 	if aligned is not None:
 		dur, _, n = aligned.partition(':')
 		return aligned_range(dur, int(n or 1))
 	from_s, _, to_s = range_.partition('/')
-	from_ = datetime.fromisoformat(from_s).replace(tzinfo=timezone.utc) if from_s else AVAIL_GENESIS
+	genesis = RIDES_GENESIS if config_name is not None and _rides_anchor(config_name) else AVAIL_GENESIS
+	from_ = datetime.fromisoformat(from_s).replace(tzinfo=timezone.utc) if from_s else genesis
 	to = datetime.fromisoformat(to_s).replace(tzinfo=timezone.utc)
 	return from_, to
 
@@ -1248,7 +1251,7 @@ def gbfs_engine_build(
 	window: str,
 ) -> None:
 	from ctbk.pyramid_cascade.engine_check import DEFAULT_MANIFEST, run_build
-	time_range = _engine_range(aligned, range_)
+	time_range = _engine_range(aligned, range_, config_name)
 	raw = source_rung == 'raw'
 	source_tier, _, source_shard = ('', '', '') if raw else source_rung.partition('@')
 	err(f'range: {time_range[0].isoformat()} → {time_range[1].isoformat()}')
@@ -1445,7 +1448,7 @@ def _engine_submit(
 		from_ = RIDES_GENESIS if _rides_anchor(config_name) else AVAIL_GENESIS
 		to = datetime.now(timezone.utc)
 	else:
-		from_, to = _engine_range(aligned, range_)
+		from_, to = _engine_range(aligned, range_, config_name)
 	cmd += ['-r', f'{from_.strftime("%Y-%m-%dT%H:%M")}/{to.strftime("%Y-%m-%dT%H:%M")}']
 	if fill:
 		cmd += ['-f']
