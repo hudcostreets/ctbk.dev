@@ -492,6 +492,7 @@ import { R2Store } from '@rdub/file-tree/stores/r2';
 import { createHandlers } from '@rdub/file-tree/server';
 import { computeAndStoreHealthSnapshot, readCachedHealthSnapshot } from './health';
 import { coverageKey, coverageRange, defaultCoverageRange, isDay, type CoverageDay } from './coverage';
+import { EMPTY_VOCAB_KEY, makeVocab, readSeries, type Bin, type OpenShard, type ShardBytes, type Vocab } from './empty';
 import { runAlerts } from './alerts';
 import { DEFAULT_PYRAMID, repairGeneration, serveAvailV3, serveAvailV3Cells } from './avail_geo';
 import { serveRidesV3, serveRidesV3Cells, serveRidesV5 } from './rides_v1';
@@ -1168,6 +1169,43 @@ async function reconcileRegistry(env: Env): Promise<void> {
 	}
 }
 
+// ─── /api/empty support ──────────────────────────────────────────────────────
+
+/** One R2 shard object as a `ShardBytes` accessor (whole / suffix / range GETs). */
+function r2Shard(R2: R2Bucket, key: string): ShardBytes {
+	return {
+		async tail(n) {
+			const obj = await R2.get(key, { range: { suffix: n } });
+			return obj ? new Uint8Array(await obj.arrayBuffer()) : null;
+		},
+		async range(off, n) {
+			const obj = await R2.get(key, { range: { offset: off, length: n } });
+			return new Uint8Array(await obj!.arrayBuffer());
+		},
+		async whole() {
+			const obj = await R2.get(key);
+			return obj ? new Uint8Array(await obj.arrayBuffer()) : null;
+		},
+	};
+}
+
+/** Station vocab is append-only; cache per isolate. */
+let emptyVocab: Vocab | undefined;
+async function loadEmptyVocab(R2: R2Bucket): Promise<Vocab> {
+	if (emptyVocab) return emptyVocab;
+	const obj = await R2.get(EMPTY_VOCAB_KEY);
+	if (!obj) throw new Error(`empty vocab missing: ${EMPTY_VOCAB_KEY}`);
+	const j = (await obj.json()) as { stations: string[] };
+	emptyVocab = makeVocab(j.stations);
+	return emptyVocab;
+}
+
+/** Bucket resolution for a span when `bin` isn't given: minute ≤2d, hour ≤90d, else day. */
+function autoBin(from: string, to: string): Bin {
+	const days = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1;
+	return days <= 2 ? 'minute' : days <= 90 ? 'hour' : 'day';
+}
+
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
@@ -1278,6 +1316,33 @@ export default {
 				return jsonResponse(range, env, { headers: { 'Cache-Control': `public, max-age=${maxAge}` } });
 			} catch (err: any) {
 				return errorResponse(err.message ?? 'coverage failed', 400, env);
+			}
+		}
+
+		// /api/empty?reduce=series&from=&to=[&bin=minute|hour|day][&station=<uuid>…]
+		// — condition (empty/full) station counts over time from the empty-bitmap
+		// planes (`empty-v1p/planes`; see ./empty.ts + specs/avail-empty-bitmaps.md).
+		// No `station` ⇒ all stations (homepage/citywide); one or more ⇒ that subset
+		// (same read path, K = 1 / few / all). The reduction runs over the streamed
+		// shard columns, so response size is O(#buckets), not O(#stations). Closed
+		// ranges are immutable (past days never rewritten) → cache a day.
+		if (url.pathname === '/api/empty') {
+			try {
+				const reduce = url.searchParams.get('reduce') ?? 'series';
+				if (reduce !== 'series') return errorResponse(`unsupported reduce=${reduce} (only 'series' so far)`, 400, env);
+				const dflt = defaultCoverageRange();
+				const from = url.searchParams.get('from') ?? dflt.from;
+				const to = url.searchParams.get('to') ?? dflt.to;
+				const binParam = url.searchParams.get('bin');
+				const bin: Bin = binParam === 'minute' || binParam === 'hour' || binParam === 'day' ? binParam : autoBin(from, to);
+				const stations = url.searchParams.getAll('station');
+				const vocab = await loadEmptyVocab(env.R2);
+				const open: OpenShard = (key) => r2Shard(env.R2, key);
+				const result = await readSeries(open, vocab, { from, to, bin, stations });
+				const maxAge = to < todayUtc() ? 86400 : 300;
+				return jsonResponse(result, env, { headers: { 'Cache-Control': `public, max-age=${maxAge}` } });
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'empty query failed', 400, env);
 			}
 		}
 

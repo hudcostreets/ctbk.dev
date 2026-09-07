@@ -1,6 +1,6 @@
 # avail: empty/full bitmaps — exact station-set reliability over strided time windows
 
-Status: in progress (2026-09-04) — increment 1 landed (builder + backfill, packed layout, forward-filled planes, coverage artifacts; bake-off in §9). Next: increment 2 (worker `/api/empty`, `/api/coverage`) and the health-page history view (§9.2). Supersedes [`avail-outage-aggregations.md`] (the `/api/avail-v3/stats` + `n_empty`-per-cell + keyed week-hour-pyramid line of thinking); see "What this retires" below. Experiments in §1 are done (`tmp/empty-bitmap-exp.py`, output in `tmp/empty-bitmap-exp.out`).
+Status: in progress — increment 1 landed 2026-09-04 (builder + backfill, packed layout, forward-filled planes, coverage artifacts; bake-off in §9); the §9.2 coverage/health thread shipped and deployed 2026-09-06 (`/api/coverage`, `/health` history, `/health/feed`). Next: **increment 2** — worker `/api/empty` (Zarr reader ported to TS) with the two reductions in §4.1; the `series` reduction powers the over-time chart (§5), embedded on the homepage as the K = all case (no whole-system special-casing). Supersedes [`avail-outage-aggregations.md`] (the `/api/avail-v3/stats` + `n_empty`-per-cell + keyed week-hour-pyramid line of thinking); see "What this retires" below. Experiments in §1 are done (`tmp/empty-bitmap-exp.py`, output in `tmp/empty-bitmap-exp.out`).
 
 ## Goal
 
@@ -107,7 +107,11 @@ Every object is written once; nothing is mutated. No coarsening cascade is neede
 
 1. Resolve stations → column indices (vocab) → station-shards. Enumerate `(day, hour)` pairs in the window that match `hours × dow` (in `America/New_York`; DST handled by evaluating each UTC hour's local `(dow, hour)`).
 2. Sources, unioned: Zarr day-shards for complete days (one range read per `(day, shard, hour)`), `h1` objects for today's complete hours, `n0` objects for the ≤59 minutes since the last compaction.
-3. Gunzip + unpack, keep the selected columns, then per requested plane: per-station `% of observed`, per-row popcount over the selected set → the `k-of-K` distribution, plus `all`/`any` (AND/OR) rates. Optionally per-`(dow, hour)` breakdown for the heatmap.
+3. Gunzip + unpack, keep the selected columns, then **reduce** (below).
+
+**Reductions — one column read, several outputs.** Steps 1–2 (resolve columns → fetch shards → unpack → select the requested columns, forward-filled) are identical regardless of what's asked; only the final reduction differs, so the same code path serves one station, a small group, or all ~2,500. `reduce=`:
+- `series` (**the over-time chart**): per time-bucket, `Σ_selected-columns bit` for each plane — i.e. **how many of the selected stations are empty / full at each bucket** — plus the observed/live denominator (selected stations known that bucket). Bucket adapts to range (minute ≤ ~2 d, hour ≤ ~90 d, else day); output is O(buckets), tiny. The homepage is this with the selection = **all columns** (K = all → the citywide count); a station page is K = 1; a group is K = few. **No separate whole-system artifact** — "all stations" is just the widest column set through this same reduction.
+- `window` (heatmap / set view): collapse the whole window → per-station `% of observed`, the `k-of-K` distribution (per-row popcount over the set), `all`/`any` rates, optional per-`(dow, hour)` cells.
 
 Request-count budget (the CFW constraint, not bytes): "weekday 8–9am × 12 weeks" = 60 hours × ⌈shards touched⌉. Four nearby stations → 60 requests of ~0.3 KB; city-wide (all 5 shards) → 300. Parallel, well under the subrequest limit. Guardrail: cap `hours × days × shards` (e.g. ≤2,000 requests); multi-year × all-minutes × all-stations is a Python job, not a request.
 
@@ -119,6 +123,7 @@ Real `zarr`/`xarray` access for builds, backfill, verification, and notebook ana
 
 ## 5. FE
 
+- **Over-time chart** (`reduce=series`): # of the selected stations empty / full over time. Embeds identically on the homepage (selection = all stations → citywide count), a station-set page (`?sel=`), and a single station page (`/s/:slug`) — same component, same endpoint, selection is the only difference. Lookback picker; plane toggle; the count is against the observed/live denominator so a coverage dip reads as denominator, not a spurious drop. Mark the 2026-08-04 poller-v2 boundary (pre-v2 observed ≈ 80%).
 - **Heatmap**: day-of-week × hour-of-day, cell = % of observed minutes in the selected condition, for the current selection (`?sel=` multi-select on `/stations`, or a single station page). Lookback picker (1w / 4w / 12w / since date). Plane toggle (no bikes / no e-bikes / full).
 - **Set view**: for K selected stations, the `0..K`-of-K distribution for the chosen window, and the headline "all K empty x% of weekday 8–9am minutes".
 - **Tail**: "last 24h / 7d for these K stations" strip using h1 + n0, for the "they're all empty right now" moment.
@@ -135,7 +140,7 @@ Unchanged: the avail-v6 histogram pyramid keeps serving magnitude stats (mean bi
 
 0. **Experiments** — done (§1).
 1. **Python builder** — DONE 2026-09-04: `ctbk/gbfs_empty.py` = `ctbk gbfs empty {vocab,build,backfill,verify,stats,read}`. `stats -e` absorbs the §1 experiment script; `read` is the reference range-reader (trailing shard index → range GET → gunzip → unpack), i.e. the algorithm the worker will port, and `build -V` round-trips every written shard through it. Unit tests: `ctbk/tests/test_gbfs_empty.py` (exact plane coordinates incl. dedup/spill/dead/not-renting cases; Zarr round trip on a `LocalStore`; reader on absent shards + empty chunks). Backfill 2026-04-07 → 2026-09-03 ran **locally** (R2 write creds are present on the laptop and the job is ~150 × 15 MB streamed reads, so `e` wasn't needed). The daily `build <yesterday>` step is in `gbfs-compact.yml` (both layouts until §9 decides). `ctbk gbfs empty query` is the reference `/api/empty` (strided local hours × dows over a date range → per-station % + k-of-K joint distribution, with RPC/byte/time accounting); `bench` runs it across layouts × fetch strategies.
-2. **Worker reader** + `/api/empty` (complete days only, from Zarr). Vitest against a fixture day built from a public daily parquet.
+2. **Worker reader** + `/api/empty` (complete days only, from Zarr) — port the reference reader to TS; both reductions (§4.1): `series` first (powers the over-time chart), `window` alongside. Vitest against a fixture day built from a public daily parquet, cross-checked against `ctbk gbfs empty query`. Then the FE **over-time chart** (§5) on `/` (all), `/s/:slug` (one), and `?sel=` (a group).
 3. **Tail rungs**: compactor emits `h1` bitmaps; poller emits `n0`; reader unions all three.
 4. **FE**: heatmap + set view + tail strip.
 
