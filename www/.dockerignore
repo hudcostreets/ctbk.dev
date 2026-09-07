@@ -114,6 +114,9 @@
 !src/components/RidesTable.tsx
 !src/components/RollupTripsChart.tsx
 !src/components/S2CellTip.tsx
+!src/components/SmgChart.tsx
+!src/components/SmgPanel.module.css
+!src/components/SmgPanel.tsx
 !src/components/StageCard.tsx
 !src/components/StationAvailabilityChart.css
 !src/components/StationAvailabilityChart.tsx
@@ -164,6 +167,7 @@
 !src/main.tsx
 !src/mdx.d.ts
 !src/pages/CellsDebug.tsx
+!src/pages/FeedHealth.tsx
 !src/pages/Files.tsx
 !src/pages/Health.tsx
 !src/pages/Home.tsx
@@ -176,6 +180,7 @@
 !src/query/ridesTable.ts
 !src/query/ridesV1.ts
 !src/query/rollups.ts
+!src/query/smg.ts
 !src/query/stations.ts
 !src/stations.module.css
 !src/theme.ts
