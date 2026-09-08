@@ -21,6 +21,7 @@ import controlCss from "../controls.module.css"
 import { Checkbox } from "../components/Checkbox"
 import { Checklist } from "../components/Checklist"
 import { Footer } from "../components/Footer"
+import { Tip } from "../components/Tip"
 import MonthRangePicker from "../components/MonthRangePicker"
 import { Radios } from "../components/Radios"
 import { useIsInView } from "../hooks/useIsInView"
@@ -321,6 +322,7 @@ export default function Home() {
 
         {!screenshotMode && (
         <div className={css.row}>
+          <div className={css.legendRow}>
           <details
             className={css.controls}
             open={controlsOpen}
@@ -441,23 +443,33 @@ export default function Home() {
               cb={setRideableTypes}
             />
           </details>
+          <Tip
+            interactive
+            placement="bottom"
+            content={
+              <div className={css.examplesTip}>
+                <ul>
+                  <li><Link to="/?r=jh">JC + Hoboken</Link> (<Link to="/?r=jh&s=r">stacked</Link>)</li>
+                  <li><Link to="/?y=m&s=g&pct=&g=mf&d=1406-2102">Ride minute %'s, Men vs. Women</Link>, Jun '14 – Jan '21</li>
+                  <li><Link to="/?s=u&pct=">Member vs. customer %'s</Link></li>
+                  <li><Link to={RideableTypesExample}>Classic / E-bike ride minutes</Link> (<Link to={`${RideableTypesExample}&pct`}>stacked</Link>)</li>
+                  <li><Link to="/s/8-ave-w-33-st">8 Ave &amp; W 33 St — live availability + trip history</Link> (per-station page)</li>
+                  <li><Link to="/">Default view (system-wide rides over time)</Link></li>
+                </ul>
+              </div>
+            }
+          >
+            <span className={css.examplesTrigger}>Examples ▾</span>
+          </Tip>
+          </div>
         </div>
         )}
 
         <hr />
 
         <div className={css.row}>
-          <h4>Examples</h4>
-          <ul>
-            <li><Link to="/?r=jh">JC + Hoboken</Link> (<Link to="/?r=jh&s=r">stacked</Link>)</li>
-            <li><Link to="/?y=m&s=g&pct=&g=mf&d=1406-2102">Ride minute %'s, Men vs. Women</Link>, Jun '14 – Jan '21</li>
-            <li><Link to="/?s=u&pct=">Member vs. customer %'s</Link></li>
-            <li><Link to={RideableTypesExample}>Classic / E-bike ride minutes</Link> (<Link to={`${RideableTypesExample}&pct`}>stacked</Link>)</li>
-            <li><Link to="/s/8-ave-w-33-st">8 Ave &amp; W 33 St — live availability + trip history</Link> (per-station page)</li>
-            <li><Link to="/">Default view (system-wide rides over time)</Link></li>
-          </ul>
-          <p>This plot refreshes when <a href="https://www.citibikenyc.com/system-data" target="_blank" rel="noopener noreferrer">new data is published by Citi Bike</a> (typically the 1st or 2nd week of each month, covering the previous month).</p>
-          <p><a href="https://github.com/hudcostreets/ctbk.dev" target="_blank" rel="noopener noreferrer">The GitHub repo</a> has more info as well as <a href="https://github.com/hudcostreets/ctbk.dev/issues" target="_blank" rel="noopener noreferrer">planned enhancements</a>. Data updates are performed <a href="https://github.com/hudcostreets/ctbk.dev/actions" target="_blank" rel="noopener noreferrer">by Github Actions</a>.</p>
+          <h3 id="map">Map: Stations + Common Destinations</h3>
+          <LazyStationMap />
 
           <hr />
 
@@ -476,13 +488,9 @@ export default function Home() {
 
           <hr />
 
-          <h3 id="map">Map: Stations + Common Destinations</h3>
-          <LazyStationMap />
-
-          <hr />
-
           <h3 id="pipeline">Data Pipeline</h3>
           <p>See the <Link to="/pipeline">pipeline documentation</Link> for details on data processing stages, sources, and <Link to="/pipeline#legacy-data">data-quality issues</Link> (e.g. gender data removed since 2021-02).</p>
+          <p>Rides refresh when <a href="https://www.citibikenyc.com/system-data" target="_blank" rel="noopener noreferrer">new data is published by Citi Bike</a> (typically the 1st or 2nd week of each month, covering the previous month). <a href="https://github.com/hudcostreets/ctbk.dev" target="_blank" rel="noopener noreferrer">The GitHub repo</a> has more info and <a href="https://github.com/hudcostreets/ctbk.dev/issues" target="_blank" rel="noopener noreferrer">planned enhancements</a>; data updates run <a href="https://github.com/hudcostreets/ctbk.dev/actions" target="_blank" rel="noopener noreferrer">via GitHub Actions</a>.</p>
 
           <Footer />
         </div>

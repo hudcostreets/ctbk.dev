@@ -59,11 +59,35 @@
     position: relative;
     z-index: 10;
 }
-/* Tuck the gear icon up level with the plot's legend (bottom-left corner),
-   open or closed — the legend sits below the plot, so the expanded panel
-   flows down from the gear line without overlapping the plot. */
-.controls {
+/* Tuck the legend row (gear at left, Examples trigger at right) up level
+   with the plot's legend — the legend sits below the plot, so the row and
+   the expanded controls panel flow down without overlapping the plot. */
+.legendRow {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    width: 100%;
     margin-top: -2em;
+}
+.examplesTrigger {
+    cursor: default;
+    user-select: none;
+    white-space: nowrap;
+    font-size: 1.05em;
+    padding: 0.1em 0.2em;
+    opacity: 0.8;
+}
+.examplesTrigger:hover {
+    opacity: 1;
+    text-decoration: underline;
+}
+.examplesTip ul {
+    margin: 0;
+    padding-left: 1.2em;
+}
+.examplesTip li {
+    margin: 0.15em 0;
+    white-space: nowrap;
 }
 .controls > summary {
     margin-bottom: 0.3em;
