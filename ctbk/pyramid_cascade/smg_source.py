@@ -42,10 +42,17 @@ class SmgDailySource(TiledSource):
 
     def parse(self, blob: bytes, tile: Tile) -> pl.DataFrame:
         df = pl.read_parquet(BytesIO(blob), columns=['station_id', 'dt', *SMG_METRICS])
+        # `value_name` must NOT be one of the `on` columns: the source columns
+        # are literally `state`/`state_ff`, so unpivoting them into a value
+        # column also named `state` collides — polars ≥ 1.44 raises
+        # `DuplicateError` (1.41 tolerated it, which is why this slipped
+        # through until the base image drifted to 1.44). Unpivot to a temp
+        # name, then rename to the long-form `state` (the histogram bucket id).
         long = (
             df
-            .unpivot(index=['station_id', 'dt'], on=list(SMG_METRICS), variable_name='metric', value_name='state')
-            .with_columns(pl.col('state').cast(pl.Int32))
+            .unpivot(index=['station_id', 'dt'], on=list(SMG_METRICS), variable_name='metric', value_name='_state')
+            .with_columns(pl.col('_state').cast(pl.Int32).alias('state'))
+            .drop('_state')
             .join(self._chains, on='station_id', how='inner')
             .explode('s2_cell')
         )
