@@ -30,6 +30,15 @@ const yTicks = (page: Page) =>
 const legendItems = (page: Page) =>
   page.locator('.js-plotly-plot .legendtext').allTextContents()
 
+/** The Examples links moved into a hover tooltip (Home.tsx `Tip`, interactive
+ *  so the pointer can travel into it). Reveal it, then click the named link. */
+const clickExample = async (page: Page, name: string | RegExp) => {
+  await page.getByText(/Examples/).first().hover()
+  const link = page.getByRole('link', { name }).first()
+  await link.waitFor({ state: 'visible' })
+  await link.click()
+}
+
 /** Convert a y-tick label like "5M" / "120k" / "0" to a number. */
 const parseTick = (s: string): number => {
   const m = s.match(/^([\d.]+)([Mk%]?)$/)
@@ -87,7 +96,7 @@ test.describe('Home chart updates', () => {
     expect(yMaxDefault).toBeLessThan(10_000_000) // Rides scale, not Minutes scale
 
     // Click Examples link: stack by Bike Type, Minutes, dates from 2020-02.
-    await page.getByRole('link', { name: 'Classic / E-bike ride minutes' }).first().click()
+    await clickExample(page, 'Classic / E-bike ride minutes')
 
     // Legend reflects new trace identities — Classic + Electric stacked, plus 12mo lines.
     await expect.poll(async () => legendItems(page), { timeout: 5000 }).toEqual(
@@ -100,7 +109,7 @@ test.describe('Home chart updates', () => {
   test('Examples link "Member vs. customer %" switches to percent y-axis', async ({ page }) => {
     await ready(page)
 
-    await page.getByRole('link', { name: "Member vs. customer %'s" }).first().click()
+    await clickExample(page, "Member vs. customer %'s")
 
     // Legend reflects new traces.
     await expect.poll(async () => legendItems(page), { timeout: 5000 }).toEqual(
@@ -120,7 +129,7 @@ test.describe('Home chart updates', () => {
       .poll(async () => legendItems(page), { timeout: 5000 })
       .toEqual(expect.arrayContaining(['Classic', 'Electric']))
 
-    await page.getByRole('link', { name: 'Default view' }).first().click()
+    await clickExample(page, 'Default view')
 
     await expect.poll(async () => legendItems(page), { timeout: 5000 }).toEqual(
       ['Rides', '12mo avg'],
