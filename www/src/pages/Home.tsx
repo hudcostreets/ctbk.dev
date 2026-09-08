@@ -447,6 +447,20 @@ export default function Home() {
         <hr />
 
         <div className={css.row}>
+          <h4>Examples</h4>
+          <ul>
+            <li><Link to="/?r=jh">JC + Hoboken</Link> (<Link to="/?r=jh&s=r">stacked</Link>)</li>
+            <li><Link to="/?y=m&s=g&pct=&g=mf&d=1406-2102">Ride minute %'s, Men vs. Women</Link>, Jun '14 – Jan '21</li>
+            <li><Link to="/?s=u&pct=">Member vs. customer %'s</Link></li>
+            <li><Link to={RideableTypesExample}>Classic / E-bike ride minutes</Link> (<Link to={`${RideableTypesExample}&pct`}>stacked</Link>)</li>
+            <li><Link to="/s/8-ave-w-33-st">8 Ave &amp; W 33 St — live availability + trip history</Link> (per-station page)</li>
+            <li><Link to="/">Default view (system-wide rides over time)</Link></li>
+          </ul>
+          <p>This plot refreshes when <a href="https://www.citibikenyc.com/system-data" target="_blank" rel="noopener noreferrer">new data is published by Citi Bike</a> (typically the 1st or 2nd week of each month, covering the previous month).</p>
+          <p><a href="https://github.com/hudcostreets/ctbk.dev" target="_blank" rel="noopener noreferrer">The GitHub repo</a> has more info as well as <a href="https://github.com/hudcostreets/ctbk.dev/issues" target="_blank" rel="noopener noreferrer">planned enhancements</a>. Data updates are performed <a href="https://github.com/hudcostreets/ctbk.dev/actions" target="_blank" rel="noopener noreferrer">by Github Actions</a>.</p>
+
+          <hr />
+
           <h3 id="states">Station states</h3>
           <p>Every station-minute since April 2026, classified from the live GBFS feed: OK, no e-bikes, full, empty, offline, or unmeasured (drag to pan; click a legend entry to solo it). Rebuilt daily from the <Link to="/health/feed">feed archive</Link>.</p>
           <SmgPanel
@@ -459,20 +473,6 @@ export default function Home() {
             height={300}
             toolbar={<RangeWidthControl value={smgRange} onChange={setSmgRange} presets={SMG_RANGE_PRESETS} />}
           />
-
-          <hr />
-
-          <h4>Examples</h4>
-          <ul>
-            <li><Link to="/?r=jh">JC + Hoboken</Link> (<Link to="/?r=jh&s=r">stacked</Link>)</li>
-            <li><Link to="/?y=m&s=g&pct=&g=mf&d=1406-2102">Ride minute %'s, Men vs. Women</Link>, Jun '14 – Jan '21</li>
-            <li><Link to="/?s=u&pct=">Member vs. customer %'s</Link></li>
-            <li><Link to={RideableTypesExample}>Classic / E-bike ride minutes</Link> (<Link to={`${RideableTypesExample}&pct`}>stacked</Link>)</li>
-            <li><Link to="/s/8-ave-w-33-st">8 Ave &amp; W 33 St — live availability + trip history</Link> (per-station page)</li>
-            <li><Link to="/">Default view (system-wide rides over time)</Link></li>
-          </ul>
-          <p>This plot refreshes when <a href="https://www.citibikenyc.com/system-data" target="_blank" rel="noopener noreferrer">new data is published by Citi Bike</a> (typically the 1st or 2nd week of each month, covering the previous month).</p>
-          <p><a href="https://github.com/hudcostreets/ctbk.dev" target="_blank" rel="noopener noreferrer">The GitHub repo</a> has more info as well as <a href="https://github.com/hudcostreets/ctbk.dev/issues" target="_blank" rel="noopener noreferrer">planned enhancements</a>. Data updates are performed <a href="https://github.com/hudcostreets/ctbk.dev/actions" target="_blank" rel="noopener noreferrer">by Github Actions</a>.</p>
 
           <hr />
 

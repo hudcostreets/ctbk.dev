@@ -55,6 +55,13 @@ export default function SmgPanel({ sel, fromS, toS, onPan, clampMinS, clampMaxS,
   const bins = q.data?.bins ?? []
   const binS = q.data?.binS
 
+  // SMG data lags to the last classified day (today's source is deferred),
+  // so `toS` (= now) leaves empty space at the right. Trim the *display*
+  // edge to the last bin's end; the query window stays [fromS, toS] so a
+  // freshly-published day still shows up on the next fetch.
+  const dataMaxS = bins.length && binS != null ? bins[bins.length - 1].dtS + binS : undefined
+  const viewToS = dataMaxS != null ? Math.min(toS, dataMaxS) : toS
+
   return (
     <div className={css.panel}>
       <div className={css.toolbar}>
@@ -74,7 +81,7 @@ export default function SmgPanel({ sel, fromS, toS, onPan, clampMinS, clampMaxS,
             ff={ff}
             height={height}
             visibleFromS={fromS}
-            visibleToS={toS}
+            visibleToS={viewToS}
             onPan={onPan}
             clampMinS={clampMinS}
             clampMaxS={clampMaxS}

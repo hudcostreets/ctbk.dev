@@ -59,9 +59,10 @@
     position: relative;
     z-index: 10;
 }
-/* Tuck the closed-state gear icon up over the plot's bottom-left corner.
-   When open, let the expanded controls sit below the plot to avoid overlap. */
-.controls:not([open]) {
+/* Tuck the gear icon up level with the plot's legend (bottom-left corner),
+   open or closed — the legend sits below the plot, so the expanded panel
+   flows down from the gear line without overlapping the plot. */
+.controls {
     margin-top: -2em;
 }
 .controls > summary {
