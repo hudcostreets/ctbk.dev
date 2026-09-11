@@ -30,8 +30,8 @@ export type Pyramid = 'v3' | 'v5'
  *  rides hits — avail, station, totals stay on prod. */
 export type ApiTarget = 'prod' | 'dev'
 const API_BASE_BY_TARGET: Record<ApiTarget, string> = {
-  prod: 'https://ctbk-gbfs-api.ryan-0dc.workers.dev',
-  dev: 'https://ctbk-gbfs-api-dev.ryan-0dc.workers.dev',
+  prod: import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev',
+  dev: import.meta.env.VITE_API_BASE_DEV ?? 'https://ctbk-gbfs-api-dev.hccs-ctbk.workers.dev',
 }
 
 interface RidesV1Row {
