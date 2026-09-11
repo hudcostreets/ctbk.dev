@@ -110,16 +110,51 @@ a.subtitle:hover {
     pointer-events: none !important;
 }
 
-/* Lines render above circles (the fan reads better over the rings), which
- * also means edges win hit-testing where they cross a station's clickable
- * area — the edge click handler compensates by forwarding clicks to the
- * nearest station within its hit radius (see `StationMarkers`). */
+/* Lines render BELOW circles — they're inert decoration (`interactive:false`),
+ * so the station dots stay on top for hover/click and the fan never intercepts
+ * a station. Faded further when the flow lens is active (see `StationMap`). */
 .lines {
-    z-index: 450 !important;
+    z-index: 410 !important;
 }
 
 .tooltip p {
     margin-bottom: 0;
+}
+
+/* Single hover readout: one fixed card (top-left, below the zoom control)
+ * for whatever station the cursor is over — replaces the per-station map
+ * tooltips that stacked/collided near a selected station. Dark card reads on
+ * both light and dark tiles; non-interactive so it never blocks the map. */
+.hoverDrawer {
+    position: absolute;
+    left: 8px;
+    top: 76px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-width: 260px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font-size: 12px;
+    line-height: 1.3;
+    pointer-events: none;
+    backdrop-filter: blur(4px);
+}
+
+.hoverDrawerName {
+    font-weight: 700;
+}
+
+.hoverDrawerStat {
+    opacity: 0.85;
+}
+
+.hoverDrawerFlow {
+    color: #ffd24a;
+    font-weight: 600;
 }
 
 /* Suppress the browser's default focus ring on Leaflet's interactive
@@ -231,6 +266,49 @@ a.subtitle:hover {
     color: #eee;
 }
 
+.lensSource {
+    font-size: 0.95rem;
+    margin-bottom: 0.3em;
+    text-align: center;
+}
+
+.lensTotal {
+    display: block;
+    font-size: 0.75rem;
+    opacity: 0.7;
+    margin-top: 0.1em;
+}
+
+.lensDirBtn {
+    display: block;
+    width: 100%;
+    margin: 0 0 0.5em;
+    padding: 0.2em 0.4em;
+    font: inherit;
+    font-size: 0.78rem;
+    color: inherit;
+    background: rgba(127, 127, 127, 0.15);
+    border: 1px solid rgba(127, 127, 127, 0.3);
+    border-radius: 4px;
+    cursor: pointer;
+}
+.lensDirBtn:hover {
+    background: rgba(127, 127, 127, 0.28);
+}
+
+.lensNote {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    font-size: 0.75rem;
+    margin-top: 0.4em;
+    color: #444;
+}
+
+:global([data-theme="dark"]) .lensNote {
+    color: #ccc;
+}
+
 .legendBar {
     height: 12px;
     border-radius: 4px;
@@ -247,4 +325,19 @@ a.subtitle:hover {
 
 :global([data-theme="dark"]) .legendLabels {
     color: #ccc;
+}
+
+/* Flow-lens legend: pinned top-right so it clears the bottom rides panel
+ * (always present while a source set is selected). Defined after `.legend`
+ * so these overrides of its bottom-center positioning win (equal specificity
+ * → source order). */
+.lensLegend {
+    top: 4.5em;
+    right: 1em;
+    bottom: auto;
+    left: auto;
+    transform: none;
+    min-width: 0;
+    width: max-content;
+    max-width: 260px;
 }

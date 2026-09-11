@@ -68,6 +68,11 @@ export default function StationRidesChart({
     }
     const data: AlignedData = [x, starts, ends]
 
+    // Clip the x-axis to the last bin that actually has data. In Latest mode
+    // `toS` is "now", but rides data lands ~monthly, so the window's tail is
+    // empty — without this the chart trails off into dead space on the right.
+    const xMax = rows.length ? Math.min(toS, rows[rows.length - 1].dtS + binS) : toS
+
     const stepped = uPlot.paths.stepped!({ align: 1 })
     const yMax = Math.max(1, ...rows.map((r) => Math.max(r.starts, r.ends))) * 1.05
 
@@ -76,7 +81,7 @@ export default function StationRidesChart({
       height,
       cursor: { x: true, y: false, drag: { x: false, y: false } },
       scales: {
-        x: { time: true, auto: false, range: () => [fromS, toS] },
+        x: { time: true, auto: false, range: () => [fromS, xMax] },
         y: { range: () => [0, yMax] },
       },
       axes: [

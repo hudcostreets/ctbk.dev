@@ -30,9 +30,16 @@ export const SYSTEM_BBOX = '40.5,-74.3,41.0,-73.6'
  *    whether the poller ran or not (`stale_feed` ≡ 0 pre-2026-05-03);
  *  - poller v2: pre-v2 `stale_feed` is inflated by the CloudFront-cached
  *    1.1 feed. */
+/** Poller v2 cutover. Pre-v2 `stale_feed` is a collection artifact (the old
+ *  poller served CloudFront-cached 1.1 feed), so it measures our instrumentation
+ *  rather than station state — hence this is the default lower bound for the
+ *  system station-states window (pre-v2 stays reachable via pan / the "All"
+ *  preset; the clamp floor remains `SMG_GENESIS_S`). */
+export const SMG_POLLER_V2_S = Date.UTC(2026, 7, 4) / 1000
+
 export const SMG_ERAS: readonly { atS: number; label: string }[] = [
   { atS: Date.UTC(2026, 4, 3, 12, 20) / 1000, label: 'heartbeats' },
-  { atS: Date.UTC(2026, 7, 4) / 1000, label: 'poller v2' },
+  { atS: SMG_POLLER_V2_S, label: 'poller v2' },
 ]
 
 export type SmgGroup = 'gap' | 'dead' | 'live'

@@ -15,6 +15,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
   },
+  // Pre-bundle the heavy deck.gl/maplibre deps at server start, so the first
+  // load of the GL map doesn't trigger a mid-flight "optimized dependencies
+  // changed, reloading" (which races the initial data fetch). Mirrors jc-taxes.
+  optimizeDeps: {
+    include: ['@deck.gl/core', '@deck.gl/layers', '@deck.gl/react', 'react-map-gl/maplibre', 'maplibre-gl'],
+  },
   server: {
     port: 3456,
     strictPort: true,
