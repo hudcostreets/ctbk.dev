@@ -78,13 +78,55 @@ Follow the shared **playbook**: `$c/hccs/path/specs/s3-to-r2-hccs-playbook.md`
   - `avail-v4/` (36.9 GiB, registry-only, not FE-referenced) — genuinely stale, skip
   - `station-luc.json` (root, 470 KB) — load-bearing for the bbox→vocab cover
     (`v5BBoxCover`); was mis-classified superseded. **Copied.**
-  `avail-v5`+`avail-v6` copy (~148 GiB, R2→R2) running on `e`
-  (`~/rclone-availv56.sh`). NB `gbfs/avail/` (54 GiB, parity-verified earlier)
-  is a *different, older* prefix than the root `avail-v6/` pyramid the api now
-  serves.
+  `avail-v5`+`avail-v6` copy (~148 GiB, R2→R2) ran on `e`
+  (`~/rclone-availv56.sh`) — parity confirmed (Δ ≤13 objs = live drift). NB
+  `gbfs/avail/` (54 GiB, parity-verified earlier) is a *different, older*
+  prefix than the root `avail-v6/` pyramid the api now serves.
+- **Two more non-registry assets were also missing (found via endpoint
+  smoke-test, both tiny, laptop-copied):** `station-luc.json` (above) and
+  **`empty-v1/` + `empty-v1p/`** (933 objs / 19.4 MiB — the `/api/empty`
+  station-states Zarr planes + `empty-v1/stations.json` vocab; not in
+  `pyramid_shards`, so the registry enumeration alone missed it).
+- **Pre-cutover gate GREEN (2026-09-11):** full FE endpoint surface verified on
+  `ctbk-gbfs-api-dev` (HCCS) vs `ctbk-gbfs-api` (RAC), byte-identical —
+  `health`, `stations/slugs`, `avail-v3` (24=24), `coverage` (4=4), `rides-v5`
+  (48=48), `totals`, `empty`. HCCS serves the entire live surface at parity.
+  Lesson: compare response *bodies*, not just status — two 400s can hide a gap
+  (`empty` RAC-param-error vs HCCS-vocab-missing looked equal by status).
 
-## Remaining
+## Done (2026-09-11)
 
-- **GBFS worker fleet → HCCS** (parallel single-writer pollers, per the cutover discussion): deploy `ctbk-gbfs-{poller,loader,compactor,cascade,api}` into the HCCS account wired to the new D1 id `845e34bb…` + queue `c11bd8a9…` + the `ctbk` binding. Per-account wrangler config (`[env.hccs]` or templating) for the D1 `database_id`. Then retire RAC's fleet once verified. No dual-write needed — run both fleets in parallel during overlap.
-- **rides/`normalized`**: monthly cadence → clean between-months cutover (repoint the `rides-v5-extend` writer + the pyrmts factory reader to HCCS; don't run the next month until both flipped). No dual-write.
-- **App cutover**: DVX `r2` remote endpoint `0dcad`→`2363` + `core.remote`; FE store base-URL → `data.ctbk.dev`; **port `ctbk.dev` zone RAC→HCCS** (R2 custom domains are same-account) + attach `data.ctbk.dev`; swap CI creds.
+- **GBFS worker fleet on HCCS** ✓ — `ctbk-gbfs-{poller,loader,cascade,compactor}`
+  (prod) + `api` (dev). Serves the full FE surface at parity.
+- **DVX `r2` remote → HCCS** ✓ (`core.remote=r2`, endpoint `2363…`, creds
+  swapped; commit `03ff9456`).
+- **FE worker `ctbk-dev` staged on HCCS** ✓ — deployed at
+  `ctbk-dev.hccs-ctbk.workers.dev` (Workers-Assets-only; `ctbk.dev` domain is
+  dashboard-attached account state, NOT wrangler config, so this deploy touches
+  no domain). Built with `VITE_API_BASE`/`VITE_DATA_BASE` → HCCS. Verified:
+  rides chart + station flow-lens render from HCCS. Basemap 401s only because
+  Stadia auth is **domain-allowlist** (`ctbk.dev` only) — resolves at the real
+  domain post-flip; there is no Stadia key/env to migrate.
+
+## Remaining — the live flag-day flip (needs a person; live DNS)
+
+The `ctbk.dev` zone (RAC) is more than a data domain — 7 records incl. the
+**apex FE Worker** (`ctbk-dev`), `dev`→`ctbk-dev-dev`, `data`→R2 `ctbk`, `s3`/
+`www`→CloudFront, 2× ACM-validation CNAMEs. R2 custom domains are same-account,
+so the whole zone moves. Runbook:
+
+1. **Deploy prod `ctbk-gbfs-api` + `ctbk-dev-dev` to HCCS.** Rebuild + deploy
+   `ctbk-dev` with `VITE_API_BASE`=HCCS prod api, `VITE_DATA_BASE`=`data.ctbk.dev`.
+2. **Move `ctbk.dev` zone RAC→HCCS** (dashboard, both accounts — RACx removes,
+   HCCSx adds). **NS/downtime unknown** until HCCS shows the assigned NS — if
+   different from RAC's, registrar NS update + propagation; do at low traffic.
+3. **Recreate 7 records on HCCS**: apex `ctbk.dev`→Worker `ctbk-dev`;
+   `dev`→`ctbk-dev-dev`; `data`→R2 `ctbk` (attach custom domain to HCCS bucket);
+   `s3`/`www`→CloudFront CNAMEs (as-is); 2× ACM CNAMEs (as-is).
+4. **Verify live `ctbk.dev` on HCCS** (basemap now works — allowlisted domain).
+5. **Retire RAC**: delete RAC gbfs workers + `ctbk-dev`; swap CI creds
+   (`CLOUDFLARE_API_TOKEN`/`ACCOUNT_ID` → HCCS); repoint the daily
+   engine/compaction GHA at HCCS (starts forward `avail-v6` landing + reconcile).
+- **rides/`normalized`**: monthly cadence → clean between-months cutover
+  (repoint `rides-v5-extend` writer + pyrmts factory reader to HCCS). No
+  dual-write.
