@@ -15,7 +15,7 @@ import { useEffect, useState } from 'react'
 import { dvcUrl } from '../lib/dataBase'
 
 const INDEX_URL = '/ymdgtb-index.json'
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.ryan-0dc.workers.dev'
+const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev'
 const STATION_LUC_URL = '/assets/station-luc.json'
 // Rides history starts 2013-06; ~14y × 12mo ≈ 170 monthly bins.
 const V3_FROM = '2013-06-01T00:00:00Z'
