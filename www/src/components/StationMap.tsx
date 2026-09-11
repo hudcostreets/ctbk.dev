@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { Circle, CircleMarker, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useTheme } from '../contexts/ThemeContext'
@@ -82,7 +82,11 @@ function StationMarkers({
   pairCounts,
   colors,
   stationColors,
+  stationRadii,
+  lensActive,
+  showLines,
   hoverToSelect,
+  setHoveredId,
 }: {
   stations: Stations
   selectedId?: string
@@ -90,12 +94,16 @@ function StationMarkers({
   pinnedId?: string
   onPin?: (id: string | undefined) => void
   pinnedIds?: readonly string[]
-  onTogglePin?: (id: string) => void
+  onTogglePin?: (id: string, additive: boolean) => void
   onMarkerHover?: (id: string) => void
   pairCounts?: StationPairCounts | null
   colors: TileColors
   stationColors?: Record<string, string> | null
+  stationRadii?: Record<string, number> | null
+  lensActive?: boolean
+  showLines?: boolean
   hoverToSelect?: boolean
+  setHoveredId: Dispatch<SetStateAction<string | null>>
 }) {
   const map = useMap()
   const zoom = map.getZoom()
@@ -155,17 +163,13 @@ function StationMarkers({
     }
   }
 
-  // Suppress the permanent selected-station tooltip while the cursor is over a
-  // destination line — otherwise both tooltips pile up at the source station,
-  // overlapping awkwardly. (Only used in unpinned/hover mode; when pinned we
-  // suppress the line tooltips entirely so the pinned-station TT stays put.)
+  // Pinned == the currently-selected station is the click-pinned one (bolder
+  // ring). Hover is pure inspection: circle handlers set `hoveredId` (owned by
+  // `StationMap`, which renders the single hover drawer), never the selection
+  // — that's click-driven or the `hoverToSelect` settle timer. `setHoveredId`
+  // is a stable state setter, so it's fine in the circle handlers without
+  // being in any memo deps (see the churn-loop note above).
   const isPinned = !!pinnedId && pinnedId === selectedId
-
-  // Hovered-edge destination ID. Lets us pop a permanent tooltip on the
-  // destination station while the cursor is over the edge connecting it
-  // to the selected source — completing the "edge hover is a subset of
-  // both endpoints' station hover" mental model.
-  const [hoveredEdgeDstId, setHoveredEdgeDstId] = useState<string | null>(null)
 
   // Visible circles stay area-proportional to `sqrt(ends)` — no floor —
   // so the volume-ranking of stations reads at a glance. To keep small
@@ -176,36 +180,17 @@ function StationMarkers({
   const HIT_RADIUS_PX = 6
   const hitRadius = HIT_RADIUS_PX * mPerPx
 
-  // The lines pane sits above circles, so an edge crossing a station's
-  // clickable area intercepts clicks aimed at that station. Forward such
-  // clicks: a click within a station's hit radius means the STATION (same
-  // radius rule as the invisible hit circles); only clicks on open line
-  // body fall back to the edge's own behavior (keep the source selected).
-  const stationAtLatLng = (ll: L.LatLng): string | null => {
-    let bestId: string | null = null
-    let bestDist = Infinity
-    for (const [id, st] of Object.entries(stations)) {
-      const clickable = max(hitRadius, sqrt(st.ends) || 0)
-      const d = map.distance(ll, [st.lat, st.lng])
-      if (d <= clickable && d < bestDist) { bestDist = d; bestId = id }
-    }
-    return bestId
-  }
-  const onEdgeClick = (e: L.LeafletMouseEvent) => {
-    const hit = stationAtLatLng(e.latlng)
-    const toggle = onTogglePinRef.current
-    const select = onPinRef.current ?? setSelectedIdRef.current
-    if (hit && toggle) toggle(hit)
-    else if (hit && select) select(hit)
-    else if (selectedIdRef.current) select?.(selectedIdRef.current)
-  }
-
   const lines = useMemo(() => {
+    if (!showLines) return null
     if (!selectedStation || !selectedId || !pairCounts) return null
     if (!(selectedId in pairCounts)) return null
     const counts = pairCounts[selectedId]
     const maxCount = max(...Object.values(counts))
     const src = selectedStation
+    // When the flow lens is active (destinations already carry the flow signal
+    // via color/radius), the fan is redundant clutter — keep it as a faint
+    // hint of direction, well under the dots.
+    const lineOpacity = lensActive ? 0.12 : 0.4
 
     return (
       <Pane name="lines" className={css.lines}>
@@ -214,36 +199,24 @@ function StationMarkers({
           if (!dst) return null
           const weight = max(0.7, (count / maxCount) * sqrt(src.ends) / mPerPx)
           return (
+            // Edges are pure decoration: `interactive={false}` so they never
+            // intercept a hover/click aimed at a station underneath (the old
+            // flicker + the reason for the removed edge-click-forwarding), and
+            // the `.lines` pane sits below `.circles`. The destination's own
+            // station tooltip covers the "→ dst: count" info on hover.
             <Polyline
               key={`${selectedId}-${dstId}-${zoom}-${colors.line}`}
               positions={[[src.lat, src.lng], [dst.lat, dst.lng]]}
               color={colors.line}
               weight={weight}
-              opacity={0.7}
-              eventHandlers={{
-                // Clicks within a station's hit radius forward to that
-                // station (multi-select toggle / pin); open-line-body clicks
-                // keep the source selected so the "View station details"
-                // link below the map resolves to something useful.
-                click: onEdgeClick,
-                // Pop the destination's tooltip while the cursor is on this
-                // edge — handled by `edgeDstTooltip` below.
-                mouseover: () => setHoveredEdgeDstId(dstId),
-                mouseout: () => setHoveredEdgeDstId((cur) => (cur === dstId ? null : cur)),
-              }}
-            >
-              {/* Edge tooltip: anchored at the segment midpoint (no `sticky`,
-                  so it doesn't follow the cursor — fixes flicker as the cursor
-                  transitions between edges). Source name omitted: the source's
-                  own permanent tooltip already shows it. Pin to default
-                  `tooltipPane` (z=650) so it renders above neighbor edges. */}
-              <Tooltip pane="tooltipPane">→ {dst.name}: {count}</Tooltip>
-            </Polyline>
+              opacity={lineOpacity}
+              interactive={false}
+            />
           )
         })}
       </Pane>
     )
-  }, [selectedStation, selectedId, pairCounts, stations, mPerPx, zoom, colors, onPin, setSelectedId])
+  }, [selectedStation, selectedId, pairCounts, stations, mPerPx, zoom, colors, lensActive, showLines])
 
   // Selected-station overlay: visual-only (pointer-events: none via `.selected`
   // CSS). Clicks pass through to the base Circle in the `circles` Pane below,
@@ -255,6 +228,9 @@ function StationMarkers({
     if (isNaN(dataRadius)) return null
     return (
       <Pane name="selected" className={css.selected}>
+        {/* No tooltip: the hovered/selected station's name + counts show in
+            the single hover drawer (rendered by `StationMap`), so map labels
+            never stack or collide. */}
         <Circle
           key={`${selectedId}-${colors.selected}-${isPinned ? 'pin' : 'hov'}`}
           center={{ lat: selectedStation.lat, lng: selectedStation.lng }}
@@ -262,15 +238,7 @@ function StationMarkers({
           radius={dataRadius}
           weight={isPinned ? 4 : 3}
           interactive={false}
-        >
-          {/* Source-station tooltip: always shown when a station is selected,
-              including while hovering an edge from/to it (edge hover is a
-              subset of station hover). Edge tooltips now anchor at edge
-              midpoints, so they don't collide with this one positionally. */}
-          <Tooltip className={`${css.tooltip} ${isPinned ? css.pinnedTooltip : ''}`} sticky permanent pane="selected">
-            <p>{selectedStation.name}{selectedStation.ends > 0 ? `: ${selectedStation.ends.toLocaleString()}` : ''}</p>
-          </Tooltip>
-        </Circle>
+        />
       </Pane>
     )
   }, [selectedStation, selectedId, colors, isPinned])
@@ -282,14 +250,18 @@ function StationMarkers({
           const dataRadius = sqrt(station.ends)
           if (isNaN(dataRadius)) return []
           const circleColor = stationColors?.[id] ?? colors.circle
+          // Radius: the lens' per-station pixel radius (× m/px) when the radius
+          // channel is on for this station, else the data-proportional radius.
+          const lensRadiusPx = stationRadii?.[id]
+          const radius = lensRadiusPx != null ? lensRadiusPx * mPerPx : dataRadius
           // Visible circle: area-proportional, non-interactive (clicks pass
           // through to the invisible hit-test circle below).
           const visible = (
             <Circle
-              key={`${id}-vis-${circleColor}`}
+              key={`${id}-vis-${circleColor}-${lensRadiusPx ?? 'd'}`}
               center={{ lat: station.lat, lng: station.lng }}
               color={circleColor}
-              radius={dataRadius}
+              radius={radius}
               interactive={false}
             />
           )
@@ -298,23 +270,30 @@ function StationMarkers({
           // eventHandlers + tooltip.
           // Handlers read live values via refs so this pane never needs to
           // remount on selection changes (see the churn-loop note above).
-          const eventHandlers: Record<string, () => void> = {
-            // Multi-select mode (`onTogglePin`): clicks toggle set
-            // membership; hover still drives the transient selection.
-            click: () => {
+          const eventHandlers: Record<string, (e: L.LeafletMouseEvent) => void> = {
+            // Multi-select mode (`onTogglePin`): a plain click selects just
+            // this station; meta/ctrl-click adds/removes it from the set
+            // (`additive`). Hover still drives the transient selection.
+            click: (e) => {
+              const additive = !!(e.originalEvent?.metaKey || e.originalEvent?.ctrlKey)
               const toggle = onTogglePinRef.current
-              if (toggle) toggle(id)
+              if (toggle) toggle(id, additive)
               else (onPinRef.current ?? setSelectedIdRef.current)?.(id)
             },
             mouseover: () => {
+              setHoveredId(id)
               if (hoverToSelect && id !== selectedIdRef.current) scheduleHoverSelect(id)
               scheduleHoverPrefetch(id)
             },
             mouseout: () => {
+              setHoveredId((cur) => (cur === id ? null : cur))
               cancelHoverPrefetch()
               cancelHoverSelect()
             },
           }
+          // No per-circle tooltip: a single `hoverTooltip` layer (below),
+          // driven by `hoveredId`, renders exactly one tooltip for whatever
+          // station the cursor is over — so hovering never stacks tooltips.
           const hit = (
             <Circle
               key={`${id}-hit`}
@@ -324,27 +303,20 @@ function StationMarkers({
               weight={0}
               bubblingMouseEvents={false}
               eventHandlers={eventHandlers}
-            >
-              {/* Suppress base-circle tooltips for other stations while a
-                  station is pinned — the pinned TT stays put, nothing else
-                  fires. The pinned station's own circle TT is hidden by the
-                  overlay pane anyway. */}
-              {!isPinned && (
-                <Tooltip className={css.tooltip} sticky pane="tooltipPane">
-                  <p>{station.name}{station.ends > 0 ? `: ${station.ends.toLocaleString()}` : ''}</p>
-                </Tooltip>
-              )}
-            </Circle>
+            />
           )
           return [visible, hit]
         })}
       </Pane>
     )
-  }, [stations, colors, stationColors, hoverToSelect, isPinned, hitRadius])
+  }, [stations, colors, stationColors, stationRadii, mPerPx, hoverToSelect, hitRadius])
 
-  // Multi-select rings: one non-interactive ring per pinned station. Sits
-  // above base circles so membership reads at a glance; clicks pass through
-  // to the hit circles (which toggle membership off).
+  // Source markers: one per selected (`pinnedIds`) station. Sits above
+  // everything so the *selected* stations are unmistakable — a white halo
+  // under a bold pink ring (reads on both light and dark tiles, and distinct
+  // from the flow-lens ramp, whose hot end is also red). Which station each is
+  // shows in the hover drawer + the lens legend, so no on-map label here.
+  // Non-interactive; clicks pass through to the hit circles (toggle off).
   const multiPinRings = useMemo(() => {
     if (!pinnedIds || pinnedIds.length === 0) return null
     return (
@@ -354,49 +326,34 @@ function StationMarkers({
           if (!st) return null
           const dataRadius = sqrt(st.ends)
           const radius = max(isNaN(dataRadius) ? 0 : dataRadius, hitRadius)
-          return (
+          const center = { lat: st.lat, lng: st.lng }
+          return [
+            <Circle
+              key={`pin-halo-${id}`}
+              center={center}
+              color="#fff"
+              fill={false}
+              radius={radius + 2.5 * mPerPx}
+              weight={6}
+              interactive={false}
+            />,
             <Circle
               key={`pin-${id}`}
-              center={{ lat: st.lat, lng: st.lng }}
+              center={center}
               color={MULTI_PIN_COLOR}
               fillColor={MULTI_PIN_COLOR}
-              fillOpacity={0.25}
+              fillOpacity={0.3}
               radius={radius}
-              weight={4}
+              weight={3}
               interactive={false}
-            />
-          )
+            />,
+          ]
         })}
       </Pane>
     )
-  }, [pinnedIds, stations, hitRadius])
+  }, [pinnedIds, stations, hitRadius, mPerPx])
 
-  // Permanent tooltip on the destination station while hovering an edge that
-  // ends there. Anchored at the dst's lat/lng with a tiny invisible Circle
-  // so leaflet has a layer to bind the tooltip to.
-  const edgeDstTooltip = useMemo(() => {
-    if (!hoveredEdgeDstId) return null
-    const dst = stations[hoveredEdgeDstId]
-    if (!dst) return null
-    return (
-      <Pane name="edge-dst-tooltip" className={css.selected}>
-        <Circle
-          key={`edge-dst-${hoveredEdgeDstId}`}
-          center={{ lat: dst.lat, lng: dst.lng }}
-          radius={1}
-          fillOpacity={0}
-          weight={0}
-          interactive={false}
-        >
-          <Tooltip className={css.tooltip} permanent direction="top" pane="tooltipPane">
-            <p>{dst.name}{dst.ends > 0 ? `: ${dst.ends.toLocaleString()}` : ''}</p>
-          </Tooltip>
-        </Circle>
-      </Pane>
-    )
-  }, [hoveredEdgeDstId, stations])
-
-  return <>{selectedCircle}{lines}{circles}{multiPinRings}{edgeDstTooltip}</>
+  return <>{selectedCircle}{lines}{circles}{multiPinRings}</>
 }
 
 /** Sync map view to URL state (or via callbacks). */
@@ -453,13 +410,28 @@ export interface StationMapProps {
    *  ring overlay. When `onTogglePin` is provided, circle clicks toggle
    *  membership instead of the `onPin`/`setSelectedId` behavior. */
   pinnedIds?: readonly string[]
-  onTogglePin?: (id: string) => void
+  /** Multi-select toggle. `additive` (meta/ctrl-click) adds/removes the
+   *  station from the set; a plain click should replace the set with it. */
+  onTogglePin?: (id: string, additive: boolean) => void
   /** Fired ~80ms after the cursor settles on a circle. Use to warm
    *  caches for an imminent click (e.g. prefetch the station-detail
    *  data the click will navigate to). */
   onMarkerHover?: (id: string) => void
   pairCounts?: StationPairCounts | null
+  /** Per-station fill color override (e.g. flow lens / color-by-age). */
   stationColors?: Record<string, string> | null
+  /** Per-station radius override, in pixels (flow-lens radius channel).
+   *  Scaled to meters internally; stations absent from the map keep their
+   *  data-proportional radius. */
+  stationRadii?: Record<string, number> | null
+  /** When true, the destination-line fan fades right back (the lens channels
+   *  already carry the flow signal). Independent of `stationColors` so a plain
+   *  color-by-age recolor doesn't dim the fan. */
+  lensActive?: boolean
+  /** Draw the destination-line fan for the selected station. Off by default:
+   *  it's heavy (hundreds of SVG polylines re-rendered on hover) and, at low
+   *  opacity, stacks into a red blob near the origin. */
+  showLines?: boolean
 
   center: [number, number]
   zoom: number
@@ -501,6 +473,9 @@ export default function StationMap({
   onMarkerHover,
   pairCounts,
   stationColors,
+  stationRadii,
+  lensActive,
+  showLines,
   center,
   zoom,
   tileCode,
@@ -521,6 +496,19 @@ export default function StationMap({
   const currentTile = TILE_STYLES[tileStyle]
   const tileUrl = tileBase ? `${tileBase}/{z}/{x}/{y}.png` : currentTile.url
   const colors = TILE_COLORS[tileStyle]
+
+  // Single hover drawer (below): whatever station the cursor is over. Owned
+  // here (not in `StationMarkers`) so it renders as one HTML overlay outside
+  // the Leaflet panes — replacing the per-station map tooltips that stacked
+  // and collided when a hover landed near a selected station.
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
+  const hovered = hoveredId ? stations[hoveredId] : null
+  // Source set driving the flow lens (multi-select set, else the single pin).
+  const sourceIds = pinnedIds?.length ? pinnedIds : (pinnedId ? [pinnedId] : [])
+  // Trips from the source set to the hovered station (if it's a destination).
+  const hoveredFlow = hovered && hoveredId && pairCounts && !sourceIds.includes(hoveredId)
+    ? sourceIds.reduce((sum, src) => sum + (pairCounts[src]?.[hoveredId] ?? 0), 0)
+    : 0
 
   return (
     <div style={{ position: 'relative', height: '100%', width: '100%' }}>
@@ -553,7 +541,11 @@ export default function StationMap({
         pairCounts={pairCounts}
         colors={colors}
         stationColors={stationColors}
+        stationRadii={stationRadii}
+        lensActive={lensActive}
+        showLines={showLines}
         hoverToSelect={hoverToSelect}
+        setHoveredId={setHoveredId}
       />
       {focus && (
         <Pane name="focus" className={css.focus}>
@@ -593,6 +585,17 @@ export default function StationMap({
         backdropFilter: 'blur(4px)',
       }}>
         {overlay}
+      </div>
+    )}
+    {hovered && (
+      <div className={css.hoverDrawer}>
+        <span className={css.hoverDrawerName}>{hovered.name}</span>
+        {hovered.ends > 0 && (
+          <span className={css.hoverDrawerStat}>{hovered.ends.toLocaleString()} rides</span>
+        )}
+        {hoveredFlow > 0 && (
+          <span className={css.hoverDrawerFlow}>{hoveredFlow.toLocaleString()} from selection</span>
+        )}
       </div>
     )}
     </div>

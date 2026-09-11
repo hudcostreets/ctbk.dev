@@ -54,7 +54,7 @@ import { useRidesV1, type Pyramid, type ApiTarget } from '../query/ridesV1'
 import SmgPanel from '../components/SmgPanel'
 import { BrushProvider } from '../components/smgBrush'
 import { RangeWidthControl, type DurationPreset } from '../components/RangeWidthControl'
-import { SMG_GENESIS_S, SYSTEM_BBOX } from '../query/smg'
+import { SMG_GENESIS_S, SMG_POLLER_V2_S, SYSTEM_BBOX } from '../query/smg'
 import { rangeToUnixSeconds, roundDuration, timeRangeParam } from '../time-range'
 
 const { floor, max } = Math
@@ -67,6 +67,11 @@ const SMG_RANGE_PRESETS: readonly DurationPreset[] = [
   { label: 'All', ms: 2 * 365 * DAY_MS },
 ]
 const SMG_SYSTEM_SEL = { kind: 'bbox', bbox: SYSTEM_BBOX } as const
+// Default system station-states window: poller-v2 epoch → now (so it grows
+// over time instead of a rolling 30d). Latest-anchored, so the duration is
+// baked once at load; the clamp floor stays `SMG_GENESIS_S`, so panning left
+// / the "All" preset still reach pre-v2 (measurement-limited) data.
+const SMG_DEFAULT_DURATION_MS = Date.now() - SMG_POLLER_V2_S * 1000
 
 const ApiTargets: ApiTarget[] = ['prod', 'dev']
 
@@ -130,10 +135,11 @@ export default function Home() {
   const [snapCounter, setSnapCounter] = useState(0)
 
   // System-wide station-state chart (`smg-v1`; `specs/avail-smg-pyramid.md`
-  // §5 "L"): own window param `ar` (Latest-anchored, default 30d). "Now"
-  // is 15-min quantized so the TSQ key and the worker's edge-cache key stay
-  // stable across renders; the pyramid's tip is a day old anyway.
-  const [smgRange, setSmgRange] = useUrlState('ar', timeRangeParam(30 * DAY_MS))
+  // §5 "L"): own window param `ar` (Latest-anchored, default = since poller
+  // v2, see `SMG_DEFAULT_DURATION_MS`). "Now" is 15-min quantized so the TSQ
+  // key and the worker's edge-cache key stay stable across renders; the
+  // pyramid's tip is a day old anyway.
+  const [smgRange, setSmgRange] = useUrlState('ar', timeRangeParam(SMG_DEFAULT_DURATION_MS))
   const smgNowS = floor(Date.now() / 900_000) * 900
   const [smgFromS, smgToS] = useMemo(() => {
     const [f, t] = smgRange.timestamp === null

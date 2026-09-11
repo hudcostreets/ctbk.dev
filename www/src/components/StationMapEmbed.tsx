@@ -4,9 +4,10 @@
  * Uses local state only (no URL sync), so it can drop into any page
  * without clobbering the host page's URL params.
  */
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import StationMap, { type Stations, type StationPairCounts } from './StationMap'
+import { flowLens } from './flowLens'
 import css from '../stations.module.css'
 
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -88,6 +89,15 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
   const selectedStation = selectedId && stations ? stations[selectedId] : null
   const monthLabel = manifest ? formatMonth(manifest.latestMonth) : null
 
+  // Flow lens: once a station is pinned (clicked), color every other station
+  // by the share of that station's outbound trips ending there. Keyed on the
+  // pinned id (not the transient hover), so recoloring commits on click. The
+  // embed uses the color channel only (no URL config here).
+  const lens = useMemo(
+    () => flowLens(stations ?? {}, pairCounts, pinnedId ? [pinnedId] : [], 'c'),
+    [stations, pairCounts, pinnedId],
+  )
+
   return (
     <>
       <div className={mapClassName}>
@@ -98,6 +108,9 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
           pinnedId={pinnedId}
           onPin={(id) => setPinnedId((cur) => (cur === id ? undefined : id))}
           pairCounts={pairCounts}
+          stationColors={lens?.colors ?? null}
+          lensActive={!!lens}
+          showLines
           center={DEFAULT_CENTER}
           zoom={DEFAULT_ZOOM}
           className={css.embedMap}

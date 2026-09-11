@@ -1,5 +1,5 @@
 import { FormControl, MenuItem, Select, SelectChangeEvent } from '@mui/material'
-import { useUrlState, boolParam, cleanUrl, llzParam, stringParam } from 'use-prms'
+import { useUrlState, boolParam, cleanUrl, codeParam, llzParam, stringParam } from 'use-prms'
 import type { LLZ, Param } from 'use-prms'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -7,6 +7,8 @@ import { SpeedDial, useHotkeysContext } from 'use-kbd'
 import StationMap, {
   type Stations, type StationPairCounts, TILE_COLORS, resolveTileStyle,
 } from '../components/StationMap'
+import { flowLens, type LensChannel, type FlowDirection } from '../components/flowLens'
+import StationMapGL from '../components/StationMapGL'
 import StationRidesPanel from '../components/StationRidesPanel'
 import { RangeWidthControl } from '../components/RangeWidthControl'
 import { useTheme } from '../contexts/ThemeContext'
@@ -34,6 +36,14 @@ const sideParam: Param<'start' | 'end' | 'both'> = {
 const selParam: Param<string[]> = {
   encode: (v) => (v.length ? v.join(',') : undefined),
   decode: (raw) => (raw ? raw.split(',').filter(Boolean) : []),
+}
+
+/** URL codec for the flow-lens channel (`?lens=`): `c` (color, default), `r`
+ *  (radius), `cr` (both), or `n` (off). The lens only activates once a source
+ *  set is selected (`?sel=`), so the default stays invisible until then. */
+const lensParam: Param<LensChannel> = {
+  encode: (v) => (v === 'c' ? undefined : v),
+  decode: (raw) => (raw === 'r' || raw === 'cr' || raw === 'n' ? raw : 'c'),
 }
 
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -114,9 +124,36 @@ export default function Stations() {
   const [side, setSide] = useUrlState('side', sideParam)
   // Multi-select station set: click circles to toggle membership; the rides
   // panel below the map plots the set's starts/ends via `/api/rides`.
-  const [sel, setSel] = useUrlState('sel', selParam)
-  const togglePin = useCallback((id: string) => {
-    setSel(sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id])
+  // `push: true` → each selection edit is its own history entry, so browser
+  // back/forward is the selection undo/redo buffer. Hover (`s`) stays on the
+  // default replaceState, so sweeping the map never spams history.
+  const [sel, setSel] = useUrlState('sel', selParam, { push: true })
+  // Flow-lens channel(s) for the selected source set (color / radius / both).
+  const [lens] = useUrlState('lens', lensParam)
+  // Flow direction: `out` = where riders from the set go; `in` = where they
+  // come from. `fan` toggles the (heavy) destination-line overlay, off by
+  // default — the lens carries the flow signal and the fan stacks into a red
+  // blob near the origin + costs a lot of SVG on hover.
+  const [dir, setDir] = useUrlState('dir', codeParam<FlowDirection>('out', [['out', 'o'], ['in', 'i']]))
+  const [fan] = useUrlState('fan', boolParam)
+  // `?gl=1` → experimental GPU map (deck.gl + MapLibre), Stage 1 of the
+  // rendering migration. Off = the current react-leaflet SVG map.
+  const [gl] = useUrlState('gl', boolParam)
+  // Mark style on the GL map: solid `fill` (default) or hollow `ring`.
+  const [mark] = useUrlState('mark', codeParam<'fill' | 'ring'>('fill', [['fill', 'f'], ['ring', 'r']]))
+  // Live hover-preview: on the GL map, hovering a station (when nothing is
+  // pinned) previews the lens for it — recoloring every station by that
+  // station's flow. Cheap on the GPU; gated to `gl` (would thrash the SVG map).
+  const [hoverPreviewId, setHoverPreviewId] = useState<string | null>(null)
+  // Region select (rectangle): replace the set, or add to it with a modifier.
+  const selectSet = useCallback((ids: string[], additive: boolean) => {
+    setSel(additive ? Array.from(new Set([...sel, ...ids])) : ids)
+  }, [sel, setSel])
+  // Plain click selects just that station; meta/ctrl-click adds/removes it
+  // from the working set (multi-select). Empty-map click clears the set.
+  const selectStation = useCallback((id: string, additive: boolean) => {
+    if (additive) setSel(sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id])
+    else setSel([id])
   }, [sel, setSel])
 
   // One-time legacy URL migration: ?lat=&lng=&z= → ?ll=lat+lng+zoom.
@@ -280,6 +317,23 @@ export default function Stations() {
     return colors
   }, [colorByAge, births, stations, actualTheme])
 
+  // Flow lens: when a source set is selected (`?sel=`), restyle every other
+  // station by the set's outbound flow. Computed over `effectiveStations` so
+  // it covers exactly what the map renders. Takes precedence over color-by-age
+  // for the color channel; also drives the radius channel when `?lens=` asks.
+  // Lens source: the pinned set, or (GL only, nothing pinned) the hovered
+  // station for a live preview.
+  const lensSourceIds = sel.length ? sel : (gl && hoverPreviewId ? [hoverPreviewId] : [])
+  const flowStyle = useMemo(
+    () => (lensSourceIds.length && effectiveStations
+      ? flowLens(effectiveStations, pairCounts, lensSourceIds, lens, dir)
+      : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [lensSourceIds.join(','), effectiveStations, pairCounts, lens, dir],
+  )
+  const effectiveColors = flowStyle?.colors ?? stationColors
+  const effectiveRadii = flowStyle?.radii ?? null
+
   // Keyboard shortcuts
   const { openOmnibar } = useHotkeysContext()
   useStationsKeyboardShortcuts({
@@ -324,28 +378,62 @@ export default function Stations() {
   return (
     <div className={css.container}>
       <main className={css.main}>
+        {gl ? (
+          <StationMapGL
+            stations={effectiveStations ?? {}}
+            selectedId={selectedId}
+            pinnedIds={sel}
+            onTogglePin={selectStation}
+            onSelectSet={selectSet}
+            pairCounts={pairCounts}
+            stationColors={effectiveColors}
+            stationRadii={effectiveRadii}
+            mark={mark}
+            setSelectedId={setSelectedId}
+            onHoverStation={setHoverPreviewId}
+            center={[view.lat, view.lng]}
+            zoom={view.zoom}
+            onMove={(la, ln, z) => setView({ lat: la, lng: ln, zoom: z })}
+            onClick={() => { setSelectedId(undefined); setSel([]) }}
+          />
+        ) : (
         <StationMap
           stations={effectiveStations ?? {}}
           selectedId={selectedId}
           setSelectedId={setSelectedId}
           pinnedIds={sel}
-          onTogglePin={togglePin}
+          onTogglePin={selectStation}
           pairCounts={pairCounts}
-          stationColors={stationColors}
+          stationColors={effectiveColors}
+          stationRadii={effectiveRadii}
+          lensActive={!!flowStyle}
+          showLines={fan}
           center={[view.lat, view.lng]}
           zoom={view.zoom}
           tileCode={tileCode}
           tileBase={tileBase}
           hoverToSelect
           onMove={(la, ln, z) => setView({ lat: la, lng: ln, zoom: z })}
-          onClick={() => setSelectedId(undefined)}
+          onClick={() => { setSelectedId(undefined); setSel([]) }}
           pies={pies}
           pieRange={pies ? pieRange : undefined}
         />
+        )}
         {(loading || (api && apiTotals.isPending && !apiTotals.data)) && (
           <div className={css.loading}>Loading...</div>
         )}
-        {colorByAge && births && <ColorLegend births={births} actualTheme={actualTheme} />}
+        {flowStyle && (
+          <FlowLensLegend
+            sourceNames={lensSourceIds.map((id) => stations?.[id]?.name ?? id)}
+            channel={lens}
+            direction={dir}
+            onToggleDirection={() => setDir(dir === 'out' ? 'in' : 'out')}
+            total={flowStyle.total}
+            topCount={flowStyle.topCount}
+            floorCount={flowStyle.floorCount}
+          />
+        )}
+        {colorByAge && births && !flowStyle && <ColorLegend births={births} actualTheme={actualTheme} />}
         {(pies || api) && (
           <div className={css.piesControl}>
             <RangeWidthControl value={pieRange} onChange={setPieRange} />
@@ -413,6 +501,65 @@ export default function Stations() {
         />
       )}
       {stations && <SpeedDial ariaLabel="Search stations" />}
+    </div>
+  )
+}
+
+/** Legend for the flow lens: names the selected source(s), reports the set's
+ *  total flow, labels the ramp with real trip counts, and offers a direction
+ *  toggle — so the map's coloring is self-describing, with numbers. */
+function FlowLensLegend({
+  sourceNames,
+  channel,
+  direction,
+  onToggleDirection,
+  total,
+  topCount,
+  floorCount,
+}: {
+  sourceNames: string[]
+  channel: LensChannel
+  direction: FlowDirection
+  onToggleDirection: () => void
+  total: number
+  topCount: number
+  floorCount: number
+}) {
+  const source = sourceNames.length === 0
+    ? '—'
+    : sourceNames.length === 1
+      ? sourceNames[0]
+      : `${sourceNames[0]} +${sourceNames.length - 1} more`
+  const hasColor = channel === 'c' || channel === 'cr'
+  const hasRadius = channel === 'r' || channel === 'cr'
+  const out = direction === 'out'
+  // Matches `flowLens.ts` RAMP (indigo→sky→amber→orange→red).
+  const gradient = 'linear-gradient(to right, #3b4cc0, #7b9ff9, #f7d040, #f4772e, #d1180b)'
+  const fmt = (n: number) => n.toLocaleString()
+  return (
+    <div className={`${css.legend} ${css.lensLegend}`}>
+      <div className={css.lensSource}>
+        Trips {out ? 'from' : 'to'} <strong>{source}</strong>
+        <span className={css.lensTotal}>{fmt(total)} total</span>
+      </div>
+      <button type="button" className={css.lensDirBtn} onClick={onToggleDirection}>
+        ⇄ {out ? 'where riders go' : 'where riders come from'}
+      </button>
+      {hasColor && (
+        <>
+          <div className={css.legendBar} style={{ background: gradient }} />
+          <div className={css.legendLabels}>
+            <span>{fmt(floorCount)}</span>
+            <span>trips per station</span>
+            <span>{fmt(topCount)}</span>
+          </div>
+        </>
+      )}
+      <div className={css.lensNote}>
+        <span className={css.piesSwatch} style={{ background: '#888' }} />
+        {out ? 'no trips there' : 'no trips from there'}
+        {hasRadius && <> · size = trips</>}
+      </div>
     </div>
   )
 }
