@@ -39,6 +39,50 @@ Follow the shared **playbook**: `$c/hccs/path/specs/s3-to-r2-hccs-playbook.md`
 - **gbfs backfill** running: full `gbfs/` (raw WAL is the *unreplaceable* data — corrected an earlier mischaracterization; derived `gbfs/avail` is regenerable). ~780k objects / 194 GiB.
 - **IaC — the second-copy resources were stood up via Pulumi** (the real test of `iac-finish-the-stack.md`): `infra/__main__.py` made multi-account (AWS reproc-Batch extracted to `infra/aws_reproc.py`, gated by `manage_aws` config; account already `CLOUDFLARE_ACCOUNT_ID`/config-driven). New **`hccs` stack** (`manage_aws: false`, `cloudflare_account_id` secret = HCCS) → `pulumi up` created **D1 `ctbk-gbfs` `845e34bb-d138-4076-9955-5909e30d4323`**, **Queue `gbfs-status-events` `c11bd8a940cc4a73b206b55d438e54d5`**, the `gbfs/status`+`gbfs/info`→queue event-notification, and imported the bucket. Provider gotcha: the CF provider reads `CLOUDFLARE_API_TOKEN`; the HCCS token is `CF_PULUMI_HCCS_TOKEN` in `.envrc`, so map it explicitly (`CLOUDFLARE_API_TOKEN=$CF_PULUMI_HCCS_TOKEN`). Backend still committed local-file (solo-local for now; R2-backend + GHA-Pulumi deferred per `iac-finish-the-stack.md` Increment 1 until CI/2nd-dev).
 
+## Progress (2026-09-11, cont. — GBFS fleet stand-up)
+
+- **Workflows frozen (GH API, no code change):** `gh workflow disable` on
+  "Process new month" (`7252321`, rides ingestion — a new month must not land
+  on RAC mid-migration) + "Deploy GBFS Workers" (`257120682`, no accidental RAC
+  redeploy). Re-enable with `gh workflow enable <id>`.
+- **Worker tomls ported RAC→HCCS + committed** (`d7e6762f`): 5× `database_id`
+  `d5746734…`→`845e34bb…` (loader, cascade ×2, api ×2); 2× `R2_PUBLIC_BASE_URL`
+  `pub-4856603e…`→`pub-4b6c7e01…` (api prod + dev). `deploy.sh` blocks a
+  `database_id` split, so they move together. RAC deploys frozen → permanent
+  single-account move.
+- **HCCS D1 `ctbk-gbfs` (845e34bb) stood up:** schema via `wrangler d1 export
+  --no-data` from RAC (ground truth — captures `rg_manifest*` DDL, absent from
+  the repo) → applied to HCCS; then copied the durable registry/reference
+  tables' DATA (`pyramid_shards` 79.9k, `pyramid_watermarks` 154, `stations`
+  2.7k). **Skipped** `rg_manifest` (2.49M rows) — it's a *lazy row-group cache*
+  (`fetchShardRows` fills it from R2 parquet footers on miss), so HCCS
+  self-warms from the copied shards; saved ~$5 + a huge import. `pyrmts-ops d1
+  verify` → "schema up to date".
+- **Full HCCS fleet deployed** (`gbfs/deploy.sh`, `CF_PULUMI_HCCS_TOKEN` +
+  `CLOUDFLARE_ACCOUNT_ID_HCCS`, bootstrap-stamp path): `ctbk-gbfs-{loader,
+  cascade,compactor}` (prod) + `ctbk-gbfs-api-dev` (`--env dev`, cron off — no
+  double Slack, verification endpoint). Prod api on HCCS deferred to cutover.
+  Verified: `/api/health`, `/api/stations/slugs`, avail read-path mechanism.
+
+- **⚠️ Data-copy scope was WRONG — corrected here.** The original "live set"
+  copied `avail-v3` (pyramid name `avail`, 22.6k shards) and classified
+  `avail-v4/v5/v6` as "dev/superseded, not copied." But the `/api/avail-v3`
+  endpoint's `DEFAULT_PYRAMID` is **`avail-v6`**, and the FE also queries
+  **`avail-v5`** (`www/src/query/stations.ts`). So the live avail data was
+  never copied. **The authoritative "what HCCS needs" is the `pyramid_shards`
+  registry**, which references 7 prefixes:
+  - `avail-v3/` (pyramid `avail`) — copied ✓
+  - `smg-v1/`, `rides-v5/` — copied ✓
+  - **`avail-v6/` (67.8 GiB / 26.5k) — LIVE default, was missing**
+  - **`avail-v5/` (79.8 GiB / 32.8k) — FE-used, was missing**
+  - `avail-v4/` (36.9 GiB, registry-only, not FE-referenced) — genuinely stale, skip
+  - `station-luc.json` (root, 470 KB) — load-bearing for the bbox→vocab cover
+    (`v5BBoxCover`); was mis-classified superseded. **Copied.**
+  `avail-v5`+`avail-v6` copy (~148 GiB, R2→R2) running on `e`
+  (`~/rclone-availv56.sh`). NB `gbfs/avail/` (54 GiB, parity-verified earlier)
+  is a *different, older* prefix than the root `avail-v6/` pyramid the api now
+  serves.
+
 ## Remaining
 
 - **GBFS worker fleet → HCCS** (parallel single-writer pollers, per the cutover discussion): deploy `ctbk-gbfs-{poller,loader,compactor,cascade,api}` into the HCCS account wired to the new D1 id `845e34bb…` + queue `c11bd8a9…` + the `ctbk` binding. Per-account wrangler config (`[env.hccs]` or templating) for the D1 `database_id`. Then retire RAC's fleet once verified. No dual-write needed — run both fleets in parallel during overlap.
