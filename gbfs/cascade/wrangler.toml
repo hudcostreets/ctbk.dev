@@ -20,7 +20,7 @@ bucket_name = "ctbk"
 [[d1_databases]]
 binding = "DB"
 database_name = "ctbk-gbfs"
-database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
+database_id = "845e34bb-d138-4076-9955-5909e30d4323"
 
 # ─── Dev environment ───────────────────────────────────────────────────
 # Sibling worker `ctbk-gbfs-cascade-dev` for iterating on the avail-v3
@@ -38,7 +38,7 @@ bucket_name = "ctbk"
 [[env.dev.d1_databases]]
 binding = "DB"
 database_name = "ctbk-gbfs"
-database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
+database_id = "845e34bb-d138-4076-9955-5909e30d4323"
 
 [env.dev.triggers]
 crons = []

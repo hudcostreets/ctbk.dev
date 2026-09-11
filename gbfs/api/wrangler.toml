@@ -15,7 +15,7 @@ CORS_ORIGIN = "*"
 R2_BUCKET_NAME = "ctbk"
 # r2.dev public URL — anonymous direct reads from R2. Used as a sync
 # `getUrl(path)` fallback when the browser opts out of presigning.
-R2_PUBLIC_BASE_URL = "https://pub-4856603e85b34753b7e6bffb89411803.r2.dev"
+R2_PUBLIC_BASE_URL = "https://pub-4b6c7e01aa2349b8b8d6ed788df2a9d1.r2.dev"
 
 # Bundle .ttf font files as raw bytes (satori og:image rendering).
 # NOTE: defining ANY [[rules]] displaces wrangler's defaults, so the
@@ -33,7 +33,7 @@ fallthrough = true
 [[d1_databases]]
 binding = "DB"
 database_name = "ctbk-gbfs"
-database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
+database_id = "845e34bb-d138-4076-9955-5909e30d4323"
 
 [[r2_buckets]]
 binding = "R2"
@@ -74,12 +74,12 @@ mode = "smart"
 [env.dev.vars]
 CORS_ORIGIN = "*"
 R2_BUCKET_NAME = "ctbk"
-R2_PUBLIC_BASE_URL = "https://pub-4856603e85b34753b7e6bffb89411803.r2.dev"
+R2_PUBLIC_BASE_URL = "https://pub-4b6c7e01aa2349b8b8d6ed788df2a9d1.r2.dev"
 
 [[env.dev.d1_databases]]
 binding = "DB"
 database_name = "ctbk-gbfs"
-database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
+database_id = "845e34bb-d138-4076-9955-5909e30d4323"
 
 [[env.dev.r2_buckets]]
 binding = "R2"

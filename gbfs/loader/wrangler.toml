@@ -16,4 +16,4 @@ bucket_name = "ctbk"
 [[d1_databases]]
 binding = "DB"
 database_name = "ctbk-gbfs"
-database_id = "d5746734-70ba-46aa-8780-be09e4837f0b"
+database_id = "845e34bb-d138-4076-9955-5909e30d4323"
