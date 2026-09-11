@@ -1,5 +1,5 @@
 [core]
-    remote = s3
+    remote = r2
     autostage = true
 ['remote "s3"']
     url = s3://ctbk/.dvc
