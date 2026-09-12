@@ -108,12 +108,32 @@ Follow the shared **playbook**: `$c/hccs/path/specs/s3-to-r2-hccs-playbook.md`
   Stadia auth is **domain-allowlist** (`ctbk.dev` only) — resolves at the real
   domain post-flip; there is no Stadia key/env to migrate.
 
-## Remaining — the live flag-day flip (needs a person; live DNS)
+## Done — the live flag-day flip (2026-09-11) ✓
 
-The `ctbk.dev` zone (RAC) is more than a data domain — 7 records incl. the
-**apex FE Worker** (`ctbk-dev`), `dev`→`ctbk-dev-dev`, `data`→R2 `ctbk`, `s3`/
-`www`→CloudFront, 2× ACM-validation CNAMEs. R2 custom domains are same-account,
-so the whole zone moves. Runbook:
+Cutover **completed 2026-09-11**. `ctbk.dev` now serves entirely from HCCS
+(version `51ad27ea`), all requests 200, basemap works, zero RAC deps. The zone
+did **not** move via dashboard remove/add; instead the **registrar** (Squarespace,
+not CF Registrar) NS delegation flipped arturo/vida → **duke/hadlee** (HCCS's
+assigned NS), and the 7 records were recreated on HCCS: apex→Worker `ctbk-dev`,
+`dev`→`ctbk-dev-dev`, `data`→R2 `ctbk` (+ CORS policy), `s3`/`www`→CloudFront
+CNAMEs (DNS-only), 2× ACM CNAMEs. CI's CF/R2 secrets → HCCS; `CLOUDFLARE_GHA_D1_RO_TOKEN`
+→ HCCS D1 RO (2026-09-12). `dev` branch fast-forwarded to `www` so a future dev
+push rebuilds `ctbk-dev-dev` on HCCS defaults. RAC CF workers torn down.
+
+**Tail items (not blockers):**
+- **AWS Lambda AWS-account move** — the pyramid-tip `ctbk-avail-cascade{,-v5}`
+  (EventBridge 5-min ticks) was env-repointed to write HCCS R2 but still *runs*
+  in the RAC AWS account. A new HCCS AWS account (`688066488567`) will host it;
+  `create_function` is blocked by the fresh-account 3008 MB memory cap (needs
+  10240; measured max use 7.9 GB). Concurrency raised to 1000 (wrong lever);
+  memory-cap Support case filed 2026-09-12 (case `178917271400430`). Deploy +
+  RAC-Lambda teardown once approved.
+- **`Process new month` GHA (`7252321`)** still disabled — re-enable for the
+  first full HCCS rides pipeline (202608 waiting).
+- **RAC R2 data + D1** kept as backup — purge later, then the de-version
+  clean-slate pass.
+
+Runbook that was followed (record):
 
 1. **Deploy prod `ctbk-gbfs-api` + `ctbk-dev-dev` to HCCS.** Rebuild + deploy
    `ctbk-dev` with `VITE_API_BASE`=HCCS prod api, `VITE_DATA_BASE`=`data.ctbk.dev`.
