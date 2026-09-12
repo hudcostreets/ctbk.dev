@@ -1,2 +1,7 @@
 *.json
 *.parquet
+/e_c_202608.parquet
+/se_c_202608.parquet
+/ymrgtb_cd_202608.parquet
+/ymrgtbs_cd_202608.parquet
+/ymrgtbe_cd_202608.parquet

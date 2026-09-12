@@ -1,0 +1,11 @@
+outs:
+- md5: da0a14dee538152237d424d41c99fd71.dir
+  size: 225977183
+  hash: md5
+  path: '202608'
+meta:
+  computation:
+    cmd: ctbk norm create -w0 202608
+    deps:
+      /s3/tripdata/202608-citibike-tripdata.zip: 5e2179d8d5a659e4d80842a435158f30
+      /s3/tripdata/JC-202608-citibike-tripdata.csv.zip: 9a861581e94ae783d52f32de84163f25
