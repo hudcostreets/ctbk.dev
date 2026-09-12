@@ -166,7 +166,14 @@ jobs:
             # just those manifests (~40 KB total) — not the ~190 GiB of data —
             # via `dvx pull --meta-only` (dvx `93e790a6c`). Without this the
             # guard raises "N normalized directory manifests missing".
-            dvx pull -m --glob 's3/ctbk/normalized/*.dvc'
+            # Skip the current month ($ym): on a resume its `.dvc` is already
+            # committed (a prior run git-pushed before its R2 push) but its
+            # manifest isn't on R2 until THIS run's push, so pulling it would
+            # 404. `cons` exempts the current month from the guard anyway, and
+            # `norm create` rebuilds it locally (deterministic → same hash).
+            git ls-files 's3/ctbk/normalized/*.dvc' \
+              | grep -v "/${ym}\.dvc$" \
+              | xargs dvx pull -m
             # Whole-history / prev-month inputs for `ctbk update` steps that
             # would otherwise silently rebuild full-history artifacts from a
             # partial local set (2026-08-14 truncation incident, #183):
