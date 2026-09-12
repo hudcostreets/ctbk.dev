@@ -184,7 +184,12 @@ jobs:
             # - station-observations: lat/lng fallback in rides base build
             prev=$(date -u -d "${ym}01 -1 month" +%Y%m)
             dvc pull s3/ctbk/normalized/${prev}.parquet.dvc
-            dvc pull s3/ctbk/aggregated/ymrgtbs_cd_*.parquet.dvc s3/ctbk/aggregated/ymrgtbe_cd_*.parquet.dvc
+            # Exclude the current month here too: on a resume its committed
+            # aggregate `.dvc`s reference blobs not yet on R2 (same torn-run
+            # cause as above); `agg` rebuilds them this run.
+            git ls-files 's3/ctbk/aggregated/ymrgtbs_cd_*.parquet.dvc' 's3/ctbk/aggregated/ymrgtbe_cd_*.parquet.dvc' \
+              | grep -v "_${ym}\.parquet\.dvc$" \
+              | xargs dvc pull
             dvc pull s3/ctbk/stations/station-observations.parquet.dvc
             # (station-history.parquet — the luc refresh's historical
             # canonicals — is git-tracked; no pull needed)
