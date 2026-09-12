@@ -91,8 +91,19 @@ def run_workflow(
     if artifacts is not None:
         for artifact in artifacts:
             if Path(artifact.path).exists():
+                # `write_dvc()` records the .dvc (out-hash + current dep hashes
+                # + `meta.computation` provenance) but does NOT populate the
+                # content-addressed cache — so a later `dvc push` would find
+                # nothing to upload ("cache files do not exist neither locally
+                # nor on remote") and the freshly-built month's blobs would
+                # never reach the remote. Follow it with `dvx add`, which
+                # caches the bytes while PRESERVING the just-written `meta`
+                # (see dvx `add_to_cache`); ordering matters — write_dvc first
+                # makes the recorded dep hashes current, so add's stale-dep
+                # guard stays quiet. `-f` keeps re-runs idempotent.
                 artifact.write_dvc()
-                err(f"Recorded {artifact.path} (+ provenance)")
+                run('dvx', 'add', '-f', str(artifact.path))
+                err(f"Recorded {artifact.path} (+ provenance, cached)")
             else:
                 err(f"Warning: {artifact.path} does not exist, skipping")
         paths = [a.path for a in artifacts]
