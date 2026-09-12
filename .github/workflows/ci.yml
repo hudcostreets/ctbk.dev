@@ -227,7 +227,11 @@ jobs:
 
       - name: Install pnpm
         if: steps.args.outputs.args
-        run: npm install -g pnpm
+        # Pin to 9 to match www.yml's `pnpm/action-setup` version. Bare
+        # `npm i -g pnpm` pulls latest (v11), which chases breaking migrations
+        # the v9-authored lockfile/config predate (unsafe `..` importer paths,
+        # `pnpm.onlyBuiltDependencies` moved out of package.json → IGNORED_BUILDS).
+        run: npm install -g pnpm@9
 
       - name: Install Node dependencies
         if: steps.args.outputs.args
