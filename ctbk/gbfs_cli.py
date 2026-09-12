@@ -282,8 +282,8 @@ def gbfs_manifest_backfill(min_bins: int, env_name: str, max_keys: int | None, d
 # Env → worker URL. Dev is used constantly for smoke tests; prod
 # rarely gets curl-triggered but the endpoint exists.
 ENV_URLS = {
-	'dev':  'https://ctbk-gbfs-cascade-dev.ryan-0dc.workers.dev',
-	'prod': 'https://ctbk-gbfs-cascade.ryan-0dc.workers.dev',
+	'dev':  'https://ctbk-gbfs-cascade-dev.hccs-ctbk.workers.dev',
+	'prod': 'https://ctbk-gbfs-cascade.hccs-ctbk.workers.dev',
 }
 
 
@@ -848,8 +848,8 @@ def gbfs_lambda_logs(show_all: bool, function_name: str, minutes: int) -> None:
 # ─── Cross-pyramid API parity + latency (avail-v5 cutover) ─────────────
 
 API_URLS = {
-	'dev': 'https://ctbk-gbfs-api-dev.ryan-0dc.workers.dev',
-	'prod': 'https://ctbk-gbfs-api.ryan-0dc.workers.dev',
+	'dev': 'https://ctbk-gbfs-api-dev.hccs-ctbk.workers.dev',
+	'prod': 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev',
 }
 AVAIL_METRIC_NAMES = ('bikes', 'ebikes', 'docks', 'disabled', 'pending')
 
