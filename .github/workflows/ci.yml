@@ -160,6 +160,13 @@ jobs:
           ym=$(echo "${{ steps.args.outputs.args }}" | grep -oE '20[0-9]{4}' | head -1)
           if [ -n "$ym" ]; then
             dvc pull s3/tripdata/*${ym}*.dvc || true
+            # `cons create` depends on EVERY prior normalized dir (any source
+            # month can hold rides ending in M; `consolidated.dep_artifacts`),
+            # reading each dir's `.dir` manifest from the local cache. Hydrate
+            # just those manifests (~40 KB total) — not the ~190 GiB of data —
+            # via `dvx pull --meta-only` (dvx `93e790a6c`). Without this the
+            # guard raises "N normalized directory manifests missing".
+            dvx pull -m --glob 's3/ctbk/normalized/*.dvc'
             # Whole-history / prev-month inputs for `ctbk update` steps that
             # would otherwise silently rebuild full-history artifacts from a
             # partial local set (2026-08-14 truncation incident, #183):

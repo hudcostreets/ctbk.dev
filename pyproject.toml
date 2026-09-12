@@ -45,7 +45,10 @@ dependencies = [
 # `39062ef09`: record a tracked dep's `.dvc` out-hash on rewrite (not a
 # worktree re-hash) — kills the phantom leaf-dep-hash a level-parallel `-f`
 # reproc would otherwise record, which our audit diff must not see as a finding.
-dvx           = { git = "https://github.com/runsascoded/dvx.git", rev = "39062ef09" }
+# `93e790a6c`: `dvx pull --meta-only` — fetch just the `<md5>.dir` manifest
+# blobs (not the payload) so CI can hydrate all `normalized/*.dvc` dir manifests
+# the `cons` dep-guard needs, ~40 KB instead of ~190 GiB.
+dvx           = { git = "https://github.com/runsascoded/dvx.git", rev = "93e790a6c" }
 pyrmts        = { git = "https://github.com/runsascoded/pyrmts.git", rev = "7219b34", subdirectory = "python/pyrmts" }
 pyrmts-engine = { git = "https://github.com/runsascoded/pyrmts.git", rev = "7219b34", subdirectory = "python/pyrmts_engine" }
 pyrmts-ops    = { git = "https://github.com/runsascoded/pyrmts.git", rev = "7219b34", subdirectory = "python/pyrmts_ops" }
