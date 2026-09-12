@@ -198,7 +198,15 @@ class ConsolidatedMonth(MonthTable):
         for check_ym in GENESIS.until(ym + 1):
             dep = dir_dep(f'{base_dir}/{check_ym}')
             if dep is None:
-                missing.append(str(check_ym))
+                # `ym` itself is built by the `norm create ym` earlier in this
+                # same `update` run; stages are `-w0` (compute-only), so its
+                # `.dvc`/`.dir` manifest isn't written until `update`'s git-commit
+                # step — which runs *after* `cons`. So the current month is
+                # expectedly absent here. The guard exists to catch missing
+                # *prior* spillover dirs (any earlier source month can hold rides
+                # ending in `ym`), not the month being built, so exempt `ym`.
+                if check_ym != ym:
+                    missing.append(str(check_ym))
             elif dep:
                 artifacts[dep.path] = dep
 
