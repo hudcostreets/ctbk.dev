@@ -157,7 +157,8 @@
     "202604": "https://data.ctbk.dev/.dvc/files/md5/01/b6752cf572cbced2faf33d5f76c0dd",
     "202605": "https://data.ctbk.dev/.dvc/files/md5/94/13f7a238cdeb023f3901f984d9d853",
     "202606": "https://data.ctbk.dev/.dvc/files/md5/ee/b3e482bb854172d08573229870c53c",
-    "202607": "https://data.ctbk.dev/.dvc/files/md5/6f/5ceb027288d20db30526a480b9fd36"
+    "202607": "https://data.ctbk.dev/.dvc/files/md5/6f/5ceb027288d20db30526a480b9fd36",
+    "202608": "https://data.ctbk.dev/.dvc/files/md5/4a/51a5341d45057096dbc4bddb4a5acb"
   },
   "pairs": {
     "201306": "https://data.ctbk.dev/.dvc/files/md5/4e/8f1f27cbb5ba2b608c3cb552d8295e",
@@ -317,7 +318,8 @@
     "202604": "https://data.ctbk.dev/.dvc/files/md5/9e/57ebe5417a266f5afe25703ff1f92e",
     "202605": "https://data.ctbk.dev/.dvc/files/md5/56/ecd1dbc34289fa71a08a50455645a1",
     "202606": "https://data.ctbk.dev/.dvc/files/md5/3d/606469ca32ff52fc79e101faa30f62",
-    "202607": "https://data.ctbk.dev/.dvc/files/md5/fa/a9abaaed740fffd2d83c228b105c34"
+    "202607": "https://data.ctbk.dev/.dvc/files/md5/fa/a9abaaed740fffd2d83c228b105c34",
+    "202608": "https://data.ctbk.dev/.dvc/files/md5/bb/4220ae05c1e451fa974da02f968e00"
   },
-  "latestMonth": "202607"
+  "latestMonth": "202608"
 }
