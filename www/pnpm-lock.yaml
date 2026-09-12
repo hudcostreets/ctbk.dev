@@ -142,47 +142,6 @@ importers:
         specifier: ^2.8.3
         version: 2.8.3
 
-  ../../../pyrmts/js/packages/pyrmts:
-    dependencies:
-      hyparquet:
-        specifier: ^1.26.0
-        version: 1.26.0
-      yaml:
-        specifier: ^2.9.0
-        version: 2.9.0
-    devDependencies:
-      '@types/react':
-        specifier: ^19.2.15
-        version: 19.2.15
-      hyparquet-writer:
-        specifier: ^0.15.2
-        version: 0.15.6
-      react:
-        specifier: ^19.2.6
-        version: 19.2.6
-
-  ../../../pyrmts/js/packages/pyrmts-geo:
-    dependencies:
-      h3-js:
-        specifier: ^4.4.0
-        version: 4.4.0
-      pyrmts:
-        specifier: workspace:*
-        version: link:../pyrmts
-      s2js:
-        specifier: ^1.44.0
-        version: 1.44.0
-    devDependencies:
-      '@types/react':
-        specifier: ^19.2.15
-        version: 19.2.15
-      hyparquet-writer:
-        specifier: ^0.15.2
-        version: 0.15.6
-      react:
-        specifier: ^19.2.6
-        version: 19.2.6
-
 packages:
 
   '@babel/code-frame@7.27.1':
@@ -1138,7 +1097,7 @@ packages:
       react-dom: ^18
 
   '@rdub/file-tree@https://codeload.github.com/runsascoded/file-tree/tar.gz/288625c9a81057ad29314a6141819e0a5538c4c8':
-    resolution: {tarball: https://codeload.github.com/runsascoded/file-tree/tar.gz/288625c9a81057ad29314a6141819e0a5538c4c8}
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/runsascoded/file-tree/tar.gz/288625c9a81057ad29314a6141819e0a5538c4c8}
     version: 0.0.1-dist.206393
     peerDependencies:
       highlight.js: ^11
@@ -3025,12 +2984,12 @@ packages:
     hasBin: true
 
   plotly.js@https://codeload.github.com/runsascoded/plotly.js/tar.gz/1aa3c51cfd293aefb31ea8861dcc6b14105848fe:
-    resolution: {tarball: https://codeload.github.com/runsascoded/plotly.js/tar.gz/1aa3c51cfd293aefb31ea8861dcc6b14105848fe}
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/runsascoded/plotly.js/tar.gz/1aa3c51cfd293aefb31ea8861dcc6b14105848fe}
     version: 3.3.1-dist.d447632
     engines: {node: '>=18.0.0'}
 
   pltly@https://gitlab.com/runsascoded/js/pltly/-/archive/9c64c11de2aa3656c308dfdad56eafbc5c2fb32e/pltly-9c64c11de2aa3656c308dfdad56eafbc5c2fb32e.tar.gz:
-    resolution: {tarball: https://gitlab.com/runsascoded/js/pltly/-/archive/9c64c11de2aa3656c308dfdad56eafbc5c2fb32e/pltly-9c64c11de2aa3656c308dfdad56eafbc5c2fb32e.tar.gz}
+    resolution: {gitHosted: true, tarball: https://gitlab.com/runsascoded/js/pltly/-/archive/9c64c11de2aa3656c308dfdad56eafbc5c2fb32e/pltly-9c64c11de2aa3656c308dfdad56eafbc5c2fb32e.tar.gz}
     version: 0.1.0-dist.ee4dd04
     peerDependencies:
       plotly.js: '>=2'
@@ -3109,7 +3068,7 @@ packages:
     hasBin: true
 
   pyrmts-geo@https://codeload.github.com/runsascoded/pyrmts/tar.gz/55825c1b0548732f93f753f9cf2eddd85eb23da5#path:/js/packages/pyrmts-geo:
-    resolution: {path: /js/packages/pyrmts-geo, tarball: https://codeload.github.com/runsascoded/pyrmts/tar.gz/55825c1b0548732f93f753f9cf2eddd85eb23da5}
+    resolution: {gitHosted: true, path: /js/packages/pyrmts-geo, tarball: https://codeload.github.com/runsascoded/pyrmts/tar.gz/55825c1b0548732f93f753f9cf2eddd85eb23da5}
     version: 0.0.0
     peerDependencies:
       react: '>=18'
@@ -3118,7 +3077,7 @@ packages:
         optional: true
 
   pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/55825c1b0548732f93f753f9cf2eddd85eb23da5#path:/js/packages/pyrmts:
-    resolution: {path: /js/packages/pyrmts, tarball: https://codeload.github.com/runsascoded/pyrmts/tar.gz/55825c1b0548732f93f753f9cf2eddd85eb23da5}
+    resolution: {gitHosted: true, path: /js/packages/pyrmts, tarball: https://codeload.github.com/runsascoded/pyrmts/tar.gz/55825c1b0548732f93f753f9cf2eddd85eb23da5}
     version: 0.0.0
     peerDependencies:
       react: '>=18'
@@ -3337,7 +3296,7 @@ packages:
     resolution: {integrity: sha512-UOShsPwz7NrMUqhR6t0hWjFduvOzbtv7toDH1/hIrfRNIDBnnBWd0CwJTGvTpngVlmwGCdP9/Zl/tVrDqcuYzQ==}
 
   scrns@https://gitlab.com/runsascoded/js/scrns/-/archive/17a7273a3d08d7b50e519dcecdbbfd42bf1623e9/scrns-17a7273a3d08d7b50e519dcecdbbfd42bf1623e9.tar.gz:
-    resolution: {tarball: https://gitlab.com/runsascoded/js/scrns/-/archive/17a7273a3d08d7b50e519dcecdbbfd42bf1623e9/scrns-17a7273a3d08d7b50e519dcecdbbfd42bf1623e9.tar.gz}
+    resolution: {gitHosted: true, tarball: https://gitlab.com/runsascoded/js/scrns/-/archive/17a7273a3d08d7b50e519dcecdbbfd42bf1623e9/scrns-17a7273a3d08d7b50e519dcecdbbfd42bf1623e9.tar.gz}
     version: 0.3.0-dist.428e24f
     hasBin: true
     peerDependencies:
@@ -3647,7 +3606,7 @@ packages:
     resolution: {integrity: sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==}
 
   use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/e8de7954c2d39b639dc1b99203659b91fd8fd269:
-    resolution: {tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/e8de7954c2d39b639dc1b99203659b91fd8fd269}
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/e8de7954c2d39b639dc1b99203659b91fd8fd269}
     version: 0.12.0-dist.7d2aa3d
     peerDependencies:
       react: '>=18.0.0'
@@ -3661,7 +3620,7 @@ packages:
       react-dom: '>=18'
 
   use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/3db90a820b4372cea3efb7e02bac317dc049fa04:
-    resolution: {tarball: https://codeload.github.com/runsascoded/use-prms/tar.gz/3db90a820b4372cea3efb7e02bac317dc049fa04}
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/runsascoded/use-prms/tar.gz/3db90a820b4372cea3efb7e02bac317dc049fa04}
     version: 0.4.1-dist.84efcc8
     peerDependencies:
       react: ^18.0.0 || ^19.0.0
