@@ -65,3 +65,20 @@ def test_single_transition_month_still_merges():
     assert id_map['A'] == id_map['B']
     # merged, but the single shared month is flagged for review
     assert [r['pass'] for r in review] == ['fuzzy-borderline'] or review == []
+
+
+def test_underscore_variant_always_merges():
+    # A `_`-suffixed synthetic alias shares its base's name + location, so it is
+    # "co-active" every month — but it's the SAME station and must merge, never
+    # be split by the guard.
+    rows = [
+        ('5308.04', 'Foo St & Bar Ave', '202001', 500, 40.700, -74.000),
+        ('5308.04', 'Foo St & Bar Ave', '202012', 500, 40.700, -74.000),
+        ('5308.04_', 'Foo St & Bar Ave', '202001', 500, 40.700, -74.000),
+        ('5308.04_', 'Foo St & Bar Ave', '202012', 500, 40.700, -74.000),
+    ]
+    summary, monthly = _inputs(rows)
+    review = []
+    id_map = build_union_find(summary, monthly, review)
+    assert id_map['5308.04'] == id_map['5308.04_']
+    assert review == []

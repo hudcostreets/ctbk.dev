@@ -251,6 +251,13 @@ def _co_active(
     return _active_months(ids_a, monthly) & _active_months(ids_b, monthly)
 
 
+def _variant_pair(a: str, b: str) -> bool:
+    """True if `a` and `b` are the same station modulo a synthetic `_` suffix
+    (the pyrmts-geo fallback-cell alias, e.g. `5308.04` ↔ `5308.04_`). These are
+    the same physical station, so the co-activity guard must not split them."""
+    return a != b and a.rstrip('_') == b.rstrip('_')
+
+
 def build_union_find(
     summary: DataFrame,
     monthly_counts: dict[str, dict[str, int]],
@@ -300,7 +307,7 @@ def build_union_find(
         if len(group_ids) > 1:
             for sid in group_ids[1:]:
                 shared = _co_active([group_ids[0]], [sid], monthly_counts)
-                if len(shared) > CO_ACTIVE_MAX_MONTHS:
+                if len(shared) > CO_ACTIVE_MAX_MONTHS and not _variant_pair(group_ids[0], sid):
                     review.append({'pass': 'exact-name', 'a': group_ids[0], 'b': sid, 'shared_months': sorted(shared)})
                     exact_rejected += 1
                     continue
@@ -382,10 +389,10 @@ def build_union_find(
             # substantially active in the same month(s) — distinct stations, not
             # a renumber. Flag borderline cases (exactly the tolerance) for review.
             shared = _co_active(ids_a, ids_b, monthly_counts)
-            if len(shared) > CO_ACTIVE_MAX_MONTHS:
+            if len(shared) > CO_ACTIVE_MAX_MONTHS and not _variant_pair(ids_a[0], ids_b[0]):
                 review.append({'pass': 'fuzzy', 'a': ids_a[0], 'b': ids_b[0], 'shared_months': sorted(shared)})
                 continue
-            if shared:
+            if shared and not _variant_pair(ids_a[0], ids_b[0]):
                 review.append({'pass': 'fuzzy-borderline', 'a': ids_a[0], 'b': ids_b[0], 'shared_months': sorted(shared), 'merged': True})
 
             uf.union(rep_a, rep_b)
