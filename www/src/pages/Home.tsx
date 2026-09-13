@@ -1,14 +1,13 @@
 /**
- * Homepage: system-wide rides chart, powered by `/api/rides-{v1,v2,v3}`
- * (pyrmts-geo) — one parallel call per selected region, each passing
- * that region's cell covering as `cells=`. Output rows carry their
- * region tag so `buildTraces` filters/stacks naturally.
+ * Homepage: system-wide rides chart, powered by `/api/rides-v5`
+ * (pyrmts-geo, engine-built `s:`-keyed — `specs/rides-v5.md`) — one
+ * parallel call per selected region, each passing that region's cell
+ * covering as `cells=`. Output rows carry their region tag so
+ * `buildTraces` filters/stacks naturally. (rides-v3/v2/v1 predecessors
+ * retired; h3 v1/v2 GC'd 2026-08-15, S2 v3 excised 2026-09-13.)
  *
- * `?pyramid=v5&api=prod` is the default (engine-built, `s:`-keyed —
- * `specs/rides-v5.md` cutover). `?pyramid=v3` is the S2/LUC predecessor
- * (rollback path until GC'd after v5 burn-in; h3 v1/v2 GC'd 2026-08-15).
- * `?api=dev` routes against the dev worker. `?screenshot` hides controls
- * for OG/screenshot
+ * `?api=prod` (default) routes against the prod worker, `?api=dev` the
+ * dev worker. `?screenshot` hides controls for OG/screenshot
  * harness use (see `www/scrns.config.json`).
  */
 import { useUrlState, boolParam, numberArrayParam } from 'use-prms'
@@ -67,7 +66,6 @@ const SMG_RANGE_PRESETS: readonly DurationPreset[] = [
 ]
 const SMG_SYSTEM_SEL = { kind: 'bbox', bbox: SYSTEM_BBOX } as const
 
-const Pyramids: Pyramid[] = ['v3', 'v5']
 const ApiTargets: ApiTarget[] = ['prod', 'dev']
 
 export const RideableTypesExample = "/?y=m&s=b&rt=ce&d=2002-"
@@ -112,7 +110,7 @@ export default function Home() {
   const [stackBy, setStackBy] = useUrlState('s', codeParam<StackByV2>('None', StackByV2QueryStrings))
   const [stackRelative, setStackRelative] = useUrlState('pct', boolParam)
   const [regions, setRegions] = useUrlState('r', codesParam(Regions, RegionQueryStrings))
-  const [pyramid, setPyramid] = useUrlState<Pyramid>('pyramid', codeParam<Pyramid>('v5', [['v3', 'v3'], ['v5', 'v5']]))
+  const [pyramid] = useUrlState<Pyramid>('pyramid', codeParam<Pyramid>('v5', [['v5', 'v5']]))
   const [api, setApi] = useUrlState<ApiTarget>('api', codeParam<ApiTarget>('prod', [['prod', 'prod'], ['dev', 'dev']]))
   const [userTypes, setUserTypes] = useUrlState('u', codesParam(UserTypes, UserTypeQueryStrings))
   const [genders, setGenders] = useUrlState('g', codesParam(Genders, GenderQueryStrings))
@@ -369,13 +367,6 @@ export default function Home() {
                 checked: regions.includes(region),
               }))}
               cb={setRegions}
-            />
-
-            <Radios
-              label="Pyramid"
-              options={Pyramids.map(p => ({ label: p, data: p }))}
-              cb={setPyramid}
-              choice={pyramid}
             />
 
             <Radios

@@ -22,7 +22,7 @@ export const SYSTEM_BBOX = '40.5,-74.2,41.0,-73.7' as const
 const DATA_START_ISO = '2013-06-01T00:00:00Z'
 
 export type Anchor = 'start' | 'end'
-export type Pyramid = 'v3' | 'v5'
+export type Pyramid = 'v5'
 
 /** Which CFW worker to hit. `prod` = `ctbk-gbfs-api`, `dev` =
  *  `ctbk-gbfs-api-dev`. Use `dev` for iterating on backend changes
@@ -134,8 +134,8 @@ interface UseRidesV1Args {
    *  region's cell cover). Output rows tagged with `Region`. If omitted,
    *  a single system-wide query runs and every row is tagged `'NYC'`. */
   regions?: readonly Region[]
-  /** Pyramid variant to query — selects between `/api/rides-v5` (prod)
-   *  and `/api/rides-v3` (rollback). Default `'v5'`. */
+  /** Pyramid variant to query. Only `/api/rides-v5` remains (rides-v3
+   *  retired). Kept as a dormant pin for future pyramids. */
   pyramid?: Pyramid
   /** Which worker URL to hit. Default `'prod'`. `'dev'` points at the
    *  `ctbk-gbfs-api-dev` sibling worker for backend iteration without
