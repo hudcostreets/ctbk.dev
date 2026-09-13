@@ -221,12 +221,53 @@ def build_id_summaries(
     return summary
 
 
-def build_union_find(summary: DataFrame) -> dict[str, str]:
+# Co-activity guard: two station ids that are BOTH substantially active in the
+# same month are distinct physical stations (a renumbering is a hand-off, not a
+# concurrency), so they must never be union-merged — however similar their names
+# or close their coords. Empirically the separation is stark: true renumbers
+# share 0 substantially-active months; false merges share 30-80. `MIN_RIDES`
+# ignores metadata-only presence (a station can appear with ~0 rides); allowing
+# 1 shared month tolerates a messy transition. See `specs/station-id-coactivity.md`.
+CO_ACTIVE_MIN_RIDES = 50
+CO_ACTIVE_MAX_MONTHS = 1
+
+
+def _active_months(ids: list[str], monthly: dict[str, dict[str, int]]) -> set[str]:
+    """Months in which ANY of `ids` had >= CO_ACTIVE_MIN_RIDES rides."""
+    return {
+        ym
+        for sid in ids
+        for ym, c in monthly.get(sid, {}).items()
+        if c >= CO_ACTIVE_MIN_RIDES
+    }
+
+
+def _co_active(
+    ids_a: list[str],
+    ids_b: list[str],
+    monthly: dict[str, dict[str, int]],
+) -> set[str]:
+    """Shared substantially-active months between two id groups."""
+    return _active_months(ids_a, monthly) & _active_months(ids_b, monthly)
+
+
+def build_union_find(
+    summary: DataFrame,
+    monthly_counts: dict[str, dict[str, int]],
+    review: list | None = None,
+) -> dict[str, str]:
     """Build union-find mapping: id → canonical id (id0).
 
     Pass 1: Exact normalized name match → union.
     Pass 2: Fuzzy name + nearby coords + temporal adjacency → union.
+
+    Both passes are gated by the co-activity guard (`_co_active`): a candidate
+    union is rejected — and appended to `review` — when the two id groups are
+    both substantially active in more than `CO_ACTIVE_MAX_MONTHS` shared months.
+    `monthly_counts` is `{id: {ym: ride_count}}` (from `df_in`).
     """
+    if review is None:
+        review = []
     uf = UnionFind()
     ids = summary.index.tolist()
 
@@ -254,12 +295,18 @@ def build_union_find(summary: DataFrame) -> dict[str, str]:
             name_to_ids[nn].append(sid)
 
     exact_unions = 0
+    exact_rejected = 0
     for nn, group_ids in name_to_ids.items():
         if len(group_ids) > 1:
             for sid in group_ids[1:]:
+                shared = _co_active([group_ids[0]], [sid], monthly_counts)
+                if len(shared) > CO_ACTIVE_MAX_MONTHS:
+                    review.append({'pass': 'exact-name', 'a': group_ids[0], 'b': sid, 'shared_months': sorted(shared)})
+                    exact_rejected += 1
+                    continue
                 uf.union(group_ids[0], sid)
                 exact_unions += 1
-    err(f"Pass 1 (exact name): {exact_unions} unions across {len(name_to_ids)} unique names")
+    err(f"Pass 1 (exact name): {exact_unions} unions across {len(name_to_ids)} unique names ({exact_rejected} rejected: co-active)")
 
     # Pass 2: Fuzzy name + nearby coords + temporal adjacency
     fuzzy_unions = 0
@@ -331,10 +378,20 @@ def build_union_find(summary: DataFrame) -> dict[str, str]:
             if min_gap > 6:
                 continue
 
+            # Co-activity guard: reject a fuzzy union of two groups that are both
+            # substantially active in the same month(s) — distinct stations, not
+            # a renumber. Flag borderline cases (exactly the tolerance) for review.
+            shared = _co_active(ids_a, ids_b, monthly_counts)
+            if len(shared) > CO_ACTIVE_MAX_MONTHS:
+                review.append({'pass': 'fuzzy', 'a': ids_a[0], 'b': ids_b[0], 'shared_months': sorted(shared)})
+                continue
+            if shared:
+                review.append({'pass': 'fuzzy-borderline', 'a': ids_a[0], 'b': ids_b[0], 'shared_months': sorted(shared), 'merged': True})
+
             uf.union(rep_a, rep_b)
             fuzzy_unions += 1
 
-    err(f"Pass 2 (fuzzy): {fuzzy_unions} additional unions")
+    err(f"Pass 2 (fuzzy): {fuzzy_unions} additional unions ({sum(1 for r in review if r['pass']=='fuzzy')} rejected: co-active)")
 
     # Assign canonical IDs: most recent active ID per component
     components_final: dict[str, list[str]] = defaultdict(list)
@@ -664,7 +721,26 @@ class StationHarmonize:
         err(f"  {len(summary)} unique station IDs")
 
         err("Building union-find (station ID mapping)...")
-        id_map = build_union_find(summary)
+        # Per-(id, month) ride counts for the co-activity guard: two ids both
+        # substantially active in the same month are distinct stations, never a
+        # renumber, so they must not be union-merged (however similar/close).
+        mc = df_in.groupby(['id', 'ym'])['count'].sum()
+        monthly_counts: dict[str, dict[str, int]] = {}
+        for (sid, ym), c in mc.items():
+            monthly_counts.setdefault(sid, {})[ym] = int(c)
+        review: list = []
+        id_map = build_union_find(summary, monthly_counts, review)
+        if review:
+            import json as _json
+            review_path = self.id_map_url.replace('station-id-map.json', 'station-merge-review.json')
+            parent = dirname(review_path)
+            if parent and not exists(parent):
+                Path(parent).mkdir(parents=True, exist_ok=True)
+            with open(review_path, 'w') as f:
+                _json.dump(review, f, indent=2)
+            rejected = sum(1 for r in review if r['pass'] in ('exact-name', 'fuzzy'))
+            err(f"  Co-activity guard: {rejected} candidate merges rejected as distinct "
+                f"co-active stations, {len(review) - rejected} borderline flagged → {review_path}")
 
         # Try to build day-level spans from consolidated parquets
         norm_dir = Path(join(root, f'{BKT}/normalized'))
