@@ -1,11 +1,10 @@
 /**
  * Loads per-station monthly trip data.
  *
- * Two sources, selected by the `src` param (default `v3` since the
- * rides-v3 LUC rebuild landed — `specs/rides-v3-luc.md`; acceptance
- * showed v3 matches ride-level ground truth where the legacy JSONs
- * are off by a few rides/month):
- *  - `v3`: two `/api/rides-v3?cells=<LUC>` monthly queries (one per
+ * Two sources, selected by the `src` param (default `v5`, the rides-v5
+ * pyramid — station-identity + S2-cell keys, `MONOID_COLS`-byte-compatible
+ * with the retired rides-v3, so the same `cells=<LUC>` query serves it):
+ *  - `v5`: two `/api/rides-v5?cells=<LUC>` monthly queries (one per
  *    anchor → `Docking`), reshaped to the same `StationTripsRow[]`.
  *  - `legacy`: static `ymdgtb_cd.json` from the public DVX cache in S3,
  *    resolved via the build-time `ymdgtb-index.json`. Kept for
@@ -18,10 +17,10 @@ const INDEX_URL = '/ymdgtb-index.json'
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev'
 const STATION_LUC_URL = '/assets/station-luc.json'
 // Rides history starts 2013-06; ~14y × 12mo ≈ 170 monthly bins.
-const V3_FROM = '2013-06-01T00:00:00Z'
-const V3_BIN_BUDGET = 200
+const V5_FROM = '2013-06-01T00:00:00Z'
+const V5_BIN_BUDGET = 200
 
-export type TripsSource = 'legacy' | 'v3'
+export type TripsSource = 'legacy' | 'v5'
 
 export interface TripsIndex {
   dir_md5: string
@@ -55,7 +54,7 @@ function loadIndex(): Promise<TripsIndex> {
   return indexPromise
 }
 
-// ─── rides-v3 source ───────────────────────────────────────────────────
+// ─── rides-v5 source ───────────────────────────────────────────────────
 
 interface LucDenorm {
   by_short_name: Record<string, { lat: number; lng: number; cell: string; level: number }>
@@ -71,7 +70,7 @@ function loadLuc(): Promise<LucDenorm> {
   return lucPromise
 }
 
-interface RidesV3Record {
+interface RidesV5Record {
   dt: number
   gender: string
   user_type: string
@@ -89,11 +88,11 @@ const USER_TYPE_NAME: Record<string, StationTripsRow['User Type']> = {
   Annual: 'Annual', Daily: 'Daily',
 }
 
-async function fetchV3Rows(shortName: string): Promise<StationTripsRow[]> {
+async function fetchV5Rows(shortName: string): Promise<StationTripsRow[]> {
   const luc = await loadLuc()
   const entry = luc.by_short_name[shortName]
   if (!entry) {
-    console.warn(`useStationTrips[v3]: no LUC entry for short_name=${shortName}`)
+    console.warn(`useStationTrips[v5]: no LUC entry for short_name=${shortName}`)
     return []
   }
   // bbox is a required coarse filter on the endpoint; a small box around
@@ -106,16 +105,16 @@ async function fetchV3Rows(shortName: string): Promise<StationTripsRow[]> {
   const now = new Date()
   const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString()
   const rows = await Promise.all((['start', 'end'] as const).map(async (anchor) => {
-    const url = new URL(`${API_BASE}/api/rides-v3`)
+    const url = new URL(`${API_BASE}/api/rides-v5`)
     url.searchParams.set('anchor', anchor)
     url.searchParams.set('cells', entry.cell)
     url.searchParams.set('bbox', bbox)
-    url.searchParams.set('from', V3_FROM)
+    url.searchParams.set('from', V5_FROM)
     url.searchParams.set('to', to)
-    url.searchParams.set('bin_budget', String(V3_BIN_BUDGET))
+    url.searchParams.set('bin_budget', String(V5_BIN_BUDGET))
     const res = await fetch(url.toString())
-    if (!res.ok) throw new Error(`rides-v3 [${anchor}]: HTTP ${res.status}`)
-    const data = await res.json() as { records: RidesV3Record[] }
+    if (!res.ok) throw new Error(`rides-v5 [${anchor}]: HTTP ${res.status}`)
+    const data = await res.json() as { records: RidesV5Record[] }
     return data.records.map((r): StationTripsRow => {
       const d = new Date(r.dt)
       return {
@@ -150,8 +149,8 @@ export function useStationTrips(shortName: string | null | undefined, src: Trips
     const cacheKey = `${src}:${shortName}`
     const existing = rowsCache.get(cacheKey)
     const promise: Promise<StationTripsRow[]> = existing ?? (
-      src === 'v3'
-        ? fetchV3Rows(shortName)
+      src === 'v5'
+        ? fetchV5Rows(shortName)
         : (async () => {
             const index = await loadIndex()
             const md5 = index.files[shortName]

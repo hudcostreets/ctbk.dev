@@ -108,7 +108,7 @@ Finally, we generate JSON files with ride counts between each pair of stations, 
 
 Each `/s/:slug` detail page pulls two orthogonal data streams:
 
-- **Monthly trip history**, by default from the **rides pyramid** (`/api/rides-v3`, per-station identity keys). The `ymdgtb-cd` stage — per-station variants of `ymrgtb-cd` with start/end-station facets, one JSON per *canonical* station indexed at build time into `ymdgtb-index.json` — remains as the `?tsrc=legacy` fallback. Stations renumbered over time (e.g. `HB106` today, `HB609` pre-2025-06) share a file keyed by their canonical short_name; the index is enriched with alias entries so client lookups by either form resolve to the same data.
+- **Monthly trip history**, by default from the **rides pyramid** (`/api/rides-v5`, per-station identity keys). The `ymdgtb-cd` stage — per-station variants of `ymrgtb-cd` with start/end-station facets, one JSON per *canonical* station indexed at build time into `ymdgtb-index.json` — remains as the `?tsrc=legacy` fallback. Stations renumbered over time (e.g. `HB106` today, `HB609` pre-2025-06) share a file keyed by their canonical short_name; the index is enriched with alias entries so client lookups by either form resolve to the same data.
 - **Live availability** (per-minute bikes/docks/disabled snapshots) from a separate GBFS pipeline: a Cloudflare Worker polls `station_status` each minute; recent data is served from a D1 hot cache and older data from R2 parquet archives (compacted by `compact-r2.py`). This serving path is mid-migration to R2-only (`specs/gbfs-r2-only.md`).
 
 <H2 id="serving">Serving</H2>
