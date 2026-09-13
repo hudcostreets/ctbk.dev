@@ -113,7 +113,7 @@ Each `/s/:slug` detail page pulls two orthogonal data streams:
 
 <H2 id="serving">Serving</H2>
 
-The homepage rides chart and every `/s/:slug` trips chart are served by the **pyrmts** rollup-pyramid — `normalized/*.parquet` tiles rolled up (minute → … → month) on AWS Batch, registered in a Cloudflare D1 shard registry, and served by the CF api worker (`/api/rides-v5` in prod, `/api/rides-v3` rollback). This superseded the single-plot `ymrgtb_cd.json` flow. See `specs/rides-v5.md` and `specs/multiscale-timeseries-backend.md`.
+The homepage rides chart and every `/s/:slug` trips chart are served by the **pyrmts** rollup-pyramid — `normalized/*.parquet` tiles rolled up (minute → … → month) on AWS Batch, registered in a Cloudflare D1 shard registry, and served by the CF api worker (`/api/rides-v5`). This superseded the single-plot `ymrgtb_cd.json` flow (and the retired S2-keyed `rides-v3` rollback path). See `specs/rides-v5.md` and `specs/multiscale-timeseries-backend.md`.
 
 </PipelineProvider>
 

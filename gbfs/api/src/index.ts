@@ -495,7 +495,7 @@ import { coverageKey, coverageRange, defaultCoverageRange, isDay, type CoverageD
 import { EMPTY_VOCAB_KEY, makeVocab, readSeries, type Bin, type OpenShard, type ShardBytes, type Vocab } from './empty';
 import { runAlerts } from './alerts';
 import { DEFAULT_PYRAMID, repairGeneration, serveAvailV3, serveAvailV3Cells } from './avail_geo';
-import { serveRidesV3, serveRidesV3Cells, serveRidesV5 } from './rides_v1';
+import { serveRidesV5 } from './rides_v1';
 import { retryingStorage, withR2Retry } from './r2_retry';
 import { r2Storage } from 'pyrmts-cfw';
 import { backfillManifestKey, manifestStatus } from './rg_manifest';
@@ -1457,15 +1457,13 @@ export default {
 			return resp;
 		}
 
-		// /api/rides-{v3,v5}[/cells] — pyrmts-geo serving of rides
-		// pyramids (`rides-{v3,v5}/{start,end}/<tier>/…parquet`). v3 =
-		// S2-keyed rollback path; v5 = station-identity-keyed prod. See
-		// `specs/done/rides-pyramid-v3.md`, `specs/rides-v5.md` +
-		// `rides_v1.ts`. (h3-keyed v1/v2 GC'd 2026-08-15.)
-		const ridesMatch = url.pathname.match(/^\/api\/rides-(v[35])(\/cells)?$/);
+		// /api/rides-v5[/cells] — pyrmts-geo serving of the rides pyramid
+		// (`rides-v5/{start,end}/<tier>/…parquet`), station-identity-keyed
+		// prod. See `specs/rides-v5.md` + `rides_v1.ts`. (S2-keyed rides-v3
+		// and h3-keyed rides-v1/v2 retired/GC'd.)
+		const ridesMatch = url.pathname.match(/^\/api\/rides-v5(\/cells)?$/);
 		if (ridesMatch) {
-			const variant = ridesMatch[1] as 'v3' | 'v5';
-			const cellsRoute = !!ridesMatch[2];
+			const cellsRoute = !!ridesMatch[1];
 			// Edge cache: rides-* cold queries are O(seconds) since they
 			// fan out to many R2 GETs + decode + filter + stitch. Mirroring
 			// the /api/totals pattern (`index.ts:1232-1280`): past-only
@@ -1479,21 +1477,13 @@ export default {
 				headers.set('X-Cache', 'HIT');
 				return new Response(hit.body, { status: hit.status, headers });
 			}
-			const serveByVariant = {
-				v3: { rollup: serveRidesV3, cells: serveRidesV3Cells },
-			} as const;
 			const tRidesStart = performance.now();
 			let resp: Response;
 			try {
-				if (variant === 'v5') {
-					// Inventory-driven (D1 `pyramid_shards`) — see rides_v1.ts.
-					resp = await serveRidesV5(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*', cellsRoute, (p) => ctx.waitUntil(p));
-				} else {
-					const serve = cellsRoute ? serveByVariant[variant].cells : serveByVariant[variant].rollup;
-					resp = await serve(env.R2, request, env.CORS_ORIGIN ?? '*');
-				}
+				// Inventory-driven (D1 `pyramid_shards`) — see rides_v1.ts.
+				resp = await serveRidesV5(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*', cellsRoute, (p) => ctx.waitUntil(p));
 			} catch (err: any) {
-				return errorResponse(err.message ?? `rides-${variant} error`, 500, env);
+				return errorResponse(err.message ?? 'rides-v5 error', 500, env);
 			}
 			// Workers Analytics Engine: per-request perf telemetry. Lets us
 			// (a) detect when an EWR D1 replica spawns, (b) track per-route
@@ -1505,9 +1495,9 @@ export default {
 				const workerColo = resp.headers.get('X-Worker-Colo') ?? '';
 				const wallMs = performance.now() - tRidesStart;
 				env.PERF.writeDataPoint({
-					blobs: [`/api/rides-${variant}${cellsRoute ? '/cells' : ''}`, workerColo, String(resp.status)],
+					blobs: [`/api/rides-v5${cellsRoute ? '/cells' : ''}`, workerColo, String(resp.status)],
 					doubles: [wallMs],
-					indexes: [`/api/rides-${variant}`],
+					indexes: ['/api/rides-v5'],
 				});
 			}
 			if (resp.ok) {
