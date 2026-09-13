@@ -247,11 +247,8 @@ export default function StationDetail() {
     void prefetchStationDetail(queryClient, id, bufFromS, bufToS, binS)
   }, [queryClient, bufFromS, bufToS, binMs, availViewportPx])
 
-  // Load monthly trip history. Default `v5` (rides-v5 pyramid by LUC cell —
-  // supersedes the retired rides-v3, same `cells=` query); `?tsrc=legacy`
-  // keeps the static-JSON path for comparison until Phase E deletes it.
-  const [tripsSrc] = useUrlState('tsrc', codeParam<'legacy' | 'v5'>('v5', [['legacy', 'l'], ['v5', 'v5']]))
-  const { rows: tripsRows } = useStationTrips(info?.short_name, tripsSrc)
+  // Monthly trip history from the rides-v5 pyramid (by LUC cell).
+  const { rows: tripsRows } = useStationTrips(info?.short_name)
 
   // Trips-chart controls (per-page URL params)
   const [tripsYAxis, setTripsYAxis] = useUrlState('ty', codeParam<YAxis>('Rides', [['Rides', 'r'], ['Ride minutes', 'm']]))

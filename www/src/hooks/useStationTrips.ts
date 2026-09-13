@@ -1,31 +1,16 @@
 /**
- * Loads per-station monthly trip data.
- *
- * Two sources, selected by the `src` param (default `v5`, the rides-v5
- * pyramid — station-identity + S2-cell keys, `MONOID_COLS`-byte-compatible
- * with the retired rides-v3, so the same `cells=<LUC>` query serves it):
- *  - `v5`: two `/api/rides-v5?cells=<LUC>` monthly queries (one per
- *    anchor → `Docking`), reshaped to the same `StationTripsRow[]`.
- *  - `legacy`: static `ymdgtb_cd.json` from the public DVX cache in S3,
- *    resolved via the build-time `ymdgtb-index.json`. Kept for
- *    comparison (`?tsrc=legacy`) until Phase E deletes the artifacts.
+ * Loads per-station monthly trip data from the rides-v5 pyramid: two
+ * `/api/rides-v5?cells=<LUC>` monthly queries (one per anchor → `Docking`),
+ * reshaped to `StationTripsRow[]`. (The legacy static-`ymdgtb_cd.json` source
+ * was removed once rides-v5 became the default — Phase E.)
  */
 import { useEffect, useState } from 'react'
-import { dvcUrl } from '../lib/dataBase'
 
-const INDEX_URL = '/ymdgtb-index.json'
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev'
 const STATION_LUC_URL = '/assets/station-luc.json'
 // Rides history starts 2013-06; ~14y × 12mo ≈ 170 monthly bins.
 const V5_FROM = '2013-06-01T00:00:00Z'
 const V5_BIN_BUDGET = 200
-
-export type TripsSource = 'legacy' | 'v5'
-
-export interface TripsIndex {
-  dir_md5: string
-  files: Record<string, string>  // short_name -> md5
-}
 
 export interface StationTripsRow {
   Year: number
@@ -38,21 +23,8 @@ export interface StationTripsRow {
   Duration: number
 }
 
-const trips_url = dvcUrl
-
-// Module-level caches — same station page across navigations hits these.
-let indexPromise: Promise<TripsIndex> | null = null
+// Module-level cache — same station page across navigations hits this.
 const rowsCache = new Map<string, Promise<StationTripsRow[]>>()
-
-function loadIndex(): Promise<TripsIndex> {
-  if (!indexPromise) {
-    indexPromise = fetch(INDEX_URL).then((r) => {
-      if (!r.ok) throw new Error(`ymdgtb-index.json: HTTP ${r.status}`)
-      return r.json() as Promise<TripsIndex>
-    })
-  }
-  return indexPromise
-}
 
 // ─── rides-v5 source ───────────────────────────────────────────────────
 
@@ -132,8 +104,9 @@ async function fetchV5Rows(shortName: string): Promise<StationTripsRow[]> {
   return rows.flat()
 }
 
-/** Fetch per-station trip rows. Returns null while loading, [] if no data, rows[] when ready. */
-export function useStationTrips(shortName: string | null | undefined, src: TripsSource = 'legacy'): {
+/** Fetch per-station trip rows from the rides-v5 pyramid (`/api/rides-v5` by
+ *  LUC cell). Returns null while loading, [] if no data, rows[] when ready. */
+export function useStationTrips(shortName: string | null | undefined): {
   rows: StationTripsRow[] | null
   error: string | null
 } {
@@ -146,32 +119,16 @@ export function useStationTrips(shortName: string | null | undefined, src: Trips
     setRows(null)
     setError(null)
 
-    const cacheKey = `${src}:${shortName}`
-    const existing = rowsCache.get(cacheKey)
-    const promise: Promise<StationTripsRow[]> = existing ?? (
-      src === 'v5'
-        ? fetchV5Rows(shortName)
-        : (async () => {
-            const index = await loadIndex()
-            const md5 = index.files[shortName]
-            if (!md5) {
-              console.warn(`useStationTrips: no ymdgtb data indexed for short_name=${shortName}`)
-              return []
-            }
-            const res = await fetch(trips_url(md5))
-            if (!res.ok) throw new Error(`HTTP ${res.status}`)
-            return res.json() as Promise<StationTripsRow[]>
-          })()
-    )
-
-    if (!existing) rowsCache.set(cacheKey, promise)
+    const existing = rowsCache.get(shortName)
+    const promise: Promise<StationTripsRow[]> = existing ?? fetchV5Rows(shortName)
+    if (!existing) rowsCache.set(shortName, promise)
 
     promise
       .then((r) => { if (!cancelled) setRows(r) })
       .catch((e) => { if (!cancelled) setError(String(e)) })
 
     return () => { cancelled = true }
-  }, [shortName, src])
+  }, [shortName])
 
   return { rows, error }
 }
