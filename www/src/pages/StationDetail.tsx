@@ -42,6 +42,9 @@ interface Manifest {
   stations: Record<string, string>
   pairs: Record<string, string>
   latestMonth: string
+  /** Alias → canonical station id (renumbered stations); the monthly
+   *  `stations`/`pairs` are keyed by canonical. Missing id → itself. */
+  aliases?: Record<string, string>
 }
 
 /** Format YYYYMM → "MMM 'YY" (matches Stations.tsx) */
@@ -233,7 +236,15 @@ export default function StationDetail() {
       duration,
     })
   }, [setRange])
-  const smgSel = useMemo(() => (info?.short_name ? smgCellsFor([info.short_name]) : null), [info?.short_name])
+  // Canonical id for a renumbered station (HB106 → HB609). Every per-station
+  // *aggregation* lookup — rides/pairs, the rides-v5 trips LUC cell, and the
+  // smg station-state `s:` key — is keyed by the canonical station, so they
+  // all normalize through this. Display (header `#id`) + the gbfs-status
+  // availability plot (keyed by `gbfs_station_id`) keep the current id.
+  const canonicalShortName = info?.short_name
+    ? (manifest?.aliases?.[info.short_name] ?? info.short_name)
+    : info?.short_name
+  const smgSel = useMemo(() => (canonicalShortName ? smgCellsFor([canonicalShortName]) : null), [canonicalShortName])
 
   // Prefetch handler for hovered map circles. Reuses the current page's
   // (bufFromS, bufToS, binS) so the prefetched cache entries match the next
@@ -251,7 +262,7 @@ export default function StationDetail() {
   // supersedes the retired rides-v3, same `cells=` query); `?tsrc=legacy`
   // keeps the static-JSON path for comparison until Phase E deletes it.
   const [tripsSrc] = useUrlState('tsrc', codeParam<'legacy' | 'v5'>('v5', [['legacy', 'l'], ['v5', 'v5']]))
-  const { rows: tripsRows } = useStationTrips(info?.short_name, tripsSrc)
+  const { rows: tripsRows } = useStationTrips(canonicalShortName, tripsSrc)
 
   // Trips-chart controls (per-page URL params)
   const [tripsYAxis, setTripsYAxis] = useUrlState('ty', codeParam<YAxis>('Rides', [['Rides', 'r'], ['Ride minutes', 'm']]))
@@ -332,7 +343,7 @@ export default function StationDetail() {
     // `useRollupQuery` is internally-gated on `!!station || !!regions` — we
     // additionally gate on the feature flag by only reading the hook's result
     // when `rollupEnabled`.
-    station: rollupEnabled ? info?.short_name : undefined,
+    station: rollupEnabled ? canonicalShortName : undefined,
     end: tripsRange.timestamp,
     duration: tripsRange.duration,
     binMs: tripsBinMs > 0 ? tripsBinMs : undefined,
@@ -439,7 +450,9 @@ export default function StationDetail() {
   // Use station-history-sourced lat/lon for the map (so the marker matches the
   // pair-data dataset). Fall back to GBFS info if not yet loaded.
   const mapStations = stations ?? {}
-  const mapShortName = info?.short_name
+  // Canonical id (renumbered stations) — the monthly `stations`/`pairs` are
+  // keyed by it, so the map center/selection/pairs lookups go through it.
+  const mapShortName = canonicalShortName
   const mapCenter: [number, number] | null =
     mapShortName && mapStations[mapShortName]
       ? [mapStations[mapShortName].lat, mapStations[mapShortName].lng]
@@ -736,7 +749,7 @@ export default function StationDetail() {
                 )}
               </Typography>
               <RidesTable
-                station={info.short_name}
+                station={canonicalShortName ?? info.short_name}
                 counterpartStation={ridesPair}
                 side={ridesSide}
                 fromS={ridesFromS}
