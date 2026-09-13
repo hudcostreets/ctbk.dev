@@ -49,27 +49,10 @@ for (const month of months) {
   }
 }
 
-// Alias → canonical station-id map (renumbered stations, e.g. HB106 → HB609).
-// The monthly `stations`/`pairs` aggregates are keyed by the *canonical* id, so
-// client lookups by a station's *current* id must normalize through this first
-// (same source of truth `gen-ymdgtb-index.js` uses to alias the trips index).
-// Only non-self entries are shipped; a missing id resolves to itself.
-const idMapPath = join(repoRoot, 's3/ctbk/stations/station-id-map.json')
-const aliases = {}
-try {
-  const idMap = JSON.parse(readFileSync(idMapPath, 'utf8'))
-  for (const [alias, canonical] of Object.entries(idMap)) {
-    if (alias !== canonical) aliases[alias] = canonical
-  }
-} catch {
-  console.warn(`Alias map skipped: ${idMapPath} not found`)
-}
-
 const manifest = {
   stations: stationsUrls,
   pairs: pairsUrls,
   latestMonth: months[months.length - 1],
-  aliases,
 }
 
 const outPath = join(__dirname, '..', 'public/assets/station-urls.json')

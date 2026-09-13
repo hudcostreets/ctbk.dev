@@ -58,10 +58,6 @@ type Manifest = {
   stations: Record<string, string>
   pairs: Record<string, string>
   latestMonth: string
-  /** Alias → canonical station id (renumbered stations). The monthly
-   *  `stations`/`pairs` are keyed by canonical, so lookups by a station's
-   *  current id must resolve through this. Missing id → itself. */
-  aliases?: Record<string, string>
 }
 
 /** URL codec for the `m` param: stored internally as `YYYYMM`, encoded as `YYMM`
@@ -312,13 +308,7 @@ export default function Stations() {
   const tileStyle = resolveTileStyle(tileCode, actualTheme)
   const currentColors = TILE_COLORS[tileStyle]
 
-  // Normalize a station id to the canonical id the monthly aggregation is
-  // keyed by (renumbered stations, e.g. HB106 → HB609). Lookups into
-  // `stations`/`pairCounts` and the map's selection must go through this;
-  // the raw `selectedId` is kept for the URL + `/s/` link.
-  const canonicalSelectedId = selectedId ? (manifest?.aliases?.[selectedId] ?? selectedId) : selectedId
-
-  const subtitle = canonicalSelectedId && stations?.[canonicalSelectedId] ? stations[canonicalSelectedId].name : null
+  const subtitle = selectedId && stations?.[selectedId] ? stations[selectedId].name : null
 
   if (error) {
     return (
@@ -336,7 +326,7 @@ export default function Stations() {
       <main className={css.main}>
         <StationMap
           stations={effectiveStations ?? {}}
-          selectedId={canonicalSelectedId}
+          selectedId={selectedId}
           setSelectedId={setSelectedId}
           pinnedIds={sel}
           onTogglePin={togglePin}
