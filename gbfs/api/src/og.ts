@@ -26,6 +26,7 @@ import yogaWasm from './assets/yoga.wasm';
 import resvgWasm from './assets/resvg.wasm';
 import interSemiBold from './assets/Inter-SemiBold.ttf';
 import { serveAvailV3 } from './avail_geo';
+import { serveRidesV5 } from './rides_v1';
 
 // Both wasm modules must init exactly once per isolate.
 let _wasmReady: Promise<void> | null = null;
@@ -63,27 +64,31 @@ async function stationBySlug(db: D1Database, slug: string): Promise<StationRow |
 /** Station-LUC denorm (same file the FE + cascade worker read). Cached
  *  per isolate — ~2.5k entries, refreshed rarely. */
 const STATION_LUC_KEY = 'gbfs/station-luc.json';
+interface LucEntry { lat: number; lng: number; cell: string }
 interface LucFile {
-	by_short_name: Record<string, { cell: string }>;
+	by_short_name: Record<string, LucEntry>;
 }
 let _luc: LucFile | null = null;
-async function lucCellFor(r2: R2Bucket, shortName: string): Promise<string | null> {
+async function lucEntryFor(r2: R2Bucket, shortName: string): Promise<LucEntry | null> {
 	if (_luc === null) {
 		const obj = await r2.get(STATION_LUC_KEY);
 		if (!obj) return null;
 		_luc = await obj.json<LucFile>();
 	}
-	return _luc.by_short_name[shortName]?.cell ?? null;
+	return _luc.by_short_name[shortName] ?? null;
 }
 
-// ─── Monthly trips (per-station ymdgtb JSON on S3, via md5 index) ───
+// ─── Monthly trips (rides-v5 pyramid, per-station LUC cell) ──────────
 
-/** Same data path the FE's `useStationTrips` uses: `ymdgtb-index.json`
- *  maps short_name → md5 of a per-station trips JSON on the ctbk S3
- *  bucket. Index cached per isolate (regenerates monthly). */
-const TRIPS_INDEX_URL = 'https://ctbk.dev/ymdgtb-index.json';
-const TRIPS_S3_BASE = 'https://ctbk.s3.amazonaws.com/.dvc/files/md5';
-let _tripsIndex: { files: Record<string, string> } | null = null;
+/** Same data path as the FE's `useStationTrips`: an internal
+ *  `/api/rides-v5?anchor=start&cells=<LUC cell>` monthly query against the
+ *  rides-v5 pyramid, reusing the full serving path (`serveRidesV5`) for one
+ *  code path to trust. The share card only shows start-side monthly totals,
+ *  so a single anchor + a `count`-summing reducer suffice (no `end` query,
+ *  no gender/user-type/bike-type breakdown). Supersedes the retired
+ *  per-station `ymdgtb` JSON + `ymdgtb-index.json` md5 path. */
+const V5_FROM = '2013-06-01T00:00:00Z';
+const V5_BIN_BUDGET = 200;
 
 interface TripsSummary {
 	/** (ym, rides) pairs, chronological — start-side counts. */
@@ -93,22 +98,24 @@ interface TripsSummary {
 	lastCount: number;
 }
 
-async function tripsSummary(shortName: string): Promise<TripsSummary | null> {
-	if (_tripsIndex === null) {
-		const r = await fetch(TRIPS_INDEX_URL);
-		if (!r.ok) return null;
-		_tripsIndex = await r.json();
-	}
-	const md5 = _tripsIndex!.files[shortName];
-	if (!md5) return null;
-	const r = await fetch(`${TRIPS_S3_BASE}/${md5.slice(0, 2)}/${md5.slice(2)}`);
-	if (!r.ok) return null;
-	const rows = await r.json() as Array<{ Year: number; Month: number; Docking: string; Count: number }>;
+async function tripsSummary(r2: R2Bucket, db: D1Database, entry: LucEntry): Promise<TripsSummary | null> {
+	// `to` quantized to next-month-start (matches the FE) so the internal
+	// request URL is stable month-to-month rather than per-ms.
+	const now = new Date();
+	const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
+	// bbox is a required coarse filter; a small box around the station
+	// suffices (the `cells=` predicate does the real work).
+	const bbox = [entry.lat - 0.02, entry.lng - 0.02, entry.lat + 0.02, entry.lng + 0.02].join(',');
+	const url = `https://internal/api/rides-v5?anchor=start&cells=${encodeURIComponent(entry.cell)}` +
+		`&bbox=${bbox}&from=${V5_FROM}&to=${to}&bin_budget=${V5_BIN_BUDGET}`;
+	const resp = await serveRidesV5(r2, db, new Request(url), '*', false);
+	if (!resp.ok) return null;
+	const data = await resp.json() as { records: Array<{ dt: number; count: number }> };
 	const byYm = new Map<string, number>();
-	for (const row of rows) {
-		if (row.Docking !== 'start') continue;
-		const ym = `${row.Year}${String(row.Month).padStart(2, '0')}`;
-		byYm.set(ym, (byYm.get(ym) ?? 0) + row.Count);
+	for (const row of data.records ?? []) {
+		const d = new Date(row.dt);
+		const ym = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+		byYm.set(ym, (byYm.get(ym) ?? 0) + row.count);
 	}
 	if (byYm.size === 0) return null;
 	const months = [...byYm.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1);
@@ -301,12 +308,13 @@ export async function serveStationOg(
 	const station = await stationBySlug(db, slug);
 	if (!station) return new Response(`station not found: ${slug}\n`, { status: 404 });
 
-	const cell = await lucCellFor(r2, station.short_name);
+	const luc = await lucEntryFor(r2, station.short_name);
+	const cell = luc?.cell ?? null;
 	// Both panels are decoration — render the card without either rather
 	// than failing the share preview.
 	const [series, trips, summary] = await Promise.all([
 		cell ? availSeries(r2, db, cell).catch(() => null) : Promise.resolve(null),
-		tripsSummary(station.short_name).catch(() => null),
+		luc ? tripsSummary(r2, db, luc).catch(() => null) : Promise.resolve(null),
 		cell ? availSummary(r2, db, cell).catch(() => null) : Promise.resolve(null),
 	]);
 

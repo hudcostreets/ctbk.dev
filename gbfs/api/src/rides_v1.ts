@@ -46,9 +46,7 @@ import {
 	PlanLimitError,
 	stitch,
 	type Duration,
-	type FetchTrace,
 	type PlanLimits,
-	type Pyramid,
 	type Row,
 	type Tier,
 } from 'pyrmts';
@@ -58,17 +56,12 @@ import { retryingStorage } from './r2_retry';
 import { acquireFooterSlot, busyResponse, FetchBusyError } from './fetch_guard';
 import { fetchShardRows } from './rg_manifest';
 import {
-	filterCellsAndRes,
-	filterCellsByCover,
-	getSpatialIndex,
-	planGeoQuery,
 	planGeoQueryFromInventory,
 	s2Index,
 	vocabCover,
 	type BBox,
 	type GeoPyramid,
 	type GeoQueryPlan,
-	type SpatialIndex,
 	type SpatialSet,
 } from 'pyrmts-geo';
 import { loadV5Vocab, v5BBoxCover } from './avail_geo';
@@ -86,81 +79,6 @@ const DEFAULT_REDUCER: Reducer = 'sum';
 export const ANCHORS = ['start', 'end'] as const;
 export type Anchor = typeof ANCHORS[number];
 const DEFAULT_ANCHOR: Anchor = 'start';
-
-export const VARIANTS = ['v3'] as const;
-export type Variant = typeof VARIANTS[number];
-
-const V3_TIERS: Tier[] = [
-	{ name: '1h',  bin: '1h',  shards: ['1mo'] },
-	{ name: '3h',  bin: '3h',  shards: ['3mo'] },
-	{ name: '6h',  bin: '6h',  shards: ['6mo'] },
-	{ name: '12h', bin: '12h', shards: ['1y']  },
-	{ name: '1d',  bin: '1d',  shards: ['120y'] },
-	{ name: '3d',  bin: '3d',  shards: ['120y'] },
-	{ name: '7d',  bin: '7d',  shards: ['120y'] },
-	{ name: '14d', bin: '14d', shards: ['120y'] },
-	{ name: '1mo', bin: '1mo', shards: ['120y'] },
-	{ name: '3mo', bin: '3mo', shards: ['120y'] },
-	{ name: '1y',  bin: '1y',  shards: ['120y'] },
-];
-
-/** v3: S2-keyed at levels 10..15, consolidated cascade (~1000 bins per
- *  shard so a typical viewport reads one shard) — see
- *  `specs/done/rides-pyramid-v3.md`. */
-const TIERS_BY_VARIANT: Record<Variant, Tier[]> = {
-	v3: V3_TIERS,
-};
-
-function cellCol(anchor: Anchor, variant: Variant): string {
-	return `${anchor}_s2_cell`;
-}
-
-/** Materialized S2 levels, finest-first (planner picks finest that fits
- *  cellBudget). */
-function resolutions(variant: Variant): number[] {
-	return [15, 14, 13, 12, 11, 10];
-}
-
-function keyTemplate(anchor: Anchor, variant: Variant): string {
-	return `rides-${variant}/${anchor}/{tier}/{period}.parquet`;
-}
-
-/** Shared pyramid skeleton; only key-template + cellCol + `dims` + `index` vary. */
-function makeBaseProps(bucket: R2Bucket, anchor: Anchor, variant: Variant): Omit<GeoPyramid, 'dims'> {
-	return {
-		storage: parquetBackend(retryingStorage(r2Storage(bucket))),
-		keyTemplate: keyTemplate(anchor, variant),
-		axis: 'time',
-		binCol: 'dt',
-		// pyrmts's `sum` monoid stores state as `<name>{_n,_sum,_sumsq}` —
-		// one metric per logical quantity, monoid handles the triplet.
-		metrics: METRICS.map((name) => ({ name, monoid: 'sum' as const })),
-		tiers: TIERS_BY_VARIANT[variant],
-		geo: {
-			cellCol: cellCol(anchor, variant),
-			resolutions: resolutions(variant),
-			index: s2Index,
-		},
-	};
-}
-
-/** Rollup pyramid — `dims: []` so `stitch` collapses cells, leaving
- *  one row per (dt, dim-tuple) summed across the bbox-covering cell set. */
-export function ridesPyramid(bucket: R2Bucket, anchor: Anchor, variant: Variant): GeoPyramid {
-	return { ...makeBaseProps(bucket, anchor, variant), dims: DIMS.map((d) => ({ name: d, type: 'string' as const })) };
-}
-
-/** Per-cell pyramid — adds the cell column to dims so stitch preserves
- *  cell-level breakdown. */
-export function ridesCellsPyramid(bucket: R2Bucket, anchor: Anchor, variant: Variant): GeoPyramid {
-	return {
-		...makeBaseProps(bucket, anchor, variant),
-		dims: [
-			{ name: cellCol(anchor, variant), type: 'string' as const },
-			...DIMS.map((d) => ({ name: d, type: 'string' as const })),
-		],
-	};
-}
 
 // ─────────────────────────────────────────────────────────────────────
 // Sum-monoid reducer math.
@@ -274,304 +192,12 @@ function parseDimFilters(url: URL): { col: string; values: string[] }[] | undefi
 	return out.length ? out : undefined;
 }
 
-/** Core handler — runs plan/fetch/filter/stitch and applies reducer.
- *
- *  Pass `?debug=1` to swap the row payload for a phase-timing diagnostic:
- *  `{ debug: { plan, phaseMs: { plan, fetch, filter, stitch, reduce, total },
- *  rowCounts: { perShard, filtered, stitched, reduced } } }`. Used to
- *  benchmark hot-path optimizations (RG size, multi-range, pre-aggregation).
- */
-async function serveRidesReduced(
-	pyramid: GeoPyramid,
-	request: Request,
-	cors: string | null,
-	dropCellCol: boolean,
-): Promise<Response> {
-	const tStart = performance.now();
-	const url = new URL(request.url);
-	const from = parseInstant(url.searchParams.get('from'));
-	const to = parseInstant(url.searchParams.get('to'));
-	if (from === null || to === null) {
-		return errorResponse(400, 'from and to query params required (ISO-8601)', cors);
-	}
-	const binBudget = parsePositiveInt(url.searchParams.get('bin_budget'), 1024);
-	if (binBudget === null) return errorResponse(400, 'invalid bin_budget', cors);
-	const cellBudget = parsePositiveInt(url.searchParams.get('cell_budget'), 1024);
-	if (cellBudget === null) return errorResponse(400, 'invalid cell_budget', cors);
-	const bbox = parseBBox(url.searchParams.get('bbox'));
-	if (bbox === null) return errorResponse(400, 'bbox required (minLat,minLng,maxLat,maxLng)', cors);
-
-	const reducerRaw = url.searchParams.get('reducer') ?? DEFAULT_REDUCER;
-	if (!REDUCERS.includes(reducerRaw as Reducer)) {
-		return errorResponse(400, `bad reducer '${reducerRaw}'; one of ${REDUCERS.join('|')}`, cors);
-	}
-	const reducer = reducerRaw as Reducer;
-	const debug = url.searchParams.get('debug') === '1';
-
-	const rgFilters = parseDimFilters(url);
-
-	// Optional caller-supplied cell list — overrides bbox-derived
-	// `plan.outputCells`. Used for region stacking: caller provides the
-	// minimal cover of each region. Cells may be at mixed resolutions
-	// (S2 `minimalCover` output); finest-level cell drives `outputRes`.
-	// `cells.exclude` (optional) declares lineage-aware subtractions —
-	// the cover (`SpatialSet`) shape required by `filterCellsByCover`.
-	const cellsRaw = url.searchParams.get('cells');
-	const userCells = cellsRaw
-		? cellsRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
-		: null;
-	if (userCells !== null && userCells.length === 0) {
-		return errorResponse(400, '`cells` param given but empty', cors);
-	}
-	const cellsExcludeRaw = url.searchParams.get('cells.exclude');
-	const userCellsExclude = cellsExcludeRaw
-		? cellsExcludeRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
-		: [];
-
-	const tPlan = performance.now();
-	const index: SpatialIndex = getSpatialIndex(pyramid);
-	// Cover semantics:
-	//   - No user cover: bbox-derived single-level (planner runs `pickResolution`).
-	//   - Single-level user cover (no excludes): exact-match push-down; rows
-	//     at the cover's own level survive.
-	//   - MIXED-level cover (possibly with excludes): algebraic mode. Push
-	//     down `cells IN [include ∪ exclude]` — every kept row's cell
-	//     equals one of the cover's tokens at its native level. Negate the
-	//     sum-monoid state for exclude rows; stitch then naturally
-	//     computes Σ(include) − Σ(exclude). No `filterCellsByCover`
-	//     lineage walk needed; correctness rides on the monoid arithmetic.
-	const userCoverLevels = userCells !== null
-		? Array.from(new Set(userCells.map((c) => index.cellLevel(c))))
-		: [];
-	const userCoverIsMixed = userCells !== null && (userCoverLevels.length > 1 || userCellsExclude.length > 0);
-	const userOutputRes = userCells !== null
-		? (userCoverIsMixed ? -1 : userCoverLevels[0]!)  // -1 sentinel: don't filter by level
-		: null;
-	// `outputCells` (caller-supplied cover) path bypasses `pickResolution`,
-	// skipping `bboxToCells`'s `RegionCoverer` allocation and the V8 GC
-	// tail it hangs on the next async safepoint. See pyrmts
-	// `specs/done/plan-geo-query-precomputed-cover.md`.
-	const plan = userCells !== null
-		? planGeoQuery(pyramid, { range: { from, to }, binBudget, outputCells: { res: userOutputRes!, cells: userCells } })
-		: planGeoQuery(pyramid, { range: { from, to }, binBudget, bbox, cellBudget });
-	const outputCells = userCells ?? plan.outputCells;
-	const outputRes = userCells !== null ? userOutputRes! : plan.outputRes;
-	const allCoverCells = userCells !== null ? [...userCells, ...userCellsExclude] : null;
-	const excludeSet = new Set(userCellsExclude);
-
-	const tFetch = performance.now();
-	// Per-segment trace buffer (debug only). When `debug=1`, each segment's
-	// shard fetches append `FetchTrace` entries here, then we expose them
-	// in the debug response so callers can see the actual byte-range
-	// request distribution per parquet.
-	const trace: FetchTrace[] = debug ? [] : undefined as unknown as FetchTrace[];
-	// Push the cell list down as an RG-prune filter on the cellCol:
-	// shards are `(cell, dt)`-sorted, so each RG covers a narrow cell
-	// range and ~70% of RGs can be skipped for a region-sized cell set.
-	//
-	// Push-down filter is exact `cellCol IN values`. Use:
-	//   - Single-level cover, no excludes: include cells as-is.
-	//   - Mixed cover (with excludes): include ∪ exclude — kept rows have
-	//     cellCol equal to one of these (push-down + RG-prune still
-	//     correct); exclude rows get sign-flipped post-fetch.
-	//   - No cover: no cell filter (bbox path).
-	const allFilters = [
-		...(rgFilters ?? []),
-		...(allCoverCells ? [{ col: pyramid.geo!.cellCol, values: allCoverCells }] : []),
-	];
-	let releaseSlot: () => void;
-	try {
-		releaseSlot = await acquireFooterSlot();
-	} catch (err) {
-		if (err instanceof FetchBusyError) return busyResponse(cors);
-		throw err;
-	}
-	let shardRows: Row[][];
-	try {
-		shardRows = await fetchSegmentsSequential(plan.segments, (seg) => pyramid.storage.fetchSegment(seg, {
-			binCol: pyramid.binCol,
-			range: { from: seg.from, to: seg.to },
-			filters: allFilters.length ? allFilters : undefined,
-			...(debug ? { trace } : {}),
-		}));
-	} finally {
-		releaseSlot();
-	}
-
-	const tFilter = performance.now();
-	// Three filter paths:
-	//   - Mixed cover (excludes present or multi-level): rows are already
-	//     filtered by exact push-down. Sign-flip the sum-monoid state on
-	//     exclude rows so `stitch` computes Σinc − Σexc.
-	//   - Single-level user cover: simple set membership at the cover's level.
-	//   - No user cover: bbox-derived `outputCells` membership at outputRes.
-	const cellCol = pyramid.geo!.cellCol;
-	const monoidCols = METRICS.flatMap((m) => [`${m}_n`, `${m}_sum`, `${m}_sumsq`]);
-	const includeSet = new Set(userCells ?? []);
-	// Push-down on `cellCol IN values` is RG-PRUNE only (lex range overlap),
-	// not exact row-level match. We need to also row-filter to keep only
-	// rows whose cell equals an include or exclude token. Then for excludes,
-	// sign-flip the sum-monoid state so `stitch` computes Σinc − Σexc.
-	const filtered = userCoverIsMixed
-		? shardRows.map((rows) => {
-			const out: Row[] = [];
-			for (const r of rows) {
-				const c = r[cellCol] as string;
-				if (includeSet.has(c)) { out.push(r); continue; }
-				if (excludeSet.has(c)) {
-					const negated: Row = { ...r };
-					for (const col of monoidCols) negated[col] = -Number(r[col] ?? 0);
-					out.push(negated);
-				}
-			}
-			return out;
-		})
-		: userCells !== null
-			? shardRows.map((rows) => filterCellsAndRes(rows, cellCol, outputRes, userCells, index))
-			: shardRows.map((rows) => filterCellsAndRes(rows, cellCol, outputRes, outputCells, index));
-
-	const tStitch = performance.now();
-	const stitched = stitch({ pyramid, plan, shardRows: filtered });
-
-	const tReduce = performance.now();
-	const dropCols = dropCellCol ? [pyramid.geo!.cellCol] : [];
-	const reduced = reduceRows(stitched, reducer, dropCols);
-	const tEnd = performance.now();
-
-	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-	if (cors) headers['Access-Control-Allow-Origin'] = cors;
-	// Surface the worker's colo on every response so bench scripts can
-	// correlate latency with geographic placement without flipping
-	// `?debug=1`. Empty value if CF didn't populate `cf` (local-dev case).
-	const workerColo = (request as any).cf?.colo;
-	if (workerColo) headers['X-Worker-Colo'] = workerColo;
-	const planSummary = {
-		outputTier: plan.outputTier?.name ?? null,
-		outputBin: plan.outputBin,
-		outputRes,
-		outputCells,
-		authoritativeEnd: plan.authoritativeEnd?.toISOString() ?? null,
-		segments: plan.segments.map((s) => ({
-			tier: s.shardTier.name,
-			from: s.from.toISOString(),
-			to: s.to.toISOString(),
-			reaggregate: s.reaggregate,
-			keys: s.keys,
-		})),
-	};
-	if (debug) {
-		return new Response(JSON.stringify({
-			debug: {
-				plan: planSummary,
-				phaseMs: {
-					parse: Math.round((tPlan - tStart) * 100) / 100,
-					plan: Math.round((tFetch - tPlan) * 100) / 100,
-					fetch: Math.round((tFilter - tFetch) * 100) / 100,
-					filter: Math.round((tStitch - tFilter) * 100) / 100,
-					stitch: Math.round((tReduce - tStitch) * 100) / 100,
-					reduce: Math.round((tEnd - tReduce) * 100) / 100,
-					total: Math.round((tEnd - tStart) * 100) / 100,
-				},
-				rowCounts: {
-					perShard: shardRows.map((rs) => rs.length),
-					filteredPerShard: filtered.map((rs) => rs.length),
-					stitched: stitched.length,
-					reduced: reduced.length,
-				},
-				workerColo: (request as any).cf?.colo ?? null,
-				cellsFilter: userCells !== null ? userCells.length : null,
-				dimFilters: rgFilters ?? null,
-				reducer,
-				anchor: (pyramid.keyTemplate.includes('/start/') ? 'start' : 'end') as Anchor,
-				fetchTrace: summarizeTrace(trace),
-			},
-		}), { headers });
-	}
-	return new Response(JSON.stringify({
-		records: reduced,
-		reducer,
-		anchor: (pyramid.keyTemplate.includes('/start/') ? 'start' : 'end') as Anchor,
-		plan: planSummary,
-	}), { headers });
-}
-
-/** Group `FetchTrace[]` by parquet key, summarize counts + sizes + phase
- *  breakdown. Designed for the `?debug=1` debug response — keeps the
- *  per-slice detail available but also surfaces useful aggregates
- *  (request count, total bytes fetched, footer vs data split) without
- *  forcing the caller to walk every entry. */
-function summarizeTrace(trace: FetchTrace[] | undefined) {
-	if (!trace || trace.length === 0) return null;
-	const perKey: Record<string, {
-		count: number;
-		bytesTotal: number;
-		msTotal: number;
-		metadataSlices: number;
-		dataSlices: number;
-		minLen: number;
-		maxLen: number;
-		ranges: { start: number; end: number; length: number; ms: number; phase: string }[];
-	}> = {};
-	for (const t of trace) {
-		const e = perKey[t.key] ??= {
-			count: 0, bytesTotal: 0, msTotal: 0,
-			metadataSlices: 0, dataSlices: 0,
-			minLen: Infinity, maxLen: 0, ranges: [],
-		};
-		e.count++;
-		e.bytesTotal += t.length;
-		e.msTotal += t.ms;
-		e.minLen = Math.min(e.minLen, t.length);
-		e.maxLen = Math.max(e.maxLen, t.length);
-		if (t.phase === 'metadata') e.metadataSlices++; else e.dataSlices++;
-		e.ranges.push({ start: t.start, end: t.end, length: t.length, ms: t.ms, phase: t.phase });
-	}
-	return Object.entries(perKey).map(([key, e]) => ({
-		key,
-		count: e.count,
-		bytesTotal: e.bytesTotal,
-		msTotal: Math.round(e.msTotal * 100) / 100,
-		metadataSlices: e.metadataSlices,
-		dataSlices: e.dataSlices,
-		minLen: e.minLen,
-		maxLen: e.maxLen,
-		ranges: e.ranges,
-	}));
-}
-
 function parseAnchor(url: URL, cors: string | null): Anchor | Response {
 	const raw = url.searchParams.get('anchor') ?? DEFAULT_ANCHOR;
 	if (!ANCHORS.includes(raw as Anchor)) {
 		return errorResponse(400, `bad anchor '${raw}'; one of ${ANCHORS.join('|')}`, cors);
 	}
 	return raw as Anchor;
-}
-
-/** HTTP handler for `/api/rides-v3` — bbox rollup, one row per
- *  (dt, dims). Strips the `{anchor}_s2_cell` column from response rows
- *  (rollup has no meaningful cell value).
- *
- *  All variants serve pure parquet. The v3 D1 hybrid (coarse tiers in
- *  `RIDES_V3_COARSE`, 2026-06..07) was removed once realistic FE covers
- *  (~10 include + few exclude cells, `allowSubtraction`) proved cheap on
- *  parquet — the bakeoff that justified D1 predated the `outputCells`
- *  planner API and the LUC-rebuild layout. A stray `?backend=` param is
- *  ignored. */
-export async function serveRides(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant): Promise<Response> {
-	const cors = corsOrigin || null;
-	const url = new URL(request.url);
-	const anchor = parseAnchor(url, cors);
-	if (anchor instanceof Response) return anchor;
-	return serveRidesReduced(ridesPyramid(bucket, anchor, variant), request, cors, true);
-}
-
-/** HTTP handler for `/api/rides-v3/cells` — per-cell breakdown preserved. */
-export async function serveRidesCells(bucket: R2Bucket, request: Request, corsOrigin: string, variant: Variant): Promise<Response> {
-	const cors = corsOrigin || null;
-	const url = new URL(request.url);
-	const anchor = parseAnchor(url, cors);
-	if (anchor instanceof Response) return anchor;
-	return serveRidesReduced(ridesCellsPyramid(bucket, anchor, variant), request, cors, false);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -884,7 +510,3 @@ export async function serveRidesV5(
 		},
 	}), { headers });
 }
-
-// Per-variant aliases used by `index.ts` route handlers.
-export const serveRidesV3 = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRides(bucket, request, corsOrigin, 'v3');
-export const serveRidesV3Cells = (bucket: R2Bucket, request: Request, corsOrigin: string) => serveRidesCells(bucket, request, corsOrigin, 'v3');
