@@ -50,14 +50,41 @@ the *same* shard. Consequences that make this strictly better than two file sets
   remap is to *not* materialize — fan out + sum at serve — which we ruled out on
   serve-speed grounds.)
 
-## Depends on pyrmts
+## Depends on pyrmts — LANDED (2026-09-14)
 
-The single new engine capability is: **given the id-map, emit one summed
-canonical `s:` row per canonical class present in a shard** (fits `cascade_tiers`'
-existing relabel-and-monoid-combine; the id-map is a declared pyramid input →
-DVX dep). **Everything below is gated on that landing**, except `/merge-review`'s
-data path, which can be prototyped against the raw rows as soon as the re-key
-exists.
+The single new engine capability — *given the id-map, emit one summed canonical
+row per canonical class present in a shard* — **is built, tested, and shipped**
+(pyrmts `b5846c1`, `specs/pyrmts-identity-rollup.md`). What ctbk consumes:
+
+- **Transform**: `recanonicalize_table` (pure, idempotent) + `canonicalize_shards`
+  in `pyrmts.canonicalize` — a purely additive, per-shard overlay from the raw
+  rows already stored (no source re-pull, no re-cascade).
+- **Config**: an `identityRollup: { col, map, canonicalPrefix }` block (Python +
+  JS twin). Raw leaves stay `s:<raw_id>`; canonical rollups get a **disjoint**
+  namespace, `canonicalPrefix: "c:"` → `c:<canonical_id>` rows. `map` is a
+  declared input → DVX dep (shard-scoped invalidation).
+- **Serve selection is ctbk-side** (not a pyrmts change): pyrmts's row-matching
+  is cover-agnostic; canonical-default vs `?raw=1` audit is chosen in *our*
+  `vocabCover` call (`rides_v1.ts`/`avail_geo.ts`) feeding `planGeoQuery`.
+- **Reactive driver** (engine): `pyrmts-engine canonicalize -r <from>/<to>
+  [-m <local-map>] [-j N] <config>` — loads the declared `identityRollup.map`
+  and runs `canonicalize_shards` **directly** (reads existing shards, re-derives
+  from raw-in-shard; no journal rebuild, no source re-pull). This is ctbk's
+  map-change fast-path.
+- **Pin**: `pyrmts` dist `320dca9` (@ `f25343c`) — unchanged, the engine work was
+  Python-only (no JS churn); `pyrmts-engine` image tags off `b767d35`. Bump
+  `gbfs/api/package.json` + the engine job def on adoption.
+
+ctbk-side contract notes (from the round-trip): our `station-id-map.json` is
+`{alias: canonical}` with **bare ids** — apply `c:` to the *values* at build.
+**Strip identity self-maps** (`k == v`, e.g. `1234.56→1234.56`) before feeding
+`identityRollup.map`, else the transform emits a `c:` row duplicating one `s:`
+leaf (harmless but needless bloat).
+
+All pyrmts-side deliverables are **done** (core + JS config twin + engine
+`canonicalize` driver). **Everything below is fully unblocked**, and
+`/merge-review`'s data path can be prototyped against the raw rows as soon as the
+re-key exists.
 
 ## Tasks
 
