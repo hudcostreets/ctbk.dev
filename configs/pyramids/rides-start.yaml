@@ -1,4 +1,4 @@
-# ctbk rides-v5 pyramid, `start` anchor (`specs/rides-v5.md`): engine
+# ctbk rides pyramid, `start` anchor (`specs/rides-v5.md`): engine
 # raw-ingest from `normalized/<YYYYMM>.parquet` via `MonthlyRidesSource`,
 # station-identity keys (frozen ragged vocabulary + `s:<short_name>` —
 # same graph as avail-v5/v6), fixed-duration pow-2 day shard ladder plus
@@ -12,7 +12,7 @@
 storage:
   type: s3
   bucket: ctbk
-  key: "rides-v5/start/{tier}/{shard}/{period}.parquet"
+  key: "rides/start/{tier}/{shard}/{period}.parquet"
 
 defaults:
   rg_size: 2048

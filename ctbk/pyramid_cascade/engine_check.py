@@ -37,7 +37,7 @@ DEFAULT_MANIFEST = 'tmp/engine-check-manifest.jsonl'
 def config_prefix(config_yaml: str) -> str:
     """The keyTemplate's full literal head before `/{tier}` — single
     segment for avail (`avail-v4`), multi-segment for rides
-    (`rides-v5/start`)."""
+    (`rides/start`)."""
     cfg = parse_pyramid_yaml(config_yaml)
     head, sep, _ = cfg.keyTemplate.partition('/{tier}')
     if not sep or '{' in head:
@@ -57,7 +57,7 @@ def scratch_yaml(config_name: str, scratch_prefix: str) -> str:
     the real prefix so a scratch config can never point at serving keys.
 
     The whole literal head before `/{tier}` is replaced (may be
-    multi-segment — `rides-v5/start`), and the replacement is verified to
+    multi-segment — `rides/start`), and the replacement is verified to
     have happened: a silent no-op here would point a "scratch" build at
     serving keys."""
     merged = merged_yaml(config_name)
@@ -92,9 +92,9 @@ def aligned_range(dur: str, n: int, genesis: datetime = AVAIL_GENESIS) -> tuple[
 
 
 def _rides_anchor(config_name: str) -> str | None:
-    """`rides-v5-start` → 'start', `rides-v5-end` → 'end'; None for
-    avail configs (`specs/rides-v5.md`)."""
-    m = re.fullmatch(r'rides-v5-(start|end)', config_name)
+    """`rides-start` → 'start', `rides-end` → 'end'; None for avail
+    configs (`specs/rides-v5.md`)."""
+    m = re.fullmatch(r'rides-(start|end)', config_name)
     return m.group(1) if m else None
 
 

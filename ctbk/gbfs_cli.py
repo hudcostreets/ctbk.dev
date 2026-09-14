@@ -159,7 +159,7 @@ def gbfs_d1_shards(
 
 # ─── RG manifest (specs/rg-manifest.md) ─────────────────────────────
 
-MANIFEST_PYRAMIDS = ('rides-v5-start', 'rides-v5-end')
+MANIFEST_PYRAMIDS = ('rides-start', 'rides-end')
 
 
 def _registry_post(env_name: str, body: dict) -> dict:
@@ -1006,9 +1006,9 @@ def gbfs_invalidate(
 
 # ─── rides-v5 monthly cadence (specs/rides-v5.md §monthly cadence) ─────
 
-RIDES_V5_ANCHOR_SPECS = (
-	('rides-v5-start', 'rides-v5/start', 'ctbk_engine_src:rides_start'),
-	('rides-v5-end', 'rides-v5/end', 'ctbk_engine_src:rides_end'),
+RIDES_ANCHOR_SPECS = (
+	('rides-start', 'rides/start', 'ctbk_engine_src:rides_start'),
+	('rides-end', 'rides/end', 'ctbk_engine_src:rides_end'),
 )
 
 
@@ -1031,7 +1031,7 @@ def rides_v5_sweep(after: str | None, dry_run: bool) -> None:
 	paginator = cli_r2.get_paginator('list_objects_v2')
 	m1_ms = int(m1.timestamp()) * 1000
 	relics: list[tuple[str, str, str, str, int]] = []  # (key, pyramid, tier, shard_dur, period_start_ms)
-	for config_name, prefix, _ in RIDES_V5_ANCHOR_SPECS:
+	for config_name, prefix, _ in RIDES_ANCHOR_SPECS:
 		# Day tiers only: a calendar shard covering the open month is the
 		# het-tiled tip, not a relic.
 		for tier in ('1h', '3h', '6h', '12h', '1d', '3d', '7d', '14d'):
@@ -1060,7 +1060,7 @@ def rides_v5_sweep(after: str | None, dry_run: bool) -> None:
 	)
 	_run_wrangler_d1(f'DELETE FROM pyramid_shards WHERE {conds}', db='ctbk-gbfs', wrangler_cwd=DEFAULT_WRANGLER_CWD)
 	dropped = {k for k, *_ in relics}
-	for _config_name, prefix, _f in RIDES_V5_ANCHOR_SPECS:
+	for _config_name, prefix, _f in RIDES_ANCHOR_SPECS:
 		mkey = f'{prefix}/manifest.jsonl'
 		body = cli_r2.get_object(Bucket='ctbk', Key=mkey)['Body'].read().decode()
 		recs = [json.loads(l) for l in body.splitlines() if l.strip()]
@@ -1113,15 +1113,15 @@ def rides_v5_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
 	# re-ingests it. (End-anchor months are complete on first build.)
 	from pyrmts_engine.invalidation import invalidate, load_invalidations
 	from ctbk.pyramid_cascade.engine_check import load_pyramid
-	pyramid = load_pyramid('rides-v5-start')
+	pyramid = load_pyramid('rides-start')
 	entries, _ = load_invalidations(pyramid)
 	if any(e.start == p0 and e.end == m0 for e in entries):
 		err(f'invalidate: [{p0:%Y-%m-%d}, {m0:%Y-%m-%d}) already journaled')
 	elif dry_run:
-		err(f'invalidate: would journal [{p0:%Y-%m-%d}, {m0:%Y-%m-%d}) on rides-v5-start')
+		err(f'invalidate: would journal [{p0:%Y-%m-%d}, {m0:%Y-%m-%d}) on rides-start')
 	else:
 		invalidate(pyramid, (p0, m0))
-		err(f'invalidate: journaled [{p0:%Y-%m-%d}, {m0:%Y-%m-%d}) on rides-v5-start')
+		err(f'invalidate: journaled [{p0:%Y-%m-%d}, {m0:%Y-%m-%d}) on rides-start')
 
 	# 3. Fills, UNCAPPED range (genesis → now). Capping at month-end
 	# leaves coarse-rung holes: shards whose spans cross the cap (e.g.
@@ -1129,7 +1129,7 @@ def rides_v5_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
 	# serve-time monthly rebin rides on the 1d tier. Tip shards carrying
 	# an empty current-month tail are the DESIGN (het-tiled tip); only
 	# wholly-empty pure-future shards are relics — swept in step 4.
-	for config_name, prefix, factory in RIDES_V5_ANCHOR_SPECS:
+	for config_name, prefix, factory in RIDES_ANCHOR_SPECS:
 		rc = _engine_submit(
 			config_name,
 			scratch_prefix=prefix,
@@ -1394,7 +1394,7 @@ def _engine_submit(
 	cmd = [
 		'pyrmts-engine', 'batch', 'submit',
 		# Batch job names reject '/' (multi-segment prefixes like
-		# `rides-v5/start`); manifest + config paths keep the real prefix.
+		# `rides/start`); manifest + config paths keep the real prefix.
 		'-n', prefix.replace('/', '-'),
 		'-w', window,
 		'-g', str(rg_size),
