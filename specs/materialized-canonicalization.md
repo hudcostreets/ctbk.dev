@@ -1,4 +1,4 @@
-# Serve-time station canonicalization — ctbk side
+# Materialized station canonicalization — ctbk side
 
 Status: proposed (2026-09-13, revised after pyrmts round-trip). ctbk-side
 companion to the pyrmts spec `pyrmts/specs/ctbk-serve-time-canonicalization.md`
@@ -6,6 +6,15 @@ companion to the pyrmts spec `pyrmts/specs/ctbk-serve-time-canonicalization.md`
 tracked to-do). Follows the harmonize co-activity fix
 (`ctbk/stations/harmonize.py`, 2026-09-13) and supersedes the deferred "rebuild
 pyramids to un-merge the 25 false merges."
+
+**On the name.** The canonicalized merges are **materialized (pre-computed) at
+build time** — raw `s:<raw_id>` leaves *and* canonical `c:<canonical>` rollup rows
+are both real stored rows. Nothing is fanned-out-and-summed at serve; serve does
+only a *selection* (canonical `c:` by default, raw `s:` under `?raw=1`). The
+earlier "serve-time" label captured only that identity is **decoupled from
+ingest** (an id-map fix re-derives the `c:` rows from stored raw rows, no source
+re-pull) — but that's late binding of a pre-computed rollup, not serve-time
+computation. Hence "materialized canonicalization."
 
 ## Why (one paragraph)
 
