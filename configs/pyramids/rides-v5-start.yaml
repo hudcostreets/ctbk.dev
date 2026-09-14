@@ -57,3 +57,15 @@ geo:
   cellCol: cell
   # S2 levels (canonical pyrmts order: finest → coarsest)
   resolutions: [15, 14, 13, 12, 11, 10]
+
+# Materialized station canonicalization (specs/materialized-canonicalization.md).
+# Raw ingest keys the `cell` column by `s:<raw reported id>` (id-map-
+# independent); this rollup materializes one `c:<canonical>` row per merged
+# station cluster, summed from its raw `s:` leaves per the declared id-map
+# (`{s:<raw>: c:<canonical>}`, merged clusters only — `ctbk rides-canonicalize-map`).
+# A map fix re-derives only the `c:` rows in-place (`pyrmts-engine canonicalize`),
+# no source re-pull. Serve selects `c:` by default, `s:` under `?raw=1`.
+identityRollup:
+  col: cell
+  map: stations/station-canonicalize-map.json
+  canonicalPrefix: "c:"

@@ -12,8 +12,9 @@ The three invariants the old harness checked, re-expressed against source truth:
      anchored into it (start vs end month).
   2. **raw-leaf identity** — each reported id is its own `s:<raw>` leaf at
      ingest (an alias is a distinct leaf, not pre-folded); folding aliases into
-     `c:<canonical>` is the materialized `c:` rollup, verified once ctbk's
-     pyrmts dep carries `canonicalize` (P1b).
+     `c:<canonical>` is the materialized `c:` rollup, proven in
+     `test_rides_canonicalize.py` (ctbk's derived id-map → pyrmts
+     `recanonicalize_table`).
   3. **monoid math** — `duration` sum/sumsq aggregate correctly per group.
 
 Hermetic: builds `MonthlyRidesSource` over synthetic `normalized/<ym>.parquet`
@@ -85,8 +86,8 @@ GOLDEN_RIDES: dict[str, list[dict]] = {
 # for the START anchor, JUNE window. Hand-counted from GOLDEN_RIDES above.
 # Leaves are the RAW reported ids (`s:1`, `s:2`, `s:L`) — the alias `L` is a
 # DISTINCT leaf from `1`, both under canonical A; folding into `c:A` is the
-# materialized `c:` rollup (pyrmts `canonicalize`), asserted separately once
-# ctbk's pyrmts dep carries it (P1b).
+# materialized `c:` rollup (pyrmts `canonicalize`), asserted in
+# `test_rides_canonicalize.py`.
 GOLDEN_START_JUNE = {
     ('s:1', 'male', 'Subscriber', 'classic'): (2, 1200),    # r1, r2 (sid 1)
     ('s:L', 'female', 'Customer', 'electric'): (1, 300),    # r3 (alias sid L)
@@ -149,7 +150,7 @@ def test_golden_raw_leaves_unfolded(pyramid):
     # The alias `L` and the primary id `1` both map to canonical A but are
     # DISTINCT raw leaves at ingest — `s:1` and `s:L`, never a pre-folded
     # `s:A`. Folding into `c:A` is the materialized `c:` rollup (pyrmts
-    # `canonicalize`), verified separately once ctbk's pyrmts dep carries it.
+    # `canonicalize`), verified in `test_rides_canonicalize.py`.
     counts = semantic_counts(make_source(pyramid, 'start').read_window(JUN, JUL))
     assert sorted({cell for (cell, *_) in counts}) == ['s:1', 's:2', 's:L']
 

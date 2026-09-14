@@ -84,11 +84,19 @@ row per canonical class present in a shard* — **is built, tested, and shipped*
   Python-only (no JS churn); `pyrmts-engine` image tags off `b767d35`. Bump
   `gbfs/api/package.json` + the engine job def on adoption.
 
-ctbk-side contract notes (from the round-trip): our `station-id-map.json` is
-`{alias: canonical}` with **bare ids** — apply `c:` to the *values* at build.
-**Strip identity self-maps** (`k == v`, e.g. `1234.56→1234.56`) before feeding
-`identityRollup.map`, else the transform emits a `c:` row duplicating one `s:`
-leaf (harmless but needless bloat).
+ctbk-side contract notes (settled in P1b, `rides_assets.cluster_canonicalize_map`):
+our `station-id-map.json` is `{alias: canonical}` with **bare ids**; the derived
+`identityRollup.map` is `{s:<raw>: c:<canonical>}` — `s:` on the keys, `c:` on the
+values. **Drop singleton clusters** (a canonical whose only member is itself): no
+merge → no `c:` row, and emitting one would byte-duplicate a lone `s:` leaf. But
+within a *merged* cluster **keep the self-member** — when the canonical id is
+itself a raw reported leaf (`6148.02` both a renumber target and a reported id),
+`s:6148.02 → c:6148.02` must be present or the `c:` row loses every ride reported
+under the new id. (An earlier draft said "strip all `k == v`"; that is wrong for a
+merged canonical — only the *singleton* self-map is stripped, by dropping
+one-member clusters, not by a blanket `k == v` filter.) The effective canonical
+composes the id-map with the luc `merged` overlay (`merged.get(canon, canon)`), the
+same resolution `rides_source` keys coarse cells by.
 
 All pyrmts-side deliverables are **done** (core + JS config twin + engine
 `canonicalize` driver). **Everything below is fully unblocked**, and
@@ -97,19 +105,30 @@ re-key exists.
 
 ## Tasks
 
-1. **Ingest → raw id.** `ctbk/pyramid_cascade/rides_source.py`: emit
-   `s:<raw reported id>`, drop the canonical-map application. Update
-   `test_rides_source.py` (`test_identity_sid_maps_to_own_chain` and the
-   canonical-map cases) to assert the row key = raw id.
-2. **Vocab (single, tri-member).** `ctbk/pyramid_cascade/vocab.py` /
-   `configs/pyramids/station-vocab.json`: one vocab whose members are raw `s:`
-   ids (~3,900) + s2 cells + the canonical `s:` ids. No separate leaf-only file
-   set. Keep it a frozen-ragged addition; the id-map is *not* applied to raw
-   members — it drives only the canonical-row rollup (task 3).
-3. **Canonical rollup at build.** Declare the canonical rows per the pyrmts
-   transport, with `s3/ctbk/stations/station-id-map.json` as a declared DVX dep so
-   an id-map change dirties only the shards where affected ids have activity (and
-   nothing upstream / no raw re-ingest).
+1. **Ingest → raw id.** ✅ **DONE (P1a).** `ctbk/pyramid_cascade/rides_source.py`
+   emits `s:<raw reported id>` leaves (the canonical map now only resolves which
+   station's coarse S2 cells a raw id sits under, not the leaf key).
+   `test_rides_source.py` asserts the row key = raw id; the golden fixtures
+   (`test_rides_v5_golden.py`) key on raw leaves.
+2. **Vocab.** The one-vocab framing here (raw + canonical `s:` ids as vocab
+   members) is satisfied without a `vocab.py` change: `build_vocab` stays
+   S2-cell-only (identity-agnostic geometry), raw `s:` leaves are emitted at
+   *write* time by `rides_source` (task 1), and `c:` rows are materialized by the
+   rollup (task 3) — none are `build_vocab` members. Any serve-side vocab
+   membership for `s:`/`c:` selection is a task-4 (serve) concern, not a build one.
+3. **Canonical rollup at build.** ✅ **DONE (P1b).** `identityRollup: { col: cell,
+   map: stations/station-canonicalize-map.json, canonicalPrefix: "c:" }` on both
+   `configs/pyramids/rides-v5-{start,end}.yaml`. The map (`{s:<raw>: c:<canonical>}`,
+   merged clusters only) is derived by `ctbk rides-canonicalize-map`
+   (`rides_assets.canonicalize_id_map`) and materialized at
+   `s3/ctbk/stations/station-canonicalize-map.json` (2110 entries / 974 clusters).
+   ctbk's pyrmts dep bumped `7219b34`→`b767d35` (carries `recanonicalize_table` /
+   `IdentityRollup`); rollup proven in `test_rides_canonicalize.py`. **Remaining
+   for this task:** wire `station-id-map.json` (→ the derived map) as a declared
+   DVX dep so an id-map change dirties only the shards where affected ids have
+   activity — deferred to the P3 build integration (the reactive
+   `pyrmts-engine canonicalize` pass), since there is no built pyramid to
+   invalidate until the re-key.
 4. **api worker.** `gbfs/api/src/rides_v1.ts` (+ `avail_geo.ts`): resolve `s:`
    station queries to the **canonical** row by default, off the same shard; add a
    param (e.g. `?raw=1`) that resolves to the **raw** rows for the audit view.

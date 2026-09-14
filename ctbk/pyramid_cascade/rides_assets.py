@@ -19,8 +19,60 @@ CONFIG_DIR = REPO / 'configs' / 'pyramids'
 VOCAB_PATH = CONFIG_DIR / 'station-vocab.json'
 STATION_LUC_PATH = REPO / 'www' / 'public' / 'assets' / 'station-luc.json'
 ID_MAP_PATH = REPO / 's3' / 'ctbk' / 'stations' / 'station-id-map.json'
+CANONICALIZE_MAP_PATH = REPO / 's3' / 'ctbk' / 'stations' / 'station-canonicalize-map.json'
 NORMALIZED_DIR = REPO / 's3' / 'ctbk' / 'normalized'
 GEO_JSON_PATH = REPO / 'gbfs' / 'engine' / 'station-geo.json'
+
+
+def effective_canonical() -> dict[str, str]:
+    """Every raw reported station id → its effective canonical short_name:
+    the harmonize `station-id-map.json` composed with the luc `merged` overlay
+    (`merged.get(canon, canon)`). This is exactly the resolution
+    `MonthlyRidesSource` uses to pick a station's coarse S2 cells, so a
+    `c:<canonical>` rollup keyed off it lines up 1:1 with the coarse rows."""
+    idm = json.loads(ID_MAP_PATH.read_text())
+    merged = json.loads(STATION_LUC_PATH.read_text()).get('merged', {})
+    return {sid: merged.get(canon, canon) for sid, canon in idm.items()}
+
+
+def cluster_canonicalize_map(eff: dict[str, str]) -> dict[str, str]:
+    """Pure rule: `{raw_id: canonical}` → `{s:<raw>: c:<canonical>}` over
+    *merged* clusters only, sorted.
+
+    Group raw ids by canonical and emit an entry for **every** member of a
+    cluster with >1 raw id — including the member whose raw id equals the
+    canonical, since its own `s:<canonical>` leaf is a real ingest leaf that
+    must fold into the `c:` row (dropping it would undercount the canonical).
+    A singleton (its own sole member) is omitted: no merge → no `c:` row, and
+    its raw `s:` leaf serves directly (a `c:` row there would byte-duplicate
+    one `s:` leaf). `recanonicalize_table` then keeps every raw leaf and sums
+    the merged ones into one `c:<canonical>` row per (bin, canonical, dims)."""
+    clusters: dict[str, list[str]] = {}
+    for sid, canon in eff.items():
+        clusters.setdefault(canon, []).append(sid)
+    out: dict[str, str] = {}
+    for canon, members in clusters.items():
+        if len(members) < 2:
+            continue
+        for sid in members:
+            out[f's:{sid}'] = f'c:{canon}'
+    return dict(sorted(out.items()))
+
+
+def canonicalize_id_map() -> dict[str, str]:
+    """The pyrmts `identityRollup.map` for the rides pyramids' `cell` column:
+    `{s:<raw>: c:<canonical>}` over merged clusters, derived from the local
+    `effective_canonical()` (see `cluster_canonicalize_map`)."""
+    return cluster_canonicalize_map(effective_canonical())
+
+
+def write_canonicalize_id_map(path: Path = CANONICALIZE_MAP_PATH) -> int:
+    """Materialize `canonicalize_id_map()` to `path` (default
+    `s3/ctbk/stations/station-canonicalize-map.json`), the file the rides
+    pyramids' `identityRollup.map` declares. Returns the entry count."""
+    m = canonicalize_id_map()
+    path.write_text(json.dumps(m, indent=2) + '\n')
+    return len(m)
 
 
 def rides_source_kwargs() -> dict:
@@ -32,9 +84,7 @@ def rides_source_kwargs() -> dict:
         short_name: station_chain(e['lat'], e['lng'], short_name, vocab)
         for short_name, e in luc['by_short_name'].items()
     }
-    idm = json.loads(ID_MAP_PATH.read_text())
-    merged = luc.get('merged', {})
-    canonical = {sid: merged.get(canon, canon) for sid, canon in idm.items()}
+    canonical = effective_canonical()
     geo = {
         sid: (lat, lng)
         for sid, (lat, lng) in json.loads(GEO_JSON_PATH.read_text()).items()

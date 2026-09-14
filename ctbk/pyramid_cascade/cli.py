@@ -13,6 +13,7 @@ from pathlib import Path
 from click import BadParameter, option
 from pyrmts import parse_pyramid_yaml, pyramid_from_config
 from utz import err
+from utz.cli import flag
 
 from ctbk.cli.base import ctbk
 from .storage import storage_from_cfg
@@ -82,3 +83,19 @@ def pyramid_cascade_cmd(
                    and (not sf or g.shard_dur in sf)]
         err(f"  filtered:  {before} → {len(missing)} gaps after --tier/--shard-dur")
     report_gaps(missing)
+
+
+@ctbk.command('rides-canonicalize-map', help="Regenerate `station-canonicalize-map.json` (the rides pyramids' `identityRollup.map`: `{s:<raw>: c:<canonical>}` over merged station clusters) from `station-id-map.json` + the luc `merged` overlay.")
+@flag('-n', '--dry-run', 'dry_run', help='Print the entry count and a sample; do not write.')
+def rides_canonicalize_map_cmd(dry_run: bool):
+    from .rides_assets import CANONICALIZE_MAP_PATH, canonicalize_id_map, write_canonicalize_id_map
+
+    m = canonicalize_id_map()
+    n_canonical = len({v for v in m.values()})
+    if dry_run:
+        err(f"{len(m)} entries over {n_canonical} merged clusters (dry run, not written)")
+        for k, v in list(m.items())[:6]:
+            err(f"  {k} -> {v}")
+        return
+    n = write_canonicalize_id_map()
+    err(f"Wrote {CANONICALIZE_MAP_PATH} ({n} entries over {n_canonical} merged clusters)")
