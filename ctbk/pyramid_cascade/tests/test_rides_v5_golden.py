@@ -10,8 +10,10 @@ rides pyramid must reproduce (v5 today, a hypothetical v6 later, via its own
 The three invariants the old harness checked, re-expressed against source truth:
   1. **totals** — Σ leaf `count` over a window == the number of source rides
      anchored into it (start vs end month).
-  2. **station-equiv** — per-canonical-station monthly counts (identity keying:
-     a legacy alias folds into its canonical station, never a separate row).
+  2. **raw-leaf identity** — each reported id is its own `s:<raw>` leaf at
+     ingest (an alias is a distinct leaf, not pre-folded); folding aliases into
+     `c:<canonical>` is the materialized `c:` rollup, verified once ctbk's
+     pyrmts dep carries `canonicalize` (P1b).
   3. **monoid math** — `duration` sum/sumsq aggregate correctly per group.
 
 Hermetic: builds `MonthlyRidesSource` over synthetic `normalized/<ym>.parquet`
@@ -81,11 +83,15 @@ GOLDEN_RIDES: dict[str, list[dict]] = {
 
 # Expected per-(cell, gender, user_type, bike_type) → (ride_count, duration_sum)
 # for the START anchor, JUNE window. Hand-counted from GOLDEN_RIDES above.
+# Leaves are the RAW reported ids (`s:1`, `s:2`, `s:L`) — the alias `L` is a
+# DISTINCT leaf from `1`, both under canonical A; folding into `c:A` is the
+# materialized `c:` rollup (pyrmts `canonicalize`), asserted separately once
+# ctbk's pyrmts dep carries it (P1b).
 GOLDEN_START_JUNE = {
-    ('s:A', 'male', 'Subscriber', 'classic'): (2, 1200),
-    ('s:A', 'female', 'Customer', 'electric'): (1, 300),
-    ('s:B', 'male', 'Subscriber', 'classic'): (1, 900),
-    ('s:B', 'male', 'Subscriber', 'electric'): (1, 2400),  # r5, spilled back into June
+    ('s:1', 'male', 'Subscriber', 'classic'): (2, 1200),    # r1, r2 (sid 1)
+    ('s:L', 'female', 'Customer', 'electric'): (1, 300),    # r3 (alias sid L)
+    ('s:2', 'male', 'Subscriber', 'classic'): (1, 900),     # r4 (sid 2)
+    ('s:2', 'male', 'Subscriber', 'electric'): (1, 2400),   # r5 (sid 2), spilled back into June
 }
 
 
@@ -139,21 +145,21 @@ def test_golden_totals_match_source_ride_count(pyramid):
     assert sum(c for c, _ in semantic_counts(end.read_window(JUL, AUG)).values()) == 1
 
 
-def test_golden_identity_folding(pyramid):
-    # The legacy alias `L` and the primary id `1` both fold into canonical A;
-    # A's June count is 3 (two `1` + one `L`), never a separate `s:L` row.
+def test_golden_raw_leaves_unfolded(pyramid):
+    # The alias `L` and the primary id `1` both map to canonical A but are
+    # DISTINCT raw leaves at ingest — `s:1` and `s:L`, never a pre-folded
+    # `s:A`. Folding into `c:A` is the materialized `c:` rollup (pyrmts
+    # `canonicalize`), verified separately once ctbk's pyrmts dep carries it.
     counts = semantic_counts(make_source(pyramid, 'start').read_window(JUN, JUL))
-    a_total = sum(c for (cell, *_), (c, _) in counts.items() if cell == 's:A')
-    assert a_total == 3
-    assert not any(cell == 's:L' for (cell, *_) in counts)
+    assert sorted({cell for (cell, *_) in counts}) == ['s:1', 's:2', 's:L']
 
 
 def test_golden_duration_monoid_sumsq(pyramid):
-    # Monoid sumsq aggregates per group: A's two 600 s classic rides →
-    # duration_sumsq = 600² + 600² = 720 000 (n=2, sum=1200).
+    # Monoid sumsq aggregates per group: the two 600 s classic rides on raw
+    # leaf `s:1` → duration_sumsq = 600² + 600² = 720 000 (n=2, sum=1200).
     df = make_source(pyramid, 'start').read_window(JUN, JUL)
     g = (
-        df.filter((pl.col('cell') == 's:A') & (pl.col('bike_type') == 'classic'))
+        df.filter((pl.col('cell') == 's:1') & (pl.col('bike_type') == 'classic'))
         .filter(pl.col('metric').cast(pl.Utf8).is_in(['duration_n', 'duration_sum', 'duration_sumsq']))
         .select(pl.col('metric').cast(pl.Utf8), 'count')
         .sort('metric')

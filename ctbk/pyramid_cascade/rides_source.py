@@ -72,12 +72,15 @@ def _next_month(at: datetime) -> datetime:
 
 
 class MonthlyRidesSource(TiledSource):
-    """`chains` maps canonical short_name → key rows (vocab coarse cells
-    + `s:<short_name>`); `canonical` maps raw ride station ids to those
-    short_names; `geo` fills null coordinates for the fallback path;
-    `vocab_cells` is the fallback-exclusion set; `available_months` (a
-    set of 'YYYYMM' strings) gates the start-anchor spillback tile;
-    `fetch_fn` reads a tile key → bytes (S3, not the pyramid's R2)."""
+    """`chains` maps a station short_name → its vocab chain (coarse cells
+    + `s:<short_name>`); only the **cells** are used — the identity leaf
+    emitted is the raw reported id `s:<sid>`, so canonicalization stays a
+    separate id-map-keyed `c:` rollup. `canonical` maps raw ride station ids
+    to short_names (to resolve which station's cells a raw id sits under);
+    `geo` fills null coordinates for the fallback path; `vocab_cells` is the
+    fallback-exclusion set; `available_months` (a set of 'YYYYMM' strings)
+    gates the start-anchor spillback tile; `fetch_fn` reads a tile key →
+    bytes (S3, not the pyramid's R2)."""
 
     def __init__(
         self,
@@ -101,9 +104,21 @@ class MonthlyRidesSource(TiledSource):
         self._vocab_cells = vocab_cells
         self._available = available_months
         self._fetch_fn = fetch_fn
-        self._chains = pl.DataFrame(
-            {'short_name': list(chains), 'cell': list(chains.values())},
-            schema={'short_name': pl.Utf8, 'cell': pl.List(pl.Utf8)},
+        # Cells only (drop each chain's own `s:<short_name>` leaf): the
+        # write path emits the coarse S2-cell ancestors from the station's
+        # registered chain, but the identity leaf is the **raw reported id**
+        # (`s:<sid>`), not the canonical short_name — canonicalization is a
+        # separate, id-map-keyed `c:` rollup materialized by pyrmts's
+        # `identityRollup` pass (`specs/materialized-canonicalization.md`), so
+        # an id-map fix never touches these raw leaves. `_canonical` is still
+        # used to resolve which station's cells a raw id sits under.
+        cells_only = {
+            sn: [c for c in chain if not c.startswith('s:')]
+            for sn, chain in chains.items()
+        }
+        self._cells = pl.DataFrame(
+            {'short_name': list(cells_only), 'cells': list(cells_only.values())},
+            schema={'short_name': pl.Utf8, 'cells': pl.List(pl.Utf8)},
         )
 
     def tile_at(self, at: datetime) -> Tile:
@@ -164,16 +179,21 @@ class MonthlyRidesSource(TiledSource):
         df = df.with_columns(
             pl.col('sid').replace_strict(self._canonical, default=None).alias('short_name'),
         )
-        # Mapped = canonicalized to a short_name that HAS a chain; a
-        # canonical name absent from the chains (registry drift) falls
-        # back to coordinates, exactly like an unmapped sid (v3 rule).
-        has_chain = pl.col('short_name').is_in(self._chains['short_name'])
-        mapped = df.filter(pl.col('short_name').is_not_null() & has_chain)
-        unmapped = df.filter(pl.col('short_name').is_null() | ~has_chain)
+        # Mapped = resolves to a short_name whose station HAS registered
+        # cells; a name absent from the registry (drift) falls back to
+        # coordinates, exactly like an unmapped sid. The identity leaf is the
+        # raw `sid` (not the canonical short_name) — appended to the station's
+        # coarse cells before exploding.
+        has_cells = pl.col('short_name').is_in(self._cells['short_name'])
+        mapped = df.filter(pl.col('short_name').is_not_null() & has_cells)
+        unmapped = df.filter(pl.col('short_name').is_null() | ~has_cells)
 
         long = (
             mapped
-            .join(self._chains, on='short_name', how='inner')
+            .join(self._cells, on='short_name', how='inner')
+            .with_columns(
+                pl.concat_list(pl.col('cells'), (pl.lit('s:') + pl.col('sid'))).alias('cell')
+            )
             .select('cell', 'dt', 'gender', 'user_type', 'bike_type', 'dur_s')
             .explode('cell')
         )

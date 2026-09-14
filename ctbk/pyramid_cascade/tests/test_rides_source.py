@@ -162,11 +162,14 @@ def test_sum_monoid_long_form(pyramid):
     ]})
     h9 = ms(datetime(2026, 6, 10, 9, tzinfo=timezone.utc))
     h10 = ms(datetime(2026, 6, 10, 10, tzinfo=timezone.utc))
+    # Leaves are the RAW reported ids (`s:101`, `s:102`), not the canonical
+    # short_names — canonicalization is a separate `c:` rollup. The coarse
+    # cell (`cell-a`) still comes from the station's registered chain.
     assert read_sorted(src, JUN, JUL) == sorted(
         expected_rows('cell-a', h9, 'male', 'Subscriber', 'classic', 2, 1800, 1_800_000)
-        + expected_rows('s:ST1', h9, 'male', 'Subscriber', 'classic', 2, 1800, 1_800_000)
+        + expected_rows('s:101', h9, 'male', 'Subscriber', 'classic', 2, 1800, 1_800_000)
         + expected_rows('cell-a', h10, 'male', 'Subscriber', 'classic', 1, 300, 90_000)
-        + expected_rows('s:ST2', h10, 'male', 'Subscriber', 'classic', 1, 300, 90_000)
+        + expected_rows('s:102', h10, 'male', 'Subscriber', 'classic', 1, 300, 90_000)
     )
 
 
@@ -187,7 +190,7 @@ def test_start_anchor_spillback(pyramid):
     h2330 = ms(datetime(2026, 6, 30, 23, tzinfo=timezone.utc))
     assert read_sorted(src, JUN, JUL) == sorted(
         expected_rows('cell-a', h2330, 'male', 'Subscriber', 'classic', 1, 2400, 5_760_000)
-        + expected_rows('s:ST1', h2330, 'male', 'Subscriber', 'classic', 1, 2400, 5_760_000)
+        + expected_rows('s:101', h2330, 'male', 'Subscriber', 'classic', 1, 2400, 5_760_000)
     )
 
 
@@ -205,7 +208,7 @@ def test_end_anchor_no_spillback_tile(pyramid):
     h2330 = ms(datetime(2026, 6, 30, 23, tzinfo=timezone.utc))
     assert read_sorted(src, JUN, JUL) == sorted(
         expected_rows('cell-a', h2330, 'male', 'Subscriber', 'classic', 1, 1500, 2_250_000)
-        + expected_rows('s:ST2', h2330, 'male', 'Subscriber', 'classic', 1, 1500, 2_250_000)
+        + expected_rows('s:102', h2330, 'male', 'Subscriber', 'classic', 1, 1500, 2_250_000)
     )
     assert src.coverage() == (1, [])
 
