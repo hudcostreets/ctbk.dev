@@ -38,9 +38,18 @@ CONTENT_TYPES = {'.png': 'image/png', '.jpg': 'image/jpeg'}
 
 
 def auto_data_md5() -> str:
+    """Monthly rides-data clock: combined md5 over the per-month station-side
+    aggregates (`ymrgtbs_cd_<ym>.parquet.dvc`) — the source the screenshots'
+    rides charts derive from. Changes whenever any month's aggregate changes or
+    a new month lands. Replaces the retired `ymdgtb.dvc` clock; must stay
+    byte-identical to `www.yml`'s `sort | md5sum` (sorted md5s, one per line,
+    trailing newline)."""
+    import hashlib
+    from glob import glob
     import yaml
-    dvc = WWW.parent / 's3/ctbk/stations/ymdgtb.dvc'
-    return yaml.safe_load(dvc.read_text())['outs'][0]['md5']
+    dvcs = sorted(glob(str(WWW.parent / 's3/ctbk/aggregated/ymrgtbs_cd_*.parquet.dvc')))
+    md5s = sorted(yaml.safe_load(open(p).read())['outs'][0]['md5'] for p in dvcs)
+    return hashlib.md5(('\n'.join(md5s) + '\n').encode()).hexdigest()
 
 
 def auto_www_tree() -> str:
@@ -55,7 +64,7 @@ def auto_www_tree() -> str:
 
 
 @command()
-@option('-d', '--data-md5', help='ymdgtb.dvc md5 (the monthly data clock) to record in .deps.json; default: read from the repo.')
+@option('-d', '--data-md5', help='Monthly data clock (combined md5 of the ymrgtbs_cd aggregates) to record in .deps.json; default: read from the repo.')
 @option('-n', '--dry-run', is_flag=True, help='Report changes; upload and write nothing.')
 @option('-o', '--output', default=DEFAULT_OUT, help=f'Destination: s3://bucket/prefix or a local dir (default {DEFAULT_OUT}).')
 @option('-t', '--www-tree', help='www/ tree hash (screenshots-dir excluded) to record in .deps.json; default: compute from the repo.')
@@ -110,7 +119,7 @@ def main(
         else:
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / img.name).write_bytes(body)
-    deps = {'ymdgtb_md5': data_md5, 'www_tree': www_tree, 'images': images}
+    deps = {'data_md5': data_md5, 'www_tree': www_tree, 'images': images}
     if not dry_run:
         body = (json.dumps(deps, indent=2) + '\n').encode()
         if s3_dest:

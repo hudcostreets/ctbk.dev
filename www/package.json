@@ -55,10 +55,9 @@
   },
   "scripts": {
     "clean": "rm -rf node_modules/.vite",
-    "gen-ymdgtb-index": "node scripts/gen-ymdgtb-index.js",
-    "predev": "node scripts/gen-ymdgtb-index.js && node scripts/fetch-screenshots.js",
+    "predev": "node scripts/fetch-screenshots.js",
     "dev": "vite",
-    "prebuild": "node scripts/gen-ymdgtb-index.js && node scripts/fetch-screenshots.js",
+    "prebuild": "node scripts/fetch-screenshots.js",
     "build": "vite build",
     "deploy:dev": "pnpm build && wrangler deploy --env dev",
     "postbuild": "node scripts/gen-station-stubs.js && node scripts/gen-version.js",

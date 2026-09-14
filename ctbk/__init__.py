@@ -11,5 +11,5 @@ from . import trips_per_station, trips_region_rollup, avail_agg, avail_raw_day, 
 from .pyramid_cascade import cli as _pyramid_cascade_cli  # noqa: F401 — registers CLI
 from . import gbfs_cli as _gbfs_cli  # noqa: F401 — registers `ctbk gbfs` group
 from . import gbfs_empty as _gbfs_empty  # noqa: F401 — registers `ctbk gbfs empty` group
-from .stations import meta_hists, modes, pair_jsons, harmonize, trips_jsons
+from .stations import meta_hists, modes, pair_jsons, harmonize
 from .cli import yms

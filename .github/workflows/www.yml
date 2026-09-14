@@ -50,12 +50,17 @@ jobs:
         id: scrgate
         if: github.ref != 'refs/heads/dev'
         run: |
-          data_md5=$(awk '/md5:/{print $3; exit}' s3/ctbk/stations/ymdgtb.dvc)
+          # Monthly rides-data clock: combined md5 of the per-month station-side
+          # aggregates (the source the screenshots' rides charts derive from).
+          # Must stay byte-identical to push-screenshots.py's `auto_data_md5`
+          # (sorted per-file md5s, one per line, trailing newline). Replaced the
+          # retired `ymdgtb.dvc` clock.
+          data_md5=$(for f in s3/ctbk/aggregated/ymrgtbs_cd_*.parquet.dvc; do awk '/md5:/{print $3; exit}' "$f"; done | sort | md5sum | cut -d' ' -f1)
           www_tree=$(git ls-files -s -- www ':!www/public/screenshots' | git hash-object --stdin)
           echo "data_md5=$data_md5" >> $GITHUB_OUTPUT
           echo "www_tree=$www_tree" >> $GITHUB_OUTPUT
           deps=$(curl -sf https://ctbk.s3.amazonaws.com/screenshots/.deps.json || echo '{}')
-          rec_data=$(echo "$deps" | jq -r '.ymdgtb_md5 // "none"')
+          rec_data=$(echo "$deps" | jq -r '.data_md5 // "none"')
           rec_tree=$(echo "$deps" | jq -r '.www_tree // "none"')
           if [ "$data_md5" != "$rec_data" ] || [ "$www_tree" != "$rec_tree" ]; then
             echo "stale=true" >> $GITHUB_OUTPUT

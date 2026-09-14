@@ -60,19 +60,6 @@ def update(
     err(f"--- Station pair JSONs ---")
     ctbk_run('spj', 'create', ym)
 
-    # Per-station monthly trips JSONs (og cards + StationDetail trips
-    # panel read these via `ymdgtb-index.json`). Whole-artifact rebuild
-    # from the ymrgtb{s,e} aggregates just produced above; without this
-    # step the artifact silently freezes at its last manual build
-    # (2026-04..07: stuck at 2026-03). Retires with rides-v3 LUC (#109).
-    err(f"--- Station trips JSONs ---")
-    ctbk_run('station-trips-json', '-a', '-d')
-
-    # (The rides-v3 rollback-pyramid rebuild moved to `ctbk
-    # rides-v3-extend` — R2-only writes, no git/DVC artifacts, so ci.yml
-    # runs it AFTER the www push as a best-effort step instead of
-    # blocking the month on the memory-hungriest builds.)
-
     if not no_www:
         err(f"--- WWW assets ---")
         run('node', 'www/scripts/gen-station-urls.js', dry_run=dry_run)
