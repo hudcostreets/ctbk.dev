@@ -7,8 +7,8 @@ rows for two `sum`-monoid metrics (`count`, `duration`) over dims
 `(cell, gender, user_type, bike_type)`, keyed by station identity:
 canonical short_name → frozen-vocab chain (coarse cells + `s:<short_name>`),
 with a per-ride S2 coordinate fallback (vocab cells excluded) for the
-rare unmapped station ids — the same keying rules as `rides_v1.py`'s v3
-builder, re-based onto the vocab graph.
+rare unmapped station ids — station-identity keying re-based onto the
+vocab graph.
 
 Anchor semantics: `end` tiles align exactly with tile months. `start`
 windows additionally need the NEXT month's tile (a ride starting 23:50 on

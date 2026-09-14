@@ -44,7 +44,7 @@ from click import Choice, argument, option
 from utz import err
 
 from ctbk.gbfs_cli import gbfs
-from ctbk.rides_v1 import r2_client, r2_endpoint
+from ctbk.pyramid_cascade.lite import r2_client, r2_endpoint
 
 BUCKET = 'ctbk'
 VOCAB_KEY = 'empty-v1/stations.json'
