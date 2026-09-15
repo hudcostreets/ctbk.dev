@@ -49,9 +49,9 @@ dependencies = [
 # blobs (not the payload) so CI can hydrate all `normalized/*.dvc` dir manifests
 # the `cons` dep-guard needs, ~40 KB instead of ~190 GiB.
 dvx           = { git = "https://github.com/runsascoded/dvx.git", rev = "93e790a6c" }
-pyrmts        = { git = "https://github.com/runsascoded/pyrmts.git", rev = "cc1c530", subdirectory = "python/pyrmts" }
-pyrmts-engine = { git = "https://github.com/runsascoded/pyrmts.git", rev = "cc1c530", subdirectory = "python/pyrmts_engine" }
-pyrmts-ops    = { git = "https://github.com/runsascoded/pyrmts.git", rev = "cc1c530", subdirectory = "python/pyrmts_ops" }
+pyrmts        = { git = "https://github.com/runsascoded/pyrmts.git", rev = "2a71a97", subdirectory = "python/pyrmts" }
+pyrmts-engine = { git = "https://github.com/runsascoded/pyrmts.git", rev = "2a71a97", subdirectory = "python/pyrmts_engine" }
+pyrmts-ops    = { git = "https://github.com/runsascoded/pyrmts.git", rev = "2a71a97", subdirectory = "python/pyrmts_ops" }
 # Local (dev) — swap all three together (the Python `pds l`): from ctbk, the
 # `pyrmts` entry here is what resolves `pyrmts-engine`'s own `pyrmts` dep (its
 # workspace source only applies inside the pyrmts repo). Don't commit this
