@@ -784,14 +784,18 @@ def gbfs_lambda_rebuild(
 def gbfs_lambda_reconcile(config_name: str, dry_run: bool) -> None:
 	from pyrmts import parse_pyramid_yaml, pyramid_from_config
 	from ctbk.pyramid_cascade.d1_http import d1_query, register_shard
-	from ctbk.pyramid_cascade.engine_check import merged_yaml
+	from ctbk.pyramid_cascade.engine_check import merged_yaml, _rides_anchor
 	from ctbk.pyramid_cascade.fsck import discover_gaps
-	from ctbk.pyramid_cascade.lite import AVAIL_GENESIS
+	from ctbk.pyramid_cascade.lite import AVAIL_GENESIS, RIDES_GENESIS
 	from ctbk.pyramid_cascade.storage import storage_from_cfg
 	cfg = parse_pyramid_yaml(merged_yaml(config_name))
 	pyramid = pyramid_from_config(cfg, storage_from_cfg(cfg.storage))
 	now = datetime.now(timezone.utc)
-	_gaps, existing, expected_by_tier = discover_gaps(pyramid, (AVAIL_GENESIS, now))
+	# Genesis is config-specific: rides reaches back to 2013-06, avail only to
+	# 2026-04. Using AVAIL_GENESIS for a rides config would exclude ~13 years of
+	# shards from the expected set, so they'd never be registered.
+	genesis = RIDES_GENESIS if _rides_anchor(config_name) else AVAIL_GENESIS
+	_gaps, existing, expected_by_tier = discover_gaps(pyramid, (genesis, now))
 	registered = {r['key'] for r in d1_query('SELECT key FROM pyramid_shards WHERE pyramid = ?', [config_name])}
 	stranded = [
 		e for shards in expected_by_tier.values() for e in shards
