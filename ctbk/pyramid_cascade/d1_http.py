@@ -14,7 +14,7 @@ from pyrmts.d1 import d1_query as _d1_query, register_shard as _register_shard
 from utz import err
 
 # `ctbk-gbfs` (gbfs/api wrangler.toml `DB` binding).
-DEFAULT_DATABASE_ID = 'd5746734-70ba-46aa-8780-be09e4837f0b'
+DEFAULT_DATABASE_ID = '845e34bb-d138-4076-9955-5909e30d4323'
 
 
 def _db(database_id: str | None) -> str:
