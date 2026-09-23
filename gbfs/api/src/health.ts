@@ -438,6 +438,8 @@ const HEALTH_PYRAMIDS: { name: string; keyPrefix: string; rides?: boolean }[] = 
 	{ name: 'smg-v1', keyPrefix: 'smg-v1' },
 	{ name: 'rides-v5-start', keyPrefix: 'rides-v5/start', rides: true },
 	{ name: 'rides-v5-end', keyPrefix: 'rides-v5/end', rides: true },
+	{ name: 'rides-start', keyPrefix: 'rides/start', rides: true },
+	{ name: 'rides-end', keyPrefix: 'rides/end', rides: true },
 ];
 
 /** Cover status for one registry pyramid — `pyrmts-cfw`'s

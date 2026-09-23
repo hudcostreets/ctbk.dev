@@ -65,6 +65,7 @@ import {
 	type SpatialSet,
 } from 'pyrmts-geo';
 import { loadV5Vocab, v5BBoxCover } from './avail_geo';
+import { loadCanonMap, selectLeaves } from './canon';
 
 const METRICS = ['count', 'duration'] as const;
 type Metric = typeof METRICS[number];
@@ -310,10 +311,22 @@ function v5ShardIndex(db: D1Database, name: string): ShardIndex {
 	return _v5ShardIndex[name] ??= new CachedShardIndex(new D1ShardIndex(db), { ttlMs: V5_SHARD_TTL_MS });
 }
 
-function ridesV5Pyramid(bucket: R2Bucket, anchor: Anchor, cells: boolean): GeoPyramid {
+/** Which stored rides pyramid a route serves. `rides-v5` (`/api/rides-v5`)
+ *  keys station leaves by canonical id at ingest; `rides` (`/api/rides`,
+ *  `specs/rides-rekey.md`) stores raw-id leaves + materialized `c:` rollups,
+ *  selected per request by `canon.ts` (canonical default, `?raw=1` audit). */
+export interface RidesVariant {
+	/** R2 key prefix; the D1 pyramid name is `${prefix}-${anchor}`. */
+	prefix: string;
+	canonicalized: boolean;
+}
+export const RIDES_V5: RidesVariant = { prefix: 'rides-v5', canonicalized: false };
+export const RIDES: RidesVariant = { prefix: 'rides', canonicalized: true };
+
+function ridesV5Pyramid(bucket: R2Bucket, variant: RidesVariant, anchor: Anchor, cells: boolean): GeoPyramid {
 	return {
 		storage: parquetBackend(retryingStorage(r2Storage(bucket))),
-		keyTemplate: `rides-v5/${anchor}/{tier}/{shard}/{period}.parquet`,
+		keyTemplate: `${variant.prefix}/${anchor}/{tier}/{shard}/{period}.parquet`,
 		axis: 'time',
 		binCol: 'dt',
 		metrics: METRICS.map((name) => ({ name, monoid: 'sum' as const })),
@@ -341,7 +354,8 @@ async function v5UserCover(bucket: R2Bucket, include: string[], exclude: string[
 	return vocabCover(graph, wanted, { positiveOnly: true }).include;
 }
 
-export async function serveRidesV5(
+export async function serveRides(
+	variant: RidesVariant,
 	bucket: R2Bucket,
 	db: D1Database,
 	request: Request,
@@ -387,15 +401,30 @@ export async function serveRidesV5(
 	const exclude = (url.searchParams.get('cells.exclude') ?? '')
 		.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
 	const bbox = parseBBox(url.searchParams.get('bbox'));
+	const rawParam = url.searchParams.get('raw');
+	if (rawParam !== null && rawParam !== '0' && rawParam !== '1') {
+		return errorResponse(400, `bad raw '${rawParam}'; expected 0|1`, cors);
+	}
+	const raw = rawParam === '1';
+	if (raw && !variant.canonicalized) {
+		return errorResponse(400, `raw=1 needs a canonicalized pyramid (/api/rides), not ${variant.prefix}`, cors);
+	}
 	let include: string[];
 	if (userCells !== null) {
-		// `s:`-key covers pass through untranslated (station-detail path);
+		// Station-key covers (`s:` / `c:`) pass through (station-detail path);
 		// raw S2 covers translate via the registry.
-		include = userCells.every((c) => c.startsWith('s:'))
-			? userCells
-			: await v5UserCover(bucket, userCells, exclude);
+		const explicit = userCells.every((c) => c.startsWith('s:') || c.startsWith('c:'));
+		include = explicit ? userCells : await v5UserCover(bucket, userCells, exclude);
+		// Explicit ids under `raw=1` are raw reported ids, taken verbatim (the
+		// audit view); everything else resolves station leaves per `canon.ts`.
+		if (variant.canonicalized && !(explicit && raw)) {
+			include = selectLeaves(include, await loadCanonMap(bucket), raw ? 'raw' : 'canonical');
+		}
 	} else if (bbox !== null) {
 		include = await v5BBoxCover(bucket, bbox);
+		if (variant.canonicalized) {
+			include = selectLeaves(include, await loadCanonMap(bucket), raw ? 'raw' : 'canonical');
+		}
 	} else {
 		return errorResponse(400, 'either `bbox` or `cells` is required', cors);
 	}
@@ -405,8 +434,8 @@ export async function serveRidesV5(
 		return new Response(JSON.stringify({ records: [], reducer, anchor, plan: null }), { headers });
 	}
 
-	const pyramid = ridesV5Pyramid(bucket, anchor, cellsRoute);
-	const pyramidName = `rides-v5-${anchor}`;
+	const pyramid = ridesV5Pyramid(bucket, variant, anchor, cellsRoute);
+	const pyramidName = `${variant.prefix}-${anchor}`;
 	const registered = await v5ShardIndex(db, pyramidName).listShards(pyramidName, { range: { from, to } });
 	// One planner for both modes: pyrmts-geo forwards `targetBin` as of
 	// `69de58b`, so explicit-width queries no longer need the time-only

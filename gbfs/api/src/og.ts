@@ -26,7 +26,7 @@ import yogaWasm from './assets/yoga.wasm';
 import resvgWasm from './assets/resvg.wasm';
 import interSemiBold from './assets/Inter-SemiBold.ttf';
 import { serveAvailV3 } from './avail_geo';
-import { serveRidesV5 } from './rides_v1';
+import { RIDES_V5, serveRides } from './rides_v1';
 
 // Both wasm modules must init exactly once per isolate.
 let _wasmReady: Promise<void> | null = null;
@@ -82,7 +82,7 @@ async function lucEntryFor(r2: R2Bucket, shortName: string): Promise<LucEntry | 
 
 /** Same data path as the FE's `useStationTrips`: an internal
  *  `/api/rides-v5?anchor=start&cells=<LUC cell>` monthly query against the
- *  rides-v5 pyramid, reusing the full serving path (`serveRidesV5`) for one
+ *  rides-v5 pyramid, reusing the full serving path (`serveRides`) for one
  *  code path to trust. The share card only shows start-side monthly totals,
  *  so a single anchor + a `count`-summing reducer suffice (no `end` query,
  *  no gender/user-type/bike-type breakdown). Supersedes the retired
@@ -108,7 +108,7 @@ async function tripsSummary(r2: R2Bucket, db: D1Database, entry: LucEntry): Prom
 	const bbox = [entry.lat - 0.02, entry.lng - 0.02, entry.lat + 0.02, entry.lng + 0.02].join(',');
 	const url = `https://internal/api/rides-v5?anchor=start&cells=${encodeURIComponent(entry.cell)}` +
 		`&bbox=${bbox}&from=${V5_FROM}&to=${to}&bin_budget=${V5_BIN_BUDGET}`;
-	const resp = await serveRidesV5(r2, db, new Request(url), '*', false);
+	const resp = await serveRides(RIDES_V5, r2, db, new Request(url), '*', false);
 	if (!resp.ok) return null;
 	const data = await resp.json() as { records: Array<{ dt: number; count: number }> };
 	const byYm = new Map<string, number>();

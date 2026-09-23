@@ -495,7 +495,7 @@ import { coverageKey, coverageRange, defaultCoverageRange, isDay, type CoverageD
 import { EMPTY_VOCAB_KEY, makeVocab, readSeries, type Bin, type OpenShard, type ShardBytes, type Vocab } from './empty';
 import { runAlerts } from './alerts';
 import { DEFAULT_PYRAMID, repairGeneration, serveAvailV3, serveAvailV3Cells } from './avail_geo';
-import { serveRidesV5 } from './rides_v1';
+import { RIDES, RIDES_V5, serveRides } from './rides_v1';
 import { retryingStorage, withR2Retry } from './r2_retry';
 import { r2Storage } from 'pyrmts-cfw';
 import { backfillManifestKey, manifestStatus } from './rg_manifest';
@@ -1127,6 +1127,8 @@ const RECONCILE_PYRAMIDS: { name: string; prefix: string; rides?: boolean }[] = 
 	{ name: 'smg-v1', prefix: 'smg-v1/' },
 	{ name: 'rides-v5-start', prefix: 'rides-v5/start/', rides: true },
 	{ name: 'rides-v5-end', prefix: 'rides-v5/end/', rides: true },
+	{ name: 'rides-start', prefix: 'rides/start/', rides: true },
+	{ name: 'rides-end', prefix: 'rides/end/', rides: true },
 ];
 
 /** Register expected-cover shards that exist on R2 but are missing from
@@ -1457,13 +1459,17 @@ export default {
 			return resp;
 		}
 
-		// /api/rides-v5[/cells] — pyrmts-geo serving of the rides pyramid
-		// (`rides-v5/{start,end}/<tier>/…parquet`), station-identity-keyed
-		// prod. See `specs/rides-v5.md` + `rides_v1.ts`. (S2-keyed rides-v3
-		// and h3-keyed rides-v1/v2 retired/GC'd.)
-		const ridesMatch = url.pathname.match(/^\/api\/rides-v5(\/cells)?$/);
+		// /api/rides[-v5][/cells] — pyrmts-geo serving of the rides pyramids,
+		// station-identity-keyed. `/api/rides-v5` serves `rides-v5/{start,end}/…`
+		// (canonical ids baked in at ingest; current prod); `/api/rides` serves
+		// the re-keyed `rides/{start,end}/…` (raw-id leaves + materialized `c:`
+		// rollups; canonical by default, `?raw=1` audit — `specs/rides-rekey.md`).
+		// See `specs/rides-v5.md` + `rides_v1.ts`.
+		const ridesMatch = url.pathname.match(/^\/api\/rides(-v5)?(\/cells)?$/);
 		if (ridesMatch) {
-			const cellsRoute = !!ridesMatch[1];
+			const variant = ridesMatch[1] ? RIDES_V5 : RIDES;
+			const route = `/api/${variant.prefix}`;
+			const cellsRoute = !!ridesMatch[2];
 			// Edge cache: rides-* cold queries are O(seconds) since they
 			// fan out to many R2 GETs + decode + filter + stitch. Mirroring
 			// the /api/totals pattern (`index.ts:1232-1280`): past-only
@@ -1481,9 +1487,9 @@ export default {
 			let resp: Response;
 			try {
 				// Inventory-driven (D1 `pyramid_shards`) — see rides_v1.ts.
-				resp = await serveRidesV5(env.R2, env.DB, request, env.CORS_ORIGIN ?? '*', cellsRoute, (p) => ctx.waitUntil(p));
+				resp = await serveRides(variant, env.R2, env.DB, request, env.CORS_ORIGIN ?? '*', cellsRoute, (p) => ctx.waitUntil(p));
 			} catch (err: any) {
-				return errorResponse(err.message ?? 'rides-v5 error', 500, env);
+				return errorResponse(err.message ?? `${variant.prefix} error`, 500, env);
 			}
 			// Workers Analytics Engine: per-request perf telemetry. Lets us
 			// (a) detect when an EWR D1 replica spawns, (b) track per-route
@@ -1495,9 +1501,9 @@ export default {
 				const workerColo = resp.headers.get('X-Worker-Colo') ?? '';
 				const wallMs = performance.now() - tRidesStart;
 				env.PERF.writeDataPoint({
-					blobs: [`/api/rides-v5${cellsRoute ? '/cells' : ''}`, workerColo, String(resp.status)],
+					blobs: [`${route}${cellsRoute ? '/cells' : ''}`, workerColo, String(resp.status)],
 					doubles: [wallMs],
-					indexes: ['/api/rides-v5'],
+					indexes: [route],
 				});
 			}
 			if (resp.ok) {
@@ -1827,7 +1833,7 @@ export default {
 		if (url.pathname.startsWith('/api/files/')) {
 			const handlers = createHandlers(
 				R2Store(env.R2, {
-					prefixes: ['gbfs/', 'avail/', 'avail-v3/', 'avail-v5/', 'avail-v6/', 'smg-v1/', 'rides-v5/'],
+					prefixes: ['gbfs/', 'avail/', 'avail-v3/', 'avail-v5/', 'avail-v6/', 'smg-v1/', 'rides-v5/', 'rides/', 'stations/'],
 					publicBaseUrl: env.R2_PUBLIC_BASE_URL,
 					presign: {
 						endpoint: env.R2_S3_ENDPOINT,
