@@ -973,6 +973,116 @@ def gbfs_parity(
 	sys.exit(1 if failures else 0)
 
 
+@gbfs.command('rides-rekey-check', help='Validation gate for the rides re-key (`specs/rides-rekey.md`): candidate `/api/rides` (raw-id + materialized `c:` rows) vs baseline `/api/rides-v5`, monthly `count` series per anchor. Unmerged stations and bboxes must match exactly; merged clusters are compared to baseline (differences expected only where the id-map changed) and must equal the sum of their members\' `?raw=1` rows.')
+@option('-a', '--anchor', 'anchors', multiple=True, type=click.Choice(['start', 'end']), help='Anchor (repeatable) [default: both].')
+@option('-B', '--bbox', 'bboxes', multiple=True, help='Region case, `minLat,minLng,maxLat,maxLng` (repeatable) [default: Bay Ridge + lower Manhattan + all NYC/JC].')
+@option('-b', '--bin', 'bin_', default='1mo', show_default=True, help='Output bin.')
+@option('-c', '--candidate', default=API_URLS['dev'], show_default=True, help='Worker serving the candidate `/api/rides`.')
+@option('-C', '--baseline', default=API_URLS['prod'], show_default=True, help='Worker serving the baseline `/api/rides-v5`.')
+@option('-m', '--num-merged', type=int, default=6, show_default=True, help='Deterministic sample of merged clusters.')
+@option('-n', '--num-stations', type=int, default=8, show_default=True, help='Deterministic sample of unmerged stations.')
+@option('-r', '--range', 'range_', default='2013-06-01T00:00:00Z/2026-09-01T00:00:00Z', show_default=True, help='`FROM/TO` UTC ISO.')
+def gbfs_rides_rekey_check(
+	anchors: tuple[str, ...],
+	bboxes: tuple[str, ...],
+	bin_: str,
+	candidate: str,
+	baseline: str,
+	num_merged: int,
+	num_stations: int,
+	range_: str,
+) -> None:
+	import time as _time
+	from collections import defaultdict
+	from urllib.parse import quote
+	from_s, _, to_s = range_.partition('/')
+
+	def q(base: str, route: str, anchor: str, sel: str, raw: bool = False) -> tuple[dict, float]:
+		"""`{(dt, cell|None): count}` summed over dims, plus wall seconds."""
+		url = (f'{base}{route}?anchor={anchor}&from={from_s}&to={to_s}&bin={bin_}&reducer=sum&{sel}'
+			   + ('&raw=1' if raw else ''))
+		t0 = _time.time()
+		req = _urlrequest.Request(url, headers={'User-Agent': 'ctbk-rides-rekey-check/1.0'})
+		with _urlrequest.urlopen(req, timeout=120) as resp:
+			body = json.loads(resp.read())
+		out: dict = defaultdict(int)
+		for rec in body['records']:
+			out[(rec['dt'], rec.get('cell'))] += rec['count']
+		return dict(out), _time.time() - t0
+
+	def cells_sel(keys: list[str]) -> str:
+		# Short names embed spaces/`&`; percent-encode.
+		return 'cells=' + quote(','.join(keys), safe=',:._-')
+
+	def by_dt(series: dict) -> dict[int, int]:
+		out: dict[int, int] = defaultdict(int)
+		for (dt, _cell), v in series.items():
+			out[dt] += v
+		return dict(out)
+
+	def cmp(a: dict[int, int], b: dict[int, int]) -> str | None:
+		"""None when equal, else a short description of the difference."""
+		if a == b:
+			return None
+		bad = sorted(dt for dt in a.keys() | b.keys() if a.get(dt, 0) != b.get(dt, 0))
+		first = datetime.fromtimestamp(bad[0] / 1000, timezone.utc).strftime('%Y-%m')
+		return f'{len(bad)} bins differ (first {first}); totals {sum(a.values())} vs {sum(b.values())}'
+
+	client, bucket = _r2_client()
+	luc = json.loads(client.get_object(Bucket=bucket, Key='station-luc.json')['Body'].read())  # type: ignore[attr-defined]
+	canon_map = json.loads(client.get_object(Bucket=bucket, Key='stations/station-canonicalize-map.json')['Body'].read())  # type: ignore[attr-defined]
+	members: dict[str, list[str]] = defaultdict(list)
+	for raw_key, canon in canon_map.items():
+		members[canon[2:]].append(raw_key)
+	stations = sorted(luc['by_short_name'])
+	unmerged = [sn for sn in stations if f's:{sn}' not in canon_map]
+	merged = [sn for sn in stations if canon_map.get(f's:{sn}') == f'c:{sn}']
+	sample_u = unmerged[::max(1, len(unmerged) // num_stations)][:num_stations]
+	sample_m = merged[::max(1, len(merged) // num_merged)][:num_merged]
+
+	failures = 0
+	walls: dict[str, list[float]] = {'candidate': [], 'baseline': []}
+	print(f'range {from_s}/{to_s} · bin {bin_} · {len(sample_u)} unmerged + {len(sample_m)} merged stations')
+	for anchor in anchors or ('start', 'end'):
+		print(f'anchor={anchor}')
+		for sn in sample_u:
+			a, wa = q(candidate, '/api/rides', anchor, cells_sel([f's:{sn}']))
+			b, wb = q(baseline, '/api/rides-v5', anchor, cells_sel([f's:{sn}']))
+			walls['candidate'].append(wa)
+			walls['baseline'].append(wb)
+			d = cmp(by_dt(a), by_dt(b))
+			failures += d is not None
+			print(f'  {"✗" if d else "✓"} unmerged s:{sn:<10} {d or f"{sum(a.values())} rides"}  ({wa:.2f}s vs {wb:.2f}s)')
+		for sn in sample_m:
+			a, wa = q(candidate, '/api/rides', anchor, cells_sel([f's:{sn}']))
+			b, wb = q(baseline, '/api/rides-v5', anchor, cells_sel([f's:{sn}']))
+			r, _ = q(candidate, '/api/rides/cells', anchor, cells_sel(members[sn]), raw=True)
+			walls['candidate'].append(wa)
+			walls['baseline'].append(wb)
+			d_raw = cmp(by_dt(a), by_dt(r))
+			d_base = cmp(by_dt(a), by_dt(b))
+			failures += d_raw is not None
+			per_id = defaultdict(int)
+			for (_dt, cell), v in r.items():
+				per_id[cell] += v
+			split = ' + '.join(f'{k}={per_id.get(k, 0)}' for k in members[sn])
+			print(f'  {"✗" if d_raw else "✓"} merged   c:{sn:<10} {sum(a.values())} = {split}'
+				  + (f'  [raw sum: {d_raw}]' if d_raw else '')
+				  + (f'  [vs baseline: {d_base}]' if d_base else '  [= baseline]'))
+		for bb in bboxes or ('40.60,-74.05,40.62,-74.02', '40.70,-74.02,40.73,-73.98', '40.55,-74.10,40.90,-73.80'):
+			a, wa = q(candidate, '/api/rides', anchor, f'bbox={bb}')
+			b, wb = q(baseline, '/api/rides-v5', anchor, f'bbox={bb}')
+			walls['candidate'].append(wa)
+			walls['baseline'].append(wb)
+			d = cmp(by_dt(a), by_dt(b))
+			failures += d is not None
+			print(f'  {"✗" if d else "✓"} bbox {bb}  {d or f"{sum(a.values())} rides"}  ({wa:.2f}s vs {wb:.2f}s)')
+	for name, ws in walls.items():
+		ws = sorted(ws)
+		print(f'latency {name}: p50 {ws[len(ws) // 2]:.2f}s  p95 {ws[min(len(ws) - 1, int(len(ws) * 0.95))]:.2f}s  n={len(ws)}')
+	sys.exit(1 if failures else 0)
+
+
 # ─── shard invalidation (specs/shard-invalidation-adoption.md) ─────────
 
 
