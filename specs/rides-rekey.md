@@ -88,6 +88,17 @@ Run on Batch (`no-heavy-local-compute`); surface the cost estimate before the go
 4. **Register (P3d).** Register the new shards in D1 `pyramid_shards` under
    `rides-{start,end}` (`register_shard` / `ctbk gbfs lambda reconcile`), additive.
 
+**Status (2026-09-23): P3a–d DONE.** Built on the HCCS Batch stack (migrated off
+RAC): 267 shards / 14.5 GB per anchor. Canonicalized with pyrmts `2a71a97`'s
+vectorized additive fast path (0 errors, ~9 min both anchors); all 454 canonical
+cells in a sampled 16y shard equal the sum of their `s:` constituents. Registered
+534 rows via the api-worker registry proxy (`CTBK_REGISTRY_URL=
+https://ctbk-gbfs-api.hccs-ctbk.workers.dev` + `CTBK_REGISTRY_SECRET`; no D1-edit
+token needed; listing `rides/` needs the R2 RW key); a re-run dry-run reports 0
+stranded. The 12 ladder-expected-but-unbuilt shards per anchor are all tip periods
+starting ≥ 2026-08-07, past the latest published trip data — the monthly extend
+fills them.
+
 ## Validation gate
 
 On the dev worker (new data) vs the prod worker (old data), before any P4 flip:
