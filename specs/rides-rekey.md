@@ -127,8 +127,21 @@ row group with `c:` rows appended unsorted (`rides/start/1mo/16y/2000` = 1 RG ×
 2024 p50 is 1.65 s vs 0.29 s — pyrmts `specs/canonicalize-preserve-layout.md`.
 Pair with pyrmts `specs/content-addressed-shards.md` (`{hash}` in `keyTemplate`;
 adopt for `rides-*` before P4 so post-cutover rewrites never mutate served blobs).
-Then: re-canonicalize → (`reconcile -f` + manifest backfill, unless hashed keys
-landed) → full-range gate.
+**Full-range gate PASSED (2026-09-24)** after pyrmts `40e0cf2` (canonicalize keeps
+the build layout: 16y shard 1 RG → 55×2048, stamped, sorted) → re-canonicalize on
+`e` → `reconcile -f` → manifest backfill (508 keys). `rides-rekey-check` genesis→
+2026-09, both anchors: all 28 station cases pass (merged = Σ members = baseline);
+no 1102; dev p50 0.38 s vs prod `rides-v5` 0.69 s. Bbox diffs, all attributed:
+- lower Manhattan +1,153,934 (start): `5788.13`→`5712.10` — v5 held the dock's
+  1,153,666 rides at lat 40.73021 (just N of the bbox edge), the canonical sits
+  at 40.72974.
+- NYC-wide start: 2026-07 +1,420 = exactly the Jul-2026 starts stored in
+  `normalized/202608.parquet` (published 09-12; v5's July shards never picked up
+  the spillback); 2026-06 +84 / end +116 likewise v5 tip staleness; ±1–4 in a
+  handful of older bins = v5 built from older normalized data (the 2014-10 −2
+  verified exactly against the current source).
+Content-hashed keys (`{hash:12}`) prep landed in `098da521`; the template switch
+also needs the Batch base + derived images rebuilt at pyrmts ≥ `1cb3395`.
 
 ## Validation gate
 
