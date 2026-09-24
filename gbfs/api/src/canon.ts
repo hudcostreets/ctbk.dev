@@ -28,6 +28,11 @@
  *  declares (`configs/pyramids/rides-{start,end}.yaml`). */
 export const CANON_MAP_KEY = 'stations/station-canonicalize-map.json';
 
+/** Canonicals `station-luc.json` lacks that the rides build places in
+ *  vocab cells (`ctbk rides-canonicalize-map`); the rides vocab graph adds
+ *  them so partial-cell covers can emit their leaves. */
+export const EXTRA_STATIONS_KEY = 'stations/rides-extra-stations.json';
+
 export type LeafMode = 'canonical' | 'raw';
 
 export interface CanonMap {

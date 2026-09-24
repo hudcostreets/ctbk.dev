@@ -65,7 +65,7 @@ import {
 	type SpatialSet,
 } from 'pyrmts-geo';
 import { loadV5Vocab, v5BBoxCover } from './avail_geo';
-import { loadCanonMap, selectLeaves } from './canon';
+import { EXTRA_STATIONS_KEY, loadCanonMap, selectLeaves } from './canon';
 
 const METRICS = ['count', 'duration'] as const;
 type Metric = typeof METRICS[number];
@@ -341,8 +341,8 @@ function ridesV5Pyramid(bucket: R2Bucket, variant: RidesVariant, anchor: Anchor,
 
 /** Translate a raw-S2 user cover (include/exclude, `minimalCover`
  *  output) to the positive-only vocab cover of the stations it selects. */
-async function v5UserCover(bucket: R2Bucket, include: string[], exclude: string[]): Promise<string[]> {
-	const { graph, stations } = await loadV5Vocab(bucket);
+async function v5UserCover(bucket: R2Bucket, include: string[], exclude: string[], extrasKey?: string): Promise<string[]> {
+	const { graph, stations } = await loadV5Vocab(bucket, extrasKey);
 	const set: SpatialSet = { include, exclude };
 	const wanted = stations
 		.filter((s) => {
@@ -409,19 +409,20 @@ export async function serveRides(
 	if (raw && !variant.canonicalized) {
 		return errorResponse(400, `raw=1 needs a canonicalized pyramid (/api/rides), not ${variant.prefix}`, cors);
 	}
+	const extrasKey = variant.canonicalized ? EXTRA_STATIONS_KEY : undefined;
 	let include: string[];
 	if (userCells !== null) {
 		// Station-key covers (`s:` / `c:`) pass through (station-detail path);
 		// raw S2 covers translate via the registry.
 		const explicit = userCells.every((c) => c.startsWith('s:') || c.startsWith('c:'));
-		include = explicit ? userCells : await v5UserCover(bucket, userCells, exclude);
+		include = explicit ? userCells : await v5UserCover(bucket, userCells, exclude, extrasKey);
 		// Explicit ids under `raw=1` are raw reported ids, taken verbatim (the
 		// audit view); everything else resolves station leaves per `canon.ts`.
 		if (variant.canonicalized && !(explicit && raw)) {
 			include = selectLeaves(include, await loadCanonMap(bucket), raw ? 'raw' : 'canonical');
 		}
 	} else if (bbox !== null) {
-		include = await v5BBoxCover(bucket, bbox);
+		include = await v5BBoxCover(bucket, bbox, extrasKey);
 		if (variant.canonicalized) {
 			include = selectLeaves(include, await loadCanonMap(bucket), raw ? 'raw' : 'canonical');
 		}

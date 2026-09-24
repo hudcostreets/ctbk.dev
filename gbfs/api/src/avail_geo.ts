@@ -406,32 +406,49 @@ export interface V5Vocab {
 	graph: ReturnType<typeof buildVocabGraph>;
 	stations: { key: string; lat: number; lng: number }[];
 }
-let _v5Vocab: { value: Promise<V5Vocab>; ts: number } | null = null;
+const _v5Vocab = new Map<string, { value: Promise<V5Vocab>; ts: number }>();
 const V5_VOCAB_TTL_MS = 10 * 60_000;
 
-export function loadV5Vocab(bucket: R2Bucket): Promise<V5Vocab> {
+type LucEntries = Record<string, { cell: string; lat: number; lng: number }>;
+
+/** The vocab graph over the `station-luc.json` registry, plus — when
+ *  `extrasKey` is given — the stations in that bucket JSON (same entry
+ *  shape; rides passes `rides-extra-stations.json`, the canonicals the
+ *  registry lacks but the rides build places in vocab cells). Cached per
+ *  `extrasKey`. */
+export function loadV5Vocab(bucket: R2Bucket, extrasKey?: string): Promise<V5Vocab> {
 	const now = Date.now();
-	if (_v5Vocab && now - _v5Vocab.ts < V5_VOCAB_TTL_MS) return _v5Vocab.value;
+	const ck = extrasKey ?? '';
+	const hit = _v5Vocab.get(ck);
+	if (hit && now - hit.ts < V5_VOCAB_TTL_MS) return hit.value;
 	const value = (async (): Promise<V5Vocab> => {
 		const obj = await bucket.get('station-luc.json');
 		if (!obj) throw new Error('station-luc.json not found on R2');
-		const luc = await obj.json<{ by_short_name: Record<string, { cell: string; lat: number; lng: number }> }>();
+		const entries: LucEntries = { ...(await obj.json<{ by_short_name: LucEntries }>()).by_short_name };
+		if (extrasKey !== undefined) {
+			const ex = await bucket.get(extrasKey);
+			if (!ex) throw new Error(`${extrasKey} not found on R2`);
+			for (const [sn, e] of Object.entries(await ex.json<LucEntries>())) {
+				if (sn in entries) throw new Error(`${extrasKey}: ${sn} is already in station-luc.json`);
+				entries[sn] = e;
+			}
+		}
 		const leaves: { key: string; cell: string }[] = [];
 		const stations: V5Vocab['stations'] = [];
-		for (const [sn, e] of Object.entries(luc.by_short_name)) {
+		for (const [sn, e] of Object.entries(entries)) {
 			leaves.push({ key: `s:${sn}`, cell: e.cell });
 			stations.push({ key: `s:${sn}`, lat: e.lat, lng: e.lng });
 		}
 		const graph = buildVocabGraph(s2Index, (stationVocab as { cells: string[] }).cells, leaves);
 		return { graph, stations };
 	})();
-	_v5Vocab = { value, ts: now };
-	value.catch(() => { _v5Vocab = null; });
+	_v5Vocab.set(ck, { value, ts: now });
+	value.catch(() => { _v5Vocab.delete(ck); });
 	return value;
 }
 
-export async function v5BBoxCover(bucket: R2Bucket, bbox: BBox): Promise<string[]> {
-	const { graph, stations } = await loadV5Vocab(bucket);
+export async function v5BBoxCover(bucket: R2Bucket, bbox: BBox, extrasKey?: string): Promise<string[]> {
+	const { graph, stations } = await loadV5Vocab(bucket, extrasKey);
 	const wanted = stations
 		.filter((s) => s.lat >= bbox.minLat && s.lat <= bbox.maxLat && s.lng >= bbox.minLng && s.lng <= bbox.maxLng)
 		.map((s) => s.key);

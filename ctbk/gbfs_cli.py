@@ -491,13 +491,13 @@ def _r2_client(rw: bool = False) -> tuple[object, str]:
 	"""Build a boto3 S3 client pointed at the ctbk R2 endpoint. Reads
 	`CLOUDFLARE_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`
 	from the environment (typically sourced from `.envrc`); `rw` reads the
-	`R2_RW_`-prefixed pair instead (the default pair may be read-only).
-	Returns (client, bucket_name)."""
+	`R2_RW_`-prefixed pair instead (the default pair may be read-only),
+	as does an unset default pair. Returns (client, bucket_name)."""
 	try:
 		import boto3  # type: ignore[import-untyped]
 	except ImportError as e:
 		raise click.ClickException('boto3 not installed. `uv sync` or `pip install boto3`.') from e
-	kp = 'R2_RW_' if rw else 'R2_'
+	kp = 'R2_RW_' if rw or not os.environ.get('R2_ACCESS_KEY_ID') else 'R2_'
 	acct = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
 	akid = os.environ.get(f'{kp}ACCESS_KEY_ID')
 	sk = os.environ.get(f'{kp}SECRET_ACCESS_KEY')
@@ -1104,7 +1104,7 @@ def gbfs_rides_totals_diff(
 	import io
 	import pandas as pd
 	import pyarrow.parquet as pq
-	client, bucket = _r2_client(rw=bool(os.environ.get('R2_RW_ACCESS_KEY_ID')))
+	client, bucket = _r2_client()
 
 	def yearly(prefix: str, anchor: str) -> 'pd.Series':
 		frames = []

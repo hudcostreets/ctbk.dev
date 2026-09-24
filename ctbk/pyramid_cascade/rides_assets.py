@@ -21,6 +21,10 @@ VOCAB_PATH = CONFIG_DIR / 'station-vocab.json'
 STATION_LUC_PATH = REPO / 'www' / 'public' / 'assets' / 'station-luc.json'
 ID_MAP_PATH = REPO / 's3' / 'ctbk' / 'stations' / 'station-id-map.json'
 CANONICALIZE_MAP_PATH = REPO / 's3' / 'ctbk' / 'stations' / 'station-canonicalize-map.json'
+EXTRA_STATIONS_PATH = REPO / 's3' / 'ctbk' / 'stations' / 'rides-extra-stations.json'
+# Leaf-cell level for extra stations' `cell` (the api's vocab graph hangs a
+# leaf under the nearest vocab ancestor of its cell; any fine level works).
+EXTRA_CELL_LEVEL = 20
 NORMALIZED_DIR = REPO / 's3' / 'ctbk' / 'normalized'
 GEO_JSON_PATH = REPO / 'gbfs' / 'engine' / 'station-geo.json'
 
@@ -76,17 +80,50 @@ def write_canonicalize_id_map(path: Path = CANONICALIZE_MAP_PATH) -> int:
     return len(m)
 
 
+def _geo() -> dict[str, tuple[float, float]]:
+    return {
+        sid: (lat, lng)
+        for sid, (lat, lng) in json.loads(GEO_JSON_PATH.read_text()).items()
+    }
+
+
+def _registry() -> dict[str, tuple[float, float]]:
+    luc = json.loads(STATION_LUC_PATH.read_text())
+    return {sn: (e['lat'], e['lng']) for sn, e in luc['by_short_name'].items()}
+
+
+def rides_extra_stations() -> dict[str, dict]:
+    """The canonicals `station_positions` adds beyond the registry, in
+    `station-luc.json` `by_short_name` entry shape (`{lat, lng, cell}`).
+    Published next to the canonicalize map so the api's rides vocab graph
+    can emit their `s:` leaves in partial-cell covers — the serving-side
+    counterpart of the build placing their rides in vocab cells."""
+    import s2cell
+    registry = _registry()
+    extra = {
+        sn: pos for sn, pos in station_positions(registry, effective_canonical(), _geo()).items()
+        if sn not in registry
+    }
+    return {
+        sn: {'lat': lat, 'lng': lng, 'cell': s2cell.lat_lon_to_token(lat, lng, EXTRA_CELL_LEVEL)}
+        for sn, (lat, lng) in sorted(extra.items())
+    }
+
+
+def write_rides_extra_stations(path: Path = EXTRA_STATIONS_PATH) -> int:
+    """Materialize `rides_extra_stations()` to `path`; returns the count."""
+    d = rides_extra_stations()
+    path.write_text(json.dumps(d, indent=2) + '\n')
+    return len(d)
+
+
 def rides_source_kwargs() -> dict:
     """Everything `MonthlyRidesSource` needs beyond (pyramid, anchor),
     composed from local assets."""
     vocab = load_vocab(VOCAB_PATH)
-    luc = json.loads(STATION_LUC_PATH.read_text())
     canonical = effective_canonical()
-    geo = {
-        sid: (lat, lng)
-        for sid, (lat, lng) in json.loads(GEO_JSON_PATH.read_text()).items()
-    }
-    registry = {sn: (e['lat'], e['lng']) for sn, e in luc['by_short_name'].items()}
+    geo = _geo()
+    registry = _registry()
     chains = {
         short_name: station_chain(lat, lng, short_name, vocab)
         for short_name, (lat, lng) in station_positions(registry, canonical, geo).items()

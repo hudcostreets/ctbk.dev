@@ -85,10 +85,14 @@ def pyramid_cascade_cmd(
     report_gaps(missing)
 
 
-@ctbk.command('rides-canonicalize-map', help="Regenerate `station-canonicalize-map.json` (the rides pyramids' `identityRollup.map`: `{s:<raw>: c:<canonical>}` over merged station clusters) from `station-id-map.json` + the luc `merged` overlay.")
-@flag('-n', '--dry-run', 'dry_run', help='Print the entry count and a sample; do not write.')
-def rides_canonicalize_map_cmd(dry_run: bool):
-    from .rides_assets import CANONICALIZE_MAP_PATH, canonicalize_id_map, write_canonicalize_id_map
+@ctbk.command('rides-canonicalize-map', help="Regenerate `station-canonicalize-map.json` (the rides pyramids' `identityRollup.map`: `{s:<raw>: c:<canonical>}` over merged station clusters) from `station-id-map.json` + the luc `merged` overlay, and `rides-extra-stations.json` (canonicals the registry lacks, placed at their observed position — the rides serving vocab's supplement).")
+@flag('-n', '--dry-run', 'dry_run', help='Print the entry counts and a sample; do not write.')
+@flag('-u', '--upload', 'upload', help='Also PUT both files to R2 `stations/` (RW creds: `R2_RW_*`).')
+def rides_canonicalize_map_cmd(dry_run: bool, upload: bool):
+    from .rides_assets import (
+        CANONICALIZE_MAP_PATH, EXTRA_STATIONS_PATH, canonicalize_id_map,
+        rides_extra_stations, write_canonicalize_id_map, write_rides_extra_stations,
+    )
 
     m = canonicalize_id_map()
     n_canonical = len({v for v in m.values()})
@@ -96,6 +100,17 @@ def rides_canonicalize_map_cmd(dry_run: bool):
         err(f"{len(m)} entries over {n_canonical} merged clusters (dry run, not written)")
         for k, v in list(m.items())[:6]:
             err(f"  {k} -> {v}")
+        extra = rides_extra_stations()
+        err(f"{len(extra)} extra stations: {', '.join(extra)}")
         return
     n = write_canonicalize_id_map()
     err(f"Wrote {CANONICALIZE_MAP_PATH} ({n} entries over {n_canonical} merged clusters)")
+    n_extra = write_rides_extra_stations()
+    err(f"Wrote {EXTRA_STATIONS_PATH} ({n_extra} extra stations)")
+    if upload:
+        from ctbk.gbfs_cli import _r2_client
+        client, bucket = _r2_client(rw=True)
+        for path in (CANONICALIZE_MAP_PATH, EXTRA_STATIONS_PATH):
+            key = f'stations/{path.name}'
+            client.put_object(Bucket=bucket, Key=key, Body=path.read_bytes(), ContentType='application/json')
+            err(f"  → r2://{bucket}/{key}")
