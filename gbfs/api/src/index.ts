@@ -1132,8 +1132,12 @@ const RECONCILE_PYRAMIDS: { name: string; prefix: string; rides?: boolean }[] = 
 ];
 
 /** Register expected-cover shards that exist on R2 but are missing from
- *  `pyramid_shards`: expected(min-cover of [genesis, now)) − registered,
- *  HEAD-verified on R2. Same semantics as the Python-side
+ *  `pyramid_shards`: expected(min-cover of [genesis, now)) − registered
+ *  **slots** `(tier, shard_dur, period_start)`, HEAD-verified on R2.
+ *  Slot- not key-compared: under a content-hashed `keyTemplate` a slot's
+ *  row points at `…{period}.<hash>.parquet`, and the hashless expected key
+ *  may still exist as an orphan — a key comparison would swap the slot
+ *  back to that stale blob every tick. Same semantics as the Python-side
  *  `reconcile_registrations` — expected-cover-filtered, so rebuild
  *  scaffolds (deliberately unregistered sub-rung tiles) are never
  *  registered. The candidate set is tiny (rolling tip gaps + stranded
@@ -1151,9 +1155,11 @@ async function reconcileRegistry(env: Env): Promise<void> {
 		} as unknown as Pyramid;
 		const expected = listExpectedShards(pyr, { from: rides ? RIDES_GENESIS : AVAIL_GENESIS, to: now });
 		const rs = await env.DB.prepare(
-			'SELECT key FROM pyramid_shards WHERE pyramid = ?').bind(pyramid).all<{ key: string }>();
-		const registered = new Set((rs.results ?? []).map((r) => r.key));
-		const candidates = expected.filter((e) => !registered.has(e.key));
+			'SELECT tier, shard_dur, period_start FROM pyramid_shards WHERE pyramid = ?',
+		).bind(pyramid).all<{ tier: string; shard_dur: string; period_start: number }>();
+		const slot = (tier: string, shardDur: string, periodStart: number) => `${tier}|${shardDur}|${periodStart}`;
+		const registered = new Set((rs.results ?? []).map((r) => slot(r.tier, String(r.shard_dur), r.period_start)));
+		const candidates = expected.filter((e) => !registered.has(slot(e.tier, String(e.shardDur), e.periodStart.getTime())));
 		const stranded = [];
 		for (const e of candidates) {
 			if (await env.R2.head(e.key)) stranded.push(e);

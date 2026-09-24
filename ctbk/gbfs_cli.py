@@ -797,7 +797,16 @@ def gbfs_lambda_reconcile(config_name: str, force: bool, dry_run: bool) -> None:
 	from ctbk.pyramid_cascade.fsck import discover_gaps
 	from ctbk.pyramid_cascade.lite import AVAIL_GENESIS, RIDES_GENESIS
 	from ctbk.pyramid_cascade.storage import storage_from_cfg
+	from pyrmts.keys import template_has_hash
 	cfg = parse_pyramid_yaml(merged_yaml(config_name))
+	if template_has_hash(cfg.keyTemplate):
+		# Expected keys can't be derived from a hashed template, and a LIST
+		# holds superseded versions (orphans until `gc`): registering from
+		# storage would swap slots back to stale blobs. Writers record their
+		# keys in the build manifest; sync that instead.
+		raise click.ClickException(
+			f'{config_name}: content-hashed keyTemplate — reconcile from the build manifest: '
+			f'`ctbk gbfs engine register s3://<bucket>/<prefix>/manifest.jsonl`')
 	pyramid = pyramid_from_config(cfg, storage_from_cfg(cfg.storage))
 	now = datetime.now(timezone.utc)
 	# Genesis is config-specific: rides reaches back to 2013-06, avail only to
@@ -1108,16 +1117,21 @@ def gbfs_rides_totals_diff(
 	import io
 	import pandas as pd
 	import pyarrow.parquet as pq
+	from ctbk.pyramid_cascade.d1_http import registered_keys
+	os.environ.setdefault('CTBK_REGISTRY_URL', API_URLS['prod'])
 	client, bucket = _r2_client()
 
 	def yearly(prefix: str, anchor: str) -> 'pd.Series':
+		# Keys come from the registry (pyramid `<prefix>-<anchor>`), not the
+		# template: content-hashed keys (`…/2000.<hash>.parquet`) aren't derivable.
+		keys = registered_keys(f'{prefix}-{anchor}')
 		frames = []
 		for y0 in (2000, 2016):
-			key = f'{prefix}/{anchor}/1mo/16y/{y0}.parquet'
-			try:
-				body = client.get_object(Bucket=bucket, Key=key)['Body'].read()  # type: ignore[attr-defined]
-			except client.exceptions.NoSuchKey:  # type: ignore[attr-defined]
+			slot = f'{prefix}/{anchor}/1mo/16y/{y0}.'
+			key = next((k for k in keys if k.startswith(slot)), None)
+			if key is None:
 				continue
+			body = client.get_object(Bucket=bucket, Key=key)['Body'].read()  # type: ignore[attr-defined]
 			df = pq.read_table(io.BytesIO(body), columns=['dt', 'cell', 'count_sum']).to_pandas()
 			frames.append(df[(df.cell.str.len() == 6) & ~df.cell.str.startswith(('s:', 'c:'))])
 		df = pd.concat(frames)
@@ -1807,8 +1821,8 @@ def _load_manifest(path: str) -> list[dict]:
 	return [json.loads(l) for l in lines if l.strip()]
 
 
-@gbfs_engine.command('register', help='Register manifest shards in the D1 `pyramid_shards` registry (INSERT OR REPLACE; idempotent). Complements the cascade Lambda, which registers its own writes.')
-@option('-b', '--batch-size', type=int, default=12, show_default=True, help='Rows per D1 statement.')
+@gbfs_engine.command('register', help='Sync a build manifest into the D1 `pyramid_shards` registry: one row per slot, the manifest\'s last record winning (a content-hashed rewrite appends the slot\'s new key), INSERT OR REPLACE via the worker registry proxy when `CTBK_REGISTRY_URL` is set (else D1 REST). Idempotent.')
+@option('-b', '--batch-size', type=int, default=40, show_default=True, help='Rows per proxy call / D1 statement.')
 @option('-n', '--dry-run', is_flag=True, help='Print row count + a sample; no D1 writes.')
 @option('-P', '--pyramid', 'pyramid_name', default=None, help='Registry pyramid name [default: each record\'s own `pyramid` field].')
 @argument('manifest', metavar='MANIFEST')
@@ -1818,29 +1832,20 @@ def gbfs_engine_register(
 	pyramid_name: str | None,
 	manifest: str,
 ) -> None:
-	from ctbk.pyramid_cascade.d1_http import d1_query
-	recs = []
-	seen = set()
+	from ctbk.pyramid_cascade.d1_http import register_rows
+	# One row per registry slot (the D1 PK), the manifest's LAST record
+	# winning: a content-hashed rewrite (canonicalize, rebuild) appends a new
+	# record for the same slot, and that's the one the registry must point at.
+	by_slot: dict[tuple, dict] = {}
 	for r in _load_manifest(manifest):
-		if r['key'] not in seen:
-			seen.add(r['key'])
-			recs.append(r)
+		r = {**r, 'pyramid': pyramid_name or r['pyramid']}
+		by_slot[(r['pyramid'], r['tier'], r['shard_dur'], r['period_start'])] = r
+	recs = list(by_slot.values())
 	if dry_run:
-		names = Counter(pyramid_name or r['pyramid'] for r in recs)
-		print(f'{len(recs)} shards → pyramid_shards as {dict(names)}')
+		names = Counter(r['pyramid'] for r in recs)
+		print(f'{len(recs)} slots → pyramid_shards as {dict(names)}')
 		return
-	cols = '(pyramid, tier, shard_dur, period_start, period_end, key, written_at)'
-	for i in range(0, len(recs), batch_size):
-		chunk = recs[i:i + batch_size]
-		placeholders = ', '.join(['(?, ?, ?, ?, ?, ?, ?)'] * len(chunk))
-		params: list = []
-		for r in chunk:
-			params += [
-				pyramid_name or r['pyramid'], r['tier'], r['shard_dur'],
-				r['period_start'], r['period_end'], r['key'], r['written_at'],
-			]
-		d1_query(f'INSERT OR REPLACE INTO pyramid_shards {cols} VALUES {placeholders}', params)
-		err(f'  registered {i + len(chunk)}/{len(recs)}')
+	register_rows(recs, batch_size=batch_size)
 
 
 @gbfs_engine.command('manifest', help='Summarize a build manifest (local path or `s3://` URL): shard counts per (tier, rung), period span; optionally diff key sets vs another manifest.')
