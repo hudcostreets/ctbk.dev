@@ -108,9 +108,20 @@ coordinate fallback (non-vocab cells, no `s:` leaf). Fixed rides-side
 (`station_positions`, `e385286a`): unregistered canonicals are placed at their
 `station-geo.json` position; the shared registry is untouched. 7 canonicals with
 no coordinates anywhere (`3247`, `3248`, `3442`, `3446`, `3475`, `3633`,
-`MTL-LAB-BKN`) stay on the fallback, as under `rides-v5`. Needs: `ctbk-engine:
-e385286a` job def → force rebuild both anchors → canonicalize → reconcile
-(`written_at` bump) → `rides-rekey-check`.
+`MTL-LAB-BKN`) stay on the fallback, as under `rides-v5`. Re-run (2026-09-24):
+job def rev 2 (`ctbk-engine:e385286a`) → `ctbk gbfs engine wipe -C rides-<a> -R` +
+`engine submit -C rides-<a> -R -f` (~20 min/anchor) → `ctbk gbfs engine
+canonicalize -C rides-<a>` on `e` (267 shards/anchor, 0 errors) → `ctbk gbfs
+lambda reconcile -C rides-<a> -f` (bumps `written_at`, so the 14 RG-manifest fills
+made against the old bytes read stale). `ctbk gbfs rides-totals-diff`: end exact;
+start −2 (2 Oct-2014 rides `rides-v5` over-counts vs the current normalized
+source). Serving side: the same 14 canonicals are published as
+`stations/rides-extra-stations.json` (`ctbk rides-canonicalize-map -u`) and merged
+into the rides vocab graph, so partial-cell bbox covers emit their leaves (NYC-wide
+2024 now exact, was −81 = `3460.05`). 2024 `rides-rekey-check`: all station cases
++ NYC-wide pass; lower-Manhattan +134k is the `5788.13`→`5712.10` renumber.
+Remaining before P4: RG-manifest backfill (dev p50 1.65 s vs 0.29 s — footer
+parsing), full-range gate.
 
 ## Validation gate
 

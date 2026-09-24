@@ -1005,11 +1005,15 @@ def gbfs_rides_rekey_check(
 	from collections import defaultdict
 	from urllib.parse import quote
 	from_s, _, to_s = range_.partition('/')
+	# Closed-period responses are edge-cached `immutable` for a day, so a
+	# check after a rebuild / serving change would compare stale bodies;
+	# a per-run nonce param makes every URL a cache miss.
+	nonce = f'{_time.time():.0f}'
 
 	def q(base: str, route: str, anchor: str, sel: str, raw: bool = False) -> tuple[dict, float]:
 		"""`{(dt, cell|None): count}` summed over dims, plus wall seconds."""
 		url = (f'{base}{route}?anchor={anchor}&from={from_s}&to={to_s}&bin={bin_}&reducer=sum&{sel}'
-			   + ('&raw=1' if raw else ''))
+			   + ('&raw=1' if raw else '') + f'&_nc={nonce}')
 		t0 = _time.time()
 		req = _urlrequest.Request(url, headers={'User-Agent': 'ctbk-rides-rekey-check/1.0'})
 		with _urlrequest.urlopen(req, timeout=120) as resp:
