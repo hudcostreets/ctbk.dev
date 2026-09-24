@@ -782,8 +782,15 @@ def gbfs_lambda_rebuild(
 
 @gbfs_lambda.command('reconcile', help='Run the registration reconcile locally (laptop → true D1 primary): register expected∩storage shards missing from the registry. Containment for the 2026-07-28 D1 REST split-brain (Lambda-side writes forked).')
 @option('-C', '--config', 'config_name', default='avail-v5', show_default=True, help='Pyramid config basename (also the D1 pyramid name).')
-@option('-n', '--dry-run', is_flag=True, help='Print stranded keys; no writes.')
-def gbfs_lambda_reconcile(config_name: str, dry_run: bool) -> None:
+@option('-f', '--force', is_flag=True, help='Re-register EVERY built shard (expected ∩ storage), not just stranded ones, bumping `written_at` to now — after an in-place rebuild at the same keys, so RG-manifest fills made against the old bytes read as stale.')
+@option('-n', '--dry-run', is_flag=True, help='Print the keys it would (re-)register; no writes.')
+def gbfs_lambda_reconcile(config_name: str, force: bool, dry_run: bool) -> None:
+	# Listing a prefix needs the RW R2 key (the RO key can't ListObjects), and
+	# laptop registry writes go through the prod api worker's D1 binding.
+	for k in ('ACCESS_KEY_ID', 'SECRET_ACCESS_KEY'):
+		if v := os.environ.get(f'R2_RW_{k}'):
+			os.environ[f'R2_{k}'] = v
+	os.environ.setdefault('CTBK_REGISTRY_URL', API_URLS['prod'])
 	from pyrmts import parse_pyramid_yaml, pyramid_from_config
 	from ctbk.pyramid_cascade.d1_http import register_shard, registered_keys
 	from ctbk.pyramid_cascade.engine_check import merged_yaml, _rides_anchor
@@ -798,7 +805,7 @@ def gbfs_lambda_reconcile(config_name: str, dry_run: bool) -> None:
 	# shards from the expected set, so they'd never be registered.
 	genesis = RIDES_GENESIS if _rides_anchor(config_name) else AVAIL_GENESIS
 	_gaps, existing, expected_by_tier = discover_gaps(pyramid, (genesis, now))
-	registered = registered_keys(config_name)
+	registered = set() if force else registered_keys(config_name)
 	stranded = [
 		e for shards in expected_by_tier.values() for e in shards
 		if e.key in existing and e.key not in registered
@@ -806,7 +813,7 @@ def gbfs_lambda_reconcile(config_name: str, dry_run: bool) -> None:
 	if dry_run:
 		for e in stranded:
 			print(e.key)
-		err(f'{len(stranded)} stranded ({config_name})')
+		err(f'{len(stranded)} {"built" if force else "stranded"} ({config_name})')
 		return
 	for e in stranded:
 		register_shard(
