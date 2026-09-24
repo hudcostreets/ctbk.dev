@@ -1527,7 +1527,7 @@ def _engine_sort(config_name: str) -> str:
 	return 'cell,dt,gender,user_type,bike_type' if _rides_anchor(config_name) else 's2_cell,dt'
 
 
-@gbfs_engine.command('canonicalize', help='Materialize a pyramid\'s `c:` identity-rollup rows in place (`pyrmts-engine canonicalize`) over every built shard in the range — the P3c pass, re-run after an id-map change or a rebuild. Rewrites shards in place at the same keys, so follow it with `ctbk gbfs lambda reconcile -C <config> -f` (bump `written_at`; else RG-manifest fills describe the old bytes). R2 creds from `R2_RW_*` (else `R2_*`); endpoint from `CLOUDFLARE_ACCOUNT_ID`.')
+@gbfs_engine.command('canonicalize', help='Materialize a pyramid\'s `c:` identity-rollup rows (`pyrmts-engine canonicalize`) over every built shard in the range — the P3c pass, re-run after an id-map change or a rebuild. Content-hashed keyTemplate: shards resolve through the prefix\'s build manifest, rewrites land at new keys and append there; follow with `ctbk gbfs engine register` (swap D1 rows to them). Hashless: rewrites in place; follow with `ctbk gbfs lambda reconcile -C <config> -f` (bump `written_at`; else RG-manifest fills describe the old bytes). R2 creds from `R2_RW_*` (else `R2_*`); endpoint from `CLOUDFLARE_ACCOUNT_ID`.')
 @option('-C', '--config', 'config_name', required=True, help='Pyramid config basename under configs/pyramids/ (e.g. rides-start).')
 @option('-g', '--rg-size', type=int, default=ENGINE_RG_SIZE, show_default=True, help='Rewrite row-group size (the build\'s `engine submit -g`). pyrmts ≥ 40e0cf2 otherwise reads the shard\'s stamped layout, falling back to its first RG\'s size — wrong for shards a pre-40e0cf2 canonicalize collapsed to one RG.')
 @option('-j', '--workers', type=int, default=16, show_default=True, help='Parallel shard workers.')
@@ -1542,8 +1542,15 @@ def gbfs_engine_canonicalize(
 	dry_run: bool,
 	range_: str | None,
 ) -> None:
+	from pyrmts import parse_pyramid_yaml
+	from pyrmts.keys import template_has_hash
+	from ctbk.pyramid_cascade.engine_check import config_prefix, merged_yaml
 	from_, to = _engine_range(None, range_ or f'/{datetime.now(timezone.utc):%Y-%m-%dT%H:%M}', config_name)
 	root = Path(__file__).parents[1]
+	config_yaml = merged_yaml(config_name)
+	cfg = parse_pyramid_yaml(config_yaml)
+	hashed = template_has_hash(cfg.keyTemplate)
+	manifest = f's3://{cfg.storage["bucket"]}/{config_prefix(config_yaml)}/manifest.jsonl'
 	cmd = [
 		str(Path(sys.executable).parent / 'pyrmts-engine'), 'canonicalize',
 		'-r', f'{from_:%Y-%m-%dT%H:%M}/{to:%Y-%m-%dT%H:%M}',
@@ -1551,8 +1558,10 @@ def gbfs_engine_canonicalize(
 		'-j', str(workers),
 		'-g', str(rg_size),
 		'-s', _engine_sort(config_name),
-		str(root / 'configs' / 'pyramids' / f'{config_name}.yaml'),
 	]
+	if hashed:
+		cmd += ['-i', manifest, '-n', config_name]
+	cmd += [str(root / 'configs' / 'pyramids' / f'{config_name}.yaml')]
 	if dry_run:
 		print(' '.join(cmd))
 		return
@@ -1565,7 +1574,10 @@ def gbfs_engine_canonicalize(
 		raise click.ClickException('need CLOUDFLARE_ACCOUNT_ID + R2_RW_* (or R2_*) creds')
 	env.setdefault('R2_ENDPOINT_URL', f'https://{acct}.r2.cloudflarestorage.com')
 	rc = subprocess.run(cmd, env=env).returncode
-	err(f'next: `ctbk gbfs lambda reconcile -C {config_name} -f` (shards rewrote in place; bump `written_at`)')
+	if hashed:
+		err(f'next: `ctbk gbfs engine register {manifest}` (swap D1 rows to the rewritten keys)')
+	else:
+		err(f'next: `ctbk gbfs lambda reconcile -C {config_name} -f` (shards rewrote in place; bump `written_at`)')
 	sys.exit(rc)
 
 
