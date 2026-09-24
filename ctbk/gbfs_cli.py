@@ -487,20 +487,22 @@ def gbfs_r2() -> None:
 	pass
 
 
-def _r2_client() -> tuple[object, str]:
+def _r2_client(rw: bool = False) -> tuple[object, str]:
 	"""Build a boto3 S3 client pointed at the ctbk R2 endpoint. Reads
 	`CLOUDFLARE_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`
-	from the environment (typically sourced from `.envrc`). Returns
-	(client, bucket_name)."""
+	from the environment (typically sourced from `.envrc`); `rw` reads the
+	`R2_RW_`-prefixed pair instead (the default pair may be read-only).
+	Returns (client, bucket_name)."""
 	try:
 		import boto3  # type: ignore[import-untyped]
 	except ImportError as e:
 		raise click.ClickException('boto3 not installed. `uv sync` or `pip install boto3`.') from e
+	kp = 'R2_RW_' if rw else 'R2_'
 	acct = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
-	akid = os.environ.get('R2_ACCESS_KEY_ID')
-	sk = os.environ.get('R2_SECRET_ACCESS_KEY')
+	akid = os.environ.get(f'{kp}ACCESS_KEY_ID')
+	sk = os.environ.get(f'{kp}SECRET_ACCESS_KEY')
 	if not (acct and akid and sk):
-		raise click.ClickException('CLOUDFLARE_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY not set. `source .envrc`.')
+		raise click.ClickException(f'CLOUDFLARE_ACCOUNT_ID / {kp}ACCESS_KEY_ID / {kp}SECRET_ACCESS_KEY not set. `source .envrc`.')
 	bucket = os.environ.get('R2_BUCKET', 'ctbk')
 	client = boto3.client(
 		's3',
@@ -1449,6 +1451,53 @@ def gbfs_engine_seed(
 	err(f'copied {len(src_keys)} {tier}@{dur} shards → {prefix}/{tier}/{dur}/')
 	client.put_object(Bucket=bucket, Key=f'{prefix}/config.yaml', Body=yml.encode(), ContentType='application/yaml')  # type: ignore[attr-defined]
 	err(f'uploaded {prefix}/config.yaml')
+
+
+# Real prefixes `engine wipe -R` may delete: pyramids built but not yet
+# serving prod (the `rides/` re-key, read only by the dev worker until the
+# P4 cutover — drop them from this set then).
+WIPEABLE_REAL_CONFIGS = {'rides-start', 'rides-end'}
+
+
+@gbfs_engine.command('wipe', help='Delete a pyramid prefix\'s shards + manifest (keeping `config.yaml`), so a following `engine submit -f` rebuilds everything — `-f` only fills gaps, so a source-logic change needs this first. D1 registry rows are left as-is (re-registered with fresh `written_at` by `gbfs lambda reconcile` after the rebuild).')
+@option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
+@option('-n', '--dry-run', is_flag=True, help='Print what would be deleted; delete nothing.')
+@option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
+@option('-R', '--real', is_flag=True, help=f'Wipe the config\'s own prefix; only for not-yet-serving pyramids ({", ".join(sorted(WIPEABLE_REAL_CONFIGS))}).')
+def gbfs_engine_wipe(
+	config_name: str,
+	dry_run: bool,
+	scratch_prefix: str | None,
+	real: bool,
+) -> None:
+	from ctbk.pyramid_cascade.engine_check import config_prefix, merged_yaml
+	if real:
+		if config_name not in WIPEABLE_REAL_CONFIGS:
+			raise click.ClickException(f'refusing -R wipe of {config_name!r}: not in WIPEABLE_REAL_CONFIGS')
+		if scratch_prefix is not None:
+			raise click.UsageError('-R and -p are mutually exclusive')
+		prefix = config_prefix(merged_yaml(config_name))
+	else:
+		prefix = scratch_prefix or f'{config_name}-engine-check'
+	client, bucket = _r2_client(rw=True)
+	paginator = client.get_paginator('list_objects_v2')  # type: ignore[attr-defined]
+	keep = f'{prefix}/config.yaml'
+	doomed = [
+		(c['Key'], c['Size'])
+		for page in paginator.paginate(Bucket=bucket, Prefix=f'{prefix}/')
+		for c in page.get('Contents') or []
+		if c['Key'] != keep
+	]
+	n_shards = sum(k.endswith('.parquet') for k, _ in doomed)
+	others = sorted(k for k, _ in doomed if not k.endswith('.parquet'))
+	size = sum(sz for _, sz in doomed)
+	err(f'{prefix}/: {n_shards} shards + {len(others)} other ({", ".join(others) or "-"}), {size / 1e9:.2f} GB; keeping {keep}')
+	if dry_run:
+		return
+	keys = [k for k, _ in doomed]
+	for i in range(0, len(keys), 1000):
+		client.delete_objects(Bucket=bucket, Delete={'Objects': [{'Key': k} for k in keys[i:i + 1000]]})  # type: ignore[attr-defined]
+	err(f'deleted {len(keys)} keys under {prefix}/')
 
 
 @gbfs_engine.command('jobdef', help='Register a new `pyrmts-engine` job-definition revision: latest revision\'s properties with the container image swapped (creds/env copied wholesale, never read).')
