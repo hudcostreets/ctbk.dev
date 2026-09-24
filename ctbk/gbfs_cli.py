@@ -1085,6 +1085,44 @@ def gbfs_rides_rekey_check(
 	sys.exit(1 if failures else 0)
 
 
+@gbfs.command('rides-totals-diff', help='Whole-system ride totals per year, candidate vs baseline rides pyramid, read straight from the `1mo/16y` shards on R2 (no worker, no CPU limit): the sum of the L6 vocab-cell rows, i.e. every *mapped* ride (coordinate-fallback rides have no vocab cells). Covers the built `16y` shards — `2000` (2013–2015) until the `2016` period closes. Exits 1 if any year differs.')
+@option('-a', '--anchor', 'anchors', multiple=True, default=('start', 'end'), show_default=True, help='Anchor(s) to compare.')
+@option('-c', '--candidate', default='rides', show_default=True, help='Candidate key prefix.')
+@option('-C', '--baseline', default='rides-v5', show_default=True, help='Baseline key prefix.')
+def gbfs_rides_totals_diff(
+	anchors: tuple[str, ...],
+	candidate: str,
+	baseline: str,
+) -> None:
+	import io
+	import pandas as pd
+	import pyarrow.parquet as pq
+	client, bucket = _r2_client(rw=bool(os.environ.get('R2_RW_ACCESS_KEY_ID')))
+
+	def yearly(prefix: str, anchor: str) -> 'pd.Series':
+		frames = []
+		for y0 in (2000, 2016):
+			key = f'{prefix}/{anchor}/1mo/16y/{y0}.parquet'
+			try:
+				body = client.get_object(Bucket=bucket, Key=key)['Body'].read()  # type: ignore[attr-defined]
+			except client.exceptions.NoSuchKey:  # type: ignore[attr-defined]
+				continue
+			df = pq.read_table(io.BytesIO(body), columns=['dt', 'cell', 'count_sum']).to_pandas()
+			frames.append(df[(df.cell.str.len() == 6) & ~df.cell.str.startswith(('s:', 'c:'))])
+		df = pd.concat(frames)
+		df['y'] = pd.to_datetime(df.dt, unit='ms').dt.year
+		return df.groupby('y').count_sum.sum()
+
+	failed = False
+	for a in anchors:
+		cand, base = yearly(candidate, a), yearly(baseline, a)
+		d = cand.sub(base, fill_value=0)
+		diffs = {int(y): int(v) for y, v in d.items() if v}
+		failed |= bool(diffs)
+		print(f'{a}: {"OK" if not diffs else "DIFF"} total Δ {int(d.sum()):+,} of {int(base.sum()):,}' + (f'; by year {diffs}' if diffs else ''))
+	sys.exit(1 if failed else 0)
+
+
 # ─── shard invalidation (specs/shard-invalidation-adoption.md) ─────────
 
 
