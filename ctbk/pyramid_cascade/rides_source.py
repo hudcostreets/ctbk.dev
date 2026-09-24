@@ -71,6 +71,34 @@ def _next_month(at: datetime) -> datetime:
     )
 
 
+def station_positions(
+    registry: dict[str, tuple[float, float]],
+    canonical: dict[str, str],
+    geo: dict[str, tuple[float, float]],
+) -> dict[str, tuple[float, float]]:
+    """Positions to build station chains from: the registry
+    (`station-luc.json` `by_short_name`) plus every effective canonical it
+    lacks, placed at the canonical's own last observed coordinates (`geo`),
+    else its first member's (sorted) that has some. The registry is
+    GBFS-active ∪ harmonize-history canonicals as of its last build, so a
+    later id-map change (e.g. splitting a false merge) can leave a
+    canonical unregistered; without this its rides would drop to the
+    coordinate fallback — no vocab cells, invisible to region covers and
+    system totals. Canonicals with no coordinates anywhere stay absent."""
+    members: dict[str, list[str]] = {}
+    for sid, canon in canonical.items():
+        if canon not in registry:
+            members.setdefault(canon, []).append(sid)
+    out = dict(registry)
+    for canon, sids in sorted(members.items()):
+        pos = geo.get(canon) or next(
+            (geo[s] for s in sorted(sids) if s in geo), None,
+        )
+        if pos is not None:
+            out[canon] = pos
+    return out
+
+
 class MonthlyRidesSource(TiledSource):
     """`chains` maps a station short_name → its vocab chain (coarse cells
     + `s:<short_name>`); only the **cells** are used — the identity leaf

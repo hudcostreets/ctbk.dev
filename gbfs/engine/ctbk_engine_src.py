@@ -57,8 +57,9 @@ def _rides(pyramid, filter, anchor: str):
     """`specs/rides-v5.md`: monthly normalized parquets (PUBLIC AWS S3
     `ctbk` bucket — not the R2 bucket the pyramid writes) → every rung.
     Chains = frozen vocab + `s:<short_name>` (as `avail_daily_status`),
-    keyed by canonical short_name; the id-map + geo fallback assets are
-    baked into the image."""
+    keyed by canonical short_name (registry ∪ unregistered canonicals at
+    their `geo` position, `station_positions`); the id-map + geo fallback
+    assets are baked into the image."""
     import json
     from pathlib import Path
 
@@ -66,7 +67,7 @@ def _rides(pyramid, filter, anchor: str):
     from botocore import UNSIGNED
     from botocore.config import Config as BotoConfig
 
-    from ctbk_rides_source import MonthlyRidesSource
+    from ctbk_rides_source import MonthlyRidesSource, station_positions
     from ctbk_vocab import load_vocab, station_chain
 
     if filter:
@@ -74,16 +75,17 @@ def _rides(pyramid, filter, anchor: str):
     here = Path(__file__).parent
     vocab = load_vocab(here / 'station-vocab.json')
     luc = json.loads(pyramid.storage.get('station-luc.json'))
-    chains = {
-        short_name: station_chain(e['lat'], e['lng'], short_name, vocab)
-        for short_name, e in luc['by_short_name'].items()
-    }
     idm = json.loads((here / 'station-id-map.json').read_text())
     merged = luc.get('merged', {})
     canonical = {sid: merged.get(canon, canon) for sid, canon in idm.items()}
     geo = {
         sid: (lat, lng)
         for sid, (lat, lng) in json.loads((here / 'station-geo.json').read_text()).items()
+    }
+    registry = {sn: (e['lat'], e['lng']) for sn, e in luc['by_short_name'].items()}
+    chains = {
+        short_name: station_chain(lat, lng, short_name, vocab)
+        for short_name, (lat, lng) in station_positions(registry, canonical, geo).items()
     }
 
     s3 = boto3.client('s3', region_name='us-east-1', config=BotoConfig(signature_version=UNSIGNED))

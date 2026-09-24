@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 import pytest
 from pyrmts import MemStorage, parse_pyramid_yaml, pyramid_from_config
 
-from ctbk.pyramid_cascade.rides_source import MonthlyRidesSource
+from ctbk.pyramid_cascade.rides_source import MonthlyRidesSource, station_positions
 
 YAML = """
 storage: { type: s3, bucket: x, key: "t/{tier}/{shard}/{period}.parquet" }
@@ -274,3 +274,30 @@ def test_missing_mid_history_month_is_coverage_miss(pyramid):
     # 2 tiles read: the missing June tile + the (present, empty) July
     # spillback tile; only June counts as missing.
     assert src.coverage() == (2, ['normalized/202606.parquet'])
+
+
+def test_station_positions_places_unregistered_canonicals():
+    # A canonical the registry lacks (e.g. split off a false merge after
+    # the registry's last build) is placed at its own observed position,
+    # else its first member's (sorted) with one; no coordinates anywhere →
+    # stays absent (its rides take the coordinate fallback). Registered
+    # stations keep their registry position even when `geo` differs.
+    registry = {'ST1': (40.70, -74.00)}
+    canonical = {
+        '101': 'ST1',     # registered
+        'OWN': 'OWN',     # unregistered, own geo
+        'm2': 'MEM',      # unregistered, members only
+        'm1': 'MEM',
+        'NOGEO': 'NOGEO', # unregistered, no geo anywhere
+    }
+    geo = {
+        'ST1': (41.0, -75.0),
+        'OWN': (40.71, -74.01),
+        'm1': (40.72, -74.02),
+        'm2': (40.73, -74.03),
+    }
+    assert station_positions(registry, canonical, geo) == {
+        'ST1': (40.70, -74.00),
+        'OWN': (40.71, -74.01),
+        'MEM': (40.72, -74.02),
+    }

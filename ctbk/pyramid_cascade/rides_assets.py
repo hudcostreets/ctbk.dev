@@ -12,6 +12,7 @@ import json
 import re
 from pathlib import Path
 
+from .rides_source import station_positions
 from .vocab import load_vocab, station_chain
 
 REPO = Path(__file__).parents[2]
@@ -80,14 +81,15 @@ def rides_source_kwargs() -> dict:
     composed from local assets."""
     vocab = load_vocab(VOCAB_PATH)
     luc = json.loads(STATION_LUC_PATH.read_text())
-    chains = {
-        short_name: station_chain(e['lat'], e['lng'], short_name, vocab)
-        for short_name, e in luc['by_short_name'].items()
-    }
     canonical = effective_canonical()
     geo = {
         sid: (lat, lng)
         for sid, (lat, lng) in json.loads(GEO_JSON_PATH.read_text()).items()
+    }
+    registry = {sn: (e['lat'], e['lng']) for sn, e in luc['by_short_name'].items()}
+    chains = {
+        short_name: station_chain(lat, lng, short_name, vocab)
+        for short_name, (lat, lng) in station_positions(registry, canonical, geo).items()
     }
     available = {
         m.group(1)
