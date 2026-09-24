@@ -120,8 +120,15 @@ source). Serving side: the same 14 canonicals are published as
 into the rides vocab graph, so partial-cell bbox covers emit their leaves (NYC-wide
 2024 now exact, was −81 = `3460.05`). 2024 `rides-rekey-check`: all station cases
 + NYC-wide pass; lower-Manhattan +134k is the `5788.13`→`5712.10` renumber.
-Remaining before P4: RG-manifest backfill (dev p50 1.65 s vs 0.29 s — footer
-parsing), full-range gate.
+RG-manifest backfill done (254/267 per anchor; the rest are below `--min-bins`).
+**Blocked before P4 on pyrmts:** `canonicalize_shards` rewrote every shard as ONE
+row group with `c:` rows appended unsorted (`rides/start/1mo/16y/2000` = 1 RG ×
+112,598 rows vs `rides-v5`'s 2048-row RGs), so full-range queries hit CF 1102 and
+2024 p50 is 1.65 s vs 0.29 s — pyrmts `specs/canonicalize-preserve-layout.md`.
+Pair with pyrmts `specs/content-addressed-shards.md` (`{hash}` in `keyTemplate`;
+adopt for `rides-*` before P4 so post-cutover rewrites never mutate served blobs).
+Then: re-canonicalize → (`reconcile -f` + manifest backfill, unless hashed keys
+landed) → full-range gate.
 
 ## Validation gate
 
