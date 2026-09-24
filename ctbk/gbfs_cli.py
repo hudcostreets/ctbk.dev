@@ -1453,6 +1453,42 @@ def gbfs_engine_seed(
 	err(f'uploaded {prefix}/config.yaml')
 
 
+@gbfs_engine.command('canonicalize', help='Materialize a pyramid\'s `c:` identity-rollup rows in place (`pyrmts-engine canonicalize`) over every built shard in the range — the P3c pass, re-run after an id-map change or a rebuild. R2 creds from `R2_RW_*` (else `R2_*`); endpoint from `CLOUDFLARE_ACCOUNT_ID`.')
+@option('-C', '--config', 'config_name', required=True, help='Pyramid config basename under configs/pyramids/ (e.g. rides-start).')
+@option('-j', '--workers', type=int, default=16, show_default=True, help='Parallel shard workers.')
+@option('-m', '--map', 'map_path', default='s3/ctbk/stations/station-canonicalize-map.json', show_default=True, help='Local id-map override (else the config\'s declared bucket key).')
+@option('-n', '--dry-run', is_flag=True, help='Print the command; run nothing.')
+@option('-r', '--range', 'range_', default=None, help='Half-open `[FROM]/TO` (UTC ISO) [default: genesis → now].')
+def gbfs_engine_canonicalize(
+	config_name: str,
+	workers: int,
+	map_path: str,
+	dry_run: bool,
+	range_: str | None,
+) -> None:
+	from_, to = _engine_range(None, range_ or f'/{datetime.now(timezone.utc):%Y-%m-%dT%H:%M}', config_name)
+	root = Path(__file__).parents[1]
+	cmd = [
+		str(Path(sys.executable).parent / 'pyrmts-engine'), 'canonicalize',
+		'-r', f'{from_:%Y-%m-%dT%H:%M}/{to:%Y-%m-%dT%H:%M}',
+		'-m', str(root / map_path),
+		'-j', str(workers),
+		str(root / 'configs' / 'pyramids' / f'{config_name}.yaml'),
+	]
+	if dry_run:
+		print(' '.join(cmd))
+		return
+	env = dict(os.environ)
+	for k in ('ACCESS_KEY_ID', 'SECRET_ACCESS_KEY'):
+		if v := os.environ.get(f'R2_RW_{k}'):
+			env[f'R2_{k}'] = v
+	acct = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
+	if not (acct and env.get('R2_ACCESS_KEY_ID') and env.get('R2_SECRET_ACCESS_KEY')):
+		raise click.ClickException('need CLOUDFLARE_ACCOUNT_ID + R2_RW_* (or R2_*) creds')
+	env.setdefault('R2_ENDPOINT_URL', f'https://{acct}.r2.cloudflarestorage.com')
+	sys.exit(subprocess.run(cmd, env=env).returncode)
+
+
 # Real prefixes `engine wipe -R` may delete: pyramids built but not yet
 # serving prod (the `rides/` re-key, read only by the dev worker until the
 # P4 cutover — drop them from this set then).
