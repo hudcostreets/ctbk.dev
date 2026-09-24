@@ -1557,7 +1557,11 @@ def _engine_submit(
 		cmd += ['-W']
 	cmd += [f's3://{bucket}/{prefix}/config.yaml']
 	if dry_run:
-		print(' '.join(cmd))
+		shown = [
+			re.sub(r'^([A-Z0-9_]*(?:KEY|SECRET)[A-Z0-9_]*)=.+', r'\1=<redacted>', a)
+			for a in cmd
+		]
+		print(' '.join(shown))
 		return 0
 	return subprocess.run(cmd).returncode
 
@@ -1577,6 +1581,7 @@ def _engine_submit(
 @option('-m', '--manifest', 'manifest_name', default='manifest.jsonl', show_default=True, help='Manifest object name under the scratch prefix.')
 @option('-n', '--dry-run', is_flag=True, help='Print the submit command without running it.')
 @option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
+@option('-R', '--real', is_flag=True, help='Build at the config\'s own prefix (not a scratch prefix; refused for `avail`); rides configs default `-x` to their `ctbk_engine_src:rides_<anchor>` factory. Forwards `R2_RW_{ACCESS_KEY_ID,SECRET_ACCESS_KEY}` from the environment as the job\'s R2 creds (the HCCS job def carries none).')
 @option('-r', '--range', 'range_', default=None, help='Half-open build range `[FROM]/TO` (UTC ISO; FROM defaults to genesis).')
 @option('-s', '--source', 'source_rung', default='1m', show_default=True, help='Source tier, `tier` (min-cover: read the tier as stored) or `tier@shard_dur` (pin one rung, e.g. seeded scratch).')
 @option('-t', '--max-missing', type=float, default=None, help='Fraction of source periods allowed to be absent before the build fails (build --max-missing). An uncapped `-f` fill expects a cover reaching `now`, so the in-progress month\'s unpublished source is a legitimate miss. Open/future periods no longer count (either side of the ratio) unless `--strict-open-periods`, so the in-progress month needs no tolerance. NOTE the denominator is the sources THIS fill reads, not all history: a gap-fill touching 8 closed source months fails at 1/8=0.125.')
@@ -1600,6 +1605,7 @@ def gbfs_engine_submit(
 	manifest_name: str,
 	dry_run: bool,
 	scratch_prefix: str | None,
+	real: bool,
 	range_: str | None,
 	source_rung: str,
 	max_missing: float | None,
@@ -1609,6 +1615,22 @@ def gbfs_engine_submit(
 	window: str,
 	source_spec: str | None,
 ) -> None:
+	if real:
+		from ctbk.pyramid_cascade.engine_check import _rides_anchor, config_prefix, merged_yaml
+		if config_name == 'avail':
+			raise click.ClickException('refusing -R for the live-serving pyramid (avail)')
+		if scratch_prefix is not None:
+			raise click.UsageError('-R and -p are mutually exclusive')
+		scratch_prefix = config_prefix(merged_yaml(config_name))
+		if source_spec is None and (anchor := _rides_anchor(config_name)):
+			source_spec = f'ctbk_engine_src:rides_{anchor}'
+		creds = {
+			'R2_ACCESS_KEY_ID': os.environ.get('R2_RW_ACCESS_KEY_ID'),
+			'R2_SECRET_ACCESS_KEY': os.environ.get('R2_RW_SECRET_ACCESS_KEY'),
+		}
+		if not all(creds.values()):
+			raise click.ClickException('-R needs R2_RW_ACCESS_KEY_ID / R2_RW_SECRET_ACCESS_KEY (`source .envrc`)')
+		envs = tuple(f'{k}={v}' for k, v in creds.items()) + envs
 	sys.exit(_engine_submit(
 		config_name,
 		aligned=aligned, mem_budget=mem_budget, close_chunk=close_chunk, envs=envs,
