@@ -1502,7 +1502,7 @@ def gbfs_engine_seed(
 	err(f'uploaded {prefix}/config.yaml')
 
 
-@gbfs_engine.command('canonicalize', help='Materialize a pyramid\'s `c:` identity-rollup rows in place (`pyrmts-engine canonicalize`) over every built shard in the range — the P3c pass, re-run after an id-map change or a rebuild. R2 creds from `R2_RW_*` (else `R2_*`); endpoint from `CLOUDFLARE_ACCOUNT_ID`.')
+@gbfs_engine.command('canonicalize', help='Materialize a pyramid\'s `c:` identity-rollup rows in place (`pyrmts-engine canonicalize`) over every built shard in the range — the P3c pass, re-run after an id-map change or a rebuild. Rewrites shards in place at the same keys, so follow it with `ctbk gbfs lambda reconcile -C <config> -f` (bump `written_at`; else RG-manifest fills describe the old bytes). R2 creds from `R2_RW_*` (else `R2_*`); endpoint from `CLOUDFLARE_ACCOUNT_ID`.')
 @option('-C', '--config', 'config_name', required=True, help='Pyramid config basename under configs/pyramids/ (e.g. rides-start).')
 @option('-j', '--workers', type=int, default=16, show_default=True, help='Parallel shard workers.')
 @option('-m', '--map', 'map_path', default='s3/ctbk/stations/station-canonicalize-map.json', show_default=True, help='Local id-map override (else the config\'s declared bucket key).')
@@ -1535,7 +1535,9 @@ def gbfs_engine_canonicalize(
 	if not (acct and env.get('R2_ACCESS_KEY_ID') and env.get('R2_SECRET_ACCESS_KEY')):
 		raise click.ClickException('need CLOUDFLARE_ACCOUNT_ID + R2_RW_* (or R2_*) creds')
 	env.setdefault('R2_ENDPOINT_URL', f'https://{acct}.r2.cloudflarestorage.com')
-	sys.exit(subprocess.run(cmd, env=env).returncode)
+	rc = subprocess.run(cmd, env=env).returncode
+	err(f'next: `ctbk gbfs lambda reconcile -C {config_name} -f` (shards rewrote in place; bump `written_at`)')
+	sys.exit(rc)
 
 
 # Real prefixes `engine wipe -R` may delete: pyramids built but not yet

@@ -145,6 +145,14 @@ the monthly rides extend runs) alongside the build. An id-map correction becomes
 a `pyrmts-engine canonicalize` pass over just the affected span (shard-scoped),
 not a rebuild — the whole point of materialized canonicalization.
 
+**Any in-place shard rewrite (canonicalize, `engine wipe` + rebuild) must be
+followed by `ctbk gbfs lambda reconcile -C rides-<a> -f`.** The keys don't change,
+so without a `written_at` bump the RG manifest (`rg_manifest`, byte ranges keyed
+by `(key, written_at)`) keeps describing the old bytes and serves corrupt reads;
+the bump marks those fills stale (then `ctbk gbfs manifest backfill`). Likewise,
+closed-period responses are edge-cached `immutable` for a day — purge (or wait
+out) the cache after a data fix.
+
 ## Sequencing
 
 1. **P3a** config rename (isolated on `c14n`).
