@@ -487,6 +487,15 @@ def gbfs_r2() -> None:
 	pass
 
 
+def _use_r2_rw_env() -> None:
+	"""Point `R2_*` (what pyrmts storage reads) at the `R2_RW_*` key when
+	set: the RO key can't ListObjects, nor GET the non-public prefixes
+	(`rides/…` manifests)."""
+	for k in ('ACCESS_KEY_ID', 'SECRET_ACCESS_KEY'):
+		if v := os.environ.get(f'R2_RW_{k}'):
+			os.environ[f'R2_{k}'] = v
+
+
 def _r2_client(rw: bool = False) -> tuple[object, str]:
 	"""Build a boto3 S3 client pointed at the ctbk R2 endpoint. Reads
 	`CLOUDFLARE_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`
@@ -785,11 +794,8 @@ def gbfs_lambda_rebuild(
 @option('-f', '--force', is_flag=True, help='Re-register EVERY built shard (expected ∩ storage), not just stranded ones, bumping `written_at` to now — after an in-place rebuild at the same keys, so RG-manifest fills made against the old bytes read as stale.')
 @option('-n', '--dry-run', is_flag=True, help='Print the keys it would (re-)register; no writes.')
 def gbfs_lambda_reconcile(config_name: str, force: bool, dry_run: bool) -> None:
-	# Listing a prefix needs the RW R2 key (the RO key can't ListObjects), and
-	# laptop registry writes go through the prod api worker's D1 binding.
-	for k in ('ACCESS_KEY_ID', 'SECRET_ACCESS_KEY'):
-		if v := os.environ.get(f'R2_RW_{k}'):
-			os.environ[f'R2_{k}'] = v
+	# Laptop registry writes go through the prod api worker's D1 binding.
+	_use_r2_rw_env()
 	os.environ.setdefault('CTBK_REGISTRY_URL', API_URLS['prod'])
 	from pyrmts import parse_pyramid_yaml, pyramid_from_config
 	from ctbk.pyramid_cascade.d1_http import register_shard, registered_keys
@@ -1887,6 +1893,41 @@ def gbfs_engine_manifest(other: str | None, head_n: int, path: str) -> None:
 				print(f'  {k}')
 		if a != b:
 			sys.exit(1)
+
+
+@gbfs_engine.command('gaps', help='The expected shards a real-prefix `engine submit -R -f` would build: the plan\'s cover minus what is built — the prefix\'s manifest (content-hashed keyTemplate: its rows are the only truth, legacy-keyed rows included) ∪ an R2 LIST (hashless). Slot keys to stdout, a per-rung count to stderr; exit 1 if any.')
+@option('-C', '--config', 'config_name', required=True, help='Pyramid config basename under configs/pyramids/ (e.g. rides-start).')
+@option('-m', '--manifest', 'manifest_name', default='manifest.jsonl', show_default=True, help='Manifest object name under the prefix.')
+@option('-r', '--range', 'range_', default=None, help='Half-open `[FROM]/TO` (UTC ISO) [default: genesis → now].')
+def gbfs_engine_gaps(config_name: str, manifest_name: str, range_: str | None) -> None:
+	from pyrmts import parse_pyramid_yaml, pyramid_from_config
+	from pyrmts.keys import template_has_hash
+	from pyrmts_engine import compile_plan
+	from pyrmts_engine.discovery import list_existing_keys, registry_key_set
+	from pyrmts_engine.shard_index import StorageJsonlShardIndex
+	from ctbk.pyramid_cascade.engine_check import config_prefix, merged_yaml
+	from ctbk.pyramid_cascade.storage import storage_from_cfg
+	_use_r2_rw_env()
+	config_yaml = merged_yaml(config_name)
+	cfg = parse_pyramid_yaml(config_yaml)
+	storage = storage_from_cfg(cfg.storage)
+	pyramid = pyramid_from_config(cfg, storage)
+	from_, to = _engine_range(None, range_ or f'/{datetime.now(timezone.utc):%Y-%m-%dT%H:%M}', config_name)
+	plan = compile_plan(pyramid, (from_, to))
+	index = StorageJsonlShardIndex(storage, f'{config_prefix(config_yaml)}/{manifest_name}')
+	if template_has_hash(pyramid.keyTemplate):
+		done = registry_key_set(pyramid, index.current_records(config_name))
+	else:
+		done = list_existing_keys(pyramid) | index.existing_keys(config_name)
+	missing = [e for e in plan.outputs if e.key not in done]
+	by_rung = Counter((e.tier, e.shard_dur) for e in missing)
+	err(f'{config_name}: {len(missing)}/{len(plan.outputs)} expected shards missing')
+	for (tier, dur), n in sorted(by_rung.items()):
+		err(f'  {tier:>4}@{dur:<5} {n}')
+	for e in missing:
+		print(e.key)
+	if missing:
+		sys.exit(1)
 
 
 def _period_from_key(prefix: str, key: str) -> tuple[str, str, datetime, datetime]:

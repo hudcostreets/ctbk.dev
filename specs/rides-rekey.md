@@ -140,8 +140,16 @@ no 1102; dev p50 0.38 s vs prod `rides-v5` 0.69 s. Bbox diffs, all attributed:
   the spillback); 2026-06 +84 / end +116 likewise v5 tip staleness; ±1–4 in a
   handful of older bins = v5 built from older normalized data (the 2014-10 −2
   verified exactly against the current source).
-Content-hashed keys (`{hash:12}`) prep landed in `098da521`; the template switch
-also needs the Batch base + derived images rebuilt at pyrmts ≥ `1cb3395`.
+Content-hashed keys (`{hash:12}`) prep landed in `098da521`; the switch landed
+in `06f98858` (2026-09-24): `rides-{start,end}` key `{period}.{hash:12}.parquet`,
+base `pyrmts-engine:1cb3395` + `ctbk-engine:06f98858` (both HCCS ECR), job-def
+rev 3, configs uploaded. Migration is lazy: `ctbk gbfs engine gaps` shows the
+267 legacy rows/anchor count as built; only 9 tip slots/anchor (periods past
+the last published source month) are missing, as before. From here a rewrite
+never mutates a blob: `engine canonicalize` (resolves through the manifest,
+writes new keys) → `engine register <manifest>` → manifest backfill; the old
+blobs are orphans for `pyrmts-engine gc`. `lambda reconcile` refuses these
+configs.
 
 ## Validation gate
 
