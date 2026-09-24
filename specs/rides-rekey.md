@@ -99,6 +99,19 @@ stranded. The 12 ladder-expected-but-unbuilt shards per anchor are all tip perio
 starting ≥ 2026-08-07, past the latest published trip data — the monthly extend
 fills them.
 
+**Regression found in validation (2026-09-23) → P3b/c re-run.** The build had
+−449k start / −391k end *mapped* rides vs `rides-v5` (all 2013–2015; −81 in Jan
+2024). Cause: `station-luc.json` predates the 09-13 harmonize regen that split
+false merges, so 14 split-off canonicals (17 raw ids: `493`, `517`, `519`,
+`3104`, `4920.11`, …) had no registry entry and their rides fell to the
+coordinate fallback (non-vocab cells, no `s:` leaf). Fixed rides-side
+(`station_positions`, `e385286a`): unregistered canonicals are placed at their
+`station-geo.json` position; the shared registry is untouched. 7 canonicals with
+no coordinates anywhere (`3247`, `3248`, `3442`, `3446`, `3475`, `3633`,
+`MTL-LAB-BKN`) stay on the fallback, as under `rides-v5`. Needs: `ctbk-engine:
+e385286a` job def → force rebuild both anchors → canonicalize → reconcile
+(`written_at` bump) → `rides-rekey-check`.
+
 ## Validation gate
 
 On the dev worker (new data) vs the prod worker (old data), before any P4 flip:
