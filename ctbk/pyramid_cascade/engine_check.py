@@ -166,3 +166,52 @@ def compare_shards(
         limit=limit,
         detail=detail,
     )
+
+
+def compare_manifests_by_slot(
+    config_name: str,
+    old_name: str,
+    new_name: str,
+    *,
+    workers: int = 8,
+    detail: bool = False,
+) -> dict[str, list[str]]:
+    """Content-compare two manifests of one real prefix slot by slot (a
+    content-hashed rebuild lands every slot at a new key, so key matching
+    can't pair them): each `new_name` slot's current shard vs `old_name`'s,
+    byte-equal short-circuit, else `compare_streaming` (canonical long-form,
+    chunked). Buckets: bytes_equal / equal / diff / only_new / only_old /
+    empty_both."""
+    from concurrent.futures import ThreadPoolExecutor
+    from pyrmts_engine.shard_index import StorageJsonlShardIndex
+    from pyrmts_engine.validate import compare_streaming
+    config_yaml = merged_yaml(config_name)
+    pyramid = load_pyramid(config_name)
+    prefix = config_prefix(config_yaml)
+    slot = lambda r: (r.tier, r.shard_dur, r.period_start_ms)
+    old, new = (
+        {slot(r): r for r in StorageJsonlShardIndex(pyramid.storage, f'{prefix}/{name}').current_records(config_name)}
+        for name in (old_name, new_name)
+    )
+    buckets: dict[str, list[str]] = {
+        'bytes_equal': [], 'equal': [], 'diff': [], 'empty_both': [],
+        'only_new': sorted(new[s].key for s in new.keys() - old.keys()),
+        'only_old': sorted(old[s].key for s in old.keys() - new.keys()),
+    }
+
+    def one(s) -> tuple[str, str, str]:
+        a = pyramid.storage.get(old[s].key)
+        b = pyramid.storage.get(new[s].key)
+        if a is None or b is None:
+            raise RuntimeError(f'missing blob: {old[s].key if a is None else new[s].key}')
+        if a == b:
+            return 'bytes_equal', new[s].key, ''
+        verdict, why = compare_streaming(a, b, pyramid)
+        return verdict, new[s].key, why
+
+    with ThreadPoolExecutor(workers) as ex:
+        for verdict, key, why in ex.map(one, sorted(old.keys() & new.keys())):
+            buckets[verdict].append(key)
+            if detail and verdict == 'diff':
+                err(f'  DIFF {key}: {why}')
+    return buckets

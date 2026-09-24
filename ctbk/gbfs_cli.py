@@ -1439,6 +1439,25 @@ def gbfs_engine_compare(
 		sys.exit(1)
 
 
+@gbfs_engine.command('slot-compare', help='Content-compare two manifests of one real prefix slot by slot (a content-hashed rebuild writes every slot at a new key, so `compare`\'s key matching can\'t pair them): the gate before `engine register`-ing a full rebuild\'s manifest. Exit 1 on any diff or unpaired slot.')
+@option('-C', '--config', 'config_name', required=True, help='Pyramid config basename under configs/pyramids/ (e.g. rides-start).')
+@option('-d', '--detail', is_flag=True, help='Per-shard line for every diff.')
+@option('-j', '--workers', type=int, default=8, show_default=True, help='Parallel shard pairs.')
+@argument('old_name', metavar='OLD')
+@argument('new_name', metavar='NEW')
+def gbfs_engine_slot_compare(config_name: str, detail: bool, workers: int, old_name: str, new_name: str) -> None:
+	from ctbk.pyramid_cascade.engine_check import compare_manifests_by_slot
+	_use_r2_rw_env()
+	buckets = compare_manifests_by_slot(config_name, old_name, new_name, workers=workers, detail=detail)
+	for name, keys in buckets.items():
+		print(f'{name}: {len(keys)}')
+		if name.startswith('only_'):
+			for k in keys:
+				print(f'  {k}')
+	if buckets['diff'] or buckets['only_new'] or buckets['only_old']:
+		sys.exit(1)
+
+
 @gbfs_engine.command('config', help='Emit the merged-ladder config YAML re-keyed under the scratch prefix (what a scratch/Batch build consumes). With -R, emit it at its own real prefix (standing up a new prod pyramid).')
 @option('-C', '--config', 'config_name', default='avail-v4', show_default=True, help='Pyramid config basename under configs/pyramids/.')
 @option('-o', '--out', default=None, help='Write to this local path instead of stdout.')
@@ -1536,6 +1555,7 @@ def _engine_sort(config_name: str) -> str:
 @gbfs_engine.command('canonicalize', help='Materialize a pyramid\'s `c:` identity-rollup rows (`pyrmts-engine canonicalize`) over every built shard in the range — the P3c pass, re-run after an id-map change or a rebuild. Content-hashed keyTemplate: shards resolve through the prefix\'s build manifest, rewrites land at new keys and append there; follow with `ctbk gbfs engine register` (swap D1 rows to them). Hashless: rewrites in place; follow with `ctbk gbfs lambda reconcile -C <config> -f` (bump `written_at`; else RG-manifest fills describe the old bytes). R2 creds from `R2_RW_*` (else `R2_*`); endpoint from `CLOUDFLARE_ACCOUNT_ID`.')
 @option('-C', '--config', 'config_name', required=True, help='Pyramid config basename under configs/pyramids/ (e.g. rides-start).')
 @option('-g', '--rg-size', type=int, default=ENGINE_RG_SIZE, show_default=True, help='Rewrite row-group size (the build\'s `engine submit -g`). pyrmts ≥ 40e0cf2 otherwise reads the shard\'s stamped layout, falling back to its first RG\'s size — wrong for shards a pre-40e0cf2 canonicalize collapsed to one RG.')
+@option('-i', '--index', 'manifest_name', default='manifest.jsonl', show_default=True, help='Manifest object name under the prefix (a content-hashed template resolves shards through it, and appends rewrites to it).')
 @option('-j', '--workers', type=int, default=16, show_default=True, help='Parallel shard workers.')
 @option('-m', '--map', 'map_path', default='s3/ctbk/stations/station-canonicalize-map.json', show_default=True, help='Local id-map override (else the config\'s declared bucket key).')
 @option('-n', '--dry-run', is_flag=True, help='Print the command; run nothing.')
@@ -1543,6 +1563,7 @@ def _engine_sort(config_name: str) -> str:
 def gbfs_engine_canonicalize(
 	config_name: str,
 	rg_size: int,
+	manifest_name: str,
 	workers: int,
 	map_path: str,
 	dry_run: bool,
@@ -1556,7 +1577,7 @@ def gbfs_engine_canonicalize(
 	config_yaml = merged_yaml(config_name)
 	cfg = parse_pyramid_yaml(config_yaml)
 	hashed = template_has_hash(cfg.keyTemplate)
-	manifest = f's3://{cfg.storage["bucket"]}/{config_prefix(config_yaml)}/manifest.jsonl'
+	manifest = f's3://{cfg.storage["bucket"]}/{config_prefix(config_yaml)}/{manifest_name}'
 	cmd = [
 		str(Path(sys.executable).parent / 'pyrmts-engine'), 'canonicalize',
 		'-r', f'{from_:%Y-%m-%dT%H:%M}/{to:%Y-%m-%dT%H:%M}',
