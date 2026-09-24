@@ -1502,14 +1502,27 @@ def gbfs_engine_seed(
 	err(f'uploaded {prefix}/config.yaml')
 
 
+# Default engine build row-group size (`engine submit -g`); `engine
+# canonicalize` rewrites with the same layout (`_engine_sort`).
+ENGINE_RG_SIZE = 2048
+
+
+def _engine_sort(config_name: str) -> str:
+	"""The shard sort a Batch build uses (`pyrmts-engine batch submit -s`)."""
+	from ctbk.pyramid_cascade.engine_check import _rides_anchor
+	return 'cell,dt,gender,user_type,bike_type' if _rides_anchor(config_name) else 's2_cell,dt'
+
+
 @gbfs_engine.command('canonicalize', help='Materialize a pyramid\'s `c:` identity-rollup rows in place (`pyrmts-engine canonicalize`) over every built shard in the range — the P3c pass, re-run after an id-map change or a rebuild. Rewrites shards in place at the same keys, so follow it with `ctbk gbfs lambda reconcile -C <config> -f` (bump `written_at`; else RG-manifest fills describe the old bytes). R2 creds from `R2_RW_*` (else `R2_*`); endpoint from `CLOUDFLARE_ACCOUNT_ID`.')
 @option('-C', '--config', 'config_name', required=True, help='Pyramid config basename under configs/pyramids/ (e.g. rides-start).')
+@option('-g', '--rg-size', type=int, default=ENGINE_RG_SIZE, show_default=True, help='Rewrite row-group size (the build\'s `engine submit -g`). pyrmts ≥ 40e0cf2 otherwise reads the shard\'s stamped layout, falling back to its first RG\'s size — wrong for shards a pre-40e0cf2 canonicalize collapsed to one RG.')
 @option('-j', '--workers', type=int, default=16, show_default=True, help='Parallel shard workers.')
 @option('-m', '--map', 'map_path', default='s3/ctbk/stations/station-canonicalize-map.json', show_default=True, help='Local id-map override (else the config\'s declared bucket key).')
 @option('-n', '--dry-run', is_flag=True, help='Print the command; run nothing.')
 @option('-r', '--range', 'range_', default=None, help='Half-open `[FROM]/TO` (UTC ISO) [default: genesis → now].')
 def gbfs_engine_canonicalize(
 	config_name: str,
+	rg_size: int,
 	workers: int,
 	map_path: str,
 	dry_run: bool,
@@ -1522,6 +1535,8 @@ def gbfs_engine_canonicalize(
 		'-r', f'{from_:%Y-%m-%dT%H:%M}/{to:%Y-%m-%dT%H:%M}',
 		'-m', str(root / map_path),
 		'-j', str(workers),
+		'-g', str(rg_size),
+		'-s', _engine_sort(config_name),
 		str(root / 'configs' / 'pyramids' / f'{config_name}.yaml'),
 	]
 	if dry_run:
@@ -1618,7 +1633,7 @@ def _engine_submit(
 	close_chunk: str | None = None,
 	envs: tuple[str, ...] = (),
 	fill: bool = False,
-	rg_size: int = 2048,
+	rg_size: int = ENGINE_RG_SIZE,
 	workers: int | None = None,
 	max_inflight: int | None = None,
 	close_workers: int | None = None,
@@ -1640,7 +1655,7 @@ def _engine_submit(
 	prefix = scratch_prefix or f'{config_name}-engine-check'
 	bucket = os.environ.get('R2_BUCKET', 'ctbk')
 	from ctbk.pyramid_cascade.engine_check import _rides_anchor
-	sort = 'cell,dt,gender,user_type,bike_type' if _rides_anchor(config_name) else 's2_cell,dt'
+	sort = _engine_sort(config_name)
 	cmd = [
 		'pyrmts-engine', 'batch', 'submit',
 		# Batch job names reject '/' (multi-segment prefixes like
@@ -1709,7 +1724,7 @@ def _engine_submit(
 @option('-c', '--close-chunk', default=None, help='Target combined-long bytes per close chunk, e.g. 1g (build -c).')
 @option('-e', '--env', 'envs', multiple=True, help='Extra container env var NAME=VALUE (repeatable).')
 @option('-f', '--fill', is_flag=True, help='Declarative gap-fill: diff expected min-cover vs actual storage, build only missing (build -f; range optional, defaults genesis→now). See pyrmts specs/engine-fill-mode.md.')
-@option('-g', '--rg-size', type=int, default=2048, show_default=True, help='Output-shard parquet row-group size.')
+@option('-g', '--rg-size', type=int, default=ENGINE_RG_SIZE, show_default=True, help='Output-shard parquet row-group size.')
 @option('-j', '--workers', type=int, default=None, help='Window-worker threads (build -j; default: job vCPUs).')
 @option('-K', '--max-inflight', type=int, default=None, help='Max windows in flight past the watermark (build -K).')
 @option('-k', '--close-workers', type=int, default=None, help='Concurrent close computations (build -C).')
