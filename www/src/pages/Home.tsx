@@ -1,5 +1,5 @@
 /**
- * Homepage: system-wide rides chart, powered by `/api/rides-v5`
+ * Homepage: system-wide rides chart, powered by `/api/rides`
  * (pyrmts-geo, engine-built `s:`-keyed — `specs/rides-v5.md`) — one
  * parallel call per selected region, each passing that region's cell
  * covering as `cells=`. Output rows carry their region tag so
@@ -110,7 +110,7 @@ export default function Home() {
   const [stackBy, setStackBy] = useUrlState('s', codeParam<StackByV2>('None', StackByV2QueryStrings))
   const [stackRelative, setStackRelative] = useUrlState('pct', boolParam)
   const [regions, setRegions] = useUrlState('r', codesParam(Regions, RegionQueryStrings))
-  const [pyramid] = useUrlState<Pyramid>('pyramid', codeParam<Pyramid>('v5', [['v5', 'v5']]))
+  const [pyramid] = useUrlState<Pyramid>('pyramid', codeParam<Pyramid>('rides', [['rides', 'rides']]))
   const [api, setApi] = useUrlState<ApiTarget>('api', codeParam<ApiTarget>('prod', [['prod', 'prod'], ['dev', 'dev']]))
   const [userTypes, setUserTypes] = useUrlState('u', codesParam(UserTypes, UserTypeQueryStrings))
   const [genders, setGenders] = useUrlState('g', codesParam(Genders, GenderQueryStrings))

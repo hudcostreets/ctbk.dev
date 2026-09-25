@@ -22,7 +22,7 @@ export const SYSTEM_BBOX = '40.5,-74.2,41.0,-73.7' as const
 const DATA_START_ISO = '2013-06-01T00:00:00Z'
 
 export type Anchor = 'start' | 'end'
-export type Pyramid = 'v5'
+export type Pyramid = 'rides'
 
 /** Which CFW worker to hit. `prod` = `ctbk-gbfs-api`, `dev` =
  *  `ctbk-gbfs-api-dev`. Use `dev` for iterating on backend changes
@@ -134,8 +134,8 @@ interface UseRidesV1Args {
    *  region's cell cover). Output rows tagged with `Region`. If omitted,
    *  a single system-wide query runs and every row is tagged `'NYC'`. */
   regions?: readonly Region[]
-  /** Pyramid variant to query. Only `/api/rides-v5` remains (rides-v3
-   *  retired). Kept as a dormant pin for future pyramids. */
+  /** Pyramid route to query: `/api/rides` (canonical station rows;
+   *  `specs/rides-rekey.md`). Kept as a pin for future pyramids. */
   pyramid?: Pyramid
   /** Which worker URL to hit. Default `'prod'`. `'dev'` points at the
    *  `ctbk-gbfs-api-dev` sibling worker for backend iteration without
@@ -148,7 +148,7 @@ export function useRidesV1({
   to,
   anchor = 'start',
   regions,
-  pyramid = 'v5',
+  pyramid = 'rides',
   api = 'prod',
 }: UseRidesV1Args = {}): UseQueryResult<ProcessedRow[]> {
   const apiBase = API_BASE_BY_TARGET[api]
@@ -181,15 +181,15 @@ export function useRidesV1({
           return { region: r, include: cov.include, exclude: cov.exclude }
         })
       const perRegion = await Promise.all(specs.map(async ({ region, include, exclude }) => {
-        const url = new URL(`${apiBase}/api/rides-${pyramid}`)
+        const url = new URL(`${apiBase}/api/${pyramid}`)
         const sp = url.searchParams
         sp.set('anchor', anchor)
         sp.set('from', fromIso)
         sp.set('to', toIso)
         sp.set('bbox', SYSTEM_BBOX)
         sp.set('reducer', 'sum')
-        if (pyramid === 'v5') {
-          // v5 materializes a calendar family ({1,2,3,6}mo + 1y), so `1mo`
+        if (pyramid === 'rides') {
+          // `rides` materializes a calendar family ({1,2,3,6}mo + 1y), so `1mo`
           // is served from the `1mo` tier where sealed; the un-closed tip
           // het-tiles from finer tiers at serve time (`specs/rides-v5.md`).
           // `bin=` accepts any pyrmts Duration now — not just calendar ones.
@@ -201,7 +201,7 @@ export function useRidesV1({
         if (include) sp.set('cells', include.join(','))
         if (exclude.length) sp.set('cells.exclude', exclude.join(','))
         const res = await fetch(url.toString())
-        if (!res.ok) throw new Error(`/api/rides-${pyramid}: HTTP ${res.status}`)
+        if (!res.ok) throw new Error(`/api/${pyramid}: HTTP ${res.status}`)
         const body = (await res.json()) as RidesV1Response
         const regionTag: Region = region ?? 'NYC'
         return body.records.map((row) => apiRowToProcessed(row, regionTag))

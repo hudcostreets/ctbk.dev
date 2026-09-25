@@ -1618,9 +1618,10 @@ export default {
 			return resp;
 		}
 
-		// /api/rides — paginated raw-rides table per station (see specs/multiscale-timeseries-backend.md
+		// /api/trips — paginated raw-rides table per station (see specs/multiscale-timeseries-backend.md
 		// § "Paginated raw-rides table per station"). Reads `trips/stations/<short_name>.parquet`.
-		if (url.pathname === '/api/rides') {
+		// (Was `/api/rides`, which is now the re-keyed rides pyramid route.)
+		if (url.pathname === '/api/trips') {
 			let q: RidesParams;
 			try {
 				q = parseRidesParams(url.searchParams);

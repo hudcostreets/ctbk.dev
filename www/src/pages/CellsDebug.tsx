@@ -360,7 +360,7 @@ export default function CellsDebug() {
       // window is always populated (a 30d one is empty mid-cycle).
       const from12mo = new Date((nowS - 365 * 86400) * 1000).toISOString()
       const from1h = new Date((nowS - 3600) * 1000).toISOString()
-      const ridesUrl = `${API_BASE}/api/rides-v5?anchor=start&cells=${encodeURIComponent(cells)}&from=${from12mo}&to=${to}&bin=1mo`
+      const ridesUrl = `${API_BASE}/api/rides?anchor=start&cells=${encodeURIComponent(cells)}&from=${from12mo}&to=${to}&bin=1mo`
       // bin_budget=4 over 1h → 15min-or-finer bins, so the tip bin is
       // recent (bin_budget=1 picks a 3h tier whose bin may not have
       // closed inside the window → empty records).

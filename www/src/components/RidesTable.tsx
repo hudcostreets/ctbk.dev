@@ -1,6 +1,6 @@
 /**
  * Paginated raw-rides table for `/s/:slug`. Scaffolding only — the Worker
- * `/api/rides` endpoint doesn't exist yet; `useRidesTable` returns a
+ * `/api/trips` endpoint has no data yet; `useRidesTable` returns a
  * `coming-soon` sentinel when the endpoint 404s, and this component
  * renders a placeholder row in that case.
  *

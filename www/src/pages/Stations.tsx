@@ -113,7 +113,7 @@ export default function Stations() {
   const [api] = useUrlState('api', boolParam)
   const [side, setSide] = useUrlState('side', sideParam)
   // Multi-select station set: click circles to toggle membership; the rides
-  // panel below the map plots the set's starts/ends via `/api/rides-v5`.
+  // panel below the map plots the set's starts/ends via `/api/rides`.
   const [sel, setSel] = useUrlState('sel', selParam)
   const togglePin = useCallback((id: string) => {
     setSel(sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id])

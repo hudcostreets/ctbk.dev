@@ -1,6 +1,6 @@
 /**
  * Bottom-sheet rides panel for the `/stations` map's selected-station set
- * (`?sel=`): multiscale starts/ends time series via `/api/rides-v5`
+ * (`?sel=`): multiscale starts/ends time series via `/api/rides`
  * `s:`-identity keys (`useMultiStationRides`).
  *
  * URL state (own params, only present while a selection exists):

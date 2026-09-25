@@ -1,5 +1,5 @@
 /**
- * TSQ hook for multi-station rides via `/api/rides-v5` station-identity keys.
+ * TSQ hook for multi-station rides via `/api/rides` station-identity keys.
  *
  * Selected stations (short_names) map straight to the pyramid's `s:<sn>`
  * identity rows — the worker passes all-`s:` covers through untranslated
@@ -65,7 +65,7 @@ async function fetchAnchor(
   binBudget: number,
   signal?: AbortSignal,
 ): Promise<{ byDt: Map<number, number>; outputBin?: string }> {
-  const url = new URL(`${API_BASE}/api/rides-v5`)
+  const url = new URL(`${API_BASE}/api/rides`)
   const sp = url.searchParams
   sp.set('anchor', anchor)
   sp.set('from', fromIso)
@@ -74,7 +74,7 @@ async function fetchAnchor(
   sp.set('reducer', 'sum')
   sp.set('cells', sKeys.join(','))
   const res = await dbgFetch(url.toString(), { signal })
-  if (!res.ok) throw new Error(`rides-v5 ${anchor}: HTTP ${res.status}`)
+  if (!res.ok) throw new Error(`rides ${anchor}: HTTP ${res.status}`)
   const data = await res.json() as RidesV5Response
   // One record per (dt, gender, user_type, bike_type) — collapse dims.
   const byDt = new Map<number, number>()

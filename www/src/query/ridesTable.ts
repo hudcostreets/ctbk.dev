@@ -1,6 +1,6 @@
 /**
  * TSQ hook for the paginated raw-rides table per station
- * (`GET ${API_BASE}/api/rides`; see `specs/multiscale-timeseries-backend.md`
+ * (`GET ${API_BASE}/api/trips`; see `specs/multiscale-timeseries-backend.md`
  * § "Paginated raw-rides table per station").
  *
  * Scaffolding only — the Worker endpoint doesn't exist yet. When absent the
@@ -98,7 +98,7 @@ export function useRidesTable(
     enabled,
     placeholderData: keepPreviousData,
     queryFn: async () => {
-      const url = new URL(`${stationsApi.API_BASE}/api/rides`)
+      const url = new URL(`${stationsApi.API_BASE}/api/trips`)
       const sp = url.searchParams
       sp.set('station', station)
       if (counterpartStation) sp.set('counterpart', counterpartStation)

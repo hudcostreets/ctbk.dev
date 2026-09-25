@@ -1,6 +1,6 @@
 /**
- * Loads per-station monthly trip data from the rides-v5 pyramid: two
- * `/api/rides-v5?cells=<LUC>` monthly queries (one per anchor → `Docking`),
+ * Loads per-station monthly trip data from the `rides` pyramid: two
+ * `/api/rides?cells=<LUC>` monthly queries (one per anchor → `Docking`),
  * reshaped to `StationTripsRow[]`. (The legacy static-`ymdgtb_cd.json` source
  * was removed once rides-v5 became the default — Phase E.)
  */
@@ -77,7 +77,7 @@ async function fetchV5Rows(shortName: string): Promise<StationTripsRow[]> {
   const now = new Date()
   const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString()
   const rows = await Promise.all((['start', 'end'] as const).map(async (anchor) => {
-    const url = new URL(`${API_BASE}/api/rides-v5`)
+    const url = new URL(`${API_BASE}/api/rides`)
     url.searchParams.set('anchor', anchor)
     url.searchParams.set('cells', entry.cell)
     url.searchParams.set('bbox', bbox)
@@ -85,7 +85,7 @@ async function fetchV5Rows(shortName: string): Promise<StationTripsRow[]> {
     url.searchParams.set('to', to)
     url.searchParams.set('bin_budget', String(V5_BIN_BUDGET))
     const res = await fetch(url.toString())
-    if (!res.ok) throw new Error(`rides-v5 [${anchor}]: HTTP ${res.status}`)
+    if (!res.ok) throw new Error(`rides [${anchor}]: HTTP ${res.status}`)
     const data = await res.json() as { records: RidesV5Record[] }
     return data.records.map((r): StationTripsRow => {
       const d = new Date(r.dt)
@@ -104,7 +104,7 @@ async function fetchV5Rows(shortName: string): Promise<StationTripsRow[]> {
   return rows.flat()
 }
 
-/** Fetch per-station trip rows from the rides-v5 pyramid (`/api/rides-v5` by
+/** Fetch per-station trip rows from the `rides` pyramid (`/api/rides` by
  *  LUC cell). Returns null while loading, [] if no data, rows[] when ready. */
 export function useStationTrips(shortName: string | null | undefined): {
   rows: StationTripsRow[] | null
