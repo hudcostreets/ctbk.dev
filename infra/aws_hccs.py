@@ -19,8 +19,8 @@ New:
 Deliberately unmanaged: the `pyrmts-engine` job definition (a new revision
 per engine image — `ctbk gbfs engine jobdef` copies the latest revision's
 shape forward, secrets block included) and the Lambda's image + environment
-(deployed by `gbfs/lambda/deploy-image.py`; `ignore_changes`, and the env is
-kept as a secret output so the adopted values stay encrypted in state).
+(image deployed by `gbfs/lambda/deploy-image.py`, `ignore_changes`); its env
+is managed here from encrypted stack config.
 """
 import json
 
@@ -28,6 +28,7 @@ import pulumi
 import pulumi_aws as aws
 
 ACCOUNT = '688066488567'
+ACCOUNT_CF = '2363642879f18d37d52dca114059937e'  # HCCS Cloudflare account (R2 endpoint)
 REGION = 'us-east-1'
 GITHUB_REPO = 'hudcostreets/ctbk.dev'
 
@@ -55,6 +56,7 @@ def _imp(id_: str, **kw) -> pulumi.ResourceOptions:
 
 
 def provision() -> None:
+    config = pulumi.Config()
     # ── ECR ───────────────────────────────────────────────────────────
     for name in ('ctbk-avail-lambda', 'ctbk-engine', 'pyrmts-engine'):
         aws.ecr.Repository(
@@ -87,7 +89,18 @@ def provision() -> None:
         ephemeral_storage={'size': 512},
         reserved_concurrent_executions=1,
         description='moved from RAC 006196295121 (image rac-09fb47b9)',
-        opts=_imp(LAMBDA, ignore_changes=['environment', 'image_uri', 'description'],
+        # Creds from encrypted stack config (`pulumi config set --secret`), so
+        # the state holds them only as ciphertext — an unmanaged (ignored)
+        # env was captured into state inputs in plaintext on import.
+        environment={'variables': {
+            'CLOUDFLARE_ACCOUNT_ID': ACCOUNT_CF,
+            'FILL_ALL': '1',
+            'GC_ENABLED': '0',
+            'R2_ACCESS_KEY_ID': config.require_secret('lambda_r2_access_key_id'),
+            'R2_SECRET_ACCESS_KEY': config.require_secret('lambda_r2_secret_access_key'),
+            'CLOUDFLARE_API_TOKEN': config.require_secret('lambda_cloudflare_api_token'),
+        }},
+        opts=_imp(LAMBDA, ignore_changes=['image_uri', 'description'],
                   additional_secret_outputs=['environment']),
     )
     for rule_name, (schedule, desc, config) in TICKS.items():
@@ -158,7 +171,7 @@ def provision() -> None:
     )
     gha = aws.iam.Role(
         'ctbk-gha', name='ctbk-gha',
-        description=f'GitHub Actions ({GITHUB_REPO}) — Batch submit, s3://tripdata reads, read-only infra checks',
+        description=f'GitHub Actions ({GITHUB_REPO}): Batch submit, s3://tripdata reads, read-only infra checks',
         max_session_duration=4 * 3600,  # `Process new month` can outlast the 1h default
         assume_role_policy=oidc.arn.apply(lambda arn: json.dumps({
             'Version': '2012-10-17',
