@@ -5,6 +5,7 @@ on:
     - cron: '0 9 * * *'
 permissions:
   contents: write
+  id-token: write  # HCCS AWS via OIDC (`.github/scripts/hccs-aws.sh`): public `s3://tripdata` reads
 env:
   AWS_DEFAULT_REGION: us-east-1
 jobs:
@@ -26,17 +27,11 @@ jobs:
           git config --global user.email 'ryan-williams@users.noreply.github.com'
       - name: Sync tripdata bucket
         id: sync
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        run: ctbk import -ccdX html
+        run: .github/scripts/hccs-aws.sh ctbk import -ccdX html
 
       - name: Refresh tripdata summary
         if: always()
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        run: ctbk tripdata-summary --output tripdata-latest.json && cat tripdata-latest.json
+        run: .github/scripts/hccs-aws.sh ctbk tripdata-summary --output tripdata-latest.json && cat tripdata-latest.json
 
       - name: Upload summary to R2
         if: always()

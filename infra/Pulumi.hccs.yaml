@@ -1,5 +1,13 @@
 encryptionsalt: v1:j8iYp5yESKw=:v1:KHw3bCRFPMWcpxsw:FYf7kcBLT2vIPMpuNQECufgYi3NQIw==
 config:
   ctbk-infra:manage_aws: "false"
+  ctbk-infra:manage_hccs_aws: "true"
+  aws:region: us-east-1
   ctbk-infra:cloudflare_account_id:
     secure: v1:QSgRHt7rND0i2Iuz:3Db9mxuUQNM7bUmjB8hisEw0P+xiHOrtoLfRLtxAawEsKnNav+LwwI82a5UIaepb
+  ctbk-infra:lambda_r2_access_key_id:
+    secure: v1:KtJWki244e4h2i7E:APeaRyF1A/mXiVJ1VCz5Uw2FlxTVHw3KMCm0DujBfzLqIDFTTh+THE7iYE3F4Oku
+  ctbk-infra:lambda_r2_secret_access_key:
+    secure: v1:mE1t5UAYtFYpDoqn:tJi4dlB+gQLfXTV8vbhDA3fkv3Lfy575fHOvzYzDJHtP/JRPiDcF9tua05KDPaPNgS5uujPW72lsOjt4Pk/WEwGJFMGuEZmSunLbOC4E7eM=
+  ctbk-infra:lambda_cloudflare_api_token:
+    secure: v1:40ERYa4OjKP/Vrqb:l9t7g7vyzrVpA44CK5v32HSNy4J2YmydPZixxWI2MFT/Ubi/oiMhedO+PtEcp37UX+GPTPSWABSqTjbsxNDpB8WsBCqj

@@ -36,6 +36,9 @@ gbfs_db = cf.D1Database(
     'ctbk-gbfs',
     account_id=account_id,
     name='ctbk-gbfs',
+    # Explicit: pulumi-cloudflare ≥ 6.21 sends `read_replication: null` on
+    # update when unset, which the D1 API rejects (400, code 7400).
+    read_replication={'mode': 'disabled'},
 )
 
 # ── CF Queue: per-minute JSON write events from R2 ────────────────────
@@ -88,3 +91,8 @@ pulumi.export('workers', WORKERS)
 if manage_aws:
     import aws_reproc
     aws_reproc.provision()
+
+# ── HCCS AWS account (Lambda cascade, engine Batch, GHA OIDC) — `hccs` stack ─
+if config.get_bool('manage_hccs_aws'):
+    import aws_hccs
+    aws_hccs.provision()

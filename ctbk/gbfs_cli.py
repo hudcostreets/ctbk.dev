@@ -1631,16 +1631,33 @@ def gbfs_engine_wipe(
 	err(f'deleted {len(keys)} keys under {prefix}/')
 
 
+# R2 creds for engine jobs: Secrets Manager names (`infra/aws_hccs.py`) → the
+# container env vars they populate.
+ENGINE_R2_SECRETS = {
+	'R2_ACCESS_KEY_ID': 'ctbk/r2-access-key-id',
+	'R2_SECRET_ACCESS_KEY': 'ctbk/r2-secret-access-key',
+}
+
+
 @gbfs_engine.command('jobdef', help='Register a new `pyrmts-engine` job-definition revision: latest revision\'s properties with the container image swapped (creds/env copied wholesale, never read).')
 @option('-n', '--dry-run', is_flag=True, help='Print current + new image; no registration.')
+@option('-s', '--r2-secrets', is_flag=True, help='Source the R2 creds from Secrets Manager (`ctbk/r2-*`, by ARN in the current account) — dropping any plaintext copies from `environment`. Seed once; later revisions copy the `secrets` block forward.')
 @argument('image', metavar='IMAGE')
-def gbfs_engine_jobdef(dry_run: bool, image: str) -> None:
+def gbfs_engine_jobdef(dry_run: bool, r2_secrets: bool, image: str) -> None:
 	import boto3
 	batch = boto3.client('batch', region_name='us-east-1')
 	defs = batch.describe_job_definitions(jobDefinitionName='pyrmts-engine', status='ACTIVE')['jobDefinitions']
 	latest = max(defs, key=lambda d: d['revision'])
 	props = latest['containerProperties']
 	err(f"rev {latest['revision']}: {props['image']}")
+	if r2_secrets:
+		sm = boto3.client('secretsmanager', region_name='us-east-1')
+		arns = {var: sm.describe_secret(SecretId=name)['ARN'] for var, name in ENGINE_R2_SECRETS.items()}
+		props['environment'] = [e for e in props.get('environment', []) if e['name'] not in arns]
+		props['secrets'] = [s for s in props.get('secrets', []) if s['name'] not in arns] + [
+			{'name': var, 'valueFrom': arn} for var, arn in arns.items()
+		]
+		err(f"secrets: {sorted(s['name'] for s in props['secrets'])}")
 	if dry_run:
 		err(f'would register: {image}')
 		return
