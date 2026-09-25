@@ -1310,7 +1310,7 @@ def rides_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
 	# rebuilds), then point D1 at the resulting hashed keys.
 	span = f'{p0:%Y-%m-%dT%H:%M}/{datetime.now(timezone.utc):%Y-%m-%dT%H:%M}'
 	for config_name, prefix, _ in RIDES_ANCHOR_SPECS:
-		ctx.invoke(gbfs_engine_canonicalize, config_name=config_name, range_=span, dry_run=dry_run)
+		ctx.invoke(gbfs_engine_canonicalize, config_name=config_name, range_=span, workers=4, dry_run=dry_run)
 		manifest = f's3://{bucket}/{prefix}/manifest.jsonl'
 		if dry_run:
 			err(f'register: would sync {manifest} → D1')

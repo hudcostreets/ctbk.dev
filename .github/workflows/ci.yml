@@ -207,9 +207,8 @@ jobs:
 
       # ─── Station registry refresh (spec cadence item 4) ─────────────
       # Regen `station-luc.json` from the GBFS snapshot union BEFORE any
-      # pyramid build, so the month's rides-v3 rebuild (in `ctbk update`)
-      # and rides-v5 Batch fills both attribute rides at NEW stations to
-      # their identity keys instead of coordinate fallback. Writes the
+      # pyramid build, so the month's `rides` Batch fills attribute rides at
+      # NEW stations to their identity keys instead of coordinate fallback. Writes the
       # www asset (committed by `update`'s git step) + uploads to R2 (the
       # Batch factory reads it live). New stations are additive-safe;
       # MOVED LUCs leave historical rows keyed under the old cell until
@@ -282,34 +281,22 @@ jobs:
         if: steps.args.outputs.args
         run: dvx push -r r2
 
-      # ─── rides-v5 monthly cadence (specs/rides-v5.md; #185) ─────────
-      # Prod's Home chart reads rides-v5, so the month isn't "done" until
-      # the v5 pyramid has it. `rides-v5-extend` mirrors the consolidated
-      # parquet to its public plain key (the `dvc push` above uploaded the
-      # CA blob), journals the prev-month spillback invalidation, submits
-      # + watches the Batch fills for both anchors (scoped `batch:SubmitJob`
-      # on the CI IAM user), and backfills the RG manifest. Idempotent on
-      # re-runs. Runs BEFORE the www push so a fill failure blocks the
-      # deploy and pings `:x:` top-level. Station-map/vocab regen for
-      # brand-new stations is NOT covered (spec cadence item 4 — manual).
-      - name: Install gbfs/api deps (wrangler, for relic sweep)
-        if: steps.args.outputs.args && steps.args.outputs.ym
-        working-directory: gbfs/api
-        run: pnpm install --frozen-lockfile
-      # Last RAC AWS use: v5's Batch builds run the RAC `pyrmts-engine` job
-      # def (v5-era image — the HCCS one emits the re-keyed `s:<raw>` leaves).
-      # Goes away with v5 at the rides re-key P4 cutover.
-      - name: Extend rides-v5
+      # ─── `rides` monthly cadence (specs/rides-rekey.md) ─────────────
+      # Prod's charts read `rides`, so the month isn't "done" until it has
+      # it. Idempotent on re-runs; runs before the deploy, so a fill failure
+      # blocks it and pings `:x:`. Station-map/vocab/canonicalize-map regen
+      # for brand-new stations is NOT covered (manual).
+      # HCCS Batch fills (as `ctbk-gha`), canonicalize, register, RG backfill
+      # + prune — `ctbk gbfs rides-extend --help`.
+      - name: Extend rides
         if: steps.args.outputs.args && steps.args.outputs.ym
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
+          HCCS_AWS_DURATION: '14400'
           CTBK_REGISTRY_SECRET: ${{ secrets.CTBK_REGISTRY_SECRET }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: ctbk gbfs rides-v5-extend ${{ steps.args.outputs.ym }}
+        run: .github/scripts/hccs-aws.sh ctbk gbfs rides-extend ${{ steps.args.outputs.ym }}
 
-      # One prod deploy at the very end, after rides-v5 has the month (the
+      # One prod deploy at the very end, after `rides` has the month (the
       # screenshots render it). `www.yml` skips this pipeline's own mid-run
       # pushes to `main` for the same reason.
       - name: Deploy site
@@ -317,11 +304,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run www.yml --ref main
-      # (No rides-v3 step: the rollback pyramid is frozen at its last
-      # build — a v5 rollback missing only the newest month is an
-      # acceptable degraded mode, and the v3 'all'-shard merge-patches
-      # were the runner's OOM-flakiest phase. `ctbk rides-v3-extend`
-      # remains as a manual tool until rides<5 is GC'd wholesale.)
 
       - name: Notify Slack — outcome
         if: always() && steps.slack_start.outputs.ts
