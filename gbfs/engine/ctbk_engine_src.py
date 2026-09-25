@@ -54,18 +54,15 @@ def smg_daily(pyramid, filter):
 
 
 def _rides(pyramid, filter, anchor: str):
-    """`specs/rides-v5.md`: monthly normalized parquets (PUBLIC AWS S3
-    `ctbk` bucket — not the R2 bucket the pyramid writes) → every rung.
+    """`specs/rides-v5.md`: monthly normalized parquets (`normalized/<YM>.parquet`
+    in the pyramid's own R2 bucket — plain-key copies of the DVX blobs,
+    `ctbk gbfs normalized-mirror`) → every rung.
     Chains = frozen vocab + `s:<short_name>` (as `avail_daily_status`),
     keyed by canonical short_name (registry ∪ unregistered canonicals at
     their `geo` position, `station_positions`); the id-map + geo fallback
     assets are baked into the image."""
     import json
     from pathlib import Path
-
-    import boto3
-    from botocore import UNSIGNED
-    from botocore.config import Config as BotoConfig
 
     from ctbk_rides_source import MonthlyRidesSource, station_positions
     from ctbk_vocab import load_vocab, station_chain
@@ -88,27 +85,22 @@ def _rides(pyramid, filter, anchor: str):
         for short_name, (lat, lng) in station_positions(registry, canonical, geo).items()
     }
 
-    s3 = boto3.client('s3', region_name='us-east-1', config=BotoConfig(signature_version=UNSIGNED))
-    paginator = s3.get_paginator('list_objects_v2')
+    storage = pyramid.storage
     available = set()
-    for page in paginator.paginate(Bucket='ctbk', Prefix='normalized/'):
-        for o in page.get('Contents', []):
-            name = o['Key'].removeprefix('normalized/')
-            if len(name) == 14 and name.endswith('.parquet') and name[:6].isdigit():
-                available.add(name[:6])
+    for key in storage.list('normalized/'):
+        name = key.removeprefix('normalized/')
+        if len(name) == 14 and name.endswith('.parquet') and name[:6].isdigit():
+            available.add(name[:6])
 
-    def fetch_s3(key: str) -> bytes | None:
-        try:
-            return s3.get_object(Bucket='ctbk', Key=key)['Body'].read()
-        except s3.exceptions.NoSuchKey:
-            return None
+    def fetch(key: str) -> bytes | None:
+        return storage.get(key)
 
     return MonthlyRidesSource(
         pyramid, anchor,
         chains=chains, canonical=canonical, geo=geo,
         vocab_cells=frozenset(vocab),
         available_months=available,
-        fetch_fn=fetch_s3,
+        fetch_fn=fetch,
     )
 
 

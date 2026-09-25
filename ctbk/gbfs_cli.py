@@ -536,7 +536,8 @@ def _r2_client(rw: bool = False) -> tuple[object, str]:
 		import boto3  # type: ignore[import-untyped]
 	except ImportError as e:
 		raise click.ClickException('boto3 not installed. `uv sync` or `pip install boto3`.') from e
-	kp = 'R2_RW_' if rw or not os.environ.get('R2_ACCESS_KEY_ID') else 'R2_'
+	# CI's `R2_*` secret is itself the RW key, so `rw` falls back to it.
+	kp = 'R2_RW_' if (rw and os.environ.get('R2_RW_ACCESS_KEY_ID')) or not os.environ.get('R2_ACCESS_KEY_ID') else 'R2_'
 	acct = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
 	akid = os.environ.get(f'{kp}ACCESS_KEY_ID')
 	sk = os.environ.get(f'{kp}SECRET_ACCESS_KEY')
@@ -1227,101 +1228,59 @@ RIDES_ANCHOR_SPECS = (
 )
 
 
-@gbfs.command('rides-v5-sweep', help='Delete 0-row relic shards lying wholly at/after AFTER (YYYY-MM, default: the current month) from all three stores — R2, the D1 `pyramid_shards` registry, and each anchor\'s `manifest.jsonl`. Run after any uncapped `engine submit -f`: the fill\'s expected cover reaches `now`, so windows past the last published source month build as empty shards, and a present-but-empty shard reads as "built" to every later fill — permanently blocking its window once real data lands. Only the fixed-duration day tiers are swept; calendar-tier shards for the open month are the het-tiled tip by design.')
-@option('-a', '--after', default=None, help='Sweep 0-row shards whose period starts at/after this month (YYYY-MM) [default: current month].')
-@option('-n', '--dry-run', is_flag=True, help='List relics without deleting.')
-def rides_v5_sweep(after: str | None, dry_run: bool) -> None:
-	# Present-but-empty is indistinguishable from "built and genuinely
-	# empty" (an outage signal), so these have to go, and from ALL THREE
-	# stores: R2 holds the bytes, D1 answers the serving lookup, and
-	# `manifest.jsonl` is what the fill diffs against for presence.
-	from ctbk.pyramid_cascade.lite import r2_client as _lite_r2
-	if after is None:
-		now = datetime.now(timezone.utc)
-		m1 = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-	else:
-		y, _, mo = after.replace('/', '-').partition('-')
-		m1 = datetime(int(y), int(mo), 1, tzinfo=timezone.utc)
-	cli_r2 = _lite_r2()
-	paginator = cli_r2.get_paginator('list_objects_v2')
-	m1_ms = int(m1.timestamp()) * 1000
-	relics: list[tuple[str, str, str, str, int]] = []  # (key, pyramid, tier, shard_dur, period_start_ms)
-	for config_name, prefix, _ in RIDES_ANCHOR_SPECS:
-		# Day tiers only: a calendar shard covering the open month is the
-		# het-tiled tip, not a relic.
-		for tier in ('1h', '3h', '6h', '12h', '1d', '3d', '7d', '14d'):
-			tier_prefix = f'{prefix}/{tier}/'
-			for page in paginator.paginate(Bucket='ctbk', Prefix=tier_prefix):
-				for o in page.get('Contents') or []:
-					if o['Size'] > 4096:
-						continue
-					shard, period = o['Key'][len(tier_prefix):-len('.parquet')].split('/')
-					p0_dt = datetime.strptime(period, '%Y-%m-%d').replace(tzinfo=timezone.utc)
-					if int(p0_dt.timestamp()) * 1000 >= m1_ms:
-						relics.append((o['Key'], config_name, tier, shard, int(p0_dt.timestamp()) * 1000))
-	if not relics:
-		err(f'sweep: no 0-row relic shards at/after {m1:%Y-%m}')
-		return
-	err(f'sweep: {len(relics)} 0-row relic shard(s) at/after {m1:%Y-%m}')
-	for key, *_ in relics:
-		err(f'  {key}')
-	if dry_run:
-		return
-	for key, *_ in relics:
-		cli_r2.delete_object(Bucket='ctbk', Key=key)
-	conds = ' OR '.join(
-		f"(pyramid='{p}' AND tier='{t}' AND shard_dur='{s}' AND period_start={ms})"
-		for _, p, t, s, ms in relics
-	)
-	_run_wrangler_d1(f'DELETE FROM pyramid_shards WHERE {conds}', db='ctbk-gbfs', wrangler_cwd=DEFAULT_WRANGLER_CWD)
-	dropped = {k for k, *_ in relics}
-	for _config_name, prefix, _f in RIDES_ANCHOR_SPECS:
-		mkey = f'{prefix}/manifest.jsonl'
-		body = cli_r2.get_object(Bucket='ctbk', Key=mkey)['Body'].read().decode()
-		recs = [json.loads(l) for l in body.splitlines() if l.strip()]
-		keep = [r for r in recs if r['key'] not in dropped]
-		if len(keep) != len(recs):
-			out = '\n'.join(json.dumps(r, separators=(',', ':')) for r in keep) + '\n'
-			cli_r2.put_object(Bucket='ctbk', Key=mkey, Body=out.encode(), ContentType='application/jsonl')
-			err(f'  {mkey}: {len(recs)} → {len(keep)} records')
-
-
-@gbfs.command('rides-v5-extend', help='Monthly rides-v5 cadence for one freshly-ingested month: (1) server-side copy `normalized/<YM>.parquet` from the DVC store to its public plain key (the Batch factory lists that prefix), (2) invalidate the previous month on the start anchor (spillback refold), (3) `engine submit -f` both anchors, UNCAPPED range (capping at month-end leaves coarse-rung holes; the in-progress month\'s unpublished source is expected-absent by open-period classification, so no `--max-missing` tolerance is needed), (4) sweep post-month-end 0-row relic shards, (5) RG-manifest backfill. Station-map/vocab regen for new stations is NOT covered (spec cadence item 4). Needs AWS + R2 creds, CTBK_REGISTRY_SECRET, and `pyrmts-engine` on PATH.')
-@option('-n', '--dry-run', is_flag=True, help='Print planned actions (and engine submit commands); no writes or submits.')
-@argument('ym', metavar='YM')
-@click.pass_context
-def rides_v5_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
-	import boto3
+def _mirror_normalized(r2, bucket: str, ym: str, dry_run: bool) -> None:
+	"""Server-side copy (within R2) of month `ym`'s consolidated parquet from
+	the DVX cache (`.dvc/files/md5/…`, per its `.dvc`) to the plain key
+	`normalized/<ym>.parquet` the rides Batch factory lists."""
 	import yaml
-
-	ym = ym.replace('-', '')
-	if len(ym) != 6 or not ym.isdigit():
-		raise click.BadParameter(f'YM must be YYYYMM or YYYY-MM; got {ym!r}')
-	m0 = datetime(int(ym[:4]), int(ym[4:]), 1, tzinfo=timezone.utc)
-	m1 = datetime(m0.year + 1, 1, 1, tzinfo=timezone.utc) if m0.month == 12 else m0.replace(month=m0.month + 1)
-	p0 = datetime(m0.year - 1, 12, 1, tzinfo=timezone.utc) if m0.month == 1 else m0.replace(month=m0.month - 1)
-
-	# 1. Plain-key mirror: the engine's rides factory discovers months by
-	# listing `s3://ctbk/normalized/` — DVC pushes only content-addressed
-	# blobs, so each new month needs this server-side copy.
 	dvc_path = Path(f's3/ctbk/normalized/{ym}.parquet.dvc')
 	if not dvc_path.exists():
 		raise click.ClickException(f'{dvc_path} not found — has {ym} been consolidated?')
 	out = yaml.safe_load(dvc_path.read_text())['outs'][0]
 	md5, size = out['md5'], out['size']
-	s3 = boto3.client('s3', region_name='us-east-1')
 	dst = f'normalized/{ym}.parquet'
 	try:
-		have = s3.head_object(Bucket='ctbk', Key=dst)['ContentLength']
-	except s3.exceptions.ClientError:
+		have = r2.head_object(Bucket=bucket, Key=dst)['ContentLength']
+	except r2.exceptions.ClientError as e:
+		if e.response['Error']['Code'] not in ('404', 'NoSuchKey', 'NotFound'):
+			raise
 		have = None
 	if have == size:
-		err(f'mirror: s3://ctbk/{dst} up to date ({size:,} B)')
+		err(f'mirror: r2://{bucket}/{dst} up to date ({size:,} B)')
 	elif dry_run:
 		err(f'mirror: would copy .dvc/files/md5/{md5[:2]}/{md5[2:]} → {dst} ({size:,} B; have {have})')
 	else:
-		s3.copy_object(Bucket='ctbk', Key=dst, CopySource={'Bucket': 'ctbk', 'Key': f'.dvc/files/md5/{md5[:2]}/{md5[2:]}'})
-		err(f'mirror: copied → s3://ctbk/{dst} ({size:,} B)')
+		r2.copy_object(Bucket=bucket, Key=dst, CopySource={'Bucket': bucket, 'Key': f'.dvc/files/md5/{md5[:2]}/{md5[2:]}'})
+		err(f'mirror: copied → r2://{bucket}/{dst} ({size:,} B)')
+
+
+@gbfs.command('normalized-mirror', help='Server-side copy (within R2) of each month\'s consolidated parquet from the DVX cache to `normalized/<YM>.parquet`, the plain keys the rides Batch factory reads. Skips months already mirrored at the right size. Default: every `s3/ctbk/normalized/YYYYMM.parquet.dvc`.')
+@option('-n', '--dry-run', is_flag=True, help='Report; copy nothing.')
+@argument('yms', metavar='[YM...]', nargs=-1)
+def normalized_mirror(dry_run: bool, yms: tuple[str, ...]) -> None:
+	yms = yms or tuple(sorted(p.name[:6] for p in Path('s3/ctbk/normalized').glob('[0-9]' * 6 + '.parquet.dvc')))
+	r2, bucket = _r2_client(rw=True)
+	for ym in yms:
+		_mirror_normalized(r2, bucket, ym.replace('-', ''), dry_run)
+
+
+@gbfs.command('rides-extend', help='Monthly `rides` cadence for one freshly-ingested month: (1) mirror `normalized/<YM>.parquet` from the DVX cache to its plain key, within R2 (the Batch factory lists that prefix); (2) journal the previous month on `rides-start` (spillback refold); (3) `engine submit -f` both anchors on HCCS Batch, uncapped (open periods defer); (4) canonicalize [prev month, now) through each manifest (new hashed keys); (5) `engine register` each manifest into D1; (6) RG-manifest backfill + prune of superseded keys\' rows. Station-map/vocab/canonicalize-map regen for new stations is NOT covered — a canonicalize-map change needs a full-range `engine canonicalize`. Needs HCCS AWS creds (Batch), R2 RW creds, CLOUDFLARE_ACCOUNT_ID, and CTBK_REGISTRY_SECRET (+ a D1-write CLOUDFLARE_API_TOKEN for the prune).')
+@option('-n', '--dry-run', is_flag=True, help='Print planned actions (and engine commands); no writes or submits.')
+@argument('ym', metavar='YM')
+@click.pass_context
+def rides_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
+	ym = ym.replace('-', '')
+	if len(ym) != 6 or not ym.isdigit():
+		raise click.BadParameter(f'YM must be YYYYMM or YYYY-MM; got {ym!r}')
+	m0 = datetime(int(ym[:4]), int(ym[4:]), 1, tzinfo=timezone.utc)
+	p0 = datetime(m0.year - 1, 12, 1, tzinfo=timezone.utc) if m0.month == 1 else m0.replace(month=m0.month - 1)
+	os.environ.setdefault('CTBK_REGISTRY_URL', API_URLS['prod'])
+	_use_r2_rw_env()
+
+	# 1. Plain-key mirror: the engine's rides factory discovers months by
+	# listing `normalized/` — DVX pushes only content-addressed blobs.
+	r2, bucket = _r2_client(rw=True)
+	_mirror_normalized(r2, bucket, ym, dry_run)
 
 	# 2. Spillback: prev-month rides that ended in `ym` only became
 	# attributable now — invalidate prev month so the start-anchor fill
@@ -1338,47 +1297,33 @@ def rides_v5_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
 		invalidate(pyramid, (p0, m0))
 		err(f'invalidate: journaled [{p0:%Y-%m-%d}, {m0:%Y-%m-%d}) on rides-start')
 
-	# 3. Fills, UNCAPPED range (genesis → now). Capping at month-end
-	# leaves coarse-rung holes: shards whose spans cross the cap (e.g.
-	# `1d/64d` covering Jun 4–Aug 7) can't build inside it, and July's
-	# serve-time monthly rebin rides on the 1d tier. Tip shards carrying
-	# an empty current-month tail are the DESIGN (het-tiled tip); only
-	# wholly-empty pure-future shards are relics — swept in step 4.
+	# 3. Fills, uncapped (genesis → now): the engine classifies the
+	# in-progress month's unpublished source as expected-absent and defers
+	# open periods (pyrmts ≥ 72f2552), so no tip relics to sweep. R2 creds
+	# come from the job def's Secrets Manager refs.
 	for config_name, prefix, factory in RIDES_ANCHOR_SPECS:
-		rc = _engine_submit(
-			config_name,
-			scratch_prefix=prefix,
-			fill=True,
-			source_spec=factory,
-			watch=True,
-			# No `max_missing`: the in-progress month's source
-			# (`normalized/<this-month>.parquet`, unpublished mid-month) is
-			# now classified expected-absent by the engine itself, which
-			# compares each absent source's period against the range's
-			# `to` (pyrmts `72f2552`). A ratio never expressed this — its
-			# denominator is the sources THIS fill reads, so under `-f` the
-			# 2026-08-28 `1mo`-rung backfill read 8 source months and
-			# failed at `1/8 = 0.125 > 0.01`. Closed-period gaps still
-			# count, so the guard keeps its real job — and since pyrmts
-			# `a174254` it fires BEFORE the walk (`MonthlyRidesSource.
-			# present_keys` = the S3 listing): an unpublished closed month
-			# holds its shards and exits 4 with nothing written, instead of
-			# 12 zero-row relics per anchor for step 4 to sweep.
-			dry_run=dry_run,
-		)
+		rc = _engine_submit(config_name, scratch_prefix=prefix, fill=True, source_spec=factory, watch=True, dry_run=dry_run)
 		if rc:
 			raise click.ClickException(f'{config_name} fill failed (rc={rc})')
 
-	# 4. Sweep 0-row relic shards lying wholly past month-end.
-	ctx.invoke(rides_v5_sweep, after=f'{m1:%Y-%m}', dry_run=dry_run)
-	# 5. RG-manifest rows for the new shards (serving falls back to
-	# footer reads meanwhile, but big shards' footers are the expensive
-	# path the manifest exists to avoid).
-	ctx.invoke(gbfs_manifest_backfill, dry_run=dry_run)
+	# 4–5. Materialize `c:` rows on the new shards (and the spillback
+	# rebuilds), then point D1 at the resulting hashed keys.
+	span = f'{p0:%Y-%m-%dT%H:%M}/{datetime.now(timezone.utc):%Y-%m-%dT%H:%M}'
+	for config_name, prefix, _ in RIDES_ANCHOR_SPECS:
+		ctx.invoke(gbfs_engine_canonicalize, config_name=config_name, range_=span, dry_run=dry_run)
+		manifest = f's3://{bucket}/{prefix}/manifest.jsonl'
+		if dry_run:
+			err(f'register: would sync {manifest} → D1')
+		else:
+			ctx.invoke(gbfs_engine_register, manifest=manifest)
 
-	err(f'rides-v5 extended through {m1:%Y-%m}. Not covered: station-map/vocab regen for new '
-		f'stations (spec cadence item 4). Verify the build against the golden fixtures: '
-		f'`pytest ctbk/pyramid_cascade/tests/test_rides_v5_golden.py`.')
+	# 6. RG-manifest rows for the new keys; drop the superseded keys' rows
+	# (every hashed rewrite orphans its predecessor's — 2026-09-25 D1-full).
+	pyramids = tuple(c for c, _, _ in RIDES_ANCHOR_SPECS)
+	ctx.invoke(gbfs_manifest_backfill, pyramids=pyramids, dry_run=dry_run)
+	ctx.invoke(gbfs_manifest_prune, pyramids=pyramids, dry_run=dry_run)
+
+	err(f'rides extended through {ym}. Not covered: station-map/vocab/canonicalize-map regen for new stations.')
 
 
 # ─── pyrmts-engine validation (specs/pyrmts-engine-validation.md) ──────
@@ -1631,11 +1576,12 @@ def gbfs_engine_canonicalize(
 		raise click.ClickException('need CLOUDFLARE_ACCOUNT_ID + R2_RW_* (or R2_*) creds')
 	env.setdefault('R2_ENDPOINT_URL', f'https://{acct}.r2.cloudflarestorage.com')
 	rc = subprocess.run(cmd, env=env).returncode
+	if rc:
+		raise click.ClickException(f'{config_name}: pyrmts-engine canonicalize failed (rc={rc})')
 	if hashed:
 		err(f'next: `ctbk gbfs engine register {manifest}` (swap D1 rows to the rewritten keys)')
 	else:
 		err(f'next: `ctbk gbfs lambda reconcile -C {config_name} -f` (shards rewrote in place; bump `written_at`)')
-	sys.exit(rc)
 
 
 # Real prefixes `engine wipe -R` may delete: pyramids built but not yet
