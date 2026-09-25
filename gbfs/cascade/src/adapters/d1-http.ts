@@ -16,7 +16,7 @@
  *  - `D1_DATABASE_ID` (default: `ctbk-gbfs`'s ID from wrangler.toml)
  */
 
-const DEFAULT_DB_ID = 'd5746734-70ba-46aa-8780-be09e4837f0b';
+const DEFAULT_DB_ID = '845e34bb-d138-4076-9955-5909e30d4323';
 
 interface D1QueryResult<T> {
 	results: T[];
