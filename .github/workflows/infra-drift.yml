@@ -21,10 +21,9 @@ on:
 jobs:
   aws-schedules:
     runs-on: ubuntu-latest
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: us-east-1
+    permissions:
+      contents: read
+      id-token: write  # HCCS AWS via OIDC (`.github/scripts/hccs-aws.sh`)
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v7
@@ -43,14 +42,12 @@ jobs:
             "pyrmts-ops @ $base#subdirectory=python/pyrmts_ops"
       - name: Verify avail EventBridge schedules
         run: |
-          # The three avail cascade rules. Both the v5 and v6 ticks target the
-          # v5 function (v6 rides the same config-driven image); the v3 rule is
-          # retired and MUST stay DISABLED (`specs/gc-legacy-pyramids.md`).
-          .venv/bin/pyrmts-ops aws verify \
+          # Both avail ticks target the v5 function (v6 rides the same
+          # config-driven image), in the HCCS account since 2026-09-25 (the
+          # retired v3 rule stayed behind on RAC and is deleted with it).
+          .github/scripts/hccs-aws.sh .venv/bin/pyrmts-ops aws verify \
             'ctbk-avail-cascade-v5-tick=ctbk-avail-cascade-v5@cron(3/5 * * * ? *)' \
-            'ctbk-avail-cascade-v6-tick=ctbk-avail-cascade-v5@cron(4/5 * * * ? *)' \
-            'ctbk-avail-cascade-hourly=ctbk-avail-cascade@cron(1/5 * * * ? *)' \
-            -d ctbk-avail-cascade-hourly
+            'ctbk-avail-cascade-v6-tick=ctbk-avail-cascade-v5@cron(4/5 * * * ? *)'
 
       - name: Notify Slack — failure
         if: failure()
