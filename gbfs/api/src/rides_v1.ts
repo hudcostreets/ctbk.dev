@@ -311,8 +311,7 @@ function v5ShardIndex(db: D1Database, name: string): ShardIndex {
 	return _v5ShardIndex[name] ??= new CachedShardIndex(new D1ShardIndex(db), { ttlMs: V5_SHARD_TTL_MS });
 }
 
-/** Which stored rides pyramid a route serves. `rides-v5` (`/api/rides-v5`)
- *  keys station leaves by canonical id at ingest; `rides` (`/api/rides`,
+/** Which stored rides pyramid a route serves: `rides` (`/api/rides`,
  *  `specs/rides-rekey.md`) stores raw-id leaves + materialized `c:` rollups,
  *  selected per request by `canon.ts` (canonical default, `?raw=1` audit). */
 export interface RidesVariant {
@@ -320,7 +319,6 @@ export interface RidesVariant {
 	prefix: string;
 	canonicalized: boolean;
 }
-export const RIDES_V5: RidesVariant = { prefix: 'rides-v5', canonicalized: false };
 export const RIDES: RidesVariant = { prefix: 'rides', canonicalized: true };
 
 function ridesV5Pyramid(bucket: R2Bucket, variant: RidesVariant, anchor: Anchor, cells: boolean): GeoPyramid {

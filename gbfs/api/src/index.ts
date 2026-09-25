@@ -495,7 +495,7 @@ import { coverageKey, coverageRange, defaultCoverageRange, isDay, type CoverageD
 import { EMPTY_VOCAB_KEY, makeVocab, readSeries, type Bin, type OpenShard, type ShardBytes, type Vocab } from './empty';
 import { runAlerts } from './alerts';
 import { DEFAULT_PYRAMID, repairGeneration, serveAvailV3, serveAvailV3Cells } from './avail_geo';
-import { RIDES, RIDES_V5, serveRides } from './rides_v1';
+import { RIDES, serveRides } from './rides_v1';
 import { retryingStorage, withR2Retry } from './r2_retry';
 import { r2Storage } from 'pyrmts-cfw';
 import { backfillManifestKey, manifestStatus, pruneManifestOrphans } from './rg_manifest';
@@ -1467,17 +1467,15 @@ export default {
 			return resp;
 		}
 
-		// /api/rides[-v5][/cells] — pyrmts-geo serving of the rides pyramids,
-		// station-identity-keyed. `/api/rides-v5` serves `rides-v5/{start,end}/…`
-		// (canonical ids baked in at ingest; current prod); `/api/rides` serves
-		// the re-keyed `rides/{start,end}/…` (raw-id leaves + materialized `c:`
-		// rollups; canonical by default, `?raw=1` audit — `specs/rides-rekey.md`).
-		// See `specs/rides-v5.md` + `rides_v1.ts`.
-		const ridesMatch = url.pathname.match(/^\/api\/rides(-v5)?(\/cells)?$/);
+		// /api/rides[/cells] — pyrmts-geo serving of the re-keyed rides pyramids
+		// `rides/{start,end}/…` (raw-id leaves + materialized `c:` rollups;
+		// canonical by default, `?raw=1` audit — `specs/rides-rekey.md`,
+		// `rides_v1.ts`).
+		const ridesMatch = url.pathname.match(/^\/api\/rides(\/cells)?$/);
 		if (ridesMatch) {
-			const variant = ridesMatch[1] ? RIDES_V5 : RIDES;
+			const variant = RIDES;
 			const route = `/api/${variant.prefix}`;
-			const cellsRoute = !!ridesMatch[2];
+			const cellsRoute = !!ridesMatch[1];
 			// Edge cache: rides-* cold queries are O(seconds) since they
 			// fan out to many R2 GETs + decode + filter + stitch. Mirroring
 			// the /api/totals pattern (`index.ts:1232-1280`): past-only

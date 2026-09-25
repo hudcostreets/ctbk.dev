@@ -95,6 +95,23 @@ def gbfs_d1() -> None:
 	pass
 
 
+@gbfs_d1.command('drop', help='Retire pyramids from the registry: delete their `pyramid_shards` rows (D1 REST; needs a D1-write `CLOUDFLARE_API_TOKEN`). Dry run unless `-y`. Their RG-manifest rows become orphans — follow with `ctbk gbfs manifest prune -p …`. R2 shards are untouched.')
+@option('-p', '--pyramid', 'pyramids', multiple=True, required=True, help='Pyramid name (repeatable).')
+@option('-y', '--yes', is_flag=True, help='Actually delete (default: report row counts only).')
+def gbfs_d1_drop(pyramids: tuple[str, ...], yes: bool) -> None:
+	from ctbk.pyramid_cascade.d1_http import d1_query
+	marks = ','.join('?' * len(pyramids))
+	counts = d1_query(f'SELECT pyramid, COUNT(*) AS n FROM pyramid_shards WHERE pyramid IN ({marks}) GROUP BY 1', list(pyramids))
+	for r in counts:
+		err(f'{r["pyramid"]}: {r["n"]} registry rows')
+	if not yes:
+		err('dry run; pass -y to delete')
+		return
+	d1_query(f'DELETE FROM pyramid_shards WHERE pyramid IN ({marks})', list(pyramids))
+	left = d1_query(f'SELECT COUNT(*) AS n FROM pyramid_shards WHERE pyramid IN ({marks})', list(pyramids))[0]['n']
+	err(f'deleted; {left} rows remain')
+
+
 @gbfs_d1.command('shards', help='Tabulate `pyramid_shards` grouped by (tier, shard_dur).')
 @option('-p', '--pyramid', default='avail', show_default=True, help='pyramid name column filter.')
 @option('-t', '--tier', default=None, help='Restrict to one tier (e.g. `1m`, `6h`).')
