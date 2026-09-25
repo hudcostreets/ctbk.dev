@@ -254,7 +254,9 @@ def gbfs_manifest_prune(d1_rest: bool, env_name: str, dry_run: bool, pyramids: t
 			n_keys = n_rgs = 0
 			while True:
 				# A dry run lists every orphan in one call (nothing is deleted).
-				body = {'op': 'manifest_prune', 'pyramid': pyramid, 'dry_run': dry_run}
+				# 5 keys/call: a large rides shard has ~2.7k RG rows, and each call's
+				# deletes run as one D1 transaction inside a Worker request.
+				body = {'op': 'manifest_prune', 'pyramid': pyramid, 'dry_run': dry_run, 'limit': 5}
 				if dry_run:
 					body['limit'] = 1_000_000
 				r = _registry_post(env_name, body)
