@@ -1,15 +1,35 @@
 name: Deploy ctbk.dev
+# Prod deploys from `main` (dev.ctbk.dev from `dev`) whenever a push touches
+# the site's inputs — the paths below. The monthly pipeline's own commits
+# (author `GitHub Actions`) are skipped: it pushes mid-run, before
+# `Extend rides-v5`, and a deploy then would screenshot the previous month
+# yet record the new data clock (so never regen). `ci.yml` instead
+# dispatches this once at its end. `www` is no longer a trigger — just a
+# marker of what's live, advanced after each successful prod deploy.
 on:
   push:
     branches:
-      - www
+      - main
       - dev
       - scrns-playwright-test
+    paths:
+      - 'www/**'
+      - '.github/workflows/www.yml'
+      - '.github/actions/**'
   workflow_dispatch:
+# Queue, don't cancel: a half-finished deploy + screenshot publish is worse
+# than a short wait.
+concurrency:
+  group: www-deploy-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   build:
-    name: Build + deploy www branch to ctbk.dev (CF Workers Assets)
+    name: Build + deploy to ctbk.dev (CF Workers Assets)
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'push' ||
+      github.ref != 'refs/heads/main' ||
+      github.event.head_commit.author.name != 'GitHub Actions'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -39,10 +59,10 @@ jobs:
         env:
           CI: '1'
         run: pnpm test --reporter=list
-      # ─── Screenshots: input-gated regen, HR S3 home
+      # ─── Screenshots: input-gated regen, HR R2 home
       # (specs/www-screenshots-s3-hr.md). Regenerate exactly when a
-      # declared dep changed since the provenance recorded in the S3
-      # manifest (`s3://ctbk/screenshots/.deps.json`), BEFORE the build
+      # declared dep changed since the provenance recorded in the R2
+      # manifest (`data.ctbk.dev/screenshots/.deps.json`), BEFORE the build
       # consumes them. Nothing screenshot-related is git-tracked: the
       # old pointer-commit flow triggered a second, content-identical
       # deploy and raced concurrent pushes to `www`/`main`.
@@ -59,7 +79,7 @@ jobs:
           www_tree=$(git ls-files -s -- www ':!www/public/screenshots' | git hash-object --stdin)
           echo "data_md5=$data_md5" >> $GITHUB_OUTPUT
           echo "www_tree=$www_tree" >> $GITHUB_OUTPUT
-          deps=$(curl -sf https://ctbk.s3.amazonaws.com/screenshots/.deps.json || echo '{}')
+          deps=$(curl -sf "https://data.ctbk.dev/screenshots/.deps.json?t=$(date +%s)" || echo '{}')
           rec_data=$(echo "$deps" | jq -r '.data_md5 // "none"')
           rec_tree=$(echo "$deps" | jq -r '.www_tree // "none"')
           if [ "$data_md5" != "$rec_data" ] || [ "$www_tree" != "$rec_tree" ]; then
@@ -72,10 +92,6 @@ jobs:
       - name: Regenerate screenshots (deps changed)
         if: steps.scrgate.outputs.stale == 'true'
         working-directory: www
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
         run: |
           docker build --platform linux/amd64 -f Dockerfile.screenshots -t ctbk-screenshots .
           docker run --platform linux/amd64 --name ctbk-screenshots-run ctbk-screenshots
@@ -85,13 +101,13 @@ jobs:
           command -v magick >/dev/null || command -v convert >/dev/null \
             || sudo apt-get install -y -qq imagemagick
           bash scripts/compose-og.sh
-      - name: Publish screenshots to S3
-        if: steps.scrgate.outputs.stale == 'true' && github.ref == 'refs/heads/www'
+      - name: Publish screenshots to R2
+        if: steps.scrgate.outputs.stale == 'true' && github.ref == 'refs/heads/main'
         working-directory: www
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           # Overwrite the HR keys + manifest in place — no git commit, so
           # this run's build (below) is the only deploy.
@@ -99,7 +115,7 @@ jobs:
             -d "${{ steps.scrgate.outputs.data_md5 }}" \
             -t "${{ steps.scrgate.outputs.www_tree }}"
       - name: Upload screenshots as artifact
-        if: steps.scrgate.outputs.stale == 'true' && github.ref != 'refs/heads/www'
+        if: steps.scrgate.outputs.stale == 'true' && github.ref != 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: screenshots
@@ -120,7 +136,7 @@ jobs:
       # 2026-08-15).
       - name: Record previous deploy sha
         id: prev
-        if: github.ref == 'refs/heads/www' || github.ref == 'refs/heads/dev'
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
         env:
           HOST: ${{ github.ref == 'refs/heads/dev' && 'dev.ctbk.dev' || 'ctbk.dev' }}
         run: |
@@ -129,7 +145,7 @@ jobs:
           echo "previous deploy: ${prev:-unknown (no version.json yet)}"
       - name: Deploy to Cloudflare Workers (ctbk-dev)
         id: deploy
-        if: github.ref == 'refs/heads/www' || github.ref == 'refs/heads/dev'
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
         working-directory: www
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -172,7 +188,7 @@ jobs:
           exit 1
 
       - name: Notify Slack — site deployed
-        if: github.ref == 'refs/heads/www' && steps.deploy.outcome == 'success' && steps.smoke.outcome == 'success'
+        if: github.ref == 'refs/heads/main' && steps.deploy.outcome == 'success' && steps.smoke.outcome == 'success'
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -255,7 +271,7 @@ jobs:
       # didn't fire) — e.g. 2026-08-14's two e2e-gated failures left the
       # site undeployable for ~5h with no ping.
       - name: Notify Slack — deploy failed
-        if: failure() && github.ref == 'refs/heads/www'
+        if: failure() && github.ref == 'refs/heads/main'
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SHA: ${{ github.sha }}
@@ -281,3 +297,11 @@ jobs:
               f"<{os.environ['RUN_URL']}|logs>"
           )
           PY
+
+      - name: Advance `www` marker to the live commit
+        if: github.ref == 'refs/heads/main' && steps.smoke.outcome == 'success'
+        run: |
+          # Force: `www` records what ctbk.dev serves, so a dispatched
+          # redeploy of an older commit (rollback) moves it backwards too.
+          git fetch --no-tags --depth=1 origin www || true
+          git push --force origin HEAD:refs/heads/www

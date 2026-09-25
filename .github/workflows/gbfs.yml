@@ -98,6 +98,13 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_GHA_D1_RO_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
+      - name: Notify Slack — failure
+        if: failure()
+        uses: ./.github/actions/slack-notify
+        with:
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          text: ":x: *D1 schema drift check failed* — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>"
+
   deploy:
     needs: detect-changes
     runs-on: ubuntu-latest
@@ -167,3 +174,10 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Notify Slack — failure
+        if: failure()
+        uses: ./.github/actions/slack-notify
+        with:
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          text: ":x: *GBFS worker deploy `${{ matrix.worker }}` failed* — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>"

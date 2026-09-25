@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Materialize screenshots (`public/screenshots/*.{png,jpg}`) from their
- * HR S3 home (`s3://ctbk/screenshots/`; see
+ * HR R2 home (`r2://ctbk/screenshots/`, public at `data.ctbk.dev`; see
  * `specs/www-screenshots-s3-hr.md`): download the `.deps.json` manifest,
  * then each image whose local copy is missing or md5-stale.
  *
@@ -21,12 +21,15 @@ import { fileURLToPath } from 'url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const dir = join(__dirname, '..', 'public/screenshots')
 
-const BASE = process.env.SCREENSHOTS_BASE ?? 'https://ctbk.s3.amazonaws.com/screenshots'
+const BASE = process.env.SCREENSHOTS_BASE ?? 'https://data.ctbk.dev/screenshots'
 
 const md5hex = (buf) => createHash('md5').update(buf).digest('hex')
 
+// Images are overwritten in place and CF's edge caches `.png`/`.jpg` by
+// default: key each fetch by content (`?md5=`) so a regen is never served
+// stale; the manifest by time.
 const manifestUrl = `${BASE}/.deps.json`
-const res = await fetch(manifestUrl)
+const res = await fetch(`${manifestUrl}?t=${Date.now()}`)
 if (!res.ok) throw new Error(`${manifestUrl}: HTTP ${res.status}`)
 const { images } = await res.json()
 const names = Object.keys(images)
@@ -37,7 +40,7 @@ for (const name of names) {
   const { md5 } = images[name]
   const dest = join(dir, name)
   if (existsSync(dest) && md5hex(readFileSync(dest)) === md5) continue
-  const url = `${BASE}/${name}`
+  const url = `${BASE}/${name}?md5=${md5}`
   const imgRes = await fetch(url)
   if (!imgRes.ok) throw new Error(`${url}: HTTP ${imgRes.status}`)
   const buf = Buffer.from(await imgRes.arrayBuffer())

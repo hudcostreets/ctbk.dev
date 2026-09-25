@@ -1,4 +1,8 @@
+/// <reference types="node" />
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import type { DatabaseSync as DatabaseSyncT } from 'node:sqlite';
 import { parquetReadObjects } from 'hyparquet';
 import { availParquetKeyFromStatusKey } from '../../lib/avail-monoid';
 import worker from './index';
@@ -157,5 +161,67 @@ describe('queue handler: routing', () => {
 		expect(acks).toEqual({ ack: 1, retry: 0 });
 		expect(puts).toEqual([]);
 		expect(bucket.get).not.toHaveBeenCalled();
+	});
+});
+
+/** Minimal D1 over `node:sqlite` with the real schema: `prepare().bind()`
+ *  + all-or-nothing `batch()` (D1 batches are one transaction). */
+// Vite 5 doesn't know `node:sqlite` as a builtin; load it through require.
+const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
+type DatabaseSync = DatabaseSyncT;
+
+function sqliteD1() {
+	const db = new DatabaseSync(':memory:');
+	db.exec(readFileSync(new URL('../../d1/schema.sql', import.meta.url), 'utf8'));
+	type Stmt = { sql: string; args: unknown[]; bind: (...args: unknown[]) => Stmt };
+	const stmt = (sql: string, args: unknown[] = []): Stmt => ({ sql, args, bind: (...a) => stmt(sql, a) });
+	return {
+		db,
+		prepare: (sql: string) => stmt(sql),
+		batch: async (stmts: Stmt[]) => {
+			db.exec('BEGIN');
+			try {
+				for (const s of stmts) db.prepare(s.sql).run(...(s.args as never[]));
+				db.exec('COMMIT');
+			} catch (e) {
+				db.exec('ROLLBACK');
+				throw e;
+			}
+			return [];
+		},
+	};
+}
+
+describe('queue handler: station_information upsert', () => {
+	const INFO_KEY = 'gbfs/info/2026-09-25.json';
+	const info = (stations: { station_id: string; short_name: string; name: string }[]) => ({
+		data: { stations: stations.map((s) => ({ ...s, lat: 40.7, lon: -74.0, capacity: 20, station_type: 'classic' })) },
+	});
+	const rows = (db: DatabaseSync) =>
+		db.prepare('SELECT short_name, gbfs_station_id, name, in_gbfs FROM stations ORDER BY short_name').all()
+			.map((r) => ({ ...(r as Record<string, unknown>) }));
+
+	test('a GBFS station_id that moved to a new short_name is re-pointed, not a UNIQUE failure', async () => {
+		// `5685.04` → `5685.06` renumber (2026-06): same GBFS UUID, new short_name.
+		const d1 = sqliteD1();
+		d1.db.prepare(
+			`INSERT INTO stations (short_name, gbfs_station_id, name, in_gbfs, updated_at) VALUES ('5685.04', 'G', '63 Dr & Austin St', 1, 0)`,
+		).run();
+		const { bucket } = makeBucket({
+			[INFO_KEY]: info([
+				{ station_id: 'G', short_name: '5685.06', name: '63 Dr & Austin St' },
+				{ station_id: 'H', short_name: '7000.01', name: 'New St' },
+			]),
+		});
+		const { msg, acks } = makeMsg(INFO_KEY);
+
+		await worker.queue({ messages: [msg] } as never, { BUCKET: bucket, DB: d1 } as never, {} as never);
+
+		expect(acks).toEqual({ ack: 1, retry: 0 });
+		expect(rows(d1.db)).toEqual([
+			{ short_name: '5685.04', gbfs_station_id: null, name: '63 Dr & Austin St', in_gbfs: 0 },
+			{ short_name: '5685.06', gbfs_station_id: 'G', name: '63 Dr & Austin St', in_gbfs: 1 },
+			{ short_name: '7000.01', gbfs_station_id: 'H', name: 'New St', in_gbfs: 1 },
+		]);
 	});
 });

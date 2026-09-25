@@ -22,6 +22,7 @@ on:
     - cron: '0 12 20 * *'
 permissions:
   contents: write
+  actions: write  # dispatch `www.yml`
 env:
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -153,6 +154,17 @@ jobs:
           git config --global user.name 'GitHub Actions'
           git config --global user.email 'ryan-williams@users.noreply.github.com'
 
+      # `r2` (HCCS R2) is the DVX `core.remote` since the 2026-09-11 cutover,
+      # so every pull/push below — `ctbk update`'s included — hits it. Its
+      # creds differ from the `AWS_*` env (RAC AWS), which boto would
+      # otherwise send to the R2 endpoint (400 Bad Request on HeadObject:
+      # the 2026-09-20 rehearsal failure). Inject them before any DVX call.
+      - name: Configure DVX `r2` remote creds
+        if: steps.args.outputs.args
+        run: |
+          dvx remote modify --local r2 access_key_id "$R2_ACCESS_KEY_ID"
+          dvx remote modify --local r2 secret_access_key "$R2_SECRET_ACCESS_KEY"
+
       - name: Pull pipeline inputs
         if: steps.args.outputs.args
         run: |
@@ -264,14 +276,10 @@ jobs:
       # The FE reads the DVX cache from R2 (data.ctbk.dev), so each
       # month's new content-addressed blobs must land on R2 too. `ctbk
       # update` above pushed them to the `s3` remote; mirror to `r2`.
-      # R2 creds differ from the AWS creds the `s3` remote uses, so
-      # inject them per-remote into config.local at runtime.
+      # (creds injected by "Configure DVX `r2` remote creds" above)
       - name: Push DVX cache to R2
         if: steps.args.outputs.args
-        run: |
-          dvx remote modify --local r2 access_key_id "$R2_ACCESS_KEY_ID"
-          dvx remote modify --local r2 secret_access_key "$R2_SECRET_ACCESS_KEY"
-          dvx push -r r2
+        run: dvx push -r r2
 
       # ─── rides-v5 monthly cadence (specs/rides-v5.md; #185) ─────────
       # Prod's Home chart reads rides-v5, so the month isn't "done" until
@@ -294,9 +302,14 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: ctbk gbfs rides-v5-extend ${{ steps.args.outputs.ym }}
 
-      - name: Deploy to www branch
+      # One prod deploy at the very end, after rides-v5 has the month (the
+      # screenshots render it). `www.yml` skips this pipeline's own mid-run
+      # pushes to `main` for the same reason.
+      - name: Deploy site
         if: steps.args.outputs.args
-        run: git push origin HEAD:www
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run www.yml --ref main
       # (No rides-v3 step: the rollback pyramid is frozen at its last
       # build — a v5 rollback missing only the newest month is an
       # acceptable degraded mode, and the v3 'all'-shard merge-patches

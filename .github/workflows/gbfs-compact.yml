@@ -127,3 +127,10 @@ jobs:
           aws s3 cp "r2/ctbk/avail/agg/mo1/${{ steps.date.outputs.year }}.parquet" \
                     "s3://ctbk/avail/agg/mo1/${{ steps.date.outputs.year }}.parquet" \
                     --endpoint-url "$AWS_ENDPOINT_URL"
+
+      - name: Notify Slack — failure
+        if: failure()
+        uses: ./.github/actions/slack-notify
+        with:
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          text: ":x: *GBFS daily compaction (${{ github.event_name }}) failed* — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>"

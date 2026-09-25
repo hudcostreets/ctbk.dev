@@ -19,7 +19,7 @@
  */
 import { SlackClient } from '@rdub/thrds';
 import type { HealthR2, HealthSnapshot } from './health';
-import { getHealthSnapshot } from './health';
+import { ALERTS_HEARTBEAT_KEY, getHealthSnapshot, HEALTH_SNAPSHOT_KEY } from './health';
 
 export interface Rule {
 	id: string;
@@ -87,10 +87,53 @@ export function hourlyCompactionStaleMinutes(s: HealthSnapshot): number {
 	return (Date.now() - compactedThroughMs) / 60_000;
 }
 
+/** Hours between "now" and the end of the pyramid's newest `present`
+ *  segment (any tier) — how far its served tip lags. Infinity if the
+ *  pyramid is absent from the snapshot or has nothing present. */
+export function pyramidTipAgeHours(s: HealthSnapshot, name: string): number {
+	const p = s.pyramids.find((x) => x.name === name);
+	let newest = -Infinity;
+	for (const t of p?.tiers ?? []) {
+		for (const seg of t.segments) {
+			if (seg.status === 'present') newest = Math.max(newest, new Date(seg.end).getTime());
+		}
+	}
+	return (Date.now() - newest) / 3_600_000;
+}
+
+/** Hours since the loader last upserted `stations` (daily
+ *  `station_information`). Infinity if unknown; 0 for a snapshot that
+ *  predates the field (cached by a pre-deploy worker version). */
+export function stationsStaleHours(s: HealthSnapshot): number {
+	if (s.stations === undefined) return 0;
+	const t = s.stations?.lastUpdatedAt;
+	return t ? (Date.now() / 1000 - t) / 3600 : Infinity;
+}
+
+/** Minutes since the snapshot was computed (the minute cron refreshes it). */
+export function snapshotAgeMinutes(s: HealthSnapshot): number {
+	return (Date.now() / 1000 - s.generatedAt) / 60;
+}
+
 /** Default rule set. To tweak thresholds, edit constants here. */
 const FEED_STALE_MIN = 5;
 const MISSING_MINUTES_MAX = 3;
 const HOURLY_STALE_MIN = 90;
+/** Max tip lag per served pyramid, by fill cadence: avail tiers extend every
+ *  5 min (Lambda ticks; present segments end on ≤1h boundaries), smg-v1
+ *  daily after the ~05:00Z compaction, rides-v5 monthly after each tripdata
+ *  drop (published ~2 weeks into the following month). */
+const PYRAMID_TIP_MAX_HOURS: Record<string, number> = {
+	'avail-v5': 3,
+	'avail-v6': 3,
+	'smg-v1': 36,
+	'rides-v5-start': 50 * 24,
+	'rides-v5-end': 50 * 24,
+};
+const STATIONS_STALE_HOURS = 36;
+const SNAPSHOT_STALE_MIN = 15;
+
+const fmtAge = (h: number) => (h === Infinity ? 'never' : h < 48 ? `${h.toFixed(1)}h ago` : `${(h / 24).toFixed(0)}d ago`);
 
 export const DEFAULT_RULES: Rule[] = [
 	{
@@ -119,6 +162,27 @@ export const DEFAULT_RULES: Rule[] = [
 			const ageDesc = mins === Infinity ? 'ever' : `${mins.toFixed(0)} min ago`;
 			return `:warning: *Hourly compaction stale* — last shard ${ageDesc} (threshold: ${HOURLY_STALE_MIN} min)`;
 		},
+	},
+	...Object.entries(PYRAMID_TIP_MAX_HOURS).map(([name, maxH]): Rule => ({
+		id: `pyramid-tip-stale:${name}`,
+		description: `\`${name}\` tip lags more than ${fmtAge(maxH).replace(' ago', '')}`,
+		check: (s) => pyramidTipAgeHours(s, name) > maxH,
+		firingText: (s) =>
+			`:warning: *Pyramid tip stale* — \`${name}\` newest shard ends ${fmtAge(pyramidTipAgeHours(s, name))} (threshold: ${fmtAge(maxH).replace(' ago', '')}); its filler (cascade Lambda / Batch fill / monthly ingest) may be down`,
+	})),
+	{
+		id: 'stations-stale',
+		description: `D1 \`stations\` upserted within ${STATIONS_STALE_HOURS}h`,
+		check: (s) => stationsStaleHours(s) > STATIONS_STALE_HOURS,
+		firingText: (s) =>
+			`:warning: *Stations table stale* — loader's daily \`station_information\` upsert last landed ${fmtAge(stationsStaleHours(s))} (threshold: ${STATIONS_STALE_HOURS}h)`,
+	},
+	{
+		id: 'health-snapshot-stale',
+		description: `/api/health snapshot refreshed within ${SNAPSHOT_STALE_MIN} min`,
+		check: (s) => snapshotAgeMinutes(s) > SNAPSHOT_STALE_MIN,
+		firingText: (s) =>
+			`:rotating_light: *Health snapshot stale* — last computed ${snapshotAgeMinutes(s).toFixed(0)} min ago; the api worker's minute cron (snapshot / registry reconcile) is failing`,
 	},
 ];
 
@@ -236,13 +300,17 @@ export async function runAlerts(
 	r2: AlertR2,
 	slackToken: string,
 	rules: Rule[] = DEFAULT_RULES,
+	db?: D1Database,
 ): Promise<Transition[]> {
 	const [snapshot, prev] = await Promise.all([
-		getHealthSnapshot(r2),
+		currentSnapshot(r2, db),
 		readState(r2),
 	]);
 	const transitions = diffRules(rules, prev, snapshot);
-	if (transitions.length === 0) return [];
+	if (transitions.length === 0) {
+		await writeHeartbeat(r2, 0, Object.keys(prev.firing));
+		return [];
+	}
 
 	const slack = new SlackClient({
 		token: slackToken,
@@ -270,5 +338,21 @@ export async function runAlerts(
 	if (succeeded.length > 0) {
 		await writeState(r2, next);
 	}
+	await writeHeartbeat(r2, transitions.length - succeeded.length, Object.keys(next.firing));
 	return succeeded;
+}
+
+/** The minute cron's cached snapshot, at any age (a stale one is what
+ *  `health-snapshot-stale` detects); computed live only if absent. Live
+ *  compute without `db` would lack the D1-backed sections (pyramids,
+ *  stations), so rules on them would misfire — pass `db`. */
+async function currentSnapshot(r2: AlertR2, db?: D1Database): Promise<HealthSnapshot> {
+	const cached = await r2.get(HEALTH_SNAPSHOT_KEY);
+	return cached ? cached.json<HealthSnapshot>() : getHealthSnapshot(r2, db);
+}
+
+async function writeHeartbeat(r2: AlertR2, slackFailures: number, firing: string[]): Promise<void> {
+	await r2.put(ALERTS_HEARTBEAT_KEY, JSON.stringify({ ranAt: new Date().toISOString(), slackFailures, firing }), {
+		httpMetadata: { contentType: 'application/json' },
+	});
 }
