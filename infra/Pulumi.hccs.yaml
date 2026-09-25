@@ -1,5 +1,7 @@
 encryptionsalt: v1:j8iYp5yESKw=:v1:KHw3bCRFPMWcpxsw:FYf7kcBLT2vIPMpuNQECufgYi3NQIw==
 config:
   ctbk-infra:manage_aws: "false"
+  ctbk-infra:manage_hccs_aws: "true"
+  aws:region: us-east-1
   ctbk-infra:cloudflare_account_id:
     secure: v1:QSgRHt7rND0i2Iuz:3Db9mxuUQNM7bUmjB8hisEw0P+xiHOrtoLfRLtxAawEsKnNav+LwwI82a5UIaepb
