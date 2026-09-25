@@ -166,7 +166,7 @@ describe('diffRules', () => {
 /** `pyramidTips` with each watched pyramid's newest shard ending `h` hours ago. */
 const tipsAt = (ages: Record<string, number>) => Object.fromEntries(Object.entries(ages).map(([name, h]) =>
 	[name, FIXED_NOW.getTime() - h * 3_600_000]));
-const HEALTHY_TIPS = { 'avail-v5': 0.2, 'avail-v6': 0.2, 'smg-v1': 12, 'rides-v5-start': 24 * 24, 'rides-v5-end': 24 * 24 };
+const HEALTHY_TIPS = { 'avail-v5': 0.2, 'avail-v6': 0.2, 'smg-v1': 12, 'rides-start': 24 * 24, 'rides-end': 24 * 24 };
 
 const firingIds = (s: HealthSnapshot) => DEFAULT_RULES.filter((r) => r.check(s)).map((r) => r.id);
 
@@ -210,9 +210,9 @@ describe('DEFAULT_RULES on a full snapshot', () => {
 	});
 
 	it('a missed daily smg fill fires at >36h, a late monthly ingest at >50d', () => {
-		expect(firingIds(fresh({ pyramidTips: tipsAt({ ...HEALTHY_TIPS, 'smg-v1': 37, 'rides-v5-end': 51 * 24 }) }))).toEqual([
+		expect(firingIds(fresh({ pyramidTips: tipsAt({ ...HEALTHY_TIPS, 'smg-v1': 37, 'rides-end': 51 * 24 }) }))).toEqual([
 			'pyramid-tip-stale:smg-v1',
-			'pyramid-tip-stale:rides-v5-end',
+			'pyramid-tip-stale:rides-end',
 		]);
 	});
 

@@ -22,7 +22,7 @@ s3://tripdata (.csv.zip) → norm → cons ─┬→ agg (histograms: e_c, se_c,
 The monthly driver is `ctbk update -S <YYYYMM>` (`ctbk/update.py`) — `norm` reads the `s3://tripdata` `.csv.zip`s **directly** (the old `csv` extract stage is orphaned). Stage outputs are content-addressed in the DVX cache (`s3://ctbk/.dvc/files/md5/…`, migrating to R2 behind `data.ctbk.dev`; see `specs/s3-to-r2-migration.md`).
 
 Two serving stacks sit on top of these outputs:
-- **Rides** (homepage + `/s/:slug` charts): the **pyrmts** rollup-pyramid — `normalized/*.parquet` tiles built on AWS Batch, registered in Cloudflare D1, served by the CF api worker (`/api/rides-v5` default, `/api/rides-v3` per-station). Superseded the legacy `ymrgtb_cd.json` / per-station-JSON flow (still reachable via `?tsrc=legacy`). The pyramid rebuild runs separately from `ctbk update` (R2-only writes).
+- **Rides** (homepage + `/s/:slug` charts): the **pyrmts** rollup-pyramid — `normalized/*.parquet` tiles built on AWS Batch, registered in Cloudflare D1, served by the CF api worker at `/api/rides` (`rides/{start,end}`: raw `s:<id>` station leaves + materialized `c:<canonical>` rollups, canonical by default, `?raw=1` audit; content-hashed shard keys; monthly `ctbk gbfs rides-extend` — `specs/rides-rekey.md`). Superseded the legacy `ymrgtb_cd.json` / per-station-JSON flow (still reachable via `?tsrc=legacy`). The pyramid rebuild runs separately from `ctbk update` (R2-only writes).
 - **Availability**: the GBFS subsystem under `gbfs/` (see below).
 
 The pipeline processes raw Citi Bike `.csv.zip` files through multiple stages:

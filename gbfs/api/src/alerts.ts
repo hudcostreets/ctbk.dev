@@ -118,14 +118,14 @@ const MISSING_MINUTES_MAX = 3;
 const HOURLY_STALE_MIN = 90;
 /** Max tip lag per served pyramid, by fill cadence: avail tiers extend every
  *  5 min (Lambda ticks), smg-v1
- *  daily after the ~05:00Z compaction, rides-v5 monthly after each tripdata
+ *  daily after the ~05:00Z compaction, rides monthly after each tripdata
  *  drop (published ~2 weeks into the following month). */
 const PYRAMID_TIP_MAX_HOURS: Record<string, number> = {
 	'avail-v5': 1,
 	'avail-v6': 1,
 	'smg-v1': 36,
-	'rides-v5-start': 50 * 24,
-	'rides-v5-end': 50 * 24,
+	'rides-start': 50 * 24,
+	'rides-end': 50 * 24,
 };
 const STATIONS_STALE_HOURS = 36;
 const SNAPSHOT_STALE_MIN = 15;

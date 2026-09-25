@@ -1125,8 +1125,6 @@ const RECONCILE_PYRAMIDS: { name: string; prefix: string; rides?: boolean }[] = 
 	// Same ladder + genesis as avail-v6 (`configs/pyramids/smg-v1.yaml`); the
 	// daily Batch `-f` fill writes shards but doesn't register them.
 	{ name: 'smg-v1', prefix: 'smg-v1/' },
-	{ name: 'rides-v5-start', prefix: 'rides-v5/start/', rides: true },
-	{ name: 'rides-v5-end', prefix: 'rides-v5/end/', rides: true },
 	{ name: 'rides-start', prefix: 'rides/start/', rides: true },
 	{ name: 'rides-end', prefix: 'rides/end/', rides: true },
 ];
