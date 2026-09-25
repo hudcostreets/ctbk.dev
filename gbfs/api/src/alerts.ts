@@ -87,18 +87,15 @@ export function hourlyCompactionStaleMinutes(s: HealthSnapshot): number {
 	return (Date.now() - compactedThroughMs) / 60_000;
 }
 
-/** Hours between "now" and the end of the pyramid's newest `present`
- *  segment (any tier) — how far its served tip lags. Infinity if the
- *  pyramid is absent from the snapshot or has nothing present. */
+/** Hours between "now" and the pyramid's newest registered `period_end`
+ *  (`pyramidTips`, dust rungs included) — how far its fill lags. Infinity
+ *  if it has no shards; 0 for a snapshot that predates the field. (Not the
+ *  cover `segments`: those mark only max-rung boundaries `present`, lagging
+ *  a healthy 5-min fill by up to 12h — the 2026-09-25 false alarms.) */
 export function pyramidTipAgeHours(s: HealthSnapshot, name: string): number {
-	const p = s.pyramids.find((x) => x.name === name);
-	let newest = -Infinity;
-	for (const t of p?.tiers ?? []) {
-		for (const seg of t.segments) {
-			if (seg.status === 'present') newest = Math.max(newest, new Date(seg.end).getTime());
-		}
-	}
-	return (Date.now() - newest) / 3_600_000;
+	if (s.pyramidTips === undefined) return 0;
+	const t = s.pyramidTips[name];
+	return t ? (Date.now() - t) / 3_600_000 : Infinity;
 }
 
 /** Hours since the loader last upserted `stations` (daily
@@ -120,12 +117,12 @@ const FEED_STALE_MIN = 5;
 const MISSING_MINUTES_MAX = 3;
 const HOURLY_STALE_MIN = 90;
 /** Max tip lag per served pyramid, by fill cadence: avail tiers extend every
- *  5 min (Lambda ticks; present segments end on ≤1h boundaries), smg-v1
+ *  5 min (Lambda ticks), smg-v1
  *  daily after the ~05:00Z compaction, rides-v5 monthly after each tripdata
  *  drop (published ~2 weeks into the following month). */
 const PYRAMID_TIP_MAX_HOURS: Record<string, number> = {
-	'avail-v5': 3,
-	'avail-v6': 3,
+	'avail-v5': 1,
+	'avail-v6': 1,
 	'smg-v1': 36,
 	'rides-v5-start': 50 * 24,
 	'rides-v5-end': 50 * 24,

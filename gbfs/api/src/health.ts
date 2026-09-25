@@ -138,7 +138,14 @@ export interface HealthSnapshot {
 	builds?: BuildProgress[];
 	stations?: StationsHealth | null;
 	alerts?: AlertsHeartbeat | null;
+	/** Newest registered `period_end` (epoch ms) per watched pyramid — the
+	 *  real fill tip, dust rungs included (cover `segments` only mark max-rung
+	 *  boundaries `present`, so they lag by up to a max shard). */
+	pyramidTips?: Record<string, number | null>;
 }
+
+/** Pyramids whose fill tip `alerts.ts` watches. */
+export const WATCHED_PYRAMIDS = ['avail-v5', 'avail-v6', 'smg-v1', 'rides-v5-start', 'rides-v5-end'];
 
 /** UTC-date + minute helpers — avoid Date methods that pull in locale. */
 function utcDate(d: Date): string {
@@ -537,6 +544,7 @@ export async function getHealthSnapshot(
 		db ? getStationsHealth(db) : Promise.resolve(null),
 		getAlertsHeartbeat(r2),
 	]);
+	const pyramidTips = db ? await getPyramidTips(db) : undefined;
 	const { DEFAULT_PYRAMID } = await import('./avail_geo');
 	return {
 		generatedAt: Math.floor(Date.now() / 1000),
@@ -549,7 +557,14 @@ export async function getHealthSnapshot(
 		builds,
 		stations,
 		alerts,
+		pyramidTips,
 	};
+}
+
+export async function getPyramidTips(db: D1Database): Promise<Record<string, number | null>> {
+	const rows = await Promise.all(WATCHED_PYRAMIDS.map((p) =>
+		db.prepare('SELECT MAX(period_end) AS t FROM pyramid_shards WHERE pyramid = ?').bind(p).first<{ t: number | null }>()));
+	return Object.fromEntries(WATCHED_PYRAMIDS.map((p, i) => [p, rows[i]?.t ?? null]));
 }
 
 export async function getStationsHealth(db: D1Database): Promise<StationsHealth> {
