@@ -3,11 +3,12 @@
 # requires-python = ">=3.12"
 # dependencies = ["boto3", "click", "pyyaml"]
 # ///
-"""Publish regenerated screenshots to their HR S3 home.
+"""Publish regenerated screenshots to their HR R2 home.
 
 Counterpart of `fetch-screenshots.js` (`specs/www-screenshots-s3-hr.md`):
 upload each image under `public/screenshots/` whose md5 differs from the
-current manifest to `s3://ctbk/screenshots/<name>` (overwrite in place —
+current manifest to `r2://ctbk/screenshots/<name>` (public at
+`https://data.ctbk.dev/screenshots/<name>`; overwrite in place —
 no versioning), then write a fresh `.deps.json` next to them recording
 the regen's input deps (data clock + www tree hash, which `www.yml`'s
 dep-gate compares against) plus the image manifest (names + md5s, which
@@ -18,12 +19,14 @@ Run after `scrns`/Docker regen — in CI (`www.yml`) or locally (both
 """
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from functools import partial
 from pathlib import Path
 from urllib.parse import urlparse
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import boto3
 from click import command, option
@@ -32,7 +35,9 @@ err = partial(print, file=sys.stderr)
 
 WWW = Path(__file__).parent.parent
 DIR = WWW / 'public/screenshots'
-DEFAULT_OUT = 's3://ctbk/screenshots'
+DEFAULT_OUT = 'r2://ctbk/screenshots'
+# R2 buckets → their public custom domain (prior-manifest reads).
+PUBLIC_BASES = {'ctbk': 'https://data.ctbk.dev'}
 EXTS = {'.png', '.jpg'}
 CONTENT_TYPES = {'.png': 'image/png', '.jpg': 'image/jpeg'}
 
@@ -66,7 +71,7 @@ def auto_www_tree() -> str:
 @command()
 @option('-d', '--data-md5', help='Monthly data clock (combined md5 of the ymrgtbs_cd aggregates) to record in .deps.json; default: read from the repo.')
 @option('-n', '--dry-run', is_flag=True, help='Report changes; upload and write nothing.')
-@option('-o', '--output', default=DEFAULT_OUT, help=f'Destination: s3://bucket/prefix or a local dir (default {DEFAULT_OUT}).')
+@option('-o', '--output', default=DEFAULT_OUT, help=f'Destination: r2://bucket/prefix (R2 creds: R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / CLOUDFLARE_ACCOUNT_ID) or a local dir (default {DEFAULT_OUT}).')
 @option('-t', '--www-tree', help='www/ tree hash (screenshots-dir excluded) to record in .deps.json; default: compute from the repo.')
 def main(
     data_md5: str | None,
@@ -77,17 +82,28 @@ def main(
     data_md5 = data_md5 or auto_data_md5()
     www_tree = www_tree or auto_www_tree()
 
-    s3_dest = output.startswith('s3://')
+    s3_dest = output.startswith('r2://')
     if s3_dest:
         u = urlparse(output)
         bucket, prefix = u.netloc, u.path.strip('/')
-        s3 = boto3.client('s3')
+        s3 = boto3.client(
+            's3',
+            endpoint_url=f"https://{os.environ['CLOUDFLARE_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+            aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'],
+            aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'],
+            region_name='auto',
+        )
         # Prior manifest (for skip-unchanged) via the public HTTPS URL —
         # absent on first bootstrap.
+        # CF's bot filter 403s urllib's default User-Agent.
+        req = Request(f'{PUBLIC_BASES[bucket]}/{prefix}/.deps.json?t={os.getpid()}',
+                      headers={'User-Agent': 'ctbk-push-screenshots/1.0'})
         try:
-            with urlopen(f'https://{bucket}.s3.amazonaws.com/{prefix}/.deps.json') as r:
+            with urlopen(req) as r:
                 prev_images = json.load(r).get('images', {})
-        except Exception:
+        except HTTPError as e:
+            if e.code != 404:
+                raise
             prev_images = {}
     else:
         out_dir = Path(output)

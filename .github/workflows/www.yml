@@ -39,10 +39,10 @@ jobs:
         env:
           CI: '1'
         run: pnpm test --reporter=list
-      # ─── Screenshots: input-gated regen, HR S3 home
+      # ─── Screenshots: input-gated regen, HR R2 home
       # (specs/www-screenshots-s3-hr.md). Regenerate exactly when a
-      # declared dep changed since the provenance recorded in the S3
-      # manifest (`s3://ctbk/screenshots/.deps.json`), BEFORE the build
+      # declared dep changed since the provenance recorded in the R2
+      # manifest (`data.ctbk.dev/screenshots/.deps.json`), BEFORE the build
       # consumes them. Nothing screenshot-related is git-tracked: the
       # old pointer-commit flow triggered a second, content-identical
       # deploy and raced concurrent pushes to `www`/`main`.
@@ -59,7 +59,7 @@ jobs:
           www_tree=$(git ls-files -s -- www ':!www/public/screenshots' | git hash-object --stdin)
           echo "data_md5=$data_md5" >> $GITHUB_OUTPUT
           echo "www_tree=$www_tree" >> $GITHUB_OUTPUT
-          deps=$(curl -sf https://ctbk.s3.amazonaws.com/screenshots/.deps.json || echo '{}')
+          deps=$(curl -sf "https://data.ctbk.dev/screenshots/.deps.json?t=$(date +%s)" || echo '{}')
           rec_data=$(echo "$deps" | jq -r '.data_md5 // "none"')
           rec_tree=$(echo "$deps" | jq -r '.www_tree // "none"')
           if [ "$data_md5" != "$rec_data" ] || [ "$www_tree" != "$rec_tree" ]; then
@@ -72,10 +72,6 @@ jobs:
       - name: Regenerate screenshots (deps changed)
         if: steps.scrgate.outputs.stale == 'true'
         working-directory: www
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
         run: |
           docker build --platform linux/amd64 -f Dockerfile.screenshots -t ctbk-screenshots .
           docker run --platform linux/amd64 --name ctbk-screenshots-run ctbk-screenshots
@@ -85,13 +81,13 @@ jobs:
           command -v magick >/dev/null || command -v convert >/dev/null \
             || sudo apt-get install -y -qq imagemagick
           bash scripts/compose-og.sh
-      - name: Publish screenshots to S3
+      - name: Publish screenshots to R2
         if: steps.scrgate.outputs.stale == 'true' && github.ref == 'refs/heads/www'
         working-directory: www
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           # Overwrite the HR keys + manifest in place — no git commit, so
           # this run's build (below) is the only deploy.
