@@ -177,6 +177,17 @@ printed the 500's body). Fixed with `ctbk gbfs manifest prune -p rides-start
 with every CA rewrite (fold into `gc` / the worker cron), and D1 headroom
 (~3.9 GB) should be watched.
 
+**P4 done (2026-09-25).** `c14n` fast-forwarded to `main` (`0914f1ca`): the site
+(homepage, station pages, multi-station panel, `/cells`, og images) reads
+`/api/rides`; the api's reconcile, `/health` and tip alerts track `rides-{start,end}`;
+CI's monthly step is `ctbk gbfs rides-extend` on HCCS Batch (OIDC role, job def
+rev 5 = `ctbk-engine:c8b3fffb` on pyrmts `0e3a230`, whose `build -f` honors the
+invalidation journal — verified: the pending July entry rebuilt 8 start-anchor
+shards and was pruned). `/api/rides-v5` removed in `57afbd25`; the raw-rides table
+scaffold moved to `/api/trips`. Remaining v5 retirement: `ctbk gbfs d1 drop -y -p
+rides-v5-{start,end}` + `ctbk gbfs manifest prune -p rides-v5-{start,end}` (~695k
+RG rows); R2 `rides-v5/` kept as backup until the de-version purge.
+
 ## Validation gate
 
 On the dev worker (new data) vs the prod worker (old data), before any P4 flip:
