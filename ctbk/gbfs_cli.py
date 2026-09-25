@@ -1778,7 +1778,7 @@ def _engine_submit(
 @option('-m', '--manifest', 'manifest_name', default='manifest.jsonl', show_default=True, help='Manifest object name under the scratch prefix.')
 @option('-n', '--dry-run', is_flag=True, help='Print the submit command without running it.')
 @option('-p', '--prefix', 'scratch_prefix', default=None, help='Scratch key prefix [default: <config>-engine-check].')
-@option('-R', '--real', is_flag=True, help='Build at the config\'s own prefix (not a scratch prefix; refused for `avail`); rides configs default `-x` to their `ctbk_engine_src:rides_<anchor>` factory. Forwards `R2_RW_{ACCESS_KEY_ID,SECRET_ACCESS_KEY}` from the environment as the job\'s R2 creds (the HCCS job def carries none).')
+@option('-R', '--real', is_flag=True, help='Build at the config\'s own prefix (not a scratch prefix; refused for `avail`); rides configs default `-x` to their `ctbk_engine_src:rides_<anchor>` factory. The job def supplies R2 creds (Secrets Manager refs, `engine jobdef -s`).')
 @option('-r', '--range', 'range_', default=None, help='Half-open build range `[FROM]/TO` (UTC ISO; FROM defaults to genesis).')
 @option('-s', '--source', 'source_rung', default='1m', show_default=True, help='Source tier, `tier` (min-cover: read the tier as stored) or `tier@shard_dur` (pin one rung, e.g. seeded scratch).')
 @option('-t', '--max-missing', type=float, default=None, help='Fraction of source periods allowed to be absent before the build fails (build --max-missing). An uncapped `-f` fill expects a cover reaching `now`, so the in-progress month\'s unpublished source is a legitimate miss. Open/future periods no longer count (either side of the ratio) unless `--strict-open-periods`, so the in-progress month needs no tolerance. NOTE the denominator is the sources THIS fill reads, not all history: a gap-fill touching 8 closed source months fails at 1/8=0.125.')
@@ -1821,13 +1821,6 @@ def gbfs_engine_submit(
 		scratch_prefix = config_prefix(merged_yaml(config_name))
 		if source_spec is None and (anchor := _rides_anchor(config_name)):
 			source_spec = f'ctbk_engine_src:rides_{anchor}'
-		creds = {
-			'R2_ACCESS_KEY_ID': os.environ.get('R2_RW_ACCESS_KEY_ID'),
-			'R2_SECRET_ACCESS_KEY': os.environ.get('R2_RW_SECRET_ACCESS_KEY'),
-		}
-		if not all(creds.values()):
-			raise click.ClickException('-R needs R2_RW_ACCESS_KEY_ID / R2_RW_SECRET_ACCESS_KEY (`source .envrc`)')
-		envs = tuple(f'{k}={v}' for k, v in creds.items()) + envs
 	sys.exit(_engine_submit(
 		config_name,
 		aligned=aligned, mem_budget=mem_budget, close_chunk=close_chunk, envs=envs,
