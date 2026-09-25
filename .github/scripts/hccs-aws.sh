@@ -12,6 +12,7 @@ export AWS_DEFAULT_REGION=us-east-1 AWS_REGION=us-east-1
 read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN < <(
   aws sts assume-role-with-web-identity --role-arn "$ROLE" \
     --role-session-name "gha-${GITHUB_RUN_ID:-local}" --web-identity-token "$token" \
+    --duration-seconds "${HCCS_AWS_DURATION:-3600}" \
     --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text)
 export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 exec "$@"

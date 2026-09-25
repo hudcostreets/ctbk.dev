@@ -158,7 +158,8 @@ def provision() -> None:
     )
     gha = aws.iam.Role(
         'ctbk-gha', name='ctbk-gha',
-        description=f'GitHub Actions ({GITHUB_REPO}) — Batch submit + read-only infra checks',
+        description=f'GitHub Actions ({GITHUB_REPO}) — Batch submit, s3://tripdata reads, read-only infra checks',
+        max_session_duration=4 * 3600,  # `Process new month` can outlast the 1h default
         assume_role_policy=oidc.arn.apply(lambda arn: json.dumps({
             'Version': '2012-10-17',
             'Statement': [{
@@ -194,6 +195,14 @@ def provision() -> None:
                     'Effect': 'Allow',
                     'Action': ['logs:GetLogEvents', 'logs:FilterLogEvents', 'logs:DescribeLogStreams'],
                     'Resource': f'arn:aws:logs:{REGION}:{ACCOUNT}:log-group:/pyrmts-engine/batch:*',
+                },
+                {
+                    # Citi Bike's public bucket: cross-account reads only need
+                    # this principal-side grant.
+                    'Sid': 'TripdataRead',
+                    'Effect': 'Allow',
+                    'Action': ['s3:ListBucket', 's3:GetObject'],
+                    'Resource': ['arn:aws:s3:::tripdata', 'arn:aws:s3:::tripdata/*'],
                 },
                 {
                     'Sid': 'InfraDriftRead',
