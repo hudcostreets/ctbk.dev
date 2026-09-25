@@ -1,9 +1,13 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import type { HealthSnapshot } from './health';
 import {
+	DEFAULT_RULES,
 	diffRules,
 	feedStaleMinutes,
 	hourlyCompactionStaleMinutes,
+	pyramidTipAgeHours,
+	snapshotAgeMinutes,
+	stationsStaleHours,
 	trailingHourMissing,
 	type AlertState,
 	type FiringEntry,
@@ -156,5 +160,78 @@ describe('diffRules', () => {
 			['b', 'resolved'], // was firing, now not
 			// c stays firing — no transition
 		]);
+	});
+});
+
+/** A pyramid whose newest `present` segment ends at `presentEnd` (plus a
+ *  later `pending` one, which must not count). */
+const pyr = (name: string, presentEnd: string) => ({
+	name,
+	tiers: [{
+		tier: '1m',
+		segments: [
+			{ start: '2026-05-01T00:00:00Z', end: presentEnd, shardDur: '1d', status: 'present' },
+			{ start: presentEnd, end: '2026-05-24T12:00:00Z', shardDur: '30min', status: 'pending' },
+		],
+	}],
+}) as unknown as HealthSnapshot['pyramids'][number];
+
+/** Every pyramid DEFAULT_RULES watches, each tip at the given age (hours). */
+const pyramidsAt = (ages: Record<string, number>) => Object.entries(ages).map(([name, h]) =>
+	pyr(name, new Date(FIXED_NOW.getTime() - h * 3_600_000).toISOString()));
+const HEALTHY_TIPS = { 'avail-v5': 0.5, 'avail-v6': 0.5, 'smg-v1': 12, 'rides-v5-start': 24 * 24, 'rides-v5-end': 24 * 24 };
+
+const firingIds = (s: HealthSnapshot) => DEFAULT_RULES.filter((r) => r.check(s)).map((r) => r.id);
+
+describe('pyramidTipAgeHours', () => {
+	it('ages the newest present segment, ignoring pending ones', () => {
+		expect(pyramidTipAgeHours(snap({ pyramids: [pyr('avail-v6', '2026-05-24T09:00:00Z')] }), 'avail-v6')).toBe(3);
+	});
+	it('Infinity for a pyramid missing from the snapshot', () => {
+		expect(pyramidTipAgeHours(snap(), 'avail-v6')).toBe(Infinity);
+	});
+});
+
+describe('stationsStaleHours / snapshotAgeMinutes', () => {
+	it('hours since the last stations upsert; Infinity when unknown', () => {
+		expect(stationsStaleHours(snap({ stations: { lastUpdatedAt: FIXED_NOW.getTime() / 1000 - 7200 } }))).toBe(2);
+		expect(stationsStaleHours(snap({ stations: null }))).toBe(Infinity);
+		expect(stationsStaleHours(snap())).toBe(0);  // pre-feature cached snapshot
+	});
+	it('minutes since the snapshot was generated', () => {
+		expect(snapshotAgeMinutes(snap({ generatedAt: FIXED_NOW.getTime() / 1000 - 600 }))).toBe(10);
+	});
+});
+
+describe('DEFAULT_RULES on a full snapshot', () => {
+	const fresh = (overrides: Partial<HealthSnapshot> = {}) => snap({
+		pyramids: pyramidsAt(HEALTHY_TIPS),
+		stations: { lastUpdatedAt: FIXED_NOW.getTime() / 1000 - 12 * 3600 },
+		...overrides,
+	});
+
+	it('healthy → nothing fires', () => {
+		expect(firingIds(fresh())).toEqual([]);
+	});
+
+	it('a dead cascade (avail tips 4h behind) fires both avail tip rules only', () => {
+		expect(firingIds(fresh({ pyramids: pyramidsAt({ ...HEALTHY_TIPS, 'avail-v5': 4, 'avail-v6': 4 }) }))).toEqual([
+			'pyramid-tip-stale:avail-v5',
+			'pyramid-tip-stale:avail-v6',
+		]);
+	});
+
+	it('a missed daily smg fill fires at >36h, a late monthly ingest at >50d', () => {
+		expect(firingIds(fresh({ pyramids: pyramidsAt({ ...HEALTHY_TIPS, 'smg-v1': 37, 'rides-v5-end': 51 * 24 }) }))).toEqual([
+			'pyramid-tip-stale:smg-v1',
+			'pyramid-tip-stale:rides-v5-end',
+		]);
+	});
+
+	it('stale stations (the 2026-06 loader failure) and a dead snapshot cron each fire', () => {
+		expect(firingIds(fresh({
+			stations: { lastUpdatedAt: FIXED_NOW.getTime() / 1000 - 90 * 24 * 3600 },
+			generatedAt: FIXED_NOW.getTime() / 1000 - 20 * 60,
+		}))).toEqual(['stations-stale', 'health-snapshot-stale']);
 	});
 });

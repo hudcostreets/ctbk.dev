@@ -107,6 +107,24 @@ export interface TripdataHealth {
 	totalZips: number;
 }
 
+/** Freshness of the D1 `stations` table (the loader's daily
+ *  `station_information` upsert). `lastUpdatedAt` is unix seconds. */
+export interface StationsHealth {
+	lastUpdatedAt: number | null;
+}
+
+/** Written by `runAlerts` every run (`ALERTS_HEARTBEAT_KEY`), surfaced here
+ *  so an external watchdog can tell the alerter itself is alive and
+ *  reaching Slack — the alerter can't report its own failure. */
+export interface AlertsHeartbeat {
+	ranAt: string;
+	/** Transitions whose Slack sync failed on the last run (retried next run). */
+	slackFailures: number;
+	firing: string[];
+}
+
+export const ALERTS_HEARTBEAT_KEY = 'gbfs/alerts/heartbeat.json';
+
 export interface HealthSnapshot {
 	generatedAt: number;
 	feed: FeedHealth;
@@ -118,6 +136,8 @@ export interface HealthSnapshot {
 	defaultPyramid?: string;
 	tripdata: TripdataHealth | null;
 	builds?: BuildProgress[];
+	stations?: StationsHealth | null;
+	alerts?: AlertsHeartbeat | null;
 }
 
 /** UTC-date + minute helpers — avoid Date methods that pull in locale. */
@@ -507,13 +527,15 @@ export async function getHealthSnapshot(
 	r2: HealthR2,
 	db?: D1Database,
 ): Promise<HealthSnapshot> {
-	const [feed, compactions, cascade, pyramids, tripdata, builds] = await Promise.all([
+	const [feed, compactions, cascade, pyramids, tripdata, builds, stations, alerts] = await Promise.all([
 		getFeedHealth(r2),
 		getCompactionHealth(r2),
 		getCascadeHealth(r2),
 		db ? getPyramidsHealth(db, r2) : Promise.resolve<PyramidsHealth>([]),
 		getTripdataHealth(r2),
 		getBuildsHealth(r2),
+		db ? getStationsHealth(db) : Promise.resolve(null),
+		getAlertsHeartbeat(r2),
 	]);
 	const { DEFAULT_PYRAMID } = await import('./avail_geo');
 	return {
@@ -525,7 +547,19 @@ export async function getHealthSnapshot(
 		defaultPyramid: DEFAULT_PYRAMID,
 		tripdata,
 		builds,
+		stations,
+		alerts,
 	};
+}
+
+export async function getStationsHealth(db: D1Database): Promise<StationsHealth> {
+	const row = await db.prepare('SELECT MAX(updated_at) AS t FROM stations WHERE in_gbfs = 1').first<{ t: number | null }>();
+	return { lastUpdatedAt: row?.t ?? null };
+}
+
+async function getAlertsHeartbeat(r2: HealthR2): Promise<AlertsHeartbeat | null> {
+	const obj = await r2.get(ALERTS_HEARTBEAT_KEY);
+	return obj ? obj.json<AlertsHeartbeat>() : null;
 }
 
 /** Where the cron-refreshed snapshot lives on R2. The full snapshot takes

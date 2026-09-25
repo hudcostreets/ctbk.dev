@@ -1,0 +1,27 @@
+name: Slack notify
+description: Post one message to #ctbk-bot (as ctbk-bot); fails the step if Slack rejects it.
+inputs:
+  text:
+    description: Message (Slack mrkdwn)
+    required: true
+  token:
+    description: Slack bot token (`secrets.SLACK_BOT_TOKEN`)
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TEXT: ${{ inputs.text }}
+        TOKEN: ${{ inputs.token }}
+      run: |
+        payload=$(jq -n --arg text "$TEXT" \
+          '{channel: "C0B5MKF28NP", text: $text, username: "ctbk-bot", icon_emoji: ":bike:"}')
+        resp=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+          -H "Authorization: Bearer $TOKEN" \
+          -H 'Content-Type: application/json; charset=utf-8' \
+          --data "$payload")
+        if ! jq -e .ok >/dev/null <<<"$resp"; then
+          echo "::error::Slack post failed: $(jq -r .error <<<"$resp")"
+          exit 1
+        fi

@@ -95,3 +95,10 @@ jobs:
               icon_emoji=':bike:',
           ).sync(Thread(messages=[text]))
           PY
+
+      - name: Notify Slack — failure
+        if: failure()
+        uses: ./.github/actions/slack-notify
+        with:
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          text: ":x: *Tripdata bucket sync failed* — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>"

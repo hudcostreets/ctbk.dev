@@ -1876,6 +1876,11 @@ export default {
 			console.log('alerts: SLACK_BOT_TOKEN not set; skipping');
 			return;
 		}
-		ctx.waitUntil(runAlerts(env.R2, env.SLACK_BOT_TOKEN));
+		// A failing run leaves `/api/health`'s `alerts.ranAt` heartbeat stale,
+		// which the `health-watchdog` GHA (outside this worker) reports.
+		ctx.waitUntil(
+			runAlerts(env.R2, env.SLACK_BOT_TOKEN, undefined, env.DB)
+				.catch((err) => console.error('alerts cron error:', err?.message ?? err)),
+		);
 	},
 } satisfies ExportedHandler<Env>;

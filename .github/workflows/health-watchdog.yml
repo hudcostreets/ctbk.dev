@@ -1,0 +1,49 @@
+name: Health watchdog
+# Dead-man's switch for the api worker's in-CF alerting, which can't report
+# its own failure: checks from outside Cloudflare that the minute cron still
+# refreshes `/api/health` and that `runAlerts` still runs and reaches Slack
+# (`alerts` heartbeat). Posts to #ctbk-bot on any problem (hourly while it
+# persists).
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check /api/health + alerts heartbeat
+        id: check
+        run: |
+          problems=()
+          if ! curl -sSf --max-time 30 https://ctbk-gbfs-api.hccs-ctbk.workers.dev/api/health -o health.json; then
+            problems+=("\`/api/health\` unreachable")
+          else
+            now=$(date -u +%s)
+            snap_age=$(( (now - $(jq -r '.generatedAt' health.json)) / 60 ))
+            (( snap_age > 15 )) && problems+=("health snapshot ${snap_age} min old (minute cron failing)")
+            ran_at=$(jq -r '.alerts.ranAt // empty' health.json)
+            if [ -z "$ran_at" ]; then
+              problems+=("no alerts heartbeat in snapshot")
+            else
+              alert_age=$(( (now - $(date -u -d "$ran_at" +%s)) / 60 ))
+              (( alert_age > 15 )) && problems+=("alerts last ran ${alert_age} min ago")
+            fi
+            fails=$(jq -r '.alerts.slackFailures // 0' health.json)
+            (( fails > 0 )) && problems+=("alerts: ${fails} Slack sync failure(s) on the last run")
+          fi
+          if (( ${#problems[@]} )); then
+            printf '::error::%s\n' "${problems[@]}"
+            { echo 'text<<EOF'; echo ":rotating_light: *Health watchdog* — $(IFS=';'; echo "${problems[*]}" | sed 's/;/; /g')"; echo EOF; } >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "ok: snapshot ${snap_age} min, alerts ${alert_age} min ago"
+      - name: Notify Slack
+        if: failure()
+        uses: ./.github/actions/slack-notify
+        with:
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          text: "${{ steps.check.outputs.text || ':x: *Health watchdog failed*' }} — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>"
