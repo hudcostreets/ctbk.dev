@@ -119,7 +119,19 @@ async function upsertStationsInfo(db: D1Database, info: InfoResponse): Promise<n
 				now,
 			)
 		);
-	await db.batch(stmts);
+	// A renumbered station keeps its GBFS UUID under a new short_name; the
+	// old row still holds that UUID, so its upsert would fail the UNIQUE on
+	// gbfs_station_id — and with it the whole (atomic) batch. Release the
+	// UUID from any row the snapshot no longer attaches it to, first.
+	const idToShortName = Object.fromEntries(
+		info.data.stations.filter((s) => s.short_name).map((s) => [s.station_id, s.short_name!]),
+	);
+	const release = db.prepare(
+		`UPDATE stations SET gbfs_station_id = NULL, in_gbfs = 0, updated_at = ?2
+		 WHERE gbfs_station_id IN (SELECT key FROM json_each(?1))
+		   AND short_name != json_extract(?1, '$."' || gbfs_station_id || '"')`
+	).bind(JSON.stringify(idToShortName), now);
+	await db.batch([release, ...stmts]);
 	return stmts.length;
 }
 
