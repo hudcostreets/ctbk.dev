@@ -192,8 +192,9 @@ def _registry_post(env_name: str, body: dict) -> dict:
 		except HTTPError as e:
 			if e.code not in (403, 429, 500, 502, 503):
 				raise
-			last = e
-			err(f'  registry {body.get("op")}: HTTP {e.code}, retrying ({attempt + 1}/4)')
+			detail = e.read().decode(errors='replace')[:500]
+			last = f'{e} — {detail}' if detail else e
+			err(f'  registry {body.get("op")}: HTTP {e.code}{f" ({detail})" if detail else ""}, retrying ({attempt + 1}/4)')
 		except (ConnectionResetError, TimeoutError, OSError) as e:
 			# Long sequential loops occasionally get connection resets
 			# (each urllib call opens a fresh connection; CF edge churn).
@@ -220,6 +221,35 @@ def gbfs_manifest_status(env_name: str, pyramids: tuple[str, ...], verbose: bool
 				print(f'  stale: {k}')
 			for k in s['unfilled']:
 				print(f'  unfilled: {k}')
+
+
+@gbfs_manifest.command('prune', help='Delete RG-manifest rows (`rg_manifest` + `rg_manifest_fills`) for keys no `pyramid_shards` row references — superseded blobs under a content-hashed keyTemplate (each rewrite is a new key, so its old key\'s RG rows are orphaned; legacy in-place rewrites replaced them by PK). One DELETE pair per key via D1 REST; billed as row writes (~2× rows, index).')
+@option('-n', '--dry-run', is_flag=True, help='List orphan keys + RG-row counts; delete nothing.')
+@option('-p', '--pyramid', 'pyramids', multiple=True, required=True, help='Pyramid name (repeatable).')
+def gbfs_manifest_prune(dry_run: bool, pyramids: tuple[str, ...]) -> None:
+	from ctbk.pyramid_cascade.d1_http import d1_query
+	os.environ.setdefault('CLOUDFLARE_API_TOKEN', os.environ.get('CF_TOKEN', ''))
+	total_keys = total_rgs = 0
+	for pyramid in pyramids:
+		orphans = d1_query(
+			'SELECT f.key, f.n_rgs FROM rg_manifest_fills f '
+			'LEFT JOIN pyramid_shards s ON s.pyramid = f.pyramid AND s.key = f.key '
+			'WHERE f.pyramid = ? AND s.key IS NULL ORDER BY f.key',
+			[pyramid],
+		)
+		n_rgs = sum(r['n_rgs'] for r in orphans)
+		err(f'{pyramid}: {len(orphans)} orphan keys, {n_rgs:,} RG rows')
+		total_keys += len(orphans)
+		total_rgs += n_rgs
+		for i, r in enumerate(orphans, 1):
+			if dry_run:
+				print(f'  {r["key"]}  {r["n_rgs"]}')
+				continue
+			d1_query('DELETE FROM rg_manifest WHERE pyramid = ? AND key = ?', [pyramid, r['key']])
+			d1_query('DELETE FROM rg_manifest_fills WHERE pyramid = ? AND key = ?', [pyramid, r['key']])
+			if i % 25 == 0 or i == len(orphans):
+				err(f'  pruned {i}/{len(orphans)}')
+	err(f'{"would prune" if dry_run else "pruned"} {total_keys} keys, {total_rgs:,} RG rows')
 
 
 def _key_shard_bins(key: str) -> int:

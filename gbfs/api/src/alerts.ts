@@ -249,6 +249,9 @@ export async function runAlerts(
 		channel: SLACK_CHANNEL,
 		username: SLACK_USERNAME,
 		iconEmoji: SLACK_ICON_EMOJI,
+		// thrds stores `globalThis.fetch` and calls it as `this.fetchImpl(…)`;
+		// Workers' fetch throws "Illegal invocation" when `this` isn't the global.
+		fetch: (input, init) => fetch(input, init),
 	});
 
 	const nowIso = new Date().toISOString();
