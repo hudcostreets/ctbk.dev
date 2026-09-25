@@ -23,10 +23,8 @@ on:
 permissions:
   contents: write
   actions: write  # dispatch `www.yml`
+  id-token: write  # HCCS AWS via OIDC (`.github/scripts/hccs-aws.sh`)
 env:
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  AWS_DEFAULT_REGION: us-east-1
   # R2 creds for the rides-pyramid builds in `ctbk update` (`rides-v1-build`
   # writes shards to R2; `r2_client()` prefers these over the local `cf` profile)
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -268,9 +266,12 @@ jobs:
         if: steps.args.outputs.args
         run: cd www && pnpm install --frozen-lockfile
 
+      # `norm` reads `s3://tripdata` (public): as the HCCS `ctbk-gha` role.
       - name: Run ctbk
         if: steps.args.outputs.args
-        run: ctbk ${{ steps.args.outputs.args }}
+        env:
+          HCCS_AWS_DURATION: '14400'
+        run: .github/scripts/hccs-aws.sh ctbk ${{ steps.args.outputs.args }}
 
       # ─── R2 dual-push (specs/s3-to-r2-migration.md) ────────────────
       # The FE reads the DVX cache from R2 (data.ctbk.dev), so each
@@ -295,9 +296,15 @@ jobs:
         if: steps.args.outputs.args && steps.args.outputs.ym
         working-directory: gbfs/api
         run: pnpm install --frozen-lockfile
+      # Last RAC AWS use: v5's Batch builds run the RAC `pyrmts-engine` job
+      # def (v5-era image — the HCCS one emits the re-keyed `s:<raw>` leaves).
+      # Goes away with v5 at the rides re-key P4 cutover.
       - name: Extend rides-v5
         if: steps.args.outputs.args && steps.args.outputs.ym
         env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
           CTBK_REGISTRY_SECRET: ${{ secrets.CTBK_REGISTRY_SECRET }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: ctbk gbfs rides-v5-extend ${{ steps.args.outputs.ym }}
