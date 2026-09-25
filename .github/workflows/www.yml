@@ -1,15 +1,35 @@
 name: Deploy ctbk.dev
+# Prod deploys from `main` (dev.ctbk.dev from `dev`) whenever a push touches
+# the site's inputs — the paths below. The monthly pipeline's own commits
+# (author `GitHub Actions`) are skipped: it pushes mid-run, before
+# `Extend rides-v5`, and a deploy then would screenshot the previous month
+# yet record the new data clock (so never regen). `ci.yml` instead
+# dispatches this once at its end. `www` is no longer a trigger — just a
+# marker of what's live, advanced after each successful prod deploy.
 on:
   push:
     branches:
-      - www
+      - main
       - dev
       - scrns-playwright-test
+    paths:
+      - 'www/**'
+      - '.github/workflows/www.yml'
+      - '.github/actions/**'
   workflow_dispatch:
+# Queue, don't cancel: a half-finished deploy + screenshot publish is worse
+# than a short wait.
+concurrency:
+  group: www-deploy-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   build:
-    name: Build + deploy www branch to ctbk.dev (CF Workers Assets)
+    name: Build + deploy to ctbk.dev (CF Workers Assets)
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'push' ||
+      github.ref != 'refs/heads/main' ||
+      github.event.head_commit.author.name != 'GitHub Actions'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -82,7 +102,7 @@ jobs:
             || sudo apt-get install -y -qq imagemagick
           bash scripts/compose-og.sh
       - name: Publish screenshots to R2
-        if: steps.scrgate.outputs.stale == 'true' && github.ref == 'refs/heads/www'
+        if: steps.scrgate.outputs.stale == 'true' && github.ref == 'refs/heads/main'
         working-directory: www
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -95,7 +115,7 @@ jobs:
             -d "${{ steps.scrgate.outputs.data_md5 }}" \
             -t "${{ steps.scrgate.outputs.www_tree }}"
       - name: Upload screenshots as artifact
-        if: steps.scrgate.outputs.stale == 'true' && github.ref != 'refs/heads/www'
+        if: steps.scrgate.outputs.stale == 'true' && github.ref != 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: screenshots
@@ -116,7 +136,7 @@ jobs:
       # 2026-08-15).
       - name: Record previous deploy sha
         id: prev
-        if: github.ref == 'refs/heads/www' || github.ref == 'refs/heads/dev'
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
         env:
           HOST: ${{ github.ref == 'refs/heads/dev' && 'dev.ctbk.dev' || 'ctbk.dev' }}
         run: |
@@ -125,7 +145,7 @@ jobs:
           echo "previous deploy: ${prev:-unknown (no version.json yet)}"
       - name: Deploy to Cloudflare Workers (ctbk-dev)
         id: deploy
-        if: github.ref == 'refs/heads/www' || github.ref == 'refs/heads/dev'
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
         working-directory: www
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -168,7 +188,7 @@ jobs:
           exit 1
 
       - name: Notify Slack — site deployed
-        if: github.ref == 'refs/heads/www' && steps.deploy.outcome == 'success' && steps.smoke.outcome == 'success'
+        if: github.ref == 'refs/heads/main' && steps.deploy.outcome == 'success' && steps.smoke.outcome == 'success'
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -251,7 +271,7 @@ jobs:
       # didn't fire) — e.g. 2026-08-14's two e2e-gated failures left the
       # site undeployable for ~5h with no ping.
       - name: Notify Slack — deploy failed
-        if: failure() && github.ref == 'refs/heads/www'
+        if: failure() && github.ref == 'refs/heads/main'
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SHA: ${{ github.sha }}
@@ -277,3 +297,11 @@ jobs:
               f"<{os.environ['RUN_URL']}|logs>"
           )
           PY
+
+      - name: Advance `www` marker to the live commit
+        if: github.ref == 'refs/heads/main' && steps.smoke.outcome == 'success'
+        run: |
+          # Force: `www` records what ctbk.dev serves, so a dispatched
+          # redeploy of an older commit (rollback) moves it backwards too.
+          git fetch --no-tags --depth=1 origin www || true
+          git push --force origin HEAD:refs/heads/www

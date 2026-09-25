@@ -128,7 +128,7 @@ npm run scrns       # Generate screenshots
 
 ### GitHub Actions
 - **CI** (`.github/workflows/ci.yml`): Monthly data ingestion from s3://tripdata
-- **Website** (`.github/workflows/www.yml`): Deployment to GitHub Pages on www branch
+- **Website** (`.github/workflows/www.yml`): Deploys ctbk.dev (CF Workers Assets) on pushes to `main` touching `www/**` (or dispatch; the monthly pipeline dispatches it once at its end); `www` branch = marker of the live commit
 - **No test automation**: Actions focus on ETL and deployment only
 
 ### Monthly Data Updates
