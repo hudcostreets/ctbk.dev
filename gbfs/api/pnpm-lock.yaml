@@ -36,12 +36,15 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^4.20241218.0
         version: 4.20260412.1
+      '@types/node':
+        specifier: ^22.20.4
+        version: 22.20.4
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
       vitest:
         specifier: ^2.1.8
-        version: 2.1.9(@types/node@24.10.1)
+        version: 2.1.9(@types/node@22.20.4)
       wrangler:
         specifier: ^4.0.0
         version: 4.81.1(@cloudflare/workers-types@4.20260412.1)
@@ -775,8 +778,8 @@ packages:
   '@types/ms@2.1.0':
     resolution: {integrity: sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==}
 
-  '@types/node@24.10.1':
-    resolution: {integrity: sha512-GNWcUTRBgIRJD5zj+Tq0fKOJ5XZajIiBroOF0yvj2bSU1WvNdYS/dn9UxwsujGW4JX06dnHyjV2y9rRaybH0iQ==}
+  '@types/node@22.20.4':
+    resolution: {integrity: sha512-zJRE40jpHtKqE/C4fgHrAKQLJuSpzEnP9ff9Y7YtoR3Wd2pwqzlekDeEuUQXjRd+QCYnVnNwuJYmhdk9XV8gvA==}
 
   '@types/react@19.2.15':
     resolution: {integrity: sha512-eRwcGNHve+E8qtEQSSRl6urh+rFop4v8gm6O8rGv25CodbvFdLjA1vVQ1KkiFE0w0UPOnb8tDiFKL5lp0rtY5Q==}
@@ -1000,6 +1003,10 @@ packages:
   hyparquet@https://codeload.github.com/runsascoded/hyparquet/tar.gz/0f355ea5a37dcb9b29a43e33a3d45ce660c80798:
     resolution: {tarball: https://codeload.github.com/runsascoded/hyparquet/tar.gz/0f355ea5a37dcb9b29a43e33a3d45ce660c80798}
     version: 1.22.1-dist.fae8d22
+
+  hyparquet@https://codeload.github.com/runsascoded/hyparquet/tar.gz/0fc22700f612f32c8a6ded303bfc8d4adcc57753:
+    resolution: {tarball: https://codeload.github.com/runsascoded/hyparquet/tar.gz/0fc22700f612f32c8a6ded303bfc8d4adcc57753}
+    version: 1.31.1-dist.d999e10
 
   inline-style-parser@0.2.7:
     resolution: {integrity: sha512-Nb2ctOyNR8DqQoR0OwRG95uNWIC0C1lCgf5Naz5H6Ji72KZ8OcFZLz2P5sNgwlyoJ8Yif11oMuYs5pBQa86csA==}
@@ -1239,6 +1246,15 @@ packages:
       react:
         optional: true
 
+  pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/01cb9739acd3c91f705f32b3c20f14da3f465396#path:/js/packages/pyrmts:
+    resolution: {path: /js/packages/pyrmts, tarball: https://codeload.github.com/runsascoded/pyrmts/tar.gz/01cb9739acd3c91f705f32b3c20f14da3f465396}
+    version: 0.0.0
+    peerDependencies:
+      react: '>=18'
+    peerDependenciesMeta:
+      react:
+        optional: true
+
   pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/55825c1b0548732f93f753f9cf2eddd85eb23da5#path:/js/packages/pyrmts:
     resolution: {path: /js/packages/pyrmts, tarball: https://codeload.github.com/runsascoded/pyrmts/tar.gz/55825c1b0548732f93f753f9cf2eddd85eb23da5}
     version: 0.0.0
@@ -1379,8 +1395,8 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
-  undici-types@7.16.0:
-    resolution: {integrity: sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw==}
+  undici-types@6.21.0:
+    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
   undici@7.24.4:
     resolution: {integrity: sha512-BM/JzwwaRXxrLdElV2Uo6cTLEjhSb3WXboncJamZ15NgUURmvlXvxa6xkwIOILIjPNo9i8ku136ZvWV0Uly8+w==}
@@ -1961,10 +1977,9 @@ snapshots:
 
   '@types/ms@2.1.0': {}
 
-  '@types/node@24.10.1':
+  '@types/node@22.20.4':
     dependencies:
-      undici-types: 7.16.0
-    optional: true
+      undici-types: 6.21.0
 
   '@types/react@19.2.15':
     dependencies:
@@ -1983,13 +1998,13 @@ snapshots:
       chai: 5.3.3
       tinyrainbow: 1.2.0
 
-  '@vitest/mocker@2.1.9(vite@5.4.21(@types/node@24.10.1))':
+  '@vitest/mocker@2.1.9(vite@5.4.21(@types/node@22.20.4))':
     dependencies:
       '@vitest/spy': 2.1.9
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 5.4.21(@types/node@24.10.1)
+      vite: 5.4.21(@types/node@22.20.4)
 
   '@vitest/pretty-format@2.1.9':
     dependencies:
@@ -2209,6 +2224,8 @@ snapshots:
   hyparquet@1.26.0: {}
 
   hyparquet@https://codeload.github.com/runsascoded/hyparquet/tar.gz/0f355ea5a37dcb9b29a43e33a3d45ce660c80798: {}
+
+  hyparquet@https://codeload.github.com/runsascoded/hyparquet/tar.gz/0fc22700f612f32c8a6ded303bfc8d4adcc57753: {}
 
   inline-style-parser@0.2.7: {}
 
@@ -2651,14 +2668,21 @@ snapshots:
 
   pyrmts-cfw@https://codeload.github.com/runsascoded/pyrmts/tar.gz/55825c1b0548732f93f753f9cf2eddd85eb23da5#path:/js/packages/pyrmts-cfw(react@19.2.6):
     dependencies:
-      pyrmts: https://codeload.github.com/runsascoded/pyrmts/tar.gz/55825c1b0548732f93f753f9cf2eddd85eb23da5#path:/js/packages/pyrmts(react@19.2.6)
+      pyrmts: https://codeload.github.com/runsascoded/pyrmts/tar.gz/01cb9739acd3c91f705f32b3c20f14da3f465396#path:/js/packages/pyrmts(react@19.2.6)
     transitivePeerDependencies:
       - react
 
   pyrmts-geo@https://codeload.github.com/runsascoded/pyrmts/tar.gz/55825c1b0548732f93f753f9cf2eddd85eb23da5#path:/js/packages/pyrmts-geo(react@19.2.6):
     dependencies:
-      pyrmts: https://codeload.github.com/runsascoded/pyrmts/tar.gz/55825c1b0548732f93f753f9cf2eddd85eb23da5#path:/js/packages/pyrmts(react@19.2.6)
+      pyrmts: https://codeload.github.com/runsascoded/pyrmts/tar.gz/01cb9739acd3c91f705f32b3c20f14da3f465396#path:/js/packages/pyrmts(react@19.2.6)
       s2js: 1.44.0
+    optionalDependencies:
+      react: 19.2.6
+
+  pyrmts@https://codeload.github.com/runsascoded/pyrmts/tar.gz/01cb9739acd3c91f705f32b3c20f14da3f465396#path:/js/packages/pyrmts(react@19.2.6):
+    dependencies:
+      hyparquet: https://codeload.github.com/runsascoded/hyparquet/tar.gz/0fc22700f612f32c8a6ded303bfc8d4adcc57753
+      yaml: 2.9.0
     optionalDependencies:
       react: 19.2.6
 
@@ -2879,8 +2903,7 @@ snapshots:
 
   typescript@5.9.3: {}
 
-  undici-types@7.16.0:
-    optional: true
+  undici-types@6.21.0: {}
 
   undici@7.24.4: {}
 
@@ -2940,13 +2963,13 @@ snapshots:
       '@types/unist': 3.0.3
       vfile-message: 4.0.3
 
-  vite-node@2.1.9(@types/node@24.10.1):
+  vite-node@2.1.9(@types/node@22.20.4):
     dependencies:
       cac: 6.7.14
       debug: 4.4.3
       es-module-lexer: 1.7.0
       pathe: 1.1.2
-      vite: 5.4.21(@types/node@24.10.1)
+      vite: 5.4.21(@types/node@22.20.4)
     transitivePeerDependencies:
       - '@types/node'
       - less
@@ -2958,19 +2981,19 @@ snapshots:
       - supports-color
       - terser
 
-  vite@5.4.21(@types/node@24.10.1):
+  vite@5.4.21(@types/node@22.20.4):
     dependencies:
       esbuild: 0.21.5
       postcss: 8.5.10
       rollup: 4.60.2
     optionalDependencies:
-      '@types/node': 24.10.1
+      '@types/node': 22.20.4
       fsevents: 2.3.3
 
-  vitest@2.1.9(@types/node@24.10.1):
+  vitest@2.1.9(@types/node@22.20.4):
     dependencies:
       '@vitest/expect': 2.1.9
-      '@vitest/mocker': 2.1.9(vite@5.4.21(@types/node@24.10.1))
+      '@vitest/mocker': 2.1.9(vite@5.4.21(@types/node@22.20.4))
       '@vitest/pretty-format': 2.1.9
       '@vitest/runner': 2.1.9
       '@vitest/snapshot': 2.1.9
@@ -2986,11 +3009,11 @@ snapshots:
       tinyexec: 0.3.2
       tinypool: 1.1.1
       tinyrainbow: 1.2.0
-      vite: 5.4.21(@types/node@24.10.1)
-      vite-node: 2.1.9(@types/node@24.10.1)
+      vite: 5.4.21(@types/node@22.20.4)
+      vite-node: 2.1.9(@types/node@22.20.4)
       why-is-node-running: 2.3.0
     optionalDependencies:
-      '@types/node': 24.10.1
+      '@types/node': 22.20.4
     transitivePeerDependencies:
       - less
       - lightningcss

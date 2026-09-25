@@ -498,7 +498,7 @@ import { DEFAULT_PYRAMID, repairGeneration, serveAvailV3, serveAvailV3Cells } fr
 import { RIDES, RIDES_V5, serveRides } from './rides_v1';
 import { retryingStorage, withR2Retry } from './r2_retry';
 import { r2Storage } from 'pyrmts-cfw';
-import { backfillManifestKey, manifestStatus } from './rg_manifest';
+import { backfillManifestKey, manifestStatus, pruneManifestOrphans } from './rg_manifest';
 
 /**
  * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
@@ -1244,7 +1244,7 @@ export default {
 			const auth = request.headers.get('Authorization') ?? '';
 			if (auth !== `Bearer ${env.REGISTRY_SECRET}`) return errorResponse('unauthorized', 403, env);
 			try {
-				const body = await request.json<{ op: string; pyramid?: string; key?: string; rows?: {
+				const body = await request.json<{ op: string; pyramid?: string; key?: string; limit?: number; dry_run?: boolean; rows?: {
 					pyramid: string; tier: string; shard_dur: string;
 					period_start: number; period_end: number; key: string; written_at: number;
 				}[] }>();
@@ -1282,6 +1282,10 @@ export default {
 				if (body.op === 'manifest_status') {
 					if (!body.pyramid) return errorResponse('pyramid required', 400, env);
 					return jsonResponse(await manifestStatus(env.DB, body.pyramid), env);
+				}
+				if (body.op === 'manifest_prune') {
+					if (!body.pyramid) return errorResponse('pyramid required', 400, env);
+					return jsonResponse(await pruneManifestOrphans(env.DB, body.pyramid, { limit: body.limit, dryRun: body.dry_run }), env);
 				}
 				if (body.op === 'manifest_fill') {
 					if (!body.pyramid || !body.key) return errorResponse('pyramid + key required', 400, env);

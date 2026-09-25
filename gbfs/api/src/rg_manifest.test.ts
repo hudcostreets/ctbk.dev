@@ -1,5 +1,7 @@
+/// <reference types="node" />
+import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
-import { cellTokenChunks, matchQuery, mergeManifestRgs, type ManifestRg } from './rg_manifest';
+import { cellTokenChunks, matchQuery, mergeManifestRgs, pruneManifestOrphans, type ManifestRg } from './rg_manifest';
 
 // D1's hard ceiling — the reason the cell predicate chunks at all.
 const D1_MAX_BINDS = 100;
@@ -110,5 +112,74 @@ describe('checkerboard selection (rollup-defeating)', () => {
 		const chunks = cellTokenChunks(vocab);
 		expect(chunks.length).toBe(54);
 		expect(chunks.flat()).toEqual(vocab);
+	});
+});
+
+// Vite 5 doesn't know `node:sqlite` as a builtin; load it through require.
+const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
+
+/** D1 over `node:sqlite`: `prepare().bind().all()` + transactional `batch()`,
+ *  with just the columns `pruneManifestOrphans` touches. */
+function sqliteD1() {
+	const db = new DatabaseSync(':memory:');
+	db.exec(`
+		CREATE TABLE pyramid_shards (pyramid TEXT, key TEXT);
+		CREATE TABLE rg_manifest (pyramid TEXT, key TEXT, rg_idx INTEGER, PRIMARY KEY (pyramid, key, rg_idx));
+		CREATE TABLE rg_manifest_fills (pyramid TEXT, key TEXT, n_rgs INTEGER, PRIMARY KEY (pyramid, key));
+	`);
+	type Stmt = { sql: string; args: unknown[]; bind: (...a: unknown[]) => Stmt; all: () => Promise<{ results: unknown[] }> };
+	const stmt = (sql: string, args: unknown[] = []): Stmt => ({
+		sql, args,
+		bind: (...a) => stmt(sql, a),
+		all: async () => ({ results: db.prepare(sql).all(...(args as never[])) }),
+	});
+	return {
+		db,
+		prepare: (sql: string) => stmt(sql),
+		batch: async (stmts: Stmt[]) => {
+			db.exec('BEGIN');
+			for (const st of stmts) db.prepare(st.sql).run(...(st.args as never[]));
+			db.exec('COMMIT');
+			return [];
+		},
+	};
+}
+
+describe('pruneManifestOrphans', () => {
+	/** `live` is registered; `old.a`/`old.b` were superseded (orphans); `other`
+	 *  is another pyramid's orphan-looking key, which must be left alone. */
+	function seed() {
+		const d1 = sqliteD1();
+		const add = (pyramid: string, key: string, rgs: number, registered: boolean) => {
+			if (registered) d1.db.prepare('INSERT INTO pyramid_shards VALUES (?, ?)').run(pyramid, key);
+			d1.db.prepare('INSERT INTO rg_manifest_fills VALUES (?, ?, ?)').run(pyramid, key, rgs);
+			for (let i = 0; i < rgs; i++) d1.db.prepare('INSERT INTO rg_manifest VALUES (?, ?, ?)').run(pyramid, key, i);
+		};
+		add('rides-start', 'live', 2, true);
+		add('rides-start', 'old.a', 3, false);
+		add('rides-start', 'old.b', 1, false);
+		add('rides-end', 'other', 4, false);
+		return d1;
+	}
+	const rows = (d1: ReturnType<typeof sqliteD1>) => ({
+		fills: d1.db.prepare('SELECT pyramid, key FROM rg_manifest_fills ORDER BY pyramid, key').all().map((r) => ({ ...(r as object) })),
+		rgs: Number((d1.db.prepare('SELECT COUNT(*) AS n FROM rg_manifest').get() as { n: number }).n),
+	});
+
+	it('deletes only this pyramid\'s unregistered keys, `limit` at a time', async () => {
+		const d1 = seed();
+		expect(await pruneManifestOrphans(d1 as never, 'rides-start', { limit: 1 })).toEqual({ keys: ['old.a'], rgs: 3, remaining: 1 });
+		expect(await pruneManifestOrphans(d1 as never, 'rides-start', { limit: 1 })).toEqual({ keys: ['old.b'], rgs: 1, remaining: 0 });
+		expect(await pruneManifestOrphans(d1 as never, 'rides-start')).toEqual({ keys: [], rgs: 0, remaining: 0 });
+		expect(rows(d1)).toEqual({
+			fills: [{ pyramid: 'rides-end', key: 'other' }, { pyramid: 'rides-start', key: 'live' }],
+			rgs: 2 + 4,
+		});
+	});
+
+	it('dry run reports without deleting', async () => {
+		const d1 = seed();
+		expect(await pruneManifestOrphans(d1 as never, 'rides-start', { dryRun: true })).toEqual({ keys: ['old.a', 'old.b'], rgs: 4, remaining: 2 });
+		expect(rows(d1).rgs).toBe(2 + 3 + 1 + 4);
 	});
 });

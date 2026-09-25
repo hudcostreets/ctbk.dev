@@ -376,6 +376,36 @@ export async function backfillManifestKey(
 	}
 }
 
+/** Delete the RG-manifest rows (`rg_manifest` + `rg_manifest_fills`) of keys
+ *  no `pyramid_shards` row references — superseded blobs under a
+ *  content-hashed keyTemplate, whose every rewrite orphans its predecessor's
+ *  rows (the 2026-09-25 D1-full incident). Up to `limit` keys per call, each
+ *  key's pair of DELETEs batched; callers loop until `remaining` is 0. */
+export async function pruneManifestOrphans(
+	db: D1Database,
+	pyramid: string,
+	{ limit = 25, dryRun = false }: { limit?: number; dryRun?: boolean } = {},
+): Promise<{ keys: string[]; rgs: number; remaining: number }> {
+	const res = await db.prepare(
+		`SELECT f.key AS key, f.n_rgs AS n_rgs FROM rg_manifest_fills f
+		 LEFT JOIN pyramid_shards s ON s.pyramid = f.pyramid AND s.key = f.key
+		 WHERE f.pyramid = ? AND s.key IS NULL ORDER BY f.key`,
+	).bind(pyramid).all<{ key: string; n_rgs: number }>();
+	const orphans = res.results ?? [];
+	const batch = orphans.slice(0, limit);
+	if (!dryRun && batch.length) {
+		await db.batch(batch.flatMap(({ key }) => [
+			db.prepare('DELETE FROM rg_manifest WHERE pyramid = ? AND key = ?').bind(pyramid, key),
+			db.prepare('DELETE FROM rg_manifest_fills WHERE pyramid = ? AND key = ?').bind(pyramid, key),
+		]));
+	}
+	return {
+		keys: batch.map((r) => r.key),
+		rgs: batch.reduce((n, r) => n + r.n_rgs, 0),
+		remaining: orphans.length - (dryRun ? 0 : batch.length),
+	};
+}
+
 /** Fill coverage for a pyramid: registered keys vs completed fills, with
  *  stale fills (shard re-registered since) called out separately. */
 export async function manifestStatus(
