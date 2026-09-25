@@ -151,6 +151,32 @@ writes new keys) → `engine register <manifest>` → manifest backfill; the old
 blobs are orphans for `pyrmts-engine gc`. `lambda reconcile` refuses these
 configs.
 
+**Full CA regen + cutover (2026-09-25).** Both anchors rebuilt from scratch on
+Batch into a fresh `manifest-ca.jsonl` (the live registry untouched; ~30 min
+each), canonicalized on `e` through it (`engine canonicalize -i`), gated by
+`engine slot-compare manifest.jsonl manifest-ca.jsonl`, then cut over with
+`engine register` + RG-manifest backfill:
+- start: 267/267 slots **byte-equal** to the previous build.
+- end: 261/267 byte-equal; 6 coarse shards (`1y/4y/2020`, `{2,3}mo/4y/2020`,
+  `{1,6}mo/8y/2016`, `14d/1792d/2019-01-24`) differ only in `duration_sumsq`
+  (1–24 rows each, ≤ 2.4e-15 relative — f64 reduction order on values >
+  2^53); all counts + `duration_sum` exact. Registered as-is.
+- `rides-totals-diff` after cutover: start Δ −2 (the known 2014 v5
+  over-count), end Δ 0 — identical to the gate.
+- `manifest.jsonl` now = the CA manifest; the legacy one is kept as
+  `manifest-legacy.jsonl` (rollback: `engine register` it + RG backfill).
+  Legacy + pre-canonicalize blobs await `pyrmts-engine gc`.
+
+**Incident: D1 hit its 10 GB cap.** CA keys orphan the old key's `rg_manifest`
+rows (legacy rewrites replaced them by PK), so the cutover backfills added
+~710k rows beside 913k dead ones and D1 `ctbk-gbfs` filled up — every D1
+write failed (`Exceeded maximum DB size`; visible only once `_registry_post`
+printed the 500's body). Fixed with `ctbk gbfs manifest prune -p rides-start
+-p rides-end` (913,373 rows, 10 → 6.11 GB; D1 REST deletes need
+`CF_PULUMI_HCCS_TOKEN` — `CF_TOKEN` lacks D1 write). Open: prune has to run
+with every CA rewrite (fold into `gc` / the worker cron), and D1 headroom
+(~3.9 GB) should be watched.
+
 ## Validation gate
 
 On the dev worker (new data) vs the prod worker (old data), before any P4 flip:
