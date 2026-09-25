@@ -1289,16 +1289,17 @@ def normalized_mirror(dry_run: bool, yms: tuple[str, ...]) -> None:
 
 
 @gbfs.command('rides-extend', help='Monthly `rides` cadence for one freshly-ingested month: (1) mirror `normalized/<YM>.parquet` from the DVX cache to its plain key, within R2 (the Batch factory lists that prefix); (2) journal the previous month on `rides-start` (spillback refold); (3) `engine submit -f` both anchors on HCCS Batch, uncapped (open periods defer); (4) canonicalize [prev month, now) through each manifest (new hashed keys); (5) `engine register` each manifest into D1; (6) RG-manifest backfill + prune of superseded keys\' rows. Station-map/vocab/canonicalize-map regen for new stations is NOT covered — a canonicalize-map change needs a full-range `engine canonicalize`. Needs HCCS AWS creds (Batch), R2 RW creds, CLOUDFLARE_ACCOUNT_ID, and CTBK_REGISTRY_SECRET (+ a D1-write CLOUDFLARE_API_TOKEN for the prune).')
+@option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='prod', show_default=True, help='api worker whose registry proxy registers + backfills + prunes (shared D1).')
 @option('-n', '--dry-run', is_flag=True, help='Print planned actions (and engine commands); no writes or submits.')
 @argument('ym', metavar='YM')
 @click.pass_context
-def rides_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
+def rides_extend(ctx: click.Context, env_name: str, dry_run: bool, ym: str) -> None:
 	ym = ym.replace('-', '')
 	if len(ym) != 6 or not ym.isdigit():
 		raise click.BadParameter(f'YM must be YYYYMM or YYYY-MM; got {ym!r}')
 	m0 = datetime(int(ym[:4]), int(ym[4:]), 1, tzinfo=timezone.utc)
 	p0 = datetime(m0.year - 1, 12, 1, tzinfo=timezone.utc) if m0.month == 1 else m0.replace(month=m0.month - 1)
-	os.environ.setdefault('CTBK_REGISTRY_URL', API_URLS['prod'])
+	os.environ.setdefault('CTBK_REGISTRY_URL', API_URLS[env_name])
 	_use_r2_rw_env()
 
 	# 1. Plain-key mirror: the engine's rides factory discovers months by
@@ -1344,8 +1345,8 @@ def rides_extend(ctx: click.Context, dry_run: bool, ym: str) -> None:
 	# 6. RG-manifest rows for the new keys; drop the superseded keys' rows
 	# (every hashed rewrite orphans its predecessor's — 2026-09-25 D1-full).
 	pyramids = tuple(c for c, _, _ in RIDES_ANCHOR_SPECS)
-	ctx.invoke(gbfs_manifest_backfill, pyramids=pyramids, dry_run=dry_run)
-	ctx.invoke(gbfs_manifest_prune, pyramids=pyramids, dry_run=dry_run)
+	ctx.invoke(gbfs_manifest_backfill, pyramids=pyramids, env_name=env_name, dry_run=dry_run)
+	ctx.invoke(gbfs_manifest_prune, pyramids=pyramids, env_name=env_name, dry_run=dry_run)
 
 	err(f'rides extended through {ym}. Not covered: station-map/vocab/canonicalize-map regen for new stations.')
 
