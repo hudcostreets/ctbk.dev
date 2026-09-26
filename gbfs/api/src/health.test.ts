@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getCompactionHealth, getFeedHealth, type HealthR2 } from './health';
+import { classifyFeedGaps, getCompactionHealth, getFeedHealth, type HealthR2 } from './health';
 
 /** In-memory `HealthR2` over a fixed key set: prefix listing (no delimiter
  *  support needed beyond the daily-parquet scan), single page. */
@@ -49,5 +49,24 @@ describe('health just after 00:00Z (today has no keys yet)', () => {
 	it('hourly: latest h1 comes from yesterday; todayCount stays 0', async () => {
 		const c = await getCompactionHealth(r2);
 		expect(c.hourly).toEqual({ latestKey: 'gbfs/avail/h1/2026-09-25/23.parquet', todayCount: 0 });
+	});
+});
+
+describe('classifyFeedGaps', () => {
+	const labels = (...ms: number[]) => new Set(ms.map((i) => `${String(Math.floor(i / 60)).padStart(2, '0')}-${String(i % 60).padStart(2, '0')}`));
+	const all = (n: number, ...except: number[]) => labels(...Array.from({ length: n }, (_, i) => i).filter((i) => !except.includes(i)));
+
+	it('holes with both ticks present are upstream skips; next to a skipped tick, unexplained', () => {
+		// WAL holes at 00:03 (both ticks ran), 00:05 (its own tick skipped), 00:07 (next tick skipped).
+		expect(classifyFeedGaps(all(10, 3, 5, 7), all(10, 5, 8), 9)).toEqual({
+			settled: 9,
+			missing: 3,
+			unexplained: ['00:05', '00:07'],
+			cronSkips: 2,
+		});
+	});
+
+	it('only settled minutes count', () => {
+		expect(classifyFeedGaps(all(5), all(10), 8)).toEqual({ settled: 8, missing: 3, unexplained: [], cronSkips: 0 });
 	});
 });

@@ -1,14 +1,15 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import type { HealthSnapshot } from './health';
 import {
+	d1SizeGB,
 	DEFAULT_RULES,
 	diffRules,
+	feedLagP90Seconds,
 	feedStaleMinutes,
 	hourlyCompactionStaleMinutes,
 	pyramidTipAgeHours,
 	snapshotAgeMinutes,
 	stationsStaleHours,
-	trailingHourMissing,
 	type AlertState,
 	type FiringEntry,
 	type Rule,
@@ -67,14 +68,17 @@ describe('feedStaleMinutes', () => {
 	});
 });
 
-describe('trailingHourMissing', () => {
-	it('returns 0 when caught up', () => {
-		const s = snap({ feed: { ...snap().feed, todayCount: 721, todayExpected: 721 } });
-		expect(trailingHourMissing(s)).toBe(0);
+describe('feedLagP90Seconds', () => {
+	const now = FIXED_NOW.getTime() / 1000;
+	const withLags = (lags: number[], ageS = 60) =>
+		snap({ feed: { ...snap().feed, drift: { latestS: lags[lags.length - 1], ts: now, polledAt: now, series: lags.map((l, i) => [now - ageS * (lags.length - i), l]) } } });
+	it('p90 of the trailing hour', () => {
+		expect(feedLagP90Seconds(withLags([4, 5, 6, 5, 4, 6, 5, 50, 55, 58]))).toBe(58);
+		expect(feedLagP90Seconds(withLags([...Array(18).fill(5), 50, 55]))).toBe(50);
 	});
-	it('returns gap when behind', () => {
-		const s = snap({ feed: { ...snap().feed, todayCount: 715, todayExpected: 720 } });
-		expect(trailingHourMissing(s)).toBe(5);
+	it('ignores points older than an hour; 0 below 10 points', () => {
+		expect(feedLagP90Seconds(withLags(Array(20).fill(50), 400))).toBe(0);
+		expect(feedLagP90Seconds(withLags([50, 50, 50]))).toBe(0);
 	});
 });
 
@@ -128,10 +132,17 @@ describe('diffRules', () => {
 		]);
 	});
 
-	it('no resolved transition when rule isn\'t in current rule set', () => {
-		// `restRule` is `never-fire`; `always-fire` from prev isn't in this rule set, so no transition.
-		const transitions = diffRules([restRule], { firing: { 'always-fire': entry('2026-05-24T11:00:00Z') } }, snap());
-		expect(transitions).toEqual([]);
+	it('resolves a firing rule that was removed/renamed (else it sticks in state forever)', () => {
+		const prior = entry('2026-05-24T11:00:00Z');
+		const [t, ...rest] = diffRules([restRule], { firing: { 'always-fire': prior } }, snap());
+		expect(rest).toEqual([]);
+		expect({ kind: t.kind, id: t.rule.id, description: t.rule.description, check: t.rule.check(snap()), priorEntry: t.priorEntry }).toEqual({
+			kind: 'resolved',
+			id: 'always-fire',
+			description: '`always-fire` rule retired',
+			check: false,
+			priorEntry: prior,
+		});
 	});
 
 	it('no transition when rule keeps firing (deduped)', () => {
@@ -221,5 +232,25 @@ describe('DEFAULT_RULES on a full snapshot', () => {
 			stations: { lastUpdatedAt: FIXED_NOW.getTime() / 1000 - 90 * 24 * 3600 },
 			generatedAt: FIXED_NOW.getTime() / 1000 - 20 * 60,
 		}))).toEqual(['stations-stale', 'health-snapshot-stale']);
+	});
+
+	it('upstream-skipped generations alone fire nothing; a hole next to a skipped tick does', () => {
+		const gaps = { settled: 718, missing: 30, unexplained: [], cronSkips: 0 };
+		expect(firingIds(fresh({ feed: { ...snap().feed, gaps } }))).toEqual([]);
+		const lost = fresh({ feed: { ...snap().feed, gaps: { ...gaps, missing: 31, unexplained: ['10:20'], cronSkips: 2 } } });
+		expect(firingIds(lost)).toEqual(['feed-missed-lus']);
+		expect(DEFAULT_RULES.find((r) => r.id === 'feed-missed-lus')!.firingText(lost)).toBe(
+			':rotating_light: *GBFS minutes possibly lost* — 1 WAL hole(s) today next to a skipped poller tick (10:20); 2 skipped tick(s), 30 upstream-skipped generation(s)',
+		);
+	});
+
+	it('a stale-cache lag and a near-full D1 each fire', () => {
+		const now = FIXED_NOW.getTime() / 1000;
+		const series: Array<[number, number]> = Array.from({ length: 30 }, (_, i) => [now - 60 * (30 - i), 45]);
+		expect(firingIds(fresh({
+			feed: { ...snap().feed, drift: { latestS: 45, ts: now, polledAt: now, series } },
+			d1: { sizeBytes: 8.5e9 },
+		}))).toEqual(['feed-lag', 'd1-size']);
+		expect(d1SizeGB(fresh({ d1: { sizeBytes: 4.01e9 } }))).toBe(4.01);
 	});
 });

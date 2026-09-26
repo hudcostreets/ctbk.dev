@@ -62,16 +62,29 @@ export function feedStaleMinutes(s: HealthSnapshot): number {
 	return (Date.now() - new Date(latest).getTime()) / 60_000;
 }
 
-/** Minutes missing in the trailing-hour window. `todayCount`/`todayExpected`
- *  are full-day stats — for hour-level granularity we approximate via:
- *  `expected_in_hour - actual_in_hour`. Since the snapshot doesn't expose
- *  hour-bucketed counts, we use a coarser proxy: how many minutes from
- *  the last hour are missing relative to wall-clock. */
-export function trailingHourMissing(s: HealthSnapshot): number {
-	// Coarse estimate: total minutes elapsed today − total polls today.
-	// In a healthy state this should be ≤1 (the in-flight minute).
-	const missing = s.feed.todayExpected - s.feed.todayCount;
-	return Math.max(0, missing);
+/** Today's WAL holes the poller may have missed (adjacent to a skipped
+ *  cron tick) — see `FeedGaps`. Upstream-skipped generations are excluded.
+ *  Empty for a snapshot that predates the field. */
+export function unexplainedGaps(s: HealthSnapshot): string[] {
+	return s.feed.gaps?.unexplained ?? [];
+}
+
+/** p90 first-seen lag (`polled_at − ts`, s) over the trailing hour of the
+ *  drift series; 0 with too few points to judge. Healthy sampling sees a new
+ *  LU within ~15s; a lag near 60s means samples are hitting a stale cache,
+ *  and LUs superseded before the cache refreshes are never seen (the
+ *  2026-09 SIN CloudFront-cache gaps). */
+export function feedLagP90Seconds(s: HealthSnapshot): number {
+	const series = s.feed.drift?.series ?? [];
+	const cutoff = Date.now() / 1000 - 3600;
+	const lags = series.filter(([t]) => t >= cutoff).map(([, lag]) => lag).sort((a, b) => a - b);
+	if (lags.length < 10) return 0;
+	return lags[Math.min(lags.length - 1, Math.floor(0.9 * lags.length))];
+}
+
+/** Serving-D1 size in GB; 0 when unknown. */
+export function d1SizeGB(s: HealthSnapshot): number {
+	return (s.d1?.sizeBytes ?? 0) / 1e9;
 }
 
 /** Minutes since most recent hourly compaction (`gbfs/avail/h1/<date>/HH.parquet`). */
@@ -114,7 +127,9 @@ export function snapshotAgeMinutes(s: HealthSnapshot): number {
 
 /** Default rule set. To tweak thresholds, edit constants here. */
 const FEED_STALE_MIN = 5;
-const MISSING_MINUTES_MAX = 3;
+const FEED_LAG_P90_MAX_S = 30;
+/** Of D1's 10 GB hard cap (writes fail at the cap — the 2026-09 outage). */
+const D1_SIZE_MAX_GB = 8;
 const HOURLY_STALE_MIN = 90;
 /** Max tip lag per served pyramid, by fill cadence: avail tiers extend every
  *  5 min (Lambda ticks), smg-v1
@@ -144,11 +159,21 @@ export const DEFAULT_RULES: Rule[] = [
 		},
 	},
 	{
-		id: 'feed-missing-minutes',
-		description: `≥${MISSING_MINUTES_MAX} minutes missing from today's WAL polls`,
-		check: (s) => trailingHourMissing(s) >= MISSING_MINUTES_MAX,
+		id: 'feed-missed-lus',
+		description: 'No WAL holes adjacent to a skipped poller tick today',
+		check: (s) => unexplainedGaps(s).length > 0,
+		firingText: (s) => {
+			const g = s.feed.gaps!;
+			const shown = g.unexplained.slice(0, 10).join(', ') + (g.unexplained.length > 10 ? ', …' : '');
+			return `:rotating_light: *GBFS minutes possibly lost* — ${g.unexplained.length} WAL hole(s) today next to a skipped poller tick (${shown}); ${g.cronSkips} skipped tick(s), ${g.missing - g.unexplained.length} upstream-skipped generation(s)`;
+		},
+	},
+	{
+		id: 'feed-lag',
+		description: `p90 first-seen LU lag ≤ ${FEED_LAG_P90_MAX_S}s over the last hour`,
+		check: (s) => feedLagP90Seconds(s) > FEED_LAG_P90_MAX_S,
 		firingText: (s) =>
-			`:warning: *GBFS poll gaps* — ${trailingHourMissing(s)} minutes missing today (threshold: ${MISSING_MINUTES_MAX})`,
+			`:warning: *GBFS feed lag* — p90 first-seen lag ${feedLagP90Seconds(s)}s over the last hour (threshold: ${FEED_LAG_P90_MAX_S}s); the poller is likely reading a stale cache and can miss LUs`,
 	},
 	{
 		id: 'hourly-compaction-stale',
@@ -173,6 +198,13 @@ export const DEFAULT_RULES: Rule[] = [
 		check: (s) => stationsStaleHours(s) > STATIONS_STALE_HOURS,
 		firingText: (s) =>
 			`:warning: *Stations table stale* — loader's daily \`station_information\` upsert last landed ${fmtAge(stationsStaleHours(s))} (threshold: ${STATIONS_STALE_HOURS}h)`,
+	},
+	{
+		id: 'd1-size',
+		description: `Serving D1 under ${D1_SIZE_MAX_GB} GB (10 GB hard cap)`,
+		check: (s) => d1SizeGB(s) > D1_SIZE_MAX_GB,
+		firingText: (s) =>
+			`:warning: *D1 near its size cap* — ${d1SizeGB(s).toFixed(2)} GB of 10 GB (threshold: ${D1_SIZE_MAX_GB} GB); writes fail at the cap — prune (\`ctbk gbfs manifest prune\`) or drop superseded rows`,
 	},
 	{
 		id: 'health-snapshot-stale',
@@ -219,6 +251,14 @@ export function diffRules(
 				priorEntry: prev.firing[rule.id],
 			});
 		}
+	}
+	// A rule removed or renamed while firing would otherwise stay in state
+	// (and the heartbeat's `firing`) forever: resolve its thread.
+	const ids = new Set(rules.map((r) => r.id));
+	for (const [id, priorEntry] of Object.entries(prev.firing)) {
+		if (ids.has(id)) continue;
+		const retired: Rule = { id, description: `\`${id}\` rule retired`, check: () => false, firingText: () => '' };
+		transitions.push({ rule: retired, kind: 'resolved', priorEntry });
 	}
 	return transitions;
 }

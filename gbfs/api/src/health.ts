@@ -64,6 +64,48 @@ export interface FeedHealth {
 	todayCount: number;
 	todayExpected: number;
 	last7Days: Array<{ date: string; count: number; expected: number }>;
+	gaps?: FeedGaps;
+}
+
+/** Today's missing WAL minutes, classified against the poller's per-tick
+ *  heartbeats. A LU stamped in minute m stays live ~60s, into m+1, so ticks
+ *  m and m+1 both sample it: a hole with both heartbeats present is an
+ *  upstream-skipped generation (~4/day is normal; nothing was published to
+ *  catch), while a hole next to a missing heartbeat is one the poller may
+ *  have missed — possible permanent loss. (Heartbeats prove a tick ran, not
+ *  that it saw fresh data; sampling through a stale cache shows up as
+ *  first-seen lag in `drift`, alerted separately.) */
+export interface FeedGaps {
+	/** Settled minutes today (excludes the current + previous, in flight). */
+	settled: number;
+	missing: number;
+	/** `HH:MM` of holes adjacent to a missing heartbeat. */
+	unexplained: string[];
+	/** Settled minutes with no heartbeat (CF skipped the cron). */
+	cronSkips: number;
+}
+
+const pad2 = (n: number) => n.toString().padStart(2, '0');
+const minuteLabel = (i: number) => `${pad2(Math.floor(i / 60))}-${pad2(i % 60)}`;
+
+/** `wal` / `heartbeats`: `HH-MM` labels present today. */
+export function classifyFeedGaps(wal: Set<string>, heartbeats: Set<string>, settled: number): FeedGaps {
+	let missing = 0;
+	let cronSkips = 0;
+	const unexplained: string[] = [];
+	for (let i = 0; i < settled; i++) {
+		const m = minuteLabel(i);
+		if (!heartbeats.has(m)) cronSkips++;
+		if (wal.has(m)) continue;
+		missing++;
+		if (!heartbeats.has(m) || !heartbeats.has(minuteLabel(i + 1))) unexplained.push(m.replace('-', ':'));
+	}
+	return { settled, missing, unexplained, cronSkips };
+}
+
+/** Last `HH-MM` path segment (before the extension) of each key. */
+function minuteLabels(objects: Array<{ key: string }>): Set<string> {
+	return new Set(objects.map((o) => o.key.match(/(\d{2}-\d{2})\.\w+$/)?.[1]).filter((m): m is string => !!m));
 }
 
 export interface CompactionHealth {
@@ -142,6 +184,8 @@ export interface HealthSnapshot {
 	 *  real fill tip, dust rungs included (cover `segments` only mark max-rung
 	 *  boundaries `present`, so they lag by up to a max shard). */
 	pyramidTips?: Record<string, number | null>;
+	/** Serving D1 size (bytes; `meta.size_after`); the hard cap is 10 GB. */
+	d1?: { sizeBytes: number | null };
 }
 
 /** Pyramids whose fill tip `alerts.ts` watches. */
@@ -213,7 +257,10 @@ export async function getFeedHealth(r2: HealthR2): Promise<FeedHealth> {
 	const dates: string[] = Array.from({ length: 7 }, (_, i) => dateAtOffset(i));
 	const today = dates[0];
 	const todayExpected = minutesElapsedTodayUtc();
-	const lists = await Promise.all(dates.map((date) => listAll(r2, `gbfs/status/${date}/`, 3)));
+	const [lists, heartbeats] = await Promise.all([
+		Promise.all(dates.map((date) => listAll(r2, `gbfs/status/${date}/`, 3))),
+		listAll(r2, `gbfs/heartbeat/${today}/`, 3),
+	]);
 	const todayCount = lists[0].objects.length;
 	const counts = dates
 		.map((date, i) => ({ date, count: lists[i].objects.length, expected: date === today ? todayExpected : 1440 }))
@@ -239,7 +286,9 @@ export async function getFeedHealth(r2: HealthR2): Promise<FeedHealth> {
 
 	const drift = latestPoll ? await getFeedDrift(r2, latestPoll.key) : null;
 
-	return { latestPoll, drift, todayCount, todayExpected, last7Days: counts };
+	const gaps = classifyFeedGaps(minuteLabels(lists[0].objects), minuteLabels(heartbeats.objects), Math.max(0, todayExpected - 2));
+
+	return { latestPoll, drift, todayCount, todayExpected, last7Days: counts, gaps };
 }
 
 const FEED_DRIFT_KEY = 'health/feed-drift.json';
@@ -547,6 +596,7 @@ export async function getHealthSnapshot(
 		getAlertsHeartbeat(r2),
 	]);
 	const pyramidTips = db ? await getPyramidTips(db) : undefined;
+	const d1 = db ? { sizeBytes: await getD1SizeBytes(db) } : undefined;
 	const { DEFAULT_PYRAMID } = await import('./avail_geo');
 	return {
 		generatedAt: Math.floor(Date.now() / 1000),
@@ -560,7 +610,13 @@ export async function getHealthSnapshot(
 		stations,
 		alerts,
 		pyramidTips,
+		d1,
 	};
+}
+
+export async function getD1SizeBytes(db: D1Database): Promise<number | null> {
+	const r = await db.prepare('SELECT 1').run();
+	return r.meta.size_after ?? null;
 }
 
 export async function getPyramidTips(db: D1Database): Promise<Record<string, number | null>> {
