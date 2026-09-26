@@ -75,18 +75,21 @@ async function fetchCells(
 export interface ClusterSeries {
   /** `s:<id>` → month → rides (every member present, possibly empty). */
   members: MemberSeries
-  /** The materialized `c:<canonical>` row's month → rides. */
-  canon: Map<string, number>
+  /** The materialized `c:<canonical>` row's month → rides; null when the ids
+   *  don't form one cluster (a split decision). */
+  canon: Map<string, number> | null
 }
 
+/** Per-member monthly rides for `memberIds`, plus the `c:<canon>` row when
+ *  `canon` is given. */
 export function useClusterSeries(
-  canon: string | undefined,
+  canon: string | null,
   memberIds: readonly string[],
   anchor: Anchor,
 ): UseQueryResult<ClusterSeries> {
   return useQuery<ClusterSeries>({
     queryKey: ['merge-review-series', canon, anchor, memberIds.join(',')],
-    enabled: !!canon && memberIds.length > 0,
+    enabled: memberIds.length > 0,
     staleTime: Infinity,
     retry: 3,
     // No TSQ abort signal: these are cheap, edge-cached full-history
@@ -96,10 +99,10 @@ export function useClusterSeries(
       const sKeys = memberIds.map((id) => `s:${id}`)
       const [raw, canonical] = await Promise.all([
         fetchCells(anchor, sKeys, true),
-        fetchCells(anchor, [`c:${canon}`], false),
+        canon === null ? Promise.resolve(null) : fetchCells(anchor, [`c:${canon}`], false),
       ])
       const members: MemberSeries = new Map(sKeys.map((k) => [k, raw.get(k) ?? new Map()]))
-      return { members, canon: canonical.get(`c:${canon}`) ?? new Map() }
+      return { members, canon: canonical ? canonical.get(`c:${canon}`) ?? new Map() : null }
     },
   })
 }

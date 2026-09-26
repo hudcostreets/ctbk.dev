@@ -169,3 +169,53 @@ def test_strongest_fuzzy_match_wins():
     id_map = build_union_find(summary, monthly, review)
     assert id_map == {'3089': '3089', '3091': '5371.07', '5371.07': '5371.07'}
     assert [(r['pass'], r['shared_months']) for r in review] == [('fuzzy', ['201511', '201611'])]
+
+
+def test_decisions_override_heuristics():
+    # `233` "Joralemon St & Adams St" hands off to `3440`/`4637.06` "Fulton St &
+    # Adams St" 70 m away — the fuzzy pass would merge it; a `split` decision
+    # forbids that, transitively. `3104` is co-active with `3016` but a `merge`
+    # decision naming both (+ the successor) unions them anyway.
+    rows = [
+        ('233', 'Joralemon St & Adams St', '201306', 500, 40.69299, -73.98984),
+        ('233', 'Joralemon St & Adams St', '201606', 500, 40.69299, -73.98984),
+        ('3440', 'Fulton St & Adams St', '201611', 500, 40.69242, -73.98949),
+        ('3440', 'Fulton St & Adams St', '201912', 500, 40.69242, -73.98949),
+        ('4637.06', 'Fulton St & Adams St', '202001', 500, 40.69242, -73.98950),
+        ('4637.06', 'Fulton St & Adams St', '202607', 500, 40.69242, -73.98950),
+        ('3016', 'Kent Ave & N 7 St', '201508', 500, 40.72069, -73.96167),
+        ('3016', 'Kent Ave & N 7 St', '201603', 500, 40.72069, -73.96167),
+        ('3016', 'Kent Ave & N 7 St', '201912', 500, 40.72069, -73.96167),
+        ('3104', 'KentAve&N7 St', '201508', 500, 40.72158, -73.96050),
+        ('3104', 'KentAve&N7 St', '201603', 500, 40.72158, -73.96050),
+        ('5489.03', 'Kent Ave & N 7 St', '202001', 500, 40.72037, -73.96165),
+        ('5489.03', 'Kent Ave & N 7 St', '202607', 500, 40.72037, -73.96165),
+    ]
+    summary, monthly = _inputs(rows)
+    heuristic = build_union_find(summary, monthly, [])
+    assert (heuristic['233'], heuristic['3104']) == ('4637.06', '3104')
+    decisions = [
+        {'ids': ['233', '4637.06'], 'verdict': 'split'},
+        {'ids': ['3016', '3104', '5489.03'], 'verdict': 'merge'},
+        {'ids': ['5685.04', '5685.06'], 'verdict': 'relabel'},
+    ]
+    id_map = build_union_find(summary, monthly, [], decisions)
+    assert id_map == {
+        '233': '233', '3440': '4637.06', '4637.06': '4637.06',
+        '3016': '5489.03', '3104': '5489.03', '5489.03': '5489.03',
+    }
+
+
+def test_conflicting_decisions_raise():
+    rows = [
+        ('A', 'Foo St', '202001', 500, 40.7, -74.0),
+        ('B', 'Bar St', '202101', 500, 40.8, -74.1),
+    ]
+    summary, monthly = _inputs(rows)
+    decisions = [{'ids': ['A', 'B'], 'verdict': 'split'}, {'ids': ['A', 'B'], 'verdict': 'merge'}]
+    try:
+        build_union_find(summary, monthly, [], decisions)
+    except ValueError as e:
+        assert str(e) == "merge decision ['A', 'B'] conflicts with a split decision"
+    else:
+        raise AssertionError('expected ValueError')

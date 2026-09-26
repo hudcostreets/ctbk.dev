@@ -23,7 +23,7 @@ import { Tip, TipRows } from '../components/Tip'
 import { Footer } from '../components/Footer'
 import {
   clusterStats, coActivity, extent, FLAG_INFO, FLAGS, haversineM, isoToMs, latestName,
-  type ClusterStats, type Flag, type Member,
+  type ClusterStats, type Decision, type Flag, type Member, type MergesAsset, type Repair, type Verdict,
 } from '../lib/mergeReview'
 import { useClusterSeries, useMergesAsset } from '../query/mergeReview'
 import type { Anchor } from '../query/ridesV1'
@@ -162,7 +162,7 @@ function MemberMap({ members }: { members: Member[] }) {
   )
 }
 
-function SeriesChart({ canon, members, anchor }: { canon: string, members: Member[], anchor: Anchor }) {
+function SeriesChart({ canon, members, anchor }: { canon: string | null, members: Member[], anchor: Anchor }) {
   const ids = useMemo(() => members.map((m) => m.id), [members])
   const q = useClusterSeries(canon, ids, anchor)
   const { actualTheme } = useTheme()
@@ -187,11 +187,13 @@ function SeriesChart({ canon, members, anchor }: { canon: string, members: Membe
         hovertemplate: `s:${m.id}: %{y:,}<extra></extra>`,
       }
     })
-    const cm = [...q.data.canon.keys()].sort()
+    const cs = q.data.canon
+    if (!cs) return ts
+    const cm = [...cs.keys()].sort()
     return [
       {
         x: cm.map(monthDate),
-        y: cm.map((mo) => q.data.canon.get(mo)!),
+        y: cm.map((mo) => cs.get(mo)!),
         type: 'scatter' as const,
         mode: 'lines' as const,
         name: `c:${canon}`,
@@ -235,21 +237,106 @@ function SeriesChart({ canon, members, anchor }: { canon: string, members: Membe
         ))}
         <span className={co!.months.length ? css.warn : css.ok}>
           {co!.months.length
-            ? <Tip content={<>Months where ≥2 members each carried ≥10% (and ≥20) of the cluster's {anchor}s: {co!.months.join(', ')}</>}>
+            ? <Tip content={<>Months where ≥2 of these ids each carried ≥10% (and ≥20) of their combined {anchor}s: {co!.months.join(', ')}</>}>
                 <span tabIndex={0}>co-active in {co!.months.length} mo (shaded)</span>
               </Tip>
             : 'no co-active months'}
         </span>
-        <span className={co!.sumMismatches.length ? css.bad : css.ok}>
+        {canon !== null && <span className={co!.sumMismatches.length ? css.bad : css.ok}>
           {co!.sumMismatches.length
             ? <Tip content={<TipRows rows={co!.sumMismatches.slice(0, 12).map((x) => [x.month, `c: ${fmtInt(x.canon)} vs Σ ${fmtInt(x.members)}`])} />}>
                 <span tabIndex={0}>c: ≠ Σ members in {co!.sumMismatches.length} mo</span>
               </Tip>
             : 'c: = Σ members ✓'}
-        </span>
+        </span>}
       </p>
       <Plot data={traces} layout={layout} style={{ width: '100%' }} config={{ displayModeBar: false, scrollZoom: false }} />
     </>
+  )
+}
+
+/** Raw ids with their eras, span, and distance from `ref`; the last column
+ *  is merge provenance (clusters) or the id-map's current canonical
+ *  (decisions, whose ids may sit in different clusters). */
+function MembersTable({ members, refPos, nowMs, last }: {
+  members: (Member & { canon?: string })[]
+  refPos: [number, number] | null
+  nowMs: number
+  last: 'via' | 'canon'
+}) {
+  return (
+    <div className={css.tableWrap}>
+      <table className={css.members}>
+        <thead>
+          <tr><th>raw id</th><th>names (eras)</th><th>active</th><th>distance</th><th>{last === 'via' ? 'via' : 'canonical now'}</th></tr>
+        </thead>
+        <tbody>
+          {members.map((m, i) => {
+            const ext = extent(m, nowMs)
+            return (
+              <tr key={m.id}>
+                <td><code style={{ color: memberColor(i) }}>s:{m.id}</code></td>
+                <td className={css.names}>
+                  {m.spans.length
+                    ? m.spans.map(([n, f, l]) => <div key={`${n}|${f}`}>{n} <span className={css.dim}>{f.slice(0, 7)}–{l?.slice(0, 7) ?? 'now'}</span></div>)
+                    : <span className={css.dim}>no history</span>}
+                </td>
+                <td className={css.num}>{ext ? `${round((ext[1] - ext[0]) / 86_400_000)} d` : '—'}</td>
+                <td className={css.num}>
+                  {m.pos
+                    ? <a href={`https://www.openstreetmap.org/?mlat=${m.pos[0]}&mlon=${m.pos[1]}#map=19/${m.pos[0]}/${m.pos[1]}`} target="_blank" rel="noreferrer">
+                        {refPos ? fmtDist(haversineM(refPos, m.pos)) : '—'}
+                      </a>
+                    : '—'}
+                </td>
+                <td>
+                  {last === 'canon'
+                    ? <code className={css.dim}>{m.canon}</code>
+                    : m.via === 'overlay' ? <FlagChip flag="overlay" /> : <span className={css.dim}>harmonize</span>}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function AnchorToggle({ anchor, setAnchor }: { anchor: Anchor, setAnchor: (a: Anchor) => void }) {
+  return (
+    <div className={css.seg} role="radiogroup" aria-label="Anchor">
+      {ANCHORS.map((a) => (
+        <button key={a} type="button" role="radio" aria-checked={anchor === a} className={anchor === a ? css.segOn : ''} onClick={() => setAnchor(a)}>
+          {a === 'start' ? 'Starts' : 'Ends'}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** Monthly series (live, `/api/rides/cells?raw=1`) beside the members' map. */
+function SeriesAndMap({ canon, members, anchor, setAnchor, mapKey }: {
+  canon: string | null
+  members: Member[]
+  anchor: Anchor
+  setAnchor: (a: Anchor) => void
+  mapKey: string
+}) {
+  return (
+    <section className={css.split}>
+      <div className={css.splitMain}>
+        <div className={css.sectionHead}>
+          <h3>Monthly {anchor === 'start' ? 'starts' : 'ends'}</h3>
+          <AnchorToggle anchor={anchor} setAnchor={setAnchor} />
+        </div>
+        <SeriesChart canon={canon} members={members} anchor={anchor} />
+      </div>
+      <div className={css.splitSide}>
+        <h3>Last positions</h3>
+        <MemberMap key={mapKey} members={members} />
+      </div>
+    </section>
   )
 }
 
@@ -261,7 +348,7 @@ function ClusterDetail({ stats, anchor, setAnchor, nowMs }: {
 }) {
   const { canon, cluster, name } = stats
   const { members, review } = cluster
-  const ref = members.find((m) => m.id === canon)?.pos ?? members.find((m) => m.pos)?.pos ?? null
+  const refPos = members.find((m) => m.id === canon)?.pos ?? members.find((m) => m.pos)?.pos ?? null
   return (
     <article className={css.detail}>
       <header className={css.detailHead}>
@@ -272,67 +359,15 @@ function ClusterDetail({ stats, anchor, setAnchor, nowMs }: {
         </p>
         {stats.flags.length > 0 && <p className={css.chips}>{stats.flags.map((f) => <FlagChip key={f} flag={f} />)}</p>}
       </header>
-
       <section>
         <h3>Members</h3>
-        <div className={css.tableWrap}>
-          <table className={css.members}>
-            <thead>
-              <tr><th>raw id</th><th>names (eras)</th><th>active</th><th>from c: pos</th><th>via</th></tr>
-            </thead>
-            <tbody>
-              {members.map((m, i) => {
-                const ext = extent(m, nowMs)
-                return (
-                  <tr key={m.id}>
-                    <td><code style={{ color: memberColor(i) }}>s:{m.id}</code></td>
-                    <td className={css.names}>
-                      {m.spans.length
-                        ? m.spans.map(([n, f, l]) => <div key={`${n}|${f}`}>{n} <span className={css.dim}>{f.slice(0, 7)}–{l?.slice(0, 7) ?? 'now'}</span></div>)
-                        : <span className={css.dim}>no history</span>}
-                    </td>
-                    <td className={css.num}>{ext ? `${round((ext[1] - ext[0]) / 86_400_000)} d` : '—'}</td>
-                    <td className={css.num}>
-                      {m.pos
-                        ? <a href={`https://www.openstreetmap.org/?mlat=${m.pos[0]}&mlon=${m.pos[1]}#map=19/${m.pos[0]}/${m.pos[1]}`} target="_blank" rel="noreferrer">
-                            {ref ? fmtDist(haversineM(ref, m.pos)) : '—'}
-                          </a>
-                        : '—'}
-                    </td>
-                    <td>{m.via === 'overlay' ? <FlagChip flag="overlay" /> : <span className={css.dim}>harmonize</span>}</td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+        <MembersTable members={members} refPos={refPos} nowMs={nowMs} last="via" />
       </section>
-
       <section>
         <h3>Active eras</h3>
         <Timeline members={members} nowMs={nowMs} />
       </section>
-
-      <section className={css.split}>
-        <div className={css.splitMain}>
-          <div className={css.sectionHead}>
-            <h3>Monthly {anchor === 'start' ? 'starts' : 'ends'}</h3>
-            <div className={css.seg} role="radiogroup" aria-label="Anchor">
-              {ANCHORS.map((a) => (
-                <button key={a} type="button" role="radio" aria-checked={anchor === a} className={anchor === a ? css.segOn : ''} onClick={() => setAnchor(a)}>
-                  {a === 'start' ? 'Starts' : 'Ends'}
-                </button>
-              ))}
-            </div>
-          </div>
-          <SeriesChart canon={canon} members={members} anchor={anchor} />
-        </div>
-        <div className={css.splitSide}>
-          <h3>Last positions</h3>
-          <MemberMap key={canon} members={members} />
-        </div>
-      </section>
-
+      <SeriesAndMap canon={canon} members={members} anchor={anchor} setAnchor={setAnchor} mapKey={canon} />
       {review.length > 0 && (
         <section>
           <h3>Harmonize co-activity guard</h3>
@@ -353,13 +388,190 @@ function ClusterDetail({ stats, anchor, setAnchor, nowMs }: {
   )
 }
 
+const VERDICT_LABEL: Record<Verdict | 'repair', string> = {
+  merge: 'merge',
+  split: 'split',
+  relabel: 'relabel',
+  repair: 'id repair',
+}
+
+function VerdictChip({ verdict }: { verdict: Verdict | 'repair' }) {
+  return <span className={`${css.chip} ${css[`verdict-${verdict}`]}`}>{VERDICT_LABEL[verdict]}</span>
+}
+
+/** A decisions-view list entry: a reviewed decision, or a trailing-zero repair. */
+type Item =
+  | { type: 'decision', key: string, verdict: Verdict, title: string, sub: string, decision: Decision }
+  | { type: 'repair', key: string, verdict: 'repair', title: string, sub: string, repair: Repair }
+
+function decisionTitle(d: Decision): string {
+  const names = d.members.map((m) => latestName(m) ?? `s:${m.id}`)
+  return [...new Set(names)].join(' / ')
+}
+
+function toItems(asset: MergesAsset): Item[] {
+  const decisions: Item[] = asset.decisions.map((d) => ({
+    type: 'decision', key: d.key, verdict: d.verdict, title: decisionTitle(d),
+    sub: `${d.ids.map((i) => `s:${i}`).join(' · ')} · ${d.kind}`, decision: d,
+  }))
+  // Cross-region repairs first (they skewed regional totals), then by the
+  // visits the fix moves.
+  const moved = (r: Repair) => Object.values(r.series).reduce((n, [v]) => n + v, 0)
+  const crossRegion = (r: Repair) => r.before.region !== r.after[r.n0].region || r.before.region !== r.after[r.n].region
+  const sorted = [...asset.repairs].sort((a, b) => Number(crossRegion(b)) - Number(crossRegion(a)) || moved(b) - moved(a))
+  const repairs: Item[] = sorted.map((r) => ({
+    type: 'repair', key: `${r.n}+${r.n0}`, verdict: 'repair',
+    title: `${r.names[r.n]?.[0] ?? r.n} / ${r.names[r.n0]?.[0] ?? r.n0}`,
+    sub: `s:${r.n} → s:${r.n0} · ${r.before.region ?? '?'} → ${r.after[r.n0].region ?? '?'}`,
+    repair: r,
+  }))
+  return [...decisions, ...repairs]
+}
+
+function DecisionDetail({ d, anchor, setAnchor, nowMs }: {
+  d: Decision
+  anchor: Anchor
+  setAnchor: (a: Anchor) => void
+  nowMs: number
+}) {
+  const canons = new Set(d.members.map((m) => m.canon))
+  // One cluster now (a merge): check `c:` = Σ against its materialized row.
+  const canon = canons.size === 1 && d.verdict === 'merge' ? [...canons][0] : null
+  const refPos = d.members.find((m) => m.pos)?.pos ?? null
+  return (
+    <article className={css.detail}>
+      <header className={css.detailHead}>
+        <h2>{decisionTitle(d)}</h2>
+        <p className={css.detailSub}>
+          <VerdictChip verdict={d.verdict} /> · {d.kind} · decided {d.decided}
+        </p>
+        <p className={css.rationale}>{d.rationale}</p>
+      </header>
+      <section>
+        <h3>Ids</h3>
+        <MembersTable members={d.members} refPos={refPos} nowMs={nowMs} last="canon" />
+      </section>
+      <section>
+        <h3>Active eras</h3>
+        <Timeline members={d.members} nowMs={nowMs} />
+      </section>
+      <SeriesAndMap canon={canon} members={d.members} anchor={anchor} setAnchor={setAnchor} mapKey={d.key} />
+    </article>
+  )
+}
+
+/** Before (served): both stations' rides under `s:N0`, placed at the old
+ *  canonical. After: split, each at its own canonical. Visits from the
+ *  station meta_hists (starts + ends), since the served data is the "before". */
+function RepairDetail({ r }: { r: Repair }) {
+  const { actualTheme } = useTheme()
+  const isDark = actualTheme === 'dark'
+  const gridcolor = isDark ? '#505050' : '#ddd'
+  const tickcolor = isDark ? '#e0e0e0' : '#333'
+  const yms = Object.keys(r.series).sort()
+  const x = yms.map((ym) => `${ym.slice(0, 4)}-${ym.slice(4)}-01`)
+  const traces = [
+    {
+      x, y: yms.map((ym) => r.series[ym][0] + r.series[ym][1]), type: 'scatter' as const, mode: 'lines' as const,
+      name: `before: s:${r.n0} (@ c:${r.before.canon})`, line: { color: tickcolor, width: 1.5, dash: 'dot' as const },
+      hovertemplate: 'before: %{y:,}<extra></extra>',
+    },
+    ...[r.n, r.n0].map((sid, i) => ({
+      x, y: yms.map((ym) => r.series[ym][i]), type: 'scatter' as const, mode: 'lines' as const,
+      name: `after: s:${sid} (@ ${r.after[sid].canon})`, line: { color: memberColor(i), width: 2 },
+      hovertemplate: `s:${sid}: %{y:,}<extra></extra>`,
+    })),
+  ]
+  const layout = {
+    autosize: true, height: 280, hovermode: 'x unified' as const, dragmode: 'pan' as const, showlegend: true,
+    legend: { orientation: 'h' as const, x: 0, y: 1.2, font: { color: tickcolor, size: 11 } },
+    xaxis: { type: 'date' as const, gridcolor, tickfont: { color: tickcolor, size: 11 }, hoverformat: '%b %Y' },
+    yaxis: { gridcolor, tickfont: { color: tickcolor, size: 11 }, fixedrange: true, rangemode: 'tozero' as const, automargin: true },
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', margin: { t: 40, r: 8, b: 30, l: 8 },
+  }
+  const tot = (i: 0 | 1) => yms.reduce((a, ym) => a + r.series[ym][i], 0)
+  const dist = r.after[r.n].pos && r.after[r.n0].pos ? haversineM(r.after[r.n].pos!, r.after[r.n0].pos!) : null
+  return (
+    <article className={css.detail}>
+      <header className={css.detailHead}>
+        <h2>s:{r.n} folded into s:{r.n0}</h2>
+        <p className={css.detailSub}>
+          <VerdictChip verdict="repair" /> · <code>cons</code> trailing-zero bug · {r.months[0].slice(0, 4)}-{r.months[0].slice(4)} → {r.months[r.months.length - 1].slice(0, 4)}-{r.months[r.months.length - 1].slice(4)}
+        </p>
+        <p className={css.rationale}>
+          <code>cons</code> rewrote id <code>{r.n}</code> to <code>{r.n0}</code> in {r.months.length} months, so two stations
+          {dist !== null && <> {fmtDist(dist)} apart</>} were served as one and drawn at <code>c:{r.before.canon}</code> ({r.before.region ?? '?'}).
+          The <code>cons</code> regen splits them back.
+        </p>
+      </header>
+      <section>
+        <h3>Attribution</h3>
+        <div className={css.tableWrap}>
+          <table className={css.members}>
+            <thead><tr><th>station</th><th>names</th><th>visits</th><th>before</th><th>after</th></tr></thead>
+            <tbody>
+              {([r.n, r.n0] as const).map((sid, i) => (
+                <tr key={sid}>
+                  <td><code style={{ color: memberColor(i) }}>s:{sid}</code></td>
+                  <td className={css.names}>{(r.names[sid] ?? []).join(' · ') || '—'}</td>
+                  <td className={css.num}>{fmtInt(tot(i as 0 | 1))}</td>
+                  <td className={css.num}><code>{r.before.canon}</code> {r.before.region}</td>
+                  <td className={css.num}><code>{r.after[sid].canon}</code> {r.after[sid].region}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section>
+        <h3>Monthly station visits, before vs after</h3>
+        <Plot data={traces} layout={layout} style={{ width: '100%' }} config={{ displayModeBar: false, scrollZoom: false }} />
+      </section>
+    </article>
+  )
+}
+
+function ItemList({ items, selected, onSelect }: { items: Item[], selected: string | undefined, onSelect: (k: string) => void }) {
+  const selRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => { selRef.current?.scrollIntoView({ block: 'nearest' }) }, [selected])
+  if (!items.length) return <p className={css.empty}>No items match.</p>
+  return (
+    <ol className={css.list}>
+      {items.map((it) => (
+        <li key={it.key}>
+          <button
+            type="button"
+            ref={it.key === selected ? selRef : undefined}
+            className={`${css.row} ${it.key === selected ? css.rowSel : ''}`}
+            onClick={() => onSelect(it.key)}
+          >
+            <span className={css.rowHead}>
+              <span className={css.rowName}>{it.title}</span>
+              <VerdictChip verdict={it.verdict} />
+            </span>
+            <span className={css.rowMeta}><span>{it.sub}</span></span>
+          </button>
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+const VIEWS = ['clusters', 'decisions'] as const
+type View = typeof VIEWS[number]
+const VERDICTS = ['merge', 'split', 'relabel', 'repair'] as const
+
 export default function MergeReview() {
   const asset = useMergesAsset()
+  const [view, setView] = useUrlState('v', enumParam<View>('clusters', VIEWS))
   const [selected, setSelected] = useUrlState('c', stringParam())
+  const [selItem, setSelItem] = useUrlState('d', stringParam())
   const [search, setSearch] = useUrlState('q', stringParam())
   const [flagFilter, setFlagFilter] = useUrlState('f', stringsParam([], ','))
+  const [verdictFilter, setVerdictFilter] = useUrlState('vf', stringsParam([], ','))
   const [anchor, setAnchor] = useUrlState('a', enumParam<Anchor>('start', ANCHORS))
   const nowMs = useMemo(() => Date.now(), [])
+  const q = search?.trim().toLowerCase()
 
   const all = useMemo(() => {
     if (!asset.data) return []
@@ -374,28 +586,40 @@ export default function MergeReview() {
     return n
   }, [all])
 
-  const shown = useMemo(() => {
-    const q = search?.trim().toLowerCase()
-    return all.filter((s) =>
-      (!flagFilter.length || flagFilter.some((f) => s.flags.includes(f as Flag)))
-      && (!q || s.canon.toLowerCase().includes(q) || s.cluster.members.some((m) =>
-        m.id.toLowerCase().includes(q) || m.spans.some(([n]) => n.toLowerCase().includes(q)))),
-    )
-  }, [all, flagFilter, search])
+  const shown = useMemo(() => all.filter((s) =>
+    (!flagFilter.length || flagFilter.some((f) => s.flags.includes(f as Flag)))
+    && (!q || s.canon.toLowerCase().includes(q) || s.cluster.members.some((m) =>
+      m.id.toLowerCase().includes(q) || m.spans.some(([n]) => n.toLowerCase().includes(q)))),
+  ), [all, flagFilter, q])
+
+  const items = useMemo(() => (asset.data ? toItems(asset.data) : []), [asset.data])
+  const verdictCounts = useMemo(() => {
+    const n = Object.fromEntries(VERDICTS.map((v) => [v, 0])) as Record<typeof VERDICTS[number], number>
+    for (const it of items) n[it.verdict]++
+    return n
+  }, [items])
+  const shownItems = useMemo(() => items.filter((it) =>
+    (!verdictFilter.length || verdictFilter.includes(it.verdict))
+    && (!q || it.key.toLowerCase().includes(q) || it.title.toLowerCase().includes(q)),
+  ), [items, verdictFilter, q])
 
   const current = all.find((s) => s.canon === selected) ?? shown[0]
+  const currentItem = items.find((it) => it.key === selItem) ?? shownItems[0]
   const detailRef = useRef<HTMLElement>(null)
   // Stacked (phone) layout: the detail sits below the list, so bring it
   // into view on pick.
-  const pick = (canon: string) => {
-    setSelected(canon)
+  const reveal = () => {
     if (window.matchMedia('(max-width: 820px)').matches) {
       requestAnimationFrame(() => detailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
     }
   }
+  const pick = (canon: string) => { setSelected(canon); reveal() }
+  const pickItem = (key: string) => { setSelItem(key); reveal() }
   const flagged = all.filter((s) => s.flags.some((f) => f !== 'no-history' && f !== 'overlay')).length
   const toggleFlag = (f: Flag) =>
     setFlagFilter(flagFilter.includes(f) ? flagFilter.filter((x) => x !== f) : [...flagFilter, f])
+  const toggleVerdict = (v: string) =>
+    setVerdictFilter(verdictFilter.includes(v) ? verdictFilter.filter((x) => x !== v) : [...verdictFilter, v])
 
   return (
     <div className={css.page}>
@@ -403,13 +627,21 @@ export default function MergeReview() {
         <h1>Station merge review</h1>
         <p className={css.lede}>
           Each merged cluster folds several raw reported station ids into one canonical <code>c:</code> row in the rides pyramids.
-          {asset.data && <> {fmtInt(all.length)} clusters, {fmtInt(all.reduce((n, s) => n + s.cluster.members.length, 0))} raw ids; {fmtInt(flagged)} with a distance, overlap, or co-activity-guard flag.</>}
+          {asset.data && <> {fmtInt(all.length)} clusters, {fmtInt(all.reduce((n, s) => n + s.cluster.members.length, 0))} raw ids; {fmtInt(flagged)} with a distance, overlap, or co-activity-guard flag.
+            {' '}{fmtInt(asset.data.decisions.length)} reviewed decisions and {fmtInt(asset.data.repairs.length)} id repairs.</>}
         </p>
       </header>
 
       {asset.isError && <p className={css.error}>Couldn't load <code>station-merges.json</code>: {String(asset.error)}</p>}
 
       <div className={css.filters}>
+        <div className={css.seg} role="tablist" aria-label="View">
+          {VIEWS.map((v) => (
+            <button key={v} type="button" role="tab" aria-selected={view === v} className={view === v ? css.segOn : ''} onClick={() => setView(v)}>
+              {v === 'clusters' ? 'Clusters' : 'Decisions'}
+            </button>
+          ))}
+        </div>
         <input
           id="merge-review-search"
           className={css.search}
@@ -419,25 +651,50 @@ export default function MergeReview() {
           onChange={(e) => setSearch(e.target.value || undefined)}
         />
         <div className={css.chips}>
-          {FLAGS.map((f) => (
-            <span key={f} className={css.filterChip}>
-              <FlagChip flag={f} active={flagFilter.includes(f)} onClick={() => toggleFlag(f)} />
-              <span className={css.dim}>{flagCounts[f]}</span>
-            </span>
-          ))}
+          {view === 'clusters'
+            ? FLAGS.map((f) => (
+                <span key={f} className={css.filterChip}>
+                  <FlagChip flag={f} active={flagFilter.includes(f)} onClick={() => toggleFlag(f)} />
+                  <span className={css.dim}>{flagCounts[f]}</span>
+                </span>
+              ))
+            : VERDICTS.map((v) => (
+                <span key={v} className={css.filterChip}>
+                  <button type="button" className={`${css.chip} ${css[`verdict-${v}`]} ${verdictFilter.includes(v) ? '' : css.chipOff}`} aria-pressed={verdictFilter.includes(v)} onClick={() => toggleVerdict(v)}>
+                    {VERDICT_LABEL[v]}
+                  </button>
+                  <span className={css.dim}>{verdictCounts[v]}</span>
+                </span>
+              ))}
         </div>
       </div>
 
       <div className={css.body}>
-        <nav className={css.listPane} aria-label="Clusters">
-          <p className={css.listCount}>{fmtInt(shown.length)} of {fmtInt(all.length)} · ranked by flags</p>
-          {asset.data ? <ClusterList stats={shown} selected={current?.canon} onSelect={pick} /> : <p className={css.empty}>Loading…</p>}
-        </nav>
-        <main className={css.detailPane} ref={detailRef}>
-          {current
-            ? <ClusterDetail key={current.canon} stats={current} anchor={anchor} setAnchor={setAnchor} nowMs={nowMs} />
-            : asset.data && <p className={css.empty}>Pick a cluster.</p>}
-        </main>
+        {view === 'clusters'
+          ? <>
+              <nav className={css.listPane} aria-label="Clusters">
+                <p className={css.listCount}>{fmtInt(shown.length)} of {fmtInt(all.length)} · ranked by flags</p>
+                {asset.data ? <ClusterList stats={shown} selected={current?.canon} onSelect={pick} /> : <p className={css.empty}>Loading…</p>}
+              </nav>
+              <main className={css.detailPane} ref={detailRef}>
+                {current
+                  ? <ClusterDetail key={current.canon} stats={current} anchor={anchor} setAnchor={setAnchor} nowMs={nowMs} />
+                  : asset.data && <p className={css.empty}>Pick a cluster.</p>}
+              </main>
+            </>
+          : <>
+              <nav className={css.listPane} aria-label="Decisions">
+                <p className={css.listCount}>{fmtInt(shownItems.length)} of {fmtInt(items.length)} · decisions, then id repairs</p>
+                {asset.data ? <ItemList items={shownItems} selected={currentItem?.key} onSelect={pickItem} /> : <p className={css.empty}>Loading…</p>}
+              </nav>
+              <main className={css.detailPane} ref={detailRef}>
+                {!currentItem
+                  ? asset.data && <p className={css.empty}>Pick a decision.</p>
+                  : currentItem.type === 'decision'
+                    ? <DecisionDetail key={currentItem.key} d={currentItem.decision} anchor={anchor} setAnchor={setAnchor} nowMs={nowMs} />
+                    : <RepairDetail key={currentItem.key} r={currentItem.repair} />}
+              </main>
+            </>}
       </div>
       <Footer showHome />
     </div>

@@ -9,6 +9,7 @@
 !e2e/bundle.spec.ts
 !e2e/home-chart.spec.ts
 !e2e/map-embed.spec.ts
+!e2e/merge-review.spec.ts
 !e2e/month-range.spec.ts
 !e2e/shortcuts.spec.ts
 !e2e/station-map.spec.ts

@@ -36,8 +36,43 @@ export interface Cluster {
   review: ReviewPair[]
 }
 
+export type Verdict = 'merge' | 'split' | 'relabel'
+
+/** A reviewed decision (`station-merge-decisions.yaml`): the source of truth
+ *  harmonize enforces. */
+export interface Decision {
+  key: string
+  ids: string[]
+  verdict: Verdict
+  kind: string
+  decided: string
+  rationale: string
+  members: (Member & { canon: string })[]
+}
+
+export interface RepairSide {
+  canon: string
+  pos: [number, number] | null
+  region: string | null
+}
+
+/** A `cons` trailing-zero repair: `n`'s rides were served under `n0` (placed
+ *  at `before.canon`) until the regen splits them (`after`). */
+export interface Repair {
+  n: string
+  n0: string
+  names: Record<string, string[]>
+  before: RepairSide
+  after: Record<string, RepairSide>
+  months: string[]
+  /** `YYYYMM` → [n visits, n0 visits] (starts + ends). */
+  series: Record<string, [number, number]>
+}
+
 export interface MergesAsset {
   clusters: Record<string, Cluster>
+  decisions: Decision[]
+  repairs: Repair[]
 }
 
 export type Flag = 'far' | 'near' | 'co-active' | 'overlap' | 'borderline' | 'split-nearby' | 'overlay' | 'no-history'

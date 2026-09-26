@@ -123,6 +123,29 @@ button.chip[aria-pressed="true"] {
   color: var(--mr-warn);
 }
 
+.verdict-merge {
+  background: rgba(46, 125, 50, 0.14);
+  color: var(--mr-ok);
+}
+
+.verdict-split,
+.verdict-repair {
+  background: rgba(198, 40, 40, 0.12);
+  color: var(--mr-bad);
+}
+
+.verdict-relabel {
+  background: rgba(180, 83, 9, 0.13);
+  color: var(--mr-warn);
+}
+
+.rationale {
+  margin: 8px 0 0;
+  max-width: 75ch;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
 .body {
   display: grid;
   grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);

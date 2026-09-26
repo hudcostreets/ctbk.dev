@@ -1,0 +1,81 @@
+# Reviewed station-merge decisions: the source of truth for both
+# `ctbk station-harmonize create` (`build_union_find` enforces them over its
+# heuristics) and the `/merge-review` page (via `ctbk rides-merge-review`).
+#
+#   ids:      raw reported station ids the decision covers
+#   verdict:  merge — union them, bypassing the co-activity guard;
+#             split — never union any two of them (directly or transitively)
+#             relabel — GBFS short_name change of one station (enforced by
+#               `station-luc-build`'s UUID collapse, not harmonize)
+#   kind:     manual (owner call) | same-dock | guard (a guard fix's outcome)
+#   rationale: one line of evidence
+#
+# The `cons` trailing-zero repairs (`N` vs `N0`, `specs/station-id-trailing-zero.md`)
+# are a data fix, not a merge decision; the page lists them from
+# `station-trailing-zero-repairs.json`.
+decisions:
+  - ids: ['3016', '3104', '5489.03']
+    verdict: merge
+    kind: manual
+    decided: 2026-09-26
+    rationale: >-
+      Same name "Kent Ave & N 7 St", 15 m from 3016 (also → 5489.03); overlapped 3016
+      only 2 months (one while 3016 reported as "Mobile 01"). One dock; overlapping
+      months sum like any cluster.
+  - ids: ['233', '4637.06']
+    verdict: split
+    kind: manual
+    decided: 2026-09-26
+    rationale: >-
+      "Joralemon St & Adams St" (to 2016-06) vs "Fulton St & Adams St" (from 2016-11,
+      70 m away): a different street, not a renumber.
+  - ids: ['5947.06', '6022.04']
+    verdict: split
+    kind: guard
+    decided: 2026-09-26
+    rationale: >-
+      "E 15 St & 5 Ave" vs "E 16 St & 5 Ave", 87 m apart, both busy every month since
+      2024-07; had leaked together via the 58-ride `6022.04_Pillar` alias.
+  - ids: ['6474.12', '6432.10']
+    verdict: split
+    kind: guard
+    decided: 2026-09-26
+    rationale: >-
+      E 41 St & Madison Ave SW corner vs SE corner, 30 m apart, co-active 2021-10 to
+      2023-01.
+  - ids: ['3089', '3091']
+    verdict: split
+    kind: guard
+    decided: 2026-09-26
+    rationale: >-
+      "Leonard St & Meeker Ave" vs "Frost St & Meeker St", 60 m apart, co-active 12
+      months; 3091 is 5371.07's predecessor.
+  - ids: ['5303.06', '5303.06_']
+    verdict: merge
+    kind: same-dock
+    decided: 2026-09-26
+    rationale: >-
+      Same name "Clinton St & Grand St", ~15 m apart, `_` variant: a second dock bank,
+      co-active by construction.
+  - ids: ['6960.10', '6960.12']
+    verdict: merge
+    kind: same-dock
+    decided: 2026-09-26
+    rationale: "\"3 Ave & E 71 St\" relocated ~25 m; 2 overlapping months at the hand-off."
+  - ids: ['7727.07', '7727.08']
+    verdict: merge
+    kind: same-dock
+    decided: 2026-09-26
+    rationale: "\"Amsterdam Ave & W 119 St\", 3 m apart: an extra dock bank (4 co-active months)."
+  - ids: ['5506.10', '5575.12']
+    verdict: merge
+    kind: same-dock
+    decided: 2026-09-26
+    rationale: "\"Avenue D & E 8 St\", 20 m apart; 2 overlapping months."
+  - ids: ['5685.04', '5685.06']
+    verdict: relabel
+    kind: manual
+    decided: 2026-09-26
+    rationale: >-
+      One GBFS UUID relabeled 5685.04 → 5685.06 ("Austin St & 63 Dr", docks moved
+      ~20 m); 5685.04 has no rides.

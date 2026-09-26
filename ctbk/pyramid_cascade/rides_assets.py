@@ -28,6 +28,8 @@ EXTRA_CELL_LEVEL = 20
 NORMALIZED_DIR = REPO / 's3' / 'ctbk' / 'normalized'
 HISTORY_PATH = REPO / 's3' / 'ctbk' / 'stations' / 'station-history.parquet'
 HARMONIZE_REVIEW_PATH = REPO / 's3' / 'ctbk' / 'stations' / 'station-merge-review.json'
+DECISIONS_PATH = REPO / 's3' / 'ctbk' / 'stations' / 'station-merge-decisions.yaml'
+REPAIRS_PATH = REPO / 's3' / 'ctbk' / 'stations' / 'station-trailing-zero-repairs.json'
 # FE `/merge-review` page input (`specs/rides-rekey.md` P5).
 MERGES_ASSET_PATH = REPO / 'www' / 'public' / 'assets' / 'station-merges.json'
 GEO_JSON_PATH = REPO / 'gbfs' / 'engine' / 'station-geo.json'
@@ -182,21 +184,59 @@ def merge_clusters(
     return out
 
 
+def decision_items(
+    decisions: list[dict],
+    id_map: dict[str, str],
+    spans: list[dict],
+    geo: dict[str, tuple[float, float]],
+) -> list[dict]:
+    """Pure rule: each reviewed decision (`station-merge-decisions.yaml`) as a
+    `/merge-review` item — its fields, a stable `key`, and per id the same
+    member facts as a cluster (`pos`, `spans`) plus the id-map's current
+    `canon`, so a split pair (no longer one cluster) is still reviewable."""
+    by_id: dict[str, list[list]] = {}
+    for sp in sorted(spans, key=lambda sp: (sp['first'] or '', sp['name'])):
+        by_id.setdefault(sp['id'], []).append([sp['name'], _iso_date(sp['first']), _iso_date(sp['last'])])
+    return [
+        {
+            'key': '+'.join(d['ids']),
+            'ids': d['ids'],
+            'verdict': d['verdict'],
+            'kind': d['kind'],
+            'decided': str(d['decided']),
+            'rationale': d['rationale'],
+            'members': [
+                {'id': sid, 'canon': id_map.get(sid, sid), 'pos': list(geo[sid]) if sid in geo else None, 'spans': by_id.get(sid, [])}
+                for sid in d['ids']
+            ],
+        }
+        for d in decisions
+    ]
+
+
 def merges_asset() -> dict:
-    """`merge_clusters` over the committed local inputs."""
+    """`merge_clusters` + `decision_items` over the committed local inputs,
+    plus the trailing-zero repairs (`ctbk station-harmonize trailing-zero-audit`)."""
     import pandas as pd
+    import yaml
     hist = pd.read_parquet(HISTORY_PATH, columns=['id', 'name', 'first', 'last'])
     spans = [
         {'id': r.id, 'name': r.name, 'first': r.first, 'last': r.last if isinstance(r.last, str) else None}
         for r in hist.itertuples(index=False)
     ]
-    return {'clusters': merge_clusters(
-        json.loads(CANONICALIZE_MAP_PATH.read_text()),
-        json.loads(ID_MAP_PATH.read_text()),
-        spans,
-        _geo(),
-        json.loads(HARMONIZE_REVIEW_PATH.read_text()),
-    )}
+    id_map = json.loads(ID_MAP_PATH.read_text())
+    geo = _geo()
+    return {
+        'clusters': merge_clusters(
+            json.loads(CANONICALIZE_MAP_PATH.read_text()),
+            id_map,
+            spans,
+            geo,
+            json.loads(HARMONIZE_REVIEW_PATH.read_text()),
+        ),
+        'decisions': decision_items(yaml.safe_load(DECISIONS_PATH.read_text())['decisions'], id_map, spans, geo),
+        'repairs': json.loads(REPAIRS_PATH.read_text()) if REPAIRS_PATH.exists() else [],
+    }
 
 
 def write_merges_asset(path: Path = MERGES_ASSET_PATH) -> int:

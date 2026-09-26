@@ -273,10 +273,21 @@ def _variant_pair(a: str, b: str) -> bool:
     return a != b and a.rstrip('_') == b.rstrip('_')
 
 
+def load_decisions(path: str) -> list[dict]:
+    """Reviewed merge/split decisions (`station-merge-decisions.yaml`); `[]`
+    if the file is absent."""
+    if not exists(path):
+        return []
+    import yaml
+    with open(path) as f:
+        return yaml.safe_load(f)['decisions']
+
+
 def build_union_find(
     summary: DataFrame,
     monthly_counts: dict[str, dict[str, int]],
     review: list | None = None,
+    decisions: list[dict] | None = None,
 ) -> dict[str, str]:
     """Build union-find mapping: id → canonical id (id0).
 
@@ -291,6 +302,11 @@ def build_union_find(
     `5947.06` "E 15 St & 5 Ave" reach "E 16 St & 5 Ave" (co-active since 2024)
     through its 58-ride `6022.04_Pillar` alias.
     `monthly_counts` is `{id: {ym: ride_count}}` (from `df_in`).
+
+    `decisions` (`station-merge-decisions.yaml`) override the heuristics:
+    `merge` ids are unioned up front, bypassing the guard; `split` ids never
+    end up in one group, however they'd be reached. Other verdicts (e.g.
+    `relabel`) aren't harmonize's to enforce.
     """
     if review is None:
         review = []
@@ -316,9 +332,16 @@ def build_union_find(
     group: dict[str, list[str]] = {sid: [sid] for sid in ids}
     has_ll = 'lat' in summary.columns
 
+    decided_merge: dict[str, int] = {
+        sid: i for i, d in enumerate(decisions or []) if d['verdict'] == 'merge' for sid in d['ids']
+    }
+
     def same_dock(a: str, b: str) -> bool:
-        """`_` variants, or the same (normalized) name within `SAME_DOCK_M`."""
+        """`_` variants, ids a `merge` decision names together, or the same
+        (normalized) name within `SAME_DOCK_M`."""
         if _variant_pair(a, b):
+            return True
+        if a in decided_merge and decided_merge.get(b) == decided_merge[a]:
             return True
         if not has_ll or not norm_names[a] or norm_names[a] != norm_names[b]:
             return False
@@ -332,13 +355,32 @@ def build_union_find(
     def members(sid: str) -> list[str]:
         return group[uf.find(sid)]
 
-    def union(a: str, b: str):
+    decisions = decisions or []
+    forbidden: set[frozenset[str]] = {
+        frozenset((a, b))
+        for d in decisions if d['verdict'] == 'split'
+        for i, a in enumerate(d['ids']) for b in d['ids'][i + 1:]
+    }
+
+    def union(a: str, b: str) -> bool:
+        """Union `a`'s and `b`'s groups unless a `split` decision forbids it."""
         ra, rb = uf.find(a), uf.find(b)
         if ra == rb:
-            return
+            return True
+        if forbidden and any(frozenset((x, y)) in forbidden for x in group[ra] for y in group[rb]):
+            return False
         merged = group.pop(ra) + group.pop(rb)
         uf.union(a, b)
         group[uf.find(a)] = merged
+        return True
+
+    for d in decisions:
+        if d['verdict'] != 'merge':
+            continue
+        present = [sid for sid in d['ids'] if sid in group]
+        for sid in present[1:]:
+            if not union(present[0], sid):
+                raise ValueError(f"merge decision {d['ids']} conflicts with a split decision")
 
     # Pass 1: Exact normalized name → union
     name_to_ids: dict[str, list[str]] = defaultdict(list)
@@ -357,8 +399,8 @@ def build_union_find(
                     review.append({'pass': 'exact-name', 'a': group_ids[0], 'b': sid, 'shared_months': sorted(shared)})
                     exact_rejected += 1
                     continue
-                union(group_ids[0], sid)
-                exact_unions += 1
+                if union(group_ids[0], sid):
+                    exact_unions += 1
     err(f"Pass 1 (exact name): {exact_unions} unions across {len(name_to_ids)} unique names ({exact_rejected} rejected: co-active)")
 
     # Pass 2: Fuzzy name + nearby coords + temporal adjacency. Candidate pairs
@@ -435,9 +477,10 @@ def build_union_find(
         if len(shared) > CO_ACTIVE_MAX_MONTHS:
             review.append({'pass': 'fuzzy', 'a': rep_a, 'b': rep_b, 'shared_months': sorted(shared)})
             continue
+        if not union(rep_a, rep_b):
+            continue
         if shared:
             review.append({'pass': 'fuzzy-borderline', 'a': rep_a, 'b': rep_b, 'shared_months': sorted(shared), 'merged': True})
-        union(rep_a, rep_b)
         fuzzy_unions += 1
 
     err(f"Pass 2 (fuzzy): {fuzzy_unions} additional unions ({sum(1 for r in review if r['pass']=='fuzzy')} rejected: co-active)")
@@ -778,7 +821,8 @@ class StationHarmonize:
         for (sid, ym), c in mc.items():
             monthly_counts.setdefault(sid, {})[ym] = int(c)
         review: list = []
-        id_map = build_union_find(summary, monthly_counts, review)
+        decisions = load_decisions(self.id_map_url.replace('station-id-map.json', 'station-merge-decisions.yaml'))
+        id_map = build_union_find(summary, monthly_counts, review, decisions)
         if review:
             import json as _json
             review_path = self.id_map_url.replace('station-id-map.json', 'station-merge-review.json')
@@ -932,3 +976,36 @@ def stats():
     df_in, df_il = load_meta_hists(S3)
     summary = build_id_summaries(df_in, df_il)
     compute_stats(id_map, spans, summary)
+
+
+@station_harmonize.command('trailing-zero-audit', help="Audit the `cons` trailing-zero id corruption (`specs/station-id-trailing-zero.md`) from the local station meta_hists: detect the `N`→`N0` pairs, un-corrupt the meta_hists, re-run the id-map on them (with `station-merge-decisions.yaml`), and write `station-trailing-zero-repairs.json` (per pair: monthly visits of each station, and canonical/region before vs after). Prints per-region visit deltas.")
+@option('-n', '--dry-run', is_flag=True, help="Print the impact; don't write the repairs file.")
+def trailing_zero_audit(dry_run: bool):
+    from ctbk.stations.trailing_zero import detect_pairs, regional_impact, repairs, uncorrupt
+
+    sh = StationHarmonize()
+    df_in, df_il = load_meta_hists(S3)
+    pairs = detect_pairs(df_in)
+    err(f"{len(pairs)} corrupted N→N0 pairs")
+    din, dil = uncorrupt(df_in, df_il, pairs)
+    summary = build_id_summaries(din, dil)
+    mc = din.groupby(['id', 'ym'])['count'].sum()
+    monthly: dict[str, dict[str, int]] = {}
+    for (sid, ym), c in mc.items():
+        monthly.setdefault(sid, {})[ym] = int(c)
+    decisions = load_decisions(sh.id_map_url.replace('station-id-map.json', 'station-merge-decisions.yaml'))
+    idm_after = build_union_find(summary, monthly, [], decisions)
+    with open(sh.id_map_url) as f:
+        idm_before = json.load(f)
+    with open('www/public/assets/stations-regional.json') as f:
+        stations = json.load(f)
+    reps = repairs(df_in, din, dil, pairs, idm_before, idm_after, stations)
+    impact = regional_impact(reps).groupby('region')[['before', 'after', 'delta']].sum()
+    err(f"station visits by region, repaired pairs only:\n{impact.to_string()}")
+    if dry_run:
+        return
+    out = sh.id_map_url.replace('station-id-map.json', 'station-trailing-zero-repairs.json')
+    with open(out, 'w') as f:
+        json.dump(reps, f, separators=(',', ':'))
+        f.write('\n')
+    err(f"Wrote {out} ({len(reps)} repairs)")

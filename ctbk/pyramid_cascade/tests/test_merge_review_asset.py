@@ -2,7 +2,7 @@
 (`specs/rides-rekey.md` P5). Hermetic — inputs inlined."""
 from __future__ import annotations
 
-from ctbk.pyramid_cascade.rides_assets import merge_clusters
+from ctbk.pyramid_cascade.rides_assets import decision_items, merge_clusters
 
 
 def test_merge_clusters():
@@ -45,3 +45,25 @@ def test_merge_clusters():
             'review': [review[0]],
         },
     }
+
+
+def test_decision_items():
+    decisions = [
+        {'ids': ['233', '4637.06'], 'verdict': 'split', 'kind': 'manual', 'decided': '2026-09-26', 'rationale': 'different street'},
+    ]
+    spans = [
+        {'id': '233', 'name': 'Joralemon St & Adams St', 'first': '130601', 'last': '160630'},
+        {'id': '4637.06', 'name': 'Fulton St & Adams St', 'first': '200101', 'last': None},
+    ]
+    assert decision_items(decisions, {'233': '233', '4637.06': '4637.06'}, spans, {'233': (40.693, -73.9898)}) == [{
+        'key': '233+4637.06',
+        'ids': ['233', '4637.06'],
+        'verdict': 'split',
+        'kind': 'manual',
+        'decided': '2026-09-26',
+        'rationale': 'different street',
+        'members': [
+            {'id': '233', 'canon': '233', 'pos': [40.693, -73.9898], 'spans': [['Joralemon St & Adams St', '2013-06-01', '2016-06-30']]},
+            {'id': '4637.06', 'canon': '4637.06', 'pos': None, 'spans': [['Fulton St & Adams St', '2020-01-01', None]]},
+        ],
+    }]
