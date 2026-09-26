@@ -170,7 +170,7 @@ def provision() -> None:
         })),
     )
 
-    reproc_queue = _reproc(r2_secrets)
+    reproc_queue, reproc_repo = _reproc(r2_secrets)
 
     # ── GitHub Actions OIDC identity ──────────────────────────────────
     oidc = aws.iam.OpenIdConnectProvider(
@@ -179,7 +179,7 @@ def provision() -> None:
     )
     gha = aws.iam.Role(
         'ctbk-gha', name='ctbk-gha',
-        description=f'GitHub Actions ({GITHUB_REPO}): Batch submit, s3://tripdata reads, read-only infra checks',
+        description=f'GitHub Actions ({GITHUB_REPO}): Batch submit, reproc image push, s3://tripdata reads, read-only infra checks',
         max_session_duration=4 * 3600,  # `Process new month` can outlast the 1h default
         assume_role_policy=oidc.arn.apply(lambda arn: json.dumps({
             'Version': '2012-10-17',
@@ -196,7 +196,7 @@ def provision() -> None:
     )
     aws.iam.RolePolicy(
         'ctbk-gha-policy', role=gha.name,
-        policy=pulumi.Output.all(queue.arn, exec_role.arn, fn.arn, reproc_queue.arn).apply(lambda a: json.dumps({
+        policy=pulumi.Output.all(queue.arn, exec_role.arn, fn.arn, reproc_queue.arn, reproc_repo.arn).apply(lambda a: json.dumps({
             'Version': '2012-10-17',
             'Statement': [
                 {
@@ -207,6 +207,22 @@ def provision() -> None:
                         a[0], f'arn:aws:batch:{REGION}:{ACCOUNT}:job-definition/pyrmts-engine*',
                         a[3], f'arn:aws:batch:{REGION}:{ACCOUNT}:job-definition/{REPROC}*',
                     ],
+                },
+                {
+                    # `reproc-image.yml` builds `batch/` on an arm64 runner and
+                    # pushes here; the job def picks it up via `reproc_image`.
+                    'Sid': 'EcrAuth',
+                    'Effect': 'Allow',
+                    'Action': 'ecr:GetAuthorizationToken',
+                    'Resource': '*',
+                },
+                {
+                    'Sid': 'ReprocImagePush',
+                    'Effect': 'Allow',
+                    'Action': ['ecr:BatchCheckLayerAvailability', 'ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer',
+                               'ecr:InitiateLayerUpload', 'ecr:UploadLayerPart', 'ecr:CompleteLayerUpload',
+                               'ecr:PutImage', 'ecr:DescribeImages'],
+                    'Resource': a[4],
                 },
                 {
                     'Sid': 'BatchRead',
@@ -245,7 +261,7 @@ def provision() -> None:
     pulumi.export('r2_secret_arns', [s.arn for s in r2_secrets])
 
 
-def _reproc(r2_secrets: list) -> aws.batch.JobQueue:
+def _reproc(r2_secrets: list) -> tuple[aws.batch.JobQueue, aws.ecr.Repository]:
     """The trips-DAG Batch stack (`batch/`, specs/batch-pipeline.md): reproc
     audits and partial/full regens, submitted with `dvx batch submit -P
     ctbk-reproc`. Names follow `dvx.batch`'s prefix convention (queue + job
@@ -372,4 +388,4 @@ def _reproc(r2_secrets: list) -> aws.batch.JobQueue:
     pulumi.export('reproc_queue', queue.name)
     pulumi.export('reproc_ecr', f'{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/{REPROC}')
     pulumi.export('github_rw_token_secret_arn', gh_token.arn)
-    return queue
+    return queue, repo

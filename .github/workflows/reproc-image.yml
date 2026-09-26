@@ -1,0 +1,51 @@
+# Build the trips-DAG Batch image (`batch/Dockerfile`) on a native arm64
+# runner and push it to HCCS ECR `ctbk-reproc:<sha>` via OIDC (`ctbk-gha`,
+# `infra/aws_hccs.py`). Then point the job def at it:
+#   pulumi config set -s hccs reproc_image <ref> && pulumi up -s hccs
+# (specs/batch-pipeline.md).
+name: Reproc image
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'ctbk.dev commit to bake in (default: this run''s SHA)'
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - 'batch/**'
+      - '.github/workflows/reproc-image.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - name: Resolve ref + image
+        id: ref
+        run: |
+          ref="${{ inputs.ref || github.sha }}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "image=688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-reproc:${ref:0:8}" >> "$GITHUB_OUTPUT"
+      - name: Build
+        run: docker build --platform linux/arm64 --build-arg REF=${{ steps.ref.outputs.ref }} -t ${{ steps.ref.outputs.image }} batch/
+      - name: Push
+        run: |
+          .github/scripts/hccs-aws.sh bash -c '
+            aws ecr get-login-password | docker login --username AWS --password-stdin 688066488567.dkr.ecr.us-east-1.amazonaws.com
+            docker push ${{ steps.ref.outputs.image }}
+          '
+      - name: Summary
+        run: |
+          echo "Pushed \`${{ steps.ref.outputs.image }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Next: \`pulumi config set -s hccs reproc_image ${{ steps.ref.outputs.image }} && pulumi up -s hccs\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Notify Slack — failure
+        if: failure()
+        uses: ./.github/actions/slack-notify
+        with:
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          text: ":x: *Reproc image build failed* — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>"
