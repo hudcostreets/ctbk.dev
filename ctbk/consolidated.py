@@ -1,3 +1,4 @@
+import re
 from glob import glob
 from os.path import join
 
@@ -373,8 +374,7 @@ class ConsolidatedMonth(MonthTable):
             err(f"{ym}: missing columns: {', '.join(missing_cols)}")
 
         d1 = d1[[ k for k in OUT_FIELD_ORDER if k in d1 ]]
-        all_ids = set(d1['Start Station ID']).union(set(d1['End Station ID']))
-        bad = [ i for i in all_ids if (i + '0') in all_ids ]
+        bad = truncated_decimal_ids(set(d1['Start Station ID']).union(set(d1['End Station ID'])))
         s_msk = d1['Start Station ID'].isin(bad)
         d1.loc[s_msk, 'Start Station ID'] = d1['Start Station ID'] + '0'
         e_msk = d1['End Station ID'].isin(bad)
@@ -384,6 +384,22 @@ class ConsolidatedMonth(MonthTable):
         if n_s or n_e:
             err(f"{ym}: fixed {n_s} Start Station IDs, {n_e} End Station IDs")
         return d1
+
+
+TRUNCATED_DECIMAL_RGX = re.compile(r'\d+\.\d')
+
+
+def truncated_decimal_ids(ids: set) -> set[str]:
+    """Decimal station ids that lost a trailing `0` to a float round-trip
+    (`5329.1` for `5329.10`), detected as a single-decimal-digit id whose
+    `0`-suffixed form also appears in the month.
+
+    Only DECIMAL ids qualify: an integer id `N` coexisting with `N0` is two
+    distinct stations (`309` Murray St & West St vs `3090` N 8 St & Driggs
+    Ave); appending `0` to it merged them (74 pairs, ~10.6M station visits,
+    2013-06..2020-10)."""
+    ids = {i for i in ids if isinstance(i, str)}
+    return {i for i in ids if TRUNCATED_DECIMAL_RGX.fullmatch(i) and f'{i}0' in ids}
 
 
 class ConsolidatedMonths(MonthsTables, HasRootCLI):
