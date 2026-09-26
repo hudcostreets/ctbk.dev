@@ -1,7 +1,7 @@
 """Cloudflare infrastructure for ctbk.dev.
 
 Resources:
-- R2 bucket `ctbk` (imported, already exists)
+- R2 bucket `ctbk` (imported, already exists) + its CORS rules (`hccs` stack)
 - D1 database for hot per-day GBFS availability data
 - CF Queue receiving R2 event notifications for new per-minute JSONs
 - R2 event notification: gbfs/status/*.json → Queue
@@ -25,6 +25,31 @@ ctbk_bucket = cf.R2Bucket(
         protect=True,
     ),
 )
+
+# ── R2 bucket CORS (browser reads of `data.ctbk.dev`: hyparquet range
+# requests need `Content-Range` / `Accept-Ranges` / `Content-Length`
+# exposed). `R2BucketCors` doesn't support `pulumi import`: the first
+# `up` PUTs these rules over the identical live ones (idempotent).
+# `retain_on_delete` so a destroy/rename never strips CORS from the
+# live bucket.
+if config.get_bool('manage_r2_cors'):
+    cf.R2BucketCors(
+        'ctbk-cors',
+        account_id=account_id,
+        bucket_name=ctbk_bucket.name,
+        rules=[
+            cf.R2BucketCorsRuleArgs(
+                allowed=cf.R2BucketCorsRuleAllowedArgs(
+                    origins=['*'],
+                    methods=['GET', 'HEAD'],
+                    headers=['*'],
+                ),
+                expose_headers=['Accept-Ranges', 'Content-Encoding', 'Content-Length', 'ETag', 'Content-Range'],
+                max_age_seconds=3600,
+            ),
+        ],
+        opts=pulumi.ResourceOptions(protect=True, retain_on_delete=True),
+    )
 
 # ── D1 database for current-day GBFS availability ─────────────────────
 gbfs_db = cf.D1Database(
