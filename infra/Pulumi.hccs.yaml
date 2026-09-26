@@ -11,4 +11,4 @@ config:
     secure: v1:mE1t5UAYtFYpDoqn:tJi4dlB+gQLfXTV8vbhDA3fkv3Lfy575fHOvzYzDJHtP/JRPiDcF9tua05KDPaPNgS5uujPW72lsOjt4Pk/WEwGJFMGuEZmSunLbOC4E7eM=
   ctbk-infra:lambda_cloudflare_api_token:
     secure: v1:40ERYa4OjKP/Vrqb:l9t7g7vyzrVpA44CK5v32HSNy4J2YmydPZixxWI2MFT/Ubi/oiMhedO+PtEcp37UX+GPTPSWABSqTjbsxNDpB8WsBCqj
-  ctbk-infra:reproc_image: 688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-reproc:fb3503ff
+  ctbk-infra:reproc_image: 688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-reproc:main

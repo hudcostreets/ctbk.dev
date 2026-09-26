@@ -78,6 +78,16 @@ if [ -n "${REPROC_URL:-}" ]; then
     echo "entrypoint: configured reproc remote -> $REPROC_URL" >&2
 fi
 
+# Provenance: with the job def on the mutable `:main` tag, log what's baked in.
+echo "entrypoint: image code at $(git rev-parse HEAD)" >&2
+
+# `cons` depends on EVERY normalized dir (any source month can hold rides
+# ending in M; `consolidated.dep_artifacts`), read from each dir's `.dir`
+# manifest in the local cache. Hydrate just the manifests (~40 KB), not the
+# data — same as `ci.yml`'s monthly run.
+git ls-files 's3/ctbk/normalized/*.dvc' | xargs dvx pull -m
+echo "entrypoint: hydrated normalized .dir manifests" >&2
+
 set +e
 if [ "${1:-}" = script ]; then
     shift
