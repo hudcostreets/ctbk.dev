@@ -1,0 +1,40 @@
+name: Python tests
+# `pytest` over `ctbk/tests/` + `ctbk/pyramid_cascade/tests/`. Hermetic: no
+# cloud creds are passed; a test that needs network/cloud must carry the
+# `network` marker (see `pyproject.toml`), and is deselected here.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ctbk/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/py-tests.yml'
+  pull_request:
+    paths:
+      - 'ctbk/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/py-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - name: Sync deps
+        run: uv sync --frozen
+      - name: pytest
+        run: uv run --frozen pytest -m 'not network' -p no:cacheprovider
+      - name: Notify Slack — failure on main
+        if: failure() && github.ref == 'refs/heads/main'
+        uses: ./.github/actions/slack-notify
+        with:
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          text: ":x: *Python tests failed* on `${{ github.sha }}` — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>"

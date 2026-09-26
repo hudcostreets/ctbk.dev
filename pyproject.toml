@@ -82,3 +82,9 @@ packages = ["ctbk"]
 dev = [
     "pytest>=7.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["ctbk/tests", "ctbk/pyramid_cascade/tests"]
+markers = [
+    "network: needs network / cloud credentials (deselected in CI: `-m 'not network'`)",
+]
