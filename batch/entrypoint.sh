@@ -126,6 +126,13 @@ else
 fi
 set -e
 
+# A failed run's partial results would look like a finished regen branch to
+# anything chaining on it (`-b`); push them only when asked (audit runs).
+if [ "$push_back" = yes ] && [ "$rc" -ne 0 ] && [ "${PUSH_ON_FAILURE:-0}" != 1 ]; then
+    echo "entrypoint: run failed (exit $rc); not pushing (set PUSH_ON_FAILURE=1 to keep partial results)" >&2
+    push_back=no
+fi
+
 if [ "$push_back" = yes ]; then
     git add -u
     # New `.dvc`s (a first-time month) aren't caught by `-u`.

@@ -10,6 +10,7 @@ Outputs:
 - station-id-map.json: {historical_id: canonical_id}
 - station-mappings.yaml: human-readable station history (comment-preserving via ruamel.yaml)
 """
+import os
 import json
 import re
 from collections import defaultdict
@@ -552,7 +553,10 @@ def _extract_observations_parallel(parquets: list[Path]) -> DataFrame:
             dfs.append(extract_day_observations(p))
         return pd.concat(dfs, ignore_index=True)
 
-    max_workers = min(8, len(parquets))
+    # Each worker materializes a month's start+end observations as Python
+    # strings (~10M rows for a 2025 summer month); 8 at once OOM'd a 64 GB
+    # Fargate task. `CTBK_HARMONIZE_WORKERS` caps it where memory is tighter.
+    max_workers = min(int(os.environ.get('CTBK_HARMONIZE_WORKERS', 8)), len(parquets))
     with ProcessPoolExecutor(max_workers=max_workers) as pool:
         err(f"  Using {max_workers} workers")
         results = list(pool.map(extract_day_observations, parquets))
