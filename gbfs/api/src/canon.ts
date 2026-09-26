@@ -24,14 +24,13 @@
  * such leaves matched no rows at all, so dropping them is behavior-neutral.
  */
 
-/** Bucket key of the id-map the rides pyramids' `identityRollup.map`
- *  declares (`configs/pyramids/rides-{start,end}.yaml`). */
-export const CANON_MAP_KEY = 'stations/station-canonicalize-map.json';
+import { canonMapKey } from './serve_config';
 
-/** Canonicals `station-luc.json` lacks that the rides build places in
- *  vocab cells (`ctbk rides-canonicalize-map`); the rides vocab graph adds
- *  them so partial-cell covers can emit their leaves. */
-export const EXTRA_STATIONS_KEY = 'stations/rides-extra-stations.json';
+// The id-map the rides pyramids' `identityRollup.map` declares
+// (`configs/pyramids/rides-{start,end}.yaml`) and the rides vocab supplement
+// (canonicals `station-luc.json` lacks, placed in vocab cells so partial-cell
+// covers emit their leaves) live at `serve_config.ts` keys (defaults:
+// `stations/station-canonicalize-map.json`, `stations/rides-extra-stations.json`).
 
 export type LeafMode = 'canonical' | 'raw';
 
@@ -86,20 +85,21 @@ export function selectLeaves(include: string[], m: CanonMap, mode: LeafMode): st
 	return out;
 }
 
-let _canonMap: { value: Promise<CanonMap>; ts: number } | null = null;
+let _canonMap: { value: Promise<CanonMap>; ts: number; key: string } | null = null;
 const CANON_MAP_TTL_MS = 10 * 60_000;
 
 /** The declared id-map from R2, cached per isolate with a TTL (same policy
  *  as the station registry); failures aren't cached. */
 export function loadCanonMap(bucket: R2Bucket): Promise<CanonMap> {
 	const now = Date.now();
-	if (_canonMap && now - _canonMap.ts < CANON_MAP_TTL_MS) return _canonMap.value;
+	const key = canonMapKey();
+	if (_canonMap && _canonMap.key === key && now - _canonMap.ts < CANON_MAP_TTL_MS) return _canonMap.value;
 	const value = (async (): Promise<CanonMap> => {
-		const obj = await bucket.get(CANON_MAP_KEY);
-		if (!obj) throw new Error(`${CANON_MAP_KEY} not found on R2`);
+		const obj = await bucket.get(key);
+		if (!obj) throw new Error(`${key} not found on R2`);
 		return parseCanonMap(await obj.json<Record<string, string>>());
 	})();
-	_canonMap = { value, ts: now };
+	_canonMap = { value, ts: now, key };
 	value.catch(() => { _canonMap = null; });
 	return value;
 }

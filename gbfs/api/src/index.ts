@@ -32,7 +32,7 @@
  * capacity, slug, etc.), not for the per-minute volume. See `specs/gbfs-r2-only.md`.
  */
 
-interface Env {
+interface Env extends ServeEnv {
 	DB: D1Database;
 	R2: R2Bucket;
 	CORS_ORIGIN: string;
@@ -58,6 +58,9 @@ interface Env {
 	 *    blobs[3] = status, doubles[0] = perCallMs, doubles[1] = wallMs.
 	 *  Queryable via CF GraphQL `viewer.accounts.workersAnalyticsEngine`. */
 	PERF?: AnalyticsEngineDataset;
+	/** Folded into the `/api/rides*` edge-cache key; bump to rotate every
+	 *  cached rides response after a data cutover. */
+	RIDES_CACHE_GEN?: string;
 }
 
 function todayUtc(): string {
@@ -461,6 +464,7 @@ async function resolveToGbfsId(db: D1Database, id: string): Promise<string | nul
 // Planner + helpers live in ./planQuery.ts (pure, unit-testable).
 // -----------------------------------------------------------------------------
 
+import { configureServe, ridesPyramidName, type ServeEnv } from './serve_config';
 import {
 	ALL_REGIONS,
 	parseRidesParams,
@@ -1129,15 +1133,15 @@ async function executeRidesQuery(
 /** Pyramids whose registrations the cron reconciles: D1 pyramid name →
  *  R2 key prefix, plus ladder + genesis (rides ladders/geneses differ
  *  from avail's; omitted → avail defaults). */
-const RECONCILE_PYRAMIDS: { name: string; prefix: string; rides?: boolean }[] = [
+const reconcilePyramids = (): { name: string; prefix: string; rides?: boolean }[] => [
 	{ name: 'avail', prefix: 'avail-v3/' },
 	{ name: 'avail-v5', prefix: 'avail-v5/' },
 	{ name: 'avail-v6', prefix: 'avail-v6/' },
 	// Same ladder + genesis as avail-v6 (`configs/pyramids/smg-v1.yaml`); the
 	// daily Batch `-f` fill writes shards but doesn't register them.
 	{ name: 'smg-v1', prefix: 'smg-v1/' },
-	{ name: 'rides-start', prefix: 'rides/start/', rides: true },
-	{ name: 'rides-end', prefix: 'rides/end/', rides: true },
+	{ name: ridesPyramidName('start'), prefix: 'rides/start/', rides: true },
+	{ name: ridesPyramidName('end'), prefix: 'rides/end/', rides: true },
 ];
 
 /** Register expected-cover shards that exist on R2 but are missing from
@@ -1155,7 +1159,7 @@ async function reconcileRegistry(env: Env): Promise<void> {
 	const { TIERS, AVAIL_GENESIS } = await import('./avail_geo');
 	const { V5_TIERS, RIDES_GENESIS } = await import('./rides_v1');
 	const now = new Date();
-	for (const { name: pyramid, prefix, rides } of RECONCILE_PYRAMIDS) {
+	for (const { name: pyramid, prefix, rides } of reconcilePyramids()) {
 		// listExpectedShards only reads `.tiers` and `.keyTemplate` (same
 		// stub-cast as health.ts's pyramidCover).
 		const pyr = {
@@ -1228,6 +1232,7 @@ function autoBin(from: string, to: string): Bin {
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		configureServe(env);
 		const url = new URL(request.url);
 
 		if (request.method === 'OPTIONS') {
@@ -1493,7 +1498,12 @@ export default {
 			// windows are immutable → 24h cache; queries that touch the
 			// current month get 60s (cron lag + cascade write slack).
 			const cache = caches.default;
-			const cacheKey = new Request(url.toString(), { method: 'GET' });
+			// `RIDES_CACHE_GEN` (a var) rotates every cached rides response —
+			// bump it when a data cutover swaps what past-only windows hold
+			// (their 24h `immutable` entries otherwise outlive the swap).
+			const cacheUrl = new URL(url.toString());
+			if (env.RIDES_CACHE_GEN) cacheUrl.searchParams.set('cache_gen', env.RIDES_CACHE_GEN);
+			const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
 			const hit = await cache.match(cacheKey);
 			if (hit) {
 				const headers = new Headers(hit.headers);
@@ -1880,6 +1890,7 @@ export default {
 	 *  snapshot cache, reconcile shard registrations, then evaluate Slack
 	 *  alert rules (idempotent — only posts on state change). */
 	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+		configureServe(env);
 		// Registration reconcile: register any ladder shard that exists on
 		// R2 but is missing from `pyramid_shards`. Shard *objects* are the
 		// source of truth (R2 is never forked); registration rows can go

@@ -53,6 +53,23 @@ def smg_daily(pyramid, filter):
     return SmgDailySource(pyramid, _vocab_chains(pyramid))
 
 
+def normalized_io(storage, prefix: str = 'normalized'):
+    """The rides source's view of the monthly tiles under `prefix/`: the
+    months present (`<prefix>/<YYYYMM>.parquet`), and a fetch that maps a
+    tile's `normalized/<YM>.parquet` key onto `prefix`."""
+    prefix = prefix.rstrip('/')
+    available = set()
+    for key in storage.list(f'{prefix}/'):
+        name = key.removeprefix(f'{prefix}/')
+        if len(name) == 14 and name.endswith('.parquet') and name[:6].isdigit():
+            available.add(name[:6])
+
+    def fetch(key: str) -> bytes | None:
+        return storage.get(f"{prefix}/{key.removeprefix('normalized/')}")
+
+    return available, fetch
+
+
 def _rides(pyramid, filter, anchor: str):
     """`specs/rides-v5.md`: monthly normalized parquets (`normalized/<YM>.parquet`
     in the pyramid's own R2 bucket — plain-key copies of the DVX blobs,
@@ -60,8 +77,15 @@ def _rides(pyramid, filter, anchor: str):
     Chains = frozen vocab + `s:<short_name>` (as `avail_daily_status`),
     keyed by canonical short_name (registry ∪ unregistered canonicals at
     their `geo` position, `station_positions`); the id-map + geo fallback
-    assets are baked into the image."""
+    assets are baked into the image.
+
+    Candidate builds (`specs/station-id-trailing-zero.md` §Candidate rollout)
+    read elsewhere via container env: `CTBK_NORMALIZED_PREFIX` (default
+    `normalized`; tiles keep their `normalized/<YM>.parquet` identity, only
+    the bytes come from `<prefix>/<YM>.parquet`) and `CTBK_STATION_LUC_KEY`
+    (default `station-luc.json`)."""
     import json
+    import os
     from pathlib import Path
 
     from ctbk_rides_source import MonthlyRidesSource, station_positions
@@ -71,7 +95,7 @@ def _rides(pyramid, filter, anchor: str):
         raise ValueError(f'rides source: no filter dims supported, got {filter!r}')
     here = Path(__file__).parent
     vocab = load_vocab(here / 'station-vocab.json')
-    luc = json.loads(pyramid.storage.get('station-luc.json'))
+    luc = json.loads(pyramid.storage.get(os.environ.get('CTBK_STATION_LUC_KEY') or 'station-luc.json'))
     idm = json.loads((here / 'station-id-map.json').read_text())
     merged = luc.get('merged', {})
     canonical = {sid: merged.get(canon, canon) for sid, canon in idm.items()}
@@ -85,15 +109,7 @@ def _rides(pyramid, filter, anchor: str):
         for short_name, (lat, lng) in station_positions(registry, canonical, geo).items()
     }
 
-    storage = pyramid.storage
-    available = set()
-    for key in storage.list('normalized/'):
-        name = key.removeprefix('normalized/')
-        if len(name) == 14 and name.endswith('.parquet') and name[:6].isdigit():
-            available.add(name[:6])
-
-    def fetch(key: str) -> bytes | None:
-        return storage.get(key)
+    available, fetch = normalized_io(pyramid.storage, os.environ.get('CTBK_NORMALIZED_PREFIX') or 'normalized')
 
     return MonthlyRidesSource(
         pyramid, anchor,

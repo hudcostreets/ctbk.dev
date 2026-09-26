@@ -179,7 +179,7 @@ def provision() -> None:
     )
     gha = aws.iam.Role(
         'ctbk-gha', name='ctbk-gha',
-        description=f'GitHub Actions ({GITHUB_REPO}): Batch submit, reproc image push, s3://tripdata reads, read-only infra checks',
+        description=f'GitHub Actions ({GITHUB_REPO}): Batch submit, reproc/engine image push, s3://tripdata reads, read-only infra checks',
         max_session_duration=4 * 3600,  # `Process new month` can outlast the 1h default
         assume_role_policy=oidc.arn.apply(lambda arn: json.dumps({
             'Version': '2012-10-17',
@@ -217,12 +217,21 @@ def provision() -> None:
                     'Resource': '*',
                 },
                 {
-                    'Sid': 'ReprocImagePush',
+                    # `reproc-image.yml` / `engine-image.yml` push the trips-DAG
+                    # and derived rides-engine images.
+                    'Sid': 'ImagePush',
                     'Effect': 'Allow',
                     'Action': ['ecr:BatchCheckLayerAvailability', 'ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer',
                                'ecr:InitiateLayerUpload', 'ecr:UploadLayerPart', 'ecr:CompleteLayerUpload',
                                'ecr:PutImage', 'ecr:DescribeImages'],
-                    'Resource': a[4],
+                    'Resource': [a[4], f'arn:aws:ecr:{REGION}:{ACCOUNT}:repository/ctbk-engine'],
+                },
+                {
+                    # `gbfs/engine/Dockerfile` builds `FROM` the pyrmts base image.
+                    'Sid': 'EngineBasePull',
+                    'Effect': 'Allow',
+                    'Action': ['ecr:BatchCheckLayerAvailability', 'ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'],
+                    'Resource': f'arn:aws:ecr:{REGION}:{ACCOUNT}:repository/pyrmts-engine',
                 },
                 {
                     'Sid': 'BatchRead',

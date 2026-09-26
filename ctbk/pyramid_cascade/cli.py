@@ -86,9 +86,10 @@ def pyramid_cascade_cmd(
 
 
 @ctbk.command('rides-canonicalize-map', help="Regenerate `station-canonicalize-map.json` (the rides pyramids' `identityRollup.map`: `{s:<raw>: c:<canonical>}` over merged station clusters) from `station-id-map.json` + the luc `merged` overlay, and `rides-extra-stations.json` (canonicals the registry lacks, placed at their observed position — the rides serving vocab's supplement).")
+@flag('-c', '--content-addressed', 'content_addressed', help='With -u: upload to `stations/<name>.<md5[:12]>.json` beside the live keys instead of over them (a candidate for the dev worker\'s `CANON_MAP_KEY` / `EXTRA_STATIONS_KEY`); prints the keys.')
 @flag('-n', '--dry-run', 'dry_run', help='Print the entry counts and a sample; do not write.')
 @flag('-u', '--upload', 'upload', help='Also PUT both files to R2 `stations/` (RW creds: `R2_RW_*`).')
-def rides_canonicalize_map_cmd(dry_run: bool, upload: bool):
+def rides_canonicalize_map_cmd(content_addressed: bool, dry_run: bool, upload: bool):
     from .rides_assets import (
         CANONICALIZE_MAP_PATH, EXTRA_STATIONS_PATH, canonicalize_id_map,
         rides_extra_stations, write_canonicalize_id_map, write_rides_extra_stations,
@@ -107,13 +108,21 @@ def rides_canonicalize_map_cmd(dry_run: bool, upload: bool):
     err(f"Wrote {CANONICALIZE_MAP_PATH} ({n} entries over {n_canonical} merged clusters)")
     n_extra = write_rides_extra_stations()
     err(f"Wrote {EXTRA_STATIONS_PATH} ({n_extra} extra stations)")
+    if content_addressed and not upload:
+        raise BadParameter('-c/--content-addressed needs -u/--upload')
     if upload:
         from ctbk.gbfs_cli import _r2_client
+        from ctbk.r2_keys import content_key
         client, bucket = _r2_client(rw=True)
-        for path in (CANONICALIZE_MAP_PATH, EXTRA_STATIONS_PATH):
+        for path, var in ((CANONICALIZE_MAP_PATH, 'CANON_MAP_KEY'), (EXTRA_STATIONS_PATH, 'EXTRA_STATIONS_KEY')):
+            body = path.read_bytes()
             key = f'stations/{path.name}'
-            client.put_object(Bucket=bucket, Key=key, Body=path.read_bytes(), ContentType='application/json')
+            if content_addressed:
+                key = content_key(key, body)
+            client.put_object(Bucket=bucket, Key=key, Body=body, ContentType='application/json')
             err(f"  → r2://{bucket}/{key}")
+            if content_addressed:
+                print(f'{var}={key}')
 
 
 @ctbk.command('rides-merge-review', help="Regenerate `www/public/assets/station-merges.json` (the `/merge-review` page's input): per merged cluster of `station-canonicalize-map.json`, its members' station-history eras, last positions, merge provenance (harmonize vs luc overlay), and the harmonize co-activity-guard pairs touching it.")

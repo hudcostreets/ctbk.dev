@@ -29,6 +29,7 @@
  * response is serialized. ~10–20× smaller payloads than `?reducer=hist`.
  *
  */
+import { stationLucKey } from './serve_config';
 import {
 	PlanLimitError,
 	stitch,
@@ -418,12 +419,13 @@ type LucEntries = Record<string, { cell: string; lat: number; lng: number }>;
  *  `extrasKey`. */
 export function loadV5Vocab(bucket: R2Bucket, extrasKey?: string): Promise<V5Vocab> {
 	const now = Date.now();
-	const ck = extrasKey ?? '';
+	const lucKey = stationLucKey();
+	const ck = `${lucKey}|${extrasKey ?? ''}`;
 	const hit = _v5Vocab.get(ck);
 	if (hit && now - hit.ts < V5_VOCAB_TTL_MS) return hit.value;
 	const value = (async (): Promise<V5Vocab> => {
-		const obj = await bucket.get('station-luc.json');
-		if (!obj) throw new Error('station-luc.json not found on R2');
+		const obj = await bucket.get(lucKey);
+		if (!obj) throw new Error(`${lucKey} not found on R2`);
 		const entries: LucEntries = { ...(await obj.json<{ by_short_name: LucEntries }>()).by_short_name };
 		if (extrasKey !== undefined) {
 			const ex = await bucket.get(extrasKey);

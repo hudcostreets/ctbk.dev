@@ -27,6 +27,7 @@ import resvgWasm from './assets/resvg.wasm';
 import interSemiBold from './assets/Inter-SemiBold.ttf';
 import { serveAvailV3 } from './avail_geo';
 import { RIDES, serveRides } from './rides_v1';
+import { stationLucKey } from './serve_config';
 
 // Both wasm modules must init exactly once per isolate.
 let _wasmReady: Promise<void> | null = null;
@@ -63,21 +64,22 @@ async function stationBySlug(db: D1Database, slug: string): Promise<StationRow |
 	).bind(slug).first<StationRow>();
 }
 
-/** Station-LUC denorm (same file the FE + cascade worker read). Cached
- *  per isolate — ~2.5k entries, refreshed rarely. */
-const STATION_LUC_KEY = 'gbfs/station-luc.json';
+/** Station-LUC denorm — the registry the rides/avail serve path reads
+ *  (`serve_config.ts`; was a stale `gbfs/station-luc.json` copy, last
+ *  written 2026-09-11). Cached per isolate per key — ~2.5k entries. */
 interface LucEntry { lat: number; lng: number; cell: string }
 interface LucFile {
 	by_short_name: Record<string, LucEntry>;
 }
-let _luc: LucFile | null = null;
+let _luc: { key: string; file: LucFile } | null = null;
 async function lucEntryFor(r2: R2Bucket, shortName: string): Promise<LucEntry | null> {
-	if (_luc === null) {
-		const obj = await r2.get(STATION_LUC_KEY);
+	const key = stationLucKey();
+	if (_luc?.key !== key) {
+		const obj = await r2.get(key);
 		if (!obj) return null;
-		_luc = await obj.json<LucFile>();
+		_luc = { key, file: await obj.json<LucFile>() };
 	}
-	return _luc.by_short_name[shortName] ?? null;
+	return _luc.file.by_short_name[shortName] ?? null;
 }
 
 // ─── Monthly trips (`rides` pyramid, per-station LUC cell) ───────────

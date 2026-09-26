@@ -60,6 +60,7 @@ from utz.cli import flag
 
 from ctbk.avail_v3 import R2_BUCKET, r2_client
 from ctbk.cli.base import ctbk
+from ctbk.r2_keys import content_key
 
 OUTPUT_KEY = 'station-luc.json'                          # R2 key
 LOCAL_PATH = 'www/public/assets/station-luc.json'        # FE-fetched
@@ -236,11 +237,12 @@ def luc_distribution_summary(by_short_name: dict[str, dict]) -> str:
 
 
 @ctbk.command('station-luc-build', help="Build station-luc.json (canonical short_name → LUC denorm): gbfs/info snapshot union + historical rides canonicals, joint uniqueness.")
+@flag('-c', '--content-addressed', help="Upload to `station-luc.<md5[:12]>.json` beside the live key instead of over it (a candidate for the dev worker's `STATION_LUC_KEY` / the engine's `CTBK_STATION_LUC_KEY`); prints the key.")
 @option('-f', '--date-from', 'date_from', default=WAL_PERIOD_START, help=f"Inclusive start (YYYY-MM-DD; default: {WAL_PERIOD_START}, matching the WAL period start).")
 @flag('-H', '--no-history', help="Active GBFS stations only (pre-rides-v3-LUC behavior); skips station-history canonicals + same-dock merge.")
 @option('-T', '--date-to', 'date_to', default=None, help="Exclusive end (YYYY-MM-DD; default: tomorrow UTC, so today's snapshot is included).")
 @flag('-R', '--no-r2', help="Skip R2 upload; write local file only.")
-def station_luc_build_cmd(date_from: str, no_history: bool, date_to: str | None, no_r2: bool):
+def station_luc_build_cmd(content_addressed: bool, date_from: str, no_history: bool, date_to: str | None, no_r2: bool):
     df = Date.fromisoformat(date_from)
     if date_to is None:
         dt = (datetime.now(timezone.utc).date() + timedelta(days=1))
@@ -325,12 +327,15 @@ def station_luc_build_cmd(date_from: str, no_history: bool, date_to: str | None,
     err(f"  wrote {LOCAL_PATH}")
 
     if not no_r2:
+        key = content_key(OUTPUT_KEY, body) if content_addressed else OUTPUT_KEY
         cli.put_object(
             Bucket=R2_BUCKET,
-            Key=OUTPUT_KEY,
+            Key=key,
             Body=body,
             ContentType='application/json',
         )
-        err(f"  wrote s3://{R2_BUCKET}/{OUTPUT_KEY}")
+        err(f"  wrote s3://{R2_BUCKET}/{key}")
+        if content_addressed:
+            print(key)
     else:
         err(f"  (skipped R2 upload — --no-r2)")
