@@ -1,0 +1,38 @@
+name: API contract check
+# Daily `ctbk gbfs api-check` against the prod api worker: goldens for closed
+# rides windows + invariants (final bin of half-open ranges included,
+# canonical == raw totals, `/cells` == plain route, plausible avail/smg/
+# stations). Read-only; posts to #ctbk-bot on failure. After a deliberate
+# data repair, regenerate goldens locally (`ctbk gbfs api-check -u`) and
+# commit the diff.
+on:
+  schedule:
+    - cron: '41 9 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - name: Sync deps
+        run: uv sync --frozen
+      - name: api-check
+        id: check
+        run: |
+          set -o pipefail
+          if ! uv run --frozen ctbk gbfs api-check 2>&1 | tee out.txt; then
+            { echo 'text<<EOF'; echo ":x: *API contract check failed*"; grep '^✗' out.txt | head -8 | sed 's/^/• /'; echo EOF; } >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+      - name: Notify Slack
+        if: failure()
+        uses: ./.github/actions/slack-notify
+        with:
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          text: "${{ steps.check.outputs.text || ':x: *API contract check failed*' }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>"

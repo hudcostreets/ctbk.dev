@@ -101,9 +101,10 @@ npm run scrns       # Generate screenshots
 ```
 
 ### Testing and Quality
-- **Python**: `ctbk/tests/` (`test_csvs`, `test_rides_v3_luc`, `test_avail_v3_cascade`, `test_lambda_exec`) + `ctbk/pyramid_cascade/tests/` (rides-source, rebuild, engine-check, vocab, …). Run with `pytest`.
-- **Frontend**: No unit tests configured, only linting/type checking
-- **No CI test execution**: GitHub Actions focus on data processing and deployment
+- **Python**: `ctbk/tests/` + `ctbk/pyramid_cascade/tests/` (hermetic; a test needing network/cloud gets the `network` marker). Run with `pytest`; CI runs them via `.github/workflows/py-tests.yml`.
+- **Workers**: each `gbfs/<worker>` vitest suite gates its deploy (`gbfs.yml`).
+- **Frontend**: Playwright e2e (`www/e2e/`) gates the www deploy (`www.yml`).
+- **Live API contract**: `ctbk gbfs api-check` (goldens in `ctbk/api_check_goldens/` for closed rides windows + invariants), daily via `api-check.yml`; after a deliberate data repair, rerun with `-u` and commit the golden diff.
 - **Linting**: Use `npm run lint` for frontend, no Python linting configured
 
 ## Data Processing Details
@@ -129,7 +130,7 @@ npm run scrns       # Generate screenshots
 ### GitHub Actions
 - **CI** (`.github/workflows/ci.yml`): Monthly data ingestion from s3://tripdata
 - **Website** (`.github/workflows/www.yml`): Deploys ctbk.dev (CF Workers Assets) on pushes to `main` touching `www/**` (or dispatch; the monthly pipeline dispatches it once at its end); `www` branch = marker of the live commit
-- **No test automation**: Actions focus on ETL and deployment only
+- **Tests**: `py-tests.yml` (pytest), `api-check.yml` (daily live-API contract check), plus the per-deploy vitest/Playwright gates
 
 ### Monthly Data Updates
 CI (`.github/workflows/ci.yml`) polls for new Citi Bike data monthly and runs the whole pipeline for the new month via a single driver, `ctbk update` (`ctbk/update.py`):

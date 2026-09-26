@@ -956,6 +956,21 @@ API_URLS = {
 AVAIL_METRIC_NAMES = ('bikes', 'ebikes', 'docks', 'disabled', 'pending')
 
 
+@gbfs.command('api-check', help='Contract checks of the live api worker against real data: goldens for closed rides windows + invariants (final bin of half-open ranges, canonical == raw totals, `/cells` == plain, plausible avail/smg/stations). Exits 1 on any failure. `ctbk/api_check.py`.')
+@option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='prod', show_default=True)
+@option('-k', '--only', multiple=True, help='Run only checks whose name contains this (repeatable).')
+@option('-u', '--update-goldens', is_flag=True, help='(Re)write `ctbk/api_check_goldens/*.json` from the live responses instead of comparing.')
+def gbfs_api_check(env_name: str, only: tuple[str, ...], update_goldens: bool) -> None:
+	from ctbk.api_check import run
+	results = run(API_URLS[env_name], update_goldens, only)
+	for name, ok, detail in results:
+		print(f'{"✓" if ok else "✗"} {name}: {detail}')
+	failed = [name for name, ok, _ in results if not ok]
+	err(f'{len(results) - len(failed)}/{len(results)} checks passed' + (' (goldens updated)' if update_goldens else ''))
+	if failed:
+		sys.exit(1)
+
+
 @gbfs.command('parity', help='API-level parity + latency: query the baseline (`avail`) and candidate (`avail-v5`) pyramids over a station + coarse-cell matrix, compare series values, report timings. Station mapping: v3 `cells=<LUC L15 cell>` ≡ v5 `cells=s:<short_name>`. `-B` adds v5 bbox-exactness cases (bbox rollup ≡ rollup of its stations\' identity keys).')
 @option('-B', '--bbox', 'bboxes', multiple=True, help='v5 bbox exactness case, `minLat,minLng,maxLat,maxLng` (repeatable) [default: one Bay Ridge box].')
 @option('-b', '--bin-budget', type=int, default=24, show_default=True, help='Bins per query.')
