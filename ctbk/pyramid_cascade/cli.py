@@ -114,3 +114,19 @@ def rides_canonicalize_map_cmd(dry_run: bool, upload: bool):
             key = f'stations/{path.name}'
             client.put_object(Bucket=bucket, Key=key, Body=path.read_bytes(), ContentType='application/json')
             err(f"  → r2://{bucket}/{key}")
+
+
+@ctbk.command('rides-merge-review', help="Regenerate `www/public/assets/station-merges.json` (the `/merge-review` page's input): per merged cluster of `station-canonicalize-map.json`, its members' station-history eras, last positions, merge provenance (harmonize vs luc overlay), and the harmonize co-activity-guard pairs touching it.")
+@flag('-n', '--dry-run', 'dry_run', help='Print counts and a sample cluster; do not write.')
+def rides_merge_review_cmd(dry_run: bool):
+    from .rides_assets import MERGES_ASSET_PATH, merges_asset, write_merges_asset
+
+    if dry_run:
+        clusters = merges_asset()['clusters']
+        n_members = sum(len(c['members']) for c in clusters.values())
+        err(f"{len(clusters)} clusters, {n_members} members (dry run, not written)")
+        canon, c = next(iter(clusters.items()))
+        err(f"  {canon}: {c}")
+        return
+    n = write_merges_asset()
+    err(f"Wrote {MERGES_ASSET_PATH} ({n} clusters, {MERGES_ASSET_PATH.stat().st_size:,} bytes)")

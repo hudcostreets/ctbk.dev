@@ -26,6 +26,10 @@ EXTRA_STATIONS_PATH = REPO / 's3' / 'ctbk' / 'stations' / 'rides-extra-stations.
 # leaf under the nearest vocab ancestor of its cell; any fine level works).
 EXTRA_CELL_LEVEL = 20
 NORMALIZED_DIR = REPO / 's3' / 'ctbk' / 'normalized'
+HISTORY_PATH = REPO / 's3' / 'ctbk' / 'stations' / 'station-history.parquet'
+HARMONIZE_REVIEW_PATH = REPO / 's3' / 'ctbk' / 'stations' / 'station-merge-review.json'
+# FE `/merge-review` page input (`specs/rides-rekey.md` P5).
+MERGES_ASSET_PATH = REPO / 'www' / 'public' / 'assets' / 'station-merges.json'
 GEO_JSON_PATH = REPO / 'gbfs' / 'engine' / 'station-geo.json'
 
 
@@ -115,6 +119,91 @@ def write_rides_extra_stations(path: Path = EXTRA_STATIONS_PATH) -> int:
     d = rides_extra_stations()
     path.write_text(json.dumps(d, indent=2) + '\n')
     return len(d)
+
+
+def _iso_date(d: str | None) -> str | None:
+    """station-history `YYMMDD` (day-level spans) → `YYYY-MM-DD`. A few spans
+    come from the month-level meta_hists fallback (`YYYYMM`, e.g. `202007`);
+    those have an impossible `YYMMDD` month and map to the month's 1st."""
+    if d is None:
+        return None
+    if len(d) == 6 and int(d[2:4]) <= 12:
+        return f'20{d[:2]}-{d[2:4]}-{d[4:]}'
+    if len(d) == 6:
+        return f'{d[:4]}-{d[4:]}-01'
+    raise ValueError(f'unrecognized station-history date {d!r}')
+
+
+def merge_clusters(
+    canon_map: dict[str, str],
+    id_map: dict[str, str],
+    spans: list[dict],
+    geo: dict[str, tuple[float, float]],
+    review: list[dict],
+) -> dict[str, dict]:
+    """Pure rule: the `/merge-review` page's per-cluster facts, keyed by
+    canonical short_name (sorted).
+
+    One entry per merged cluster of `canon_map` (`{s:<raw>: c:<canonical>}`).
+    Each member carries:
+      - `via`: `harmonize` if the harmonize id-map sends it to this
+        canonical, else `overlay` (folded in by the luc `merged` overlay);
+      - `pos`: last observed `[lat, lng]` (`station-geo.json`), or null;
+      - `spans`: its station-history eras `[name, first, last]` (ISO dates;
+        `last` null = still active), oldest first — empty when the history
+        predates the id (it lags the id-map).
+    Members are ordered by first activity (history-less last, then by id).
+    `review` holds the harmonize co-activity-guard pairs (`station-merge-
+    review.json`) touching any member: `merged: true` = a borderline pair
+    that was merged anyway; otherwise a rejected candidate (a split)."""
+    by_id: dict[str, list[list]] = {}
+    for sp in sorted(spans, key=lambda sp: (sp['first'] or '', sp['name'])):
+        by_id.setdefault(sp['id'], []).append([sp['name'], _iso_date(sp['first']), _iso_date(sp['last'])])
+    members: dict[str, list[str]] = {}
+    for raw, canon in canon_map.items():
+        members.setdefault(canon.removeprefix('c:'), []).append(raw.removeprefix('s:'))
+    out: dict[str, dict] = {}
+    for canon, sids in sorted(members.items()):
+        ms = [
+            {
+                'id': sid,
+                'via': 'harmonize' if id_map.get(sid) == canon else 'overlay',
+                'pos': list(geo[sid]) if sid in geo else None,
+                'spans': by_id.get(sid, []),
+            }
+            for sid in sids
+        ]
+        ms.sort(key=lambda m: (not m['spans'], m['spans'][0][1] if m['spans'] else '', m['id']))
+        ids = set(sids)
+        out[canon] = {
+            'members': ms,
+            'review': [r for r in review if r['a'] in ids or r['b'] in ids],
+        }
+    return out
+
+
+def merges_asset() -> dict:
+    """`merge_clusters` over the committed local inputs."""
+    import pandas as pd
+    hist = pd.read_parquet(HISTORY_PATH, columns=['id', 'name', 'first', 'last'])
+    spans = [
+        {'id': r.id, 'name': r.name, 'first': r.first, 'last': r.last if isinstance(r.last, str) else None}
+        for r in hist.itertuples(index=False)
+    ]
+    return {'clusters': merge_clusters(
+        json.loads(CANONICALIZE_MAP_PATH.read_text()),
+        json.loads(ID_MAP_PATH.read_text()),
+        spans,
+        _geo(),
+        json.loads(HARMONIZE_REVIEW_PATH.read_text()),
+    )}
+
+
+def write_merges_asset(path: Path = MERGES_ASSET_PATH) -> int:
+    """Materialize `merges_asset()` (compact JSON); returns the cluster count."""
+    d = merges_asset()
+    path.write_text(json.dumps(d, separators=(',', ':')) + '\n')
+    return len(d['clusters'])
 
 
 def rides_source_kwargs() -> dict:

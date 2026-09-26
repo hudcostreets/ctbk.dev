@@ -229,6 +229,17 @@ out) the cache after a data fix.
    then retire `rides-v5/` data + D1 rows (rolls into the
    `deversion-clean-slate.md` purge pass).
 5. **P5** `/merge-review` page (reads `?raw=1`). **P6** avail parity.
+   **P5 built (2026-09-26, branch `merge-review`):** `/merge-review` ranks all 974
+   merged clusters by static flags (member positions >1 km / >150 m apart,
+   active-range overlap, harmonize co-activity-guard pairs, overlay provenance)
+   from `www/public/assets/station-merges.json` (`ctbk rides-merge-review`, over
+   `station-canonicalize-map.json` + `station-history.parquet` +
+   `station-merge-review.json` + `station-geo.json`); the selected cluster shows
+   per-member monthly rides from `/api/rides/cells?raw=1`, shades ride-level
+   co-active months, and checks `c:` = Σ members. First finding: raw id `3640`
+   was reused (Lafayette Ave & Classon Ave → Journal Square, JC, 10 km away), so
+   `c:4452.01` absorbs ~13 months of Journal Square rides in 2020 — 37 clusters
+   have members >1 km apart and want an id-map review pass.
 
 ## Open owner decisions
 
