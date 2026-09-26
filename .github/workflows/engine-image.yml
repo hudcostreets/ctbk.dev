@@ -1,0 +1,45 @@
+# Build the derived rides-engine image (`gbfs/engine/Dockerfile`, FROM the
+# pyrmts base in HCCS ECR) on a native arm64 runner and push
+# `ctbk-engine:<sha8>` via OIDC (`ctbk-gha`, `infra/aws_hccs.py`). The image
+# bakes `rides_source.py` + `station-{id-map,vocab,geo}.json`, so id-map /
+# geo changes need a fresh build. Register a job-def revision on it with
+# `ctbk gbfs engine jobdef -s <image>` (`engine submit` uses the latest).
+name: Engine image
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'ctbk.dev commit/branch to build (default: this run''s SHA)'
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Resolve image
+        id: ref
+        run: echo "image=688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-engine:$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build + push
+        run: |
+          .github/scripts/hccs-aws.sh bash -c '
+            aws ecr get-login-password | docker login --username AWS --password-stdin 688066488567.dkr.ecr.us-east-1.amazonaws.com
+            docker build --platform linux/arm64 -f gbfs/engine/Dockerfile -t ${{ steps.ref.outputs.image }} .
+            docker push ${{ steps.ref.outputs.image }}
+          '
+      - name: Summary
+        run: |
+          echo "Pushed \`${{ steps.ref.outputs.image }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Register: \`ctbk gbfs engine jobdef -s ${{ steps.ref.outputs.image }}\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Notify Slack — failure
+        if: failure()
+        uses: ./.github/actions/slack-notify
+        with:
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          text: ":x: *Engine image build failed* — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>"
