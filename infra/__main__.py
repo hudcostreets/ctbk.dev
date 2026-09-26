@@ -14,11 +14,6 @@ import pulumi_cloudflare as cf
 config = pulumi.Config()
 account_id = os.environ.get('CLOUDFLARE_ACCOUNT_ID') or config.require_secret('cloudflare_account_id')
 
-# The AWS reproc-Batch stack lives in the pyrmts AWS account and is specific to
-# the RAC-side deployment. A CF-only stack (e.g. the HCCS second copy) sets
-# `manage_aws: false` to provision just the Cloudflare resources.
-manage_aws = config.get_bool('manage_aws') is not False
-
 # ── R2 bucket (imported; created via dashboard 2026-04-06) ────────────
 ctbk_bucket = cf.R2Bucket(
     'ctbk',
@@ -86,11 +81,6 @@ WORKERS = {
 }
 pulumi.export('workers', WORKERS)
 
-
-# ── AWS reproc Batch infra (pyrmts AWS account) — RAC-side stacks only ─
-if manage_aws:
-    import aws_reproc
-    aws_reproc.provision()
 
 # ── HCCS AWS account (Lambda cascade, engine Batch, GHA OIDC) — `hccs` stack ─
 if config.get_bool('manage_hccs_aws'):
