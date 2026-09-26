@@ -1,6 +1,6 @@
 outs:
-- md5: 0291898d6246ab90546ff8de43869549
-  size: 1617748
+- md5: 53e4755ae5c7febf75bd97379acc8505
+  size: 1684923
   hash: md5
   path: se_c.json
 meta:
@@ -8,5 +8,5 @@ meta:
     cmd: ctbk spj create -w0 201906
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      stations.json: 1c197276db6ff80d79198525faf7d247
-      /s3/ctbk/aggregated/se_c_201906.parquet: f3b397d189aa59ecc99d0ee9454400e0
+      stations.json: 4e64555683f6ed2790f67b7e8c912d53
+      /s3/ctbk/aggregated/se_c_201906.parquet: f0a9045846a6af7692b081812a439b88

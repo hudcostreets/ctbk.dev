@@ -1,6 +1,6 @@
 outs:
-- md5: c77a2edfcf782a310bd6ea831b8a9cad
-  size: 72931
+- md5: 4d305fb47656965b4241b0984dfd4005
+  size: 76983
   hash: md5
   path: stations.json
 meta:
@@ -8,6 +8,6 @@ meta:
     cmd: ctbk sm create -w0 201910
     code_ref: e7e0bbf860d9a179f78b3db7ea90ace9df89ca5b
     deps:
-      /s3/ctbk/stations/meta_hists/in_201910.parquet: 4b57521e138ccfb5c6ca891397f0f408
-      /s3/ctbk/stations/meta_hists/il_201910.parquet: 2d255cc333d9b46a32d804578e1bd5bf
-      /s3/ctbk/aggregated/e_c_201910.parquet: b34b3c94a79330692d5804473f3a3ea0
+      /s3/ctbk/stations/meta_hists/in_201910.parquet: cc3dc2954c16c98de92c07c5ad367074
+      /s3/ctbk/stations/meta_hists/il_201910.parquet: bafea365a3d12161dea83f513f581087
+      /s3/ctbk/aggregated/e_c_201910.parquet: 0c76be5d957851df94633573a661c983
