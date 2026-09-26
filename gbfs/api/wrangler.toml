@@ -75,6 +75,15 @@ mode = "smart"
 CORS_ORIGIN = "*"
 R2_BUCKET_NAME = "ctbk"
 R2_PUBLIC_BASE_URL = "https://pub-4b6c7e01aa2349b8b8d6ed788df2a9d1.r2.dev"
+# Candidate rollout (`src/serve_config.ts`; `specs/station-id-trailing-zero.md`
+# §Candidate rollout): point dev at candidate data, leave prod on the
+# defaults. Unset/empty ⇒ prod's `rides` / `station-luc.json` /
+# `stations/station-canonicalize-map.json` / `stations/rides-extra-stations.json`.
+# RIDES_PYRAMID = "rides-next"
+# STATION_LUC_KEY = "station-luc.<hash12>.json"
+# CANON_MAP_KEY = "stations/station-canonicalize-map.<hash12>.json"
+# EXTRA_STATIONS_KEY = "stations/rides-extra-stations.<hash12>.json"
+# RIDES_CACHE_GEN = "<label>"  # folded into the `/api/rides*` edge-cache key
 
 [[env.dev.d1_databases]]
 binding = "DB"

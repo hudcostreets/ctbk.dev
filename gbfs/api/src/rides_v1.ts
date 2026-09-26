@@ -65,7 +65,8 @@ import {
 	type SpatialSet,
 } from 'pyrmts-geo';
 import { loadV5Vocab, v5BBoxCover } from './avail_geo';
-import { EXTRA_STATIONS_KEY, loadCanonMap, selectLeaves } from './canon';
+import { loadCanonMap, selectLeaves } from './canon';
+import { extraStationsKey, ridesPyramidBase } from './serve_config';
 
 const METRICS = ['count', 'duration'] as const;
 type Metric = typeof METRICS[number];
@@ -315,11 +316,15 @@ function v5ShardIndex(db: D1Database, name: string): ShardIndex {
  *  `specs/rides-rekey.md`) stores raw-id leaves + materialized `c:` rollups,
  *  selected per request by `canon.ts` (canonical default, `?raw=1` audit). */
 export interface RidesVariant {
-	/** R2 key prefix; the D1 pyramid name is `${prefix}-${anchor}`. */
+	/** R2 key prefix. */
 	prefix: string;
 	canonicalized: boolean;
+	/** D1 registry name base (pyramids `${registry}-${anchor}`); default
+	 *  `prefix`. A candidate build registers under another name over the same
+	 *  (content-hashed) keys — `serve_config.ts`. */
+	registry?: () => string;
 }
-export const RIDES: RidesVariant = { prefix: 'rides', canonicalized: true };
+export const RIDES: RidesVariant = { prefix: 'rides', canonicalized: true, registry: ridesPyramidBase };
 
 export function ridesV5Pyramid(bucket: R2Bucket, variant: RidesVariant, anchor: Anchor, cells: boolean): GeoPyramid {
 	return {
@@ -407,7 +412,7 @@ export async function serveRides(
 	if (raw && !variant.canonicalized) {
 		return errorResponse(400, `raw=1 needs a canonicalized pyramid (/api/rides), not ${variant.prefix}`, cors);
 	}
-	const extrasKey = variant.canonicalized ? EXTRA_STATIONS_KEY : undefined;
+	const extrasKey = variant.canonicalized ? extraStationsKey() : undefined;
 	let include: string[];
 	if (userCells !== null) {
 		// Station-key covers (`s:` / `c:`) pass through (station-detail path);
@@ -434,7 +439,7 @@ export async function serveRides(
 	}
 
 	const pyramid = ridesV5Pyramid(bucket, variant, anchor, cellsRoute);
-	const pyramidName = `${variant.prefix}-${anchor}`;
+	const pyramidName = `${variant.registry?.() ?? variant.prefix}-${anchor}`;
 	const registered = await v5ShardIndex(db, pyramidName).listShards(pyramidName, { range: { from, to } });
 	// One planner for both modes: pyrmts-geo forwards `targetBin` as of
 	// `69de58b`, so explicit-width queries no longer need the time-only

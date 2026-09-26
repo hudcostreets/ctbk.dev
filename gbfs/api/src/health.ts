@@ -7,6 +7,7 @@
  *
  * See `specs/gbfs-health-page.md` for the surfaced shape.
  */
+import { ridesPyramidName } from './serve_config';
 import type { Pyramid, Storage, Tier } from 'pyrmts';
 import {
 	computeAndStoreSnapshot,
@@ -190,6 +191,13 @@ export interface HealthSnapshot {
 
 /** Pyramids whose fill tip `alerts.ts` watches. */
 export const WATCHED_PYRAMIDS = ['avail-v5', 'avail-v6', 'smg-v1', 'rides-start', 'rides-end'];
+
+/** A watched pyramid's D1 registry name. `rides-{start,end}` are roles (the
+ *  keys `pyramidTips` + the tip alerts use), resolved through
+ *  `serve_config.ts` so a candidate registry name keeps the alert ids. */
+export function watchedRegistryName(role: string): string {
+	return role === 'rides-start' ? ridesPyramidName('start') : role === 'rides-end' ? ridesPyramidName('end') : role;
+}
 
 /** UTC-date + minute helpers — avoid Date methods that pull in locale. */
 function utcDate(d: Date): string {
@@ -468,7 +476,7 @@ export async function getPyramidsHealth(db: D1Database, r2?: HealthR2): Promise<
 	const { TIERS, AVAIL_GENESIS } = await import('./avail_geo');
 	const { V5_TIERS, RIDES_GENESIS } = await import('./rides_v1');
 	const out: PyramidsHealth = [];
-	for (const { name, keyPrefix, rides } of HEALTH_PYRAMIDS) {
+	for (const { name, keyPrefix, rides } of healthPyramids()) {
 		const cover = await pyramidCover(
 			db, name, keyPrefix, shardCol,
 			rides ? V5_TIERS : TIERS, rides ? RIDES_GENESIS : AVAIL_GENESIS,
@@ -508,14 +516,14 @@ async function annotateSegmentBytes(
  *  prefix). avail v3/v5/v6 share the TIERS ladder; rides pyramids
  *  carry their own ladder + genesis (`rides: true`). Dormant avail-v4 is
  *  intentionally omitted (superseded by v5). */
-const HEALTH_PYRAMIDS: { name: string; keyPrefix: string; rides?: boolean }[] = [
+const healthPyramids = (): { name: string; keyPrefix: string; rides?: boolean }[] => [
 	{ name: 'avail', keyPrefix: 'avail-v3' },
 	{ name: 'avail-v5', keyPrefix: 'avail-v5' },
 	{ name: 'avail-v6', keyPrefix: 'avail-v6' },
 	// Station-minute states: avail-v6's ladder + genesis (`configs/pyramids/smg-v1.yaml`).
 	{ name: 'smg-v1', keyPrefix: 'smg-v1' },
-	{ name: 'rides-start', keyPrefix: 'rides/start', rides: true },
-	{ name: 'rides-end', keyPrefix: 'rides/end', rides: true },
+	{ name: ridesPyramidName('start'), keyPrefix: 'rides/start', rides: true },
+	{ name: ridesPyramidName('end'), keyPrefix: 'rides/end', rides: true },
 ];
 
 /** Cover status for one registry pyramid — `pyrmts-cfw`'s
@@ -621,7 +629,7 @@ export async function getD1SizeBytes(db: D1Database): Promise<number | null> {
 
 export async function getPyramidTips(db: D1Database): Promise<Record<string, number | null>> {
 	const rows = await Promise.all(WATCHED_PYRAMIDS.map((p) =>
-		db.prepare('SELECT MAX(period_end) AS t FROM pyramid_shards WHERE pyramid = ?').bind(p).first<{ t: number | null }>()));
+		db.prepare('SELECT MAX(period_end) AS t FROM pyramid_shards WHERE pyramid = ?').bind(watchedRegistryName(p)).first<{ t: number | null }>()));
 	return Object.fromEntries(WATCHED_PYRAMIDS.map((p, i) => [p, rows[i]?.t ?? null]));
 }
 

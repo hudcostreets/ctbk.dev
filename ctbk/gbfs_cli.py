@@ -1086,24 +1086,34 @@ def gbfs_parity(
 	sys.exit(1 if failures else 0)
 
 
-@gbfs.command('rides-rekey-check', help='Validation gate for the rides re-key (`specs/rides-rekey.md`): candidate `/api/rides` (raw-id + materialized `c:` rows) vs baseline `/api/rides-v5`, monthly `count` series per anchor. Unmerged stations and bboxes must match exactly; merged clusters are compared to baseline (differences expected only where the id-map changed) and must equal the sum of their members\' `?raw=1` rows.')
+@gbfs.command('rides-rekey-check', help='Validation gate for a rides rebuild (`specs/rides-rekey.md`, `specs/station-id-trailing-zero.md`): candidate `/api/rides` (raw-id + materialized `c:` rows) vs a baseline route, monthly `count` series per anchor. Unmerged stations and bboxes must match exactly (with -x, stations the repair touches are reported as expected diffs and bboxes are informational — whole-system equality is `rides-totals-diff`\'s); merged clusters must equal the sum of their members\' `?raw=1` rows.')
 @option('-a', '--anchor', 'anchors', multiple=True, type=click.Choice(['start', 'end']), help='Anchor (repeatable) [default: both].')
 @option('-B', '--bbox', 'bboxes', multiple=True, help='Region case, `minLat,minLng,maxLat,maxLng` (repeatable) [default: Bay Ridge + lower Manhattan + all NYC/JC].')
 @option('-b', '--bin', 'bin_', default='1mo', show_default=True, help='Output bin.')
 @option('-c', '--candidate', default=API_URLS['dev'], show_default=True, help='Worker serving the candidate `/api/rides`.')
-@option('-C', '--baseline', default=API_URLS['prod'], show_default=True, help='Worker serving the baseline `/api/rides-v5`.')
+@option('-C', '--baseline', default=API_URLS['prod'], show_default=True, help='Worker serving the baseline route.')
+@option('-L', '--luc-key', default='station-luc.json', show_default=True, help='R2 key of the station registry the candidate serves (a candidate `STATION_LUC_KEY`); drives the station sample.')
+@option('-M', '--canon-key', default='stations/station-canonicalize-map.json', show_default=True, help='R2 key of the id-map the candidate serves (a candidate `CANON_MAP_KEY`); drives merged/unmerged classification.')
 @option('-m', '--num-merged', type=int, default=6, show_default=True, help='Deterministic sample of merged clusters.')
 @option('-n', '--num-stations', type=int, default=8, show_default=True, help='Deterministic sample of unmerged stations.')
+@option('-p', '--num-repairs', type=int, default=6, show_default=True, help='With -x: repaired pairs to print (baseline vs candidate raw totals).')
 @option('-r', '--range', 'range_', default='2013-06-01T00:00:00Z/2026-09-01T00:00:00Z', show_default=True, help='`FROM/TO` UTC ISO.')
+@option('-R', '--baseline-route', default='/api/rides', show_default=True, help='Baseline route (`/api/rides-v5` for the original re-key gate; retired).')
+@option('-x', '--expect-diff', 'repairs_path', default=None, help='`station-trailing-zero-repairs.json`: stations a repair touches (each pair\'s ids + before/after canonicals, plus every station whose cluster differs between the live id-map and -M) may differ from baseline.')
 def gbfs_rides_rekey_check(
 	anchors: tuple[str, ...],
 	bboxes: tuple[str, ...],
 	bin_: str,
 	candidate: str,
 	baseline: str,
+	luc_key: str,
+	canon_key: str,
 	num_merged: int,
 	num_stations: int,
+	num_repairs: int,
 	range_: str,
+	baseline_route: str,
+	repairs_path: str | None,
 ) -> None:
 	import time as _time
 	from collections import defaultdict
@@ -1146,8 +1156,22 @@ def gbfs_rides_rekey_check(
 		return f'{len(bad)} bins differ (first {first}); totals {sum(a.values())} vs {sum(b.values())}'
 
 	client, bucket = _r2_client()
-	luc = json.loads(client.get_object(Bucket=bucket, Key='station-luc.json')['Body'].read())  # type: ignore[attr-defined]
-	canon_map = json.loads(client.get_object(Bucket=bucket, Key='stations/station-canonicalize-map.json')['Body'].read())  # type: ignore[attr-defined]
+
+	def r2_json(key: str):
+		return json.loads(client.get_object(Bucket=bucket, Key=key)['Body'].read())  # type: ignore[attr-defined]
+
+	luc = r2_json(luc_key)
+	canon_map = r2_json(canon_key)
+	expected: set[str] = set()
+	repairs: list[dict] = []
+	if repairs_path:
+		repairs = json.loads(Path(repairs_path).read_text())
+		for r in repairs:
+			expected |= {r['n'], r['n0'], r['before']['canon'], *(a['canon'] for a in r['after'].values())}
+		live_map = r2_json('stations/station-canonicalize-map.json')
+		for k in live_map.keys() | canon_map.keys():
+			if live_map.get(k) != canon_map.get(k):
+				expected |= {k[2:], *(v[2:] for v in (live_map.get(k), canon_map.get(k)) if v)}
 	members: dict[str, list[str]] = defaultdict(list)
 	for raw_key, canon in canon_map.items():
 		members[canon[2:]].append(raw_key)
@@ -1159,20 +1183,23 @@ def gbfs_rides_rekey_check(
 
 	failures = 0
 	walls: dict[str, list[float]] = {'candidate': [], 'baseline': []}
-	print(f'range {from_s}/{to_s} · bin {bin_} · {len(sample_u)} unmerged + {len(sample_m)} merged stations')
+	print(f'range {from_s}/{to_s} · bin {bin_} · {len(sample_u)} unmerged + {len(sample_m)} merged stations'
+		  + (f' · {len(expected)} stations expected to differ' if repairs_path else ''))
 	for anchor in anchors or ('start', 'end'):
 		print(f'anchor={anchor}')
 		for sn in sample_u:
 			a, wa = q(candidate, '/api/rides', anchor, cells_sel([f's:{sn}']))
-			b, wb = q(baseline, '/api/rides-v5', anchor, cells_sel([f's:{sn}']))
+			b, wb = q(baseline, baseline_route, anchor, cells_sel([f's:{sn}']))
 			walls['candidate'].append(wa)
 			walls['baseline'].append(wb)
 			d = cmp(by_dt(a), by_dt(b))
-			failures += d is not None
-			print(f'  {"✗" if d else "✓"} unmerged s:{sn:<10} {d or f"{sum(a.values())} rides"}  ({wa:.2f}s vs {wb:.2f}s)')
+			exp = sn in expected
+			failures += d is not None and not exp
+			mark = '~' if d and exp else '✗' if d else '✓'
+			print(f'  {mark} unmerged s:{sn:<10} {d or f"{sum(a.values())} rides"}{"  (expected: repair)" if d and exp else ""}  ({wa:.2f}s vs {wb:.2f}s)')
 		for sn in sample_m:
 			a, wa = q(candidate, '/api/rides', anchor, cells_sel([f's:{sn}']))
-			b, wb = q(baseline, '/api/rides-v5', anchor, cells_sel([f's:{sn}']))
+			b, wb = q(baseline, baseline_route, anchor, cells_sel([f's:{sn}']))
 			r, _ = q(candidate, '/api/rides/cells', anchor, cells_sel(members[sn]), raw=True)
 			walls['candidate'].append(wa)
 			walls['baseline'].append(wb)
@@ -1188,22 +1215,30 @@ def gbfs_rides_rekey_check(
 				  + (f'  [vs baseline: {d_base}]' if d_base else '  [= baseline]'))
 		for bb in bboxes or ('40.60,-74.05,40.62,-74.02', '40.70,-74.02,40.73,-73.98', '40.55,-74.10,40.90,-73.80'):
 			a, wa = q(candidate, '/api/rides', anchor, f'bbox={bb}')
-			b, wb = q(baseline, '/api/rides-v5', anchor, f'bbox={bb}')
+			b, wb = q(baseline, baseline_route, anchor, f'bbox={bb}')
 			walls['candidate'].append(wa)
 			walls['baseline'].append(wb)
 			d = cmp(by_dt(a), by_dt(b))
-			failures += d is not None
-			print(f'  {"✗" if d else "✓"} bbox {bb}  {d or f"{sum(a.values())} rides"}  ({wa:.2f}s vs {wb:.2f}s)')
+			failures += d is not None and not repairs_path
+			mark = '~' if d and repairs_path else '✗' if d else '✓'
+			print(f'  {mark} bbox {bb}  {d or f"{sum(a.values())} rides"}  ({wa:.2f}s vs {wb:.2f}s)')
+		for r in repairs[:num_repairs]:
+			ids = [r['n'], r['n0']]
+			a, _ = q(candidate, '/api/rides/cells', anchor, cells_sel([f's:{i}' for i in ids]), raw=True)
+			b, _ = q(baseline, '/api/rides/cells', anchor, cells_sel([f's:{i}' for i in ids]), raw=True)
+			tot = lambda series, i: sum(v for (_dt, cell), v in series.items() if cell == f's:{i}')
+			print(f'  · repaired {r["n"]}/{r["n0"]}: baseline raw ' + ' + '.join(f's:{i}={tot(b, i)}' for i in ids)
+				  + ' → candidate raw ' + ' + '.join(f's:{i}={tot(a, i)}' for i in ids))
 	for name, ws in walls.items():
 		ws = sorted(ws)
 		print(f'latency {name}: p50 {ws[len(ws) // 2]:.2f}s  p95 {ws[min(len(ws) - 1, int(len(ws) * 0.95))]:.2f}s  n={len(ws)}')
 	sys.exit(1 if failures else 0)
 
 
-@gbfs.command('rides-totals-diff', help='Whole-system ride totals per year, candidate vs baseline rides pyramid, read straight from the `1mo/16y` shards on R2 (no worker, no CPU limit): the sum of the L6 vocab-cell rows, i.e. every *mapped* ride (coordinate-fallback rides have no vocab cells). Covers the built `16y` shards — `2000` (2013–2015) until the `2016` period closes. Exits 1 if any year differs.')
+@gbfs.command('rides-totals-diff', help='Whole-system ride totals per year, candidate vs baseline rides pyramid, read straight from the `1mo/16y` shards on R2 (no worker, no CPU limit): the sum of the L6 vocab-cell rows, i.e. every *mapped* ride (coordinate-fallback rides have no vocab cells). Covers the built `16y` shards — `2000` (2013–2015) until the `2016` period closes. Shards come from each side\'s D1 registry (`<name>-<anchor>`), so a candidate registered under another name over the same content-hashed prefix compares fine. Exits 1 if any year differs.')
 @option('-a', '--anchor', 'anchors', multiple=True, default=('start', 'end'), show_default=True, help='Anchor(s) to compare.')
-@option('-c', '--candidate', default='rides', show_default=True, help='Candidate key prefix.')
-@option('-C', '--baseline', default='rides-v5', show_default=True, help='Baseline key prefix.')
+@option('-c', '--candidate', default='rides-next', show_default=True, help='Candidate registry name base (pyramids `<name>-<anchor>`).')
+@option('-C', '--baseline', default='rides', show_default=True, help='Baseline registry name base.')
 def gbfs_rides_totals_diff(
 	anchors: tuple[str, ...],
 	candidate: str,
@@ -1216,14 +1251,15 @@ def gbfs_rides_totals_diff(
 	os.environ.setdefault('CTBK_REGISTRY_URL', API_URLS['prod'])
 	client, bucket = _r2_client()
 
-	def yearly(prefix: str, anchor: str) -> 'pd.Series':
-		# Keys come from the registry (pyramid `<prefix>-<anchor>`), not the
-		# template: content-hashed keys (`…/2000.<hash>.parquet`) aren't derivable.
-		keys = registered_keys(f'{prefix}-{anchor}')
+	def yearly(name: str, anchor: str) -> 'pd.Series':
+		# Keys come from the registry (pyramid `<name>-<anchor>`), not the
+		# template: content-hashed keys (`…/2000.<hash>.parquet`) aren't
+		# derivable, and the key prefix needn't match the registry name.
+		keys = registered_keys(f'{name}-{anchor}')
 		frames = []
 		for y0 in (2000, 2016):
-			slot = f'{prefix}/{anchor}/1mo/16y/{y0}.'
-			key = next((k for k in keys if k.startswith(slot)), None)
+			slot = f'/{anchor}/1mo/16y/{y0}.'
+			key = next((k for k in keys if slot in k), None)
 			if key is None:
 				continue
 			body = client.get_object(Bucket=bucket, Key=key)['Body'].read()  # type: ignore[attr-defined]
@@ -1286,24 +1322,30 @@ RIDES_ANCHOR_SPECS = (
 )
 
 
-def _mirror_normalized(r2, bucket: str, ym: str, dry_run: bool) -> None:
+def _mirror_normalized(r2, bucket: str, ym: str, dry_run: bool, dest_prefix: str = 'normalized') -> None:
 	"""Server-side copy (within R2) of month `ym`'s consolidated parquet from
 	the DVX cache (`.dvc/files/md5/…`, per its `.dvc`) to the plain key
-	`normalized/<ym>.parquet` the rides Batch factory lists."""
+	`<dest_prefix>/<ym>.parquet` the rides Batch factory lists (`normalized/`,
+	or a candidate prefix a candidate build reads via `CTBK_NORMALIZED_PREFIX`).
+	Up to date = same bytes: R2's single-part ETag is the MD5 DVX tracks
+	(a multipart ETag isn't, so fall back to size)."""
 	import yaml
 	dvc_path = Path(f's3/ctbk/normalized/{ym}.parquet.dvc')
 	if not dvc_path.exists():
 		raise click.ClickException(f'{dvc_path} not found — has {ym} been consolidated?')
 	out = yaml.safe_load(dvc_path.read_text())['outs'][0]
 	md5, size = out['md5'], out['size']
-	dst = f'normalized/{ym}.parquet'
+	dst = f"{dest_prefix.rstrip('/')}/{ym}.parquet"
 	try:
-		have = r2.head_object(Bucket=bucket, Key=dst)['ContentLength']
+		head = r2.head_object(Bucket=bucket, Key=dst)
+		etag = head['ETag'].strip('"')
+		have = head['ContentLength']
+		current = etag == md5 if '-' not in etag else have == size
 	except r2.exceptions.ClientError as e:
 		if e.response['Error']['Code'] not in ('404', 'NoSuchKey', 'NotFound'):
 			raise
-		have = None
-	if have == size:
+		have, current = None, False
+	if current:
 		err(f'mirror: r2://{bucket}/{dst} up to date ({size:,} B)')
 	elif dry_run:
 		err(f'mirror: would copy .dvc/files/md5/{md5[:2]}/{md5[2:]} → {dst} ({size:,} B; have {have})')
@@ -1312,14 +1354,15 @@ def _mirror_normalized(r2, bucket: str, ym: str, dry_run: bool) -> None:
 		err(f'mirror: copied → r2://{bucket}/{dst} ({size:,} B)')
 
 
-@gbfs.command('normalized-mirror', help='Server-side copy (within R2) of each month\'s consolidated parquet from the DVX cache to `normalized/<YM>.parquet`, the plain keys the rides Batch factory reads. Skips months already mirrored at the right size. Default: every `s3/ctbk/normalized/YYYYMM.parquet.dvc`.')
+@gbfs.command('normalized-mirror', help='Server-side copy (within R2) of each month\'s consolidated parquet from the DVX cache (per the checked-out `.dvc`s) to `<prefix>/<YM>.parquet`, the plain keys the rides Batch factory reads. Skips months whose mirror already holds the same bytes. Default: every `s3/ctbk/normalized/YYYYMM.parquet.dvc`.')
+@option('-d', '--dest-prefix', default='normalized', show_default=True, help='Destination prefix: `normalized` (live, and the public `data.ctbk.dev/normalized/` dataset) or a candidate prefix (e.g. `normalized-next`) a candidate engine build reads via `-e CTBK_NORMALIZED_PREFIX=…` — mirror ALL months there, since the build lists the prefix for available months.')
 @option('-n', '--dry-run', is_flag=True, help='Report; copy nothing.')
 @argument('yms', metavar='[YM...]', nargs=-1)
-def normalized_mirror(dry_run: bool, yms: tuple[str, ...]) -> None:
+def normalized_mirror(dest_prefix: str, dry_run: bool, yms: tuple[str, ...]) -> None:
 	yms = yms or tuple(sorted(p.name[:6] for p in Path('s3/ctbk/normalized').glob('[0-9]' * 6 + '.parquet.dvc')))
 	r2, bucket = _r2_client(rw=True)
 	for ym in yms:
-		_mirror_normalized(r2, bucket, ym.replace('-', ''), dry_run)
+		_mirror_normalized(r2, bucket, ym.replace('-', ''), dry_run, dest_prefix)
 
 
 @gbfs.command('rides-extend', help='Monthly `rides` cadence for one freshly-ingested month: (1) mirror `normalized/<YM>.parquet` from the DVX cache to its plain key, within R2 (the Batch factory lists that prefix); (2) journal the previous month on `rides-start` (spillback refold); (3) `engine submit -f` both anchors on HCCS Batch, uncapped (open periods defer); (4) canonicalize [prev month, now) through each manifest (new hashed keys); (5) `engine register` each manifest into D1; (6) RG-manifest backfill + prune of superseded keys\' rows. Station-map/vocab/canonicalize-map regen for new stations is NOT covered — a canonicalize-map change needs a full-range `engine canonicalize`. Needs HCCS AWS creds (Batch), R2 RW creds, CLOUDFLARE_ACCOUNT_ID, and CTBK_REGISTRY_SECRET (+ a D1-write CLOUDFLARE_API_TOKEN for the prune).')
@@ -1754,6 +1797,7 @@ def _engine_submit(
 	watch: bool = False,
 	window: str = '12h',
 	source_spec: str | None = None,
+	ignore_invalidations: bool = False,
 ) -> int:
 	"""Build + run the `pyrmts-engine batch submit` command; returns its
 	exit code (0 for dry-run)."""
@@ -1782,6 +1826,8 @@ def _engine_submit(
 	cmd += ['-r', f'{from_.strftime("%Y-%m-%dT%H:%M")}/{to.strftime("%Y-%m-%dT%H:%M")}']
 	if fill:
 		cmd += ['-f']
+	if ignore_invalidations:
+		cmd += ['-I']
 	if source_spec is not None:
 		cmd += ['-x', source_spec]
 	else:
@@ -1830,6 +1876,7 @@ def _engine_submit(
 @option('-e', '--env', 'envs', multiple=True, help='Extra container env var NAME=VALUE (repeatable).')
 @option('-f', '--fill', is_flag=True, help='Declarative gap-fill: diff expected min-cover vs actual storage, build only missing (build -f; range optional, defaults genesis→now). See pyrmts specs/engine-fill-mode.md.')
 @option('-g', '--rg-size', type=int, default=ENGINE_RG_SIZE, show_default=True, help='Output-shard parquet row-group size.')
+@option('-I', '--ignore-invalidations', is_flag=True, help='With -f: ignore (don\'t consume or prune) the prefix\'s invalidation journal (build -I) — for a candidate build into its own manifest, which must leave the live build\'s pending repairs alone.')
 @option('-j', '--workers', type=int, default=None, help='Window-worker threads (build -j; default: job vCPUs).')
 @option('-K', '--max-inflight', type=int, default=None, help='Max windows in flight past the watermark (build -K).')
 @option('-k', '--close-workers', type=int, default=None, help='Concurrent close computations (build -C).')
@@ -1854,6 +1901,7 @@ def gbfs_engine_submit(
 	envs: tuple[str, ...],
 	fill: bool,
 	rg_size: int,
+	ignore_invalidations: bool,
 	workers: int | None,
 	max_inflight: int | None,
 	close_workers: int | None,
@@ -1888,6 +1936,7 @@ def gbfs_engine_submit(
 		dry_run=dry_run, scratch_prefix=scratch_prefix, range_=range_,
 		source_rung=source_rung, max_missing=max_missing, resume=resume, vcpus=vcpus,
 		watch=watch, window=window, source_spec=source_spec,
+		ignore_invalidations=ignore_invalidations,
 	))
 
 

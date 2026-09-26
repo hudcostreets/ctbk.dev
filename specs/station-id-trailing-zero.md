@@ -1,6 +1,6 @@
 # Station-id corruption in `cons` + harmonize guard fixes
 
-Status: code fixed on `merge-review` (2026-09-26); **data regen + prod rides rebuild not yet run** (ops sequence below).
+Status (2026-09-26): code fixed and merged. Steps 1–3 of the ops sequence ran on HCCS Batch (`specs/batch-pipeline.md`): 59-month `cons` + derived stages, `ymrgtb{s,e}_cd`, and a harmonize matching the preview (71 id-map changes), all on branch `trailing-zero-repair` (unmerged). The prod rollout follows **Candidate rollout** below, not ops-sequence steps 4–10 in place.
 
 Found via `/merge-review` (rides-rekey P5): `c:4452.01` "Lafayette Ave & Classon Ave" absorbed Journal Square (JC, 10 km away) through raw id `3640`.
 
@@ -125,3 +125,141 @@ Order matters: each step's inputs come from the previous one. Heavy steps run on
 - **R2:** ~29 GB of new rides objects; superseded keys stay until purged (~+$0.45/mo meanwhile). Plus ~1.2 GB of new `cons` blobs. Class A ops are in the thousands, inside the free tier.
 - **D1:** register ~534 rows. RG-manifest backfill ~0.7M rows plus prune ~0.7M deletes ≈ 2.8M row-writes with the index, against 50M included this cycle (7.3M used), so $0. Size peaks at ~+0.7 GB (4.0 → ~4.7 of 10 GB) until the prune.
 - **`e`:** a few hours for `cons`/`smh`/`agg` over 59 months plus a full harmonize.
+
+## Candidate rollout
+
+Steps 4–10 above would write the repair straight into what prod serves: `station-luc.json`, `stations/station-canonicalize-map.json`, `normalized/` and the `rides-{start,end}` registry are all fixed-key inputs. Instead, write every changed input **beside** the live one, point the dev worker at it, validate, then cut prod over, with the old inputs kept for rollback until GC.
+
+| Input | Live (prod reads) | Candidate (dev reads) | Cutover |
+|---|---|---|---|
+| Station registry | `station-luc.json` (also read by the avail cascade Lambda + smg fill) | `station-luc.<md5[:12]>.json` via `STATION_LUC_KEY` | copy onto `station-luc.json` |
+| Rides id-map + vocab supplement | `stations/station-canonicalize-map.json`, `stations/rides-extra-stations.json` | content-addressed keys via `CANON_MAP_KEY` / `EXTRA_STATIONS_KEY` | copy onto the live keys |
+| Monthly tiles (+ public dataset) | `normalized/<YM>.parquet` | `normalized-next/<YM>.parquet` (all months), read by the candidate build via `CTBK_NORMALIZED_PREFIX` | `normalized-mirror` (copies only months whose bytes differ) |
+| Rides shards | content-hashed keys under `rides/{start,end}/`, `manifest.jsonl`, D1 `rides-{start,end}` | same prefixes (new keys beside old), `manifest-next.jsonl`, D1 `rides-next-{start,end}` via `RIDES_PYRAMID` | `engine register` the candidate manifest under the prod names; it becomes `manifest.jsonl` |
+| Engine image (baked id-map + geo) | latest `pyrmts-engine` job-def revision | a revision registered only for the candidate builds, then reverted | re-register the candidate image |
+
+Serve-side switches: `gbfs/api/src/serve_config.ts` (`RIDES_PYRAMID`, `STATION_LUC_KEY`, `CANON_MAP_KEY`, `EXTRA_STATIONS_KEY`; defaults = prod) and `RIDES_CACHE_GEN` (folded into the `/api/rides*` edge-cache key). Engine: `CTBK_NORMALIZED_PREFIX`, `CTBK_STATION_LUC_KEY` (`gbfs/engine/ctbk_engine_src.py`).
+
+Conventions below: `A=2363642879f18d37d52dca114059937e` (HCCS CF account, not secret); R2 writes use `R2_RW_*`; AWS commands run with `AWS_PROFILE=h`; D1 registry/manifest writes go through the prod worker's registry proxy (`CTBK_REGISTRY_SECRET`), as `rides-extend` does. ☁ marks cloud writes; everything before **Cutover** leaves prod serving unchanged.
+
+### 1. Candidate assets (from `wt/repair`, after merging `main` into `trailing-zero-repair` for this tooling)
+
+Prereq: this tooling (`repair-cutover`) on `main`. Its api changes are prod-neutral except one fix: og images now read `station-luc.json` (they read a stale `gbfs/station-luc.json` copy from 2026-09-11).
+
+```
+ctbk station-luc-build -c                         # ☁ station-luc.<h>.json only; prints the key → $LUC_KEY
+                                                  #   also rewrites www/public/assets/station-luc.json (the FE copy)
+ctbk rides-canonicalize-map -u -c                 # ☁ prints CANON_MAP_KEY=… EXTRA_STATIONS_KEY=… (reads the new local luc's `merged` overlay)
+ctbk rides-merge-review                           # www/public/assets/station-merges.json (/merge-review input)
+python -c 'from ctbk.pyramid_cascade.rides_assets import regen_geo_json as g; g()'   # gbfs/engine/station-geo.json
+git add -u && git commit -m 'repair: candidate station assets' && git push h trailing-zero-repair
+```
+
+**Review** `station-luc-build`'s `LUC churn: N stations moved, M new` line. Moved stations' historical **avail** rows (`avail-v6`, `smg-v1`) are keyed under their old cell; incremental fills won't re-key them. If `N > 0`, decide before cutover whether to journal the WAL era for the avail pyramids (`ctbk gbfs invalidate -C avail-v6 2026-04-07T00:00:00Z <now>`, same for smg-v1), which is a large refold, or accept the drift for those stations.
+
+### 2. Candidate rides build
+
+```
+# engine image with the repaired id-map + geo baked in (the ctbk-engine flow; base image unchanged)
+pyrmts-engine batch push -c . -f gbfs/engine/Dockerfile -p linux/arm64 688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-engine:<sha>   # ☁ ECR
+ctbk gbfs engine jobdef -n x                      # prints the live revision's image → $LIVE_IMAGE (record it)
+ctbk gbfs engine jobdef 688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-engine:<sha>                                                      # ☁ new revision
+
+ctbk gbfs normalized-mirror -d normalized-next    # ☁ all 159 months (the build lists this prefix), ~12.4 GB server-side copies
+ctbk gbfs engine gaps -C rides-start -m manifest-next.jsonl | wc -l     # every slot (fresh manifest ⇒ full build)
+
+for a in start end; do                             # in parallel, ~20 min each
+  ctbk gbfs engine submit -C rides-$a -R -f -I -m manifest-next.jsonl \
+    -e CTBK_NORMALIZED_PREFIX=normalized-next -e CTBK_STATION_LUC_KEY=$LUC_KEY -W &                                                         # ☁ Batch; new keys + manifest-next.jsonl
+done
+# as soon as both jobs are RUNNING (a job keeps its submit-time revision): put prod back on the live image,
+# so `rides-extend` (monthly CI) never builds with the candidate id-map before cutover
+ctbk gbfs engine jobdef $LIVE_IMAGE                                                                                                          # ☁ new revision
+for j in $(jobs -p); do wait $j || echo "build $j FAILED"; done
+```
+
+`-I` matters: `-f` otherwise consumes and prunes `rides/<a>/_invalidations.json`, the **live** build's pending repairs. The candidate build registers nothing live: its records land in `manifest-next.jsonl` only.
+
+Canonicalize the candidate manifests over the full range (the id-map changed), on the reproc Batch queue: `-b` checks out the repair branch's `s3/`, so `-m` reads the repaired map.
+
+```
+ctbk regen -w -b trailing-zero-repair -n canon-next -s "export CLOUDFLARE_ACCOUNT_ID=$A; \
+  ctbk gbfs engine canonicalize -C rides-start -i manifest-next.jsonl -m s3/ctbk/stations/station-canonicalize-map.json -j 8 & s=\$!; \
+  ctbk gbfs engine canonicalize -C rides-end   -i manifest-next.jsonl -m s3/ctbk/stations/station-canonicalize-map.json -j 8 & e=\$!; \
+  wait \$s && wait \$e"                                                                                                                     # ☁ new keys, appended to manifest-next.jsonl
+
+for a in start end; do
+  ctbk gbfs engine register -P rides-next-$a s3://ctbk/rides/$a/manifest-next.jsonl                                                          # ☁ D1 ~267 rows each
+  ctbk gbfs engine slot-compare -C rides-$a manifest.jsonl manifest-next.jsonl | tail -3                                                     # informational: how many slots changed
+done
+ctbk gbfs manifest backfill -p rides-next-start -p rides-next-end                                                                            # ☁ D1 RG manifest
+```
+
+### 3. Dev worker on the candidate
+
+```
+cd gbfs/api && CLOUDFLARE_API_TOKEN=$CF_PULUMI_HCCS_TOKEN CLOUDFLARE_ACCOUNT_ID=$A pnpm exec wrangler deploy --env dev \
+  --var RIDES_PYRAMID:rides-next --var STATION_LUC_KEY:$LUC_KEY \
+  --var CANON_MAP_KEY:$CANON_MAP_KEY --var EXTRA_STATIONS_KEY:$EXTRA_STATIONS_KEY                                                             # ☁ dev worker only
+```
+
+The GHA deploy doesn't touch the dev worker, so these vars persist until the next manual `--env dev` deploy.
+
+### 4. Validate (dev = candidate, prod = live)
+
+```
+ctbk gbfs rides-totals-diff -c rides-next -C rides                                     # exact per year, both anchors (attribution-only repair)
+ctbk gbfs rides-rekey-check -L $LUC_KEY -M $CANON_MAP_KEY -x s3/ctbk/stations/station-trailing-zero-repairs.json
+                                                                                        # no ✗; repaired stations show `~ expected`, pairs print split totals
+ctbk gbfs api-check -e dev                                                             # goldens sit outside the repaired windows: expect 11/11
+```
+
+Then in a browser (HCCSx profile), from `wt/repair`: `cd www && VITE_API_BASE=https://ctbk-gbfs-api-dev.hccs-ctbk.workers.dev pnpm dev`:
+
+- `/merge-review`: the 37 clusters with members > 1 km apart are gone; the Decisions view's repairs show before/after split.
+- `/s/lafayette+classon` (`4452.01`) and Journal Square (`JC103`): separate series for 2017-10 → 2021-01.
+- Homepage on prod with `?api=dev`: region charts equal prod (region columns were never wrong).
+
+### 5. Cutover
+
+```
+for a in start end; do
+  ctbk gbfs r2 cp rides/$a/manifest.jsonl rides/$a/manifest-pre-repair.jsonl                                                                 # ☁ rollback copy
+  ctbk gbfs engine register -P rides-$a s3://ctbk/rides/$a/manifest-next.jsonl                                                               # ☁ D1: prod serves the candidate
+  ctbk gbfs r2 cp -f rides/$a/manifest-next.jsonl rides/$a/manifest.jsonl                                                                    # ☁ monthly `rides-extend` builds on it
+done
+ctbk gbfs manifest backfill -p rides-start -p rides-end                                                                                       # ☁ RG rows are per (pyramid, key)
+for k in station-luc.json stations/station-canonicalize-map.json stations/rides-extra-stations.json; do
+  ctbk gbfs r2 cp $k ${k%.json}.pre-repair.json                                                                                               # ☁ rollback copies
+done
+ctbk gbfs r2 cp -f $LUC_KEY station-luc.json                                                                                                  # ☁ API, avail Lambda, smg fill now read it
+ctbk gbfs r2 cp -f $CANON_MAP_KEY stations/station-canonicalize-map.json
+ctbk gbfs r2 cp -f $EXTRA_STATIONS_KEY stations/rides-extra-stations.json
+ctbk gbfs normalized-mirror                                                                                                                  # ☁ from wt/repair: only the 59 changed months copy (public dataset fixed)
+ctbk gbfs engine jobdef 688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-engine:<sha>                                                      # ☁ monthly builds use the repaired id-map
+```
+
+Then merge `trailing-zero-repair` into `main` with `RIDES_CACHE_GEN = "trailing-zero-repair"` added under `[vars]` in `gbfs/api/wrangler.toml` (the push deploys the api worker, rotating its cached rides responses, and www with the new `station-luc.json` / `station-merges.json`), run `ctbk gbfs api-check -u` if any golden moved and commit the diff, and redeploy the dev worker without the `--var`s. Browsers that already hold a past-window response keep it until its 24h `immutable` expiry; nothing server-side can reach those.
+
+**Rollback** (until GC): `engine register -P rides-$a s3://ctbk/rides/$a/manifest-pre-repair.jsonl`, `r2 cp -f` the `manifest-pre-repair.jsonl` and `*.pre-repair.json` copies back, `engine jobdef $LIVE_IMAGE`, `normalized-mirror` from a `main` checkout from before the merge, revert the merge, and bump `RIDES_CACHE_GEN` again.
+
+### 6. GC (after a week or so of clean `api-check` runs)
+
+```
+ctbk gbfs d1 drop -y -p rides-next-start -p rides-next-end                                                                                    # ☁ D1
+ctbk gbfs manifest prune -p rides-start -p rides-end -p rides-next-start -p rides-next-end                                                   # ☁ D1 orphan RG rows
+for a in start end; do
+  pyrmts-engine gc -i d1://845e34bb-d138-4076-9955-5909e30d4323 -n rides-$a configs/pyramids/rides-$a.yaml                                     # dry run: superseded keys
+  pyrmts-engine gc --apply -i d1://845e34bb-d138-4076-9955-5909e30d4323 -n rides-$a configs/pyramids/rides-$a.yaml                             # ☁ (AWS_ENDPOINT_URL=https://$A.r2.cloudflarestorage.com)
+  ctbk gbfs r2 rm rides/$a/manifest-pre-repair.jsonl rides/$a/manifest-next.jsonl                                                             # ☁
+done
+ctbk gbfs r2 rm -p normalized-next/                                                                                                            # ☁
+ctbk gbfs r2 rm $LUC_KEY $CANON_MAP_KEY $EXTRA_STATIONS_KEY station-luc.pre-repair.json \
+  stations/station-canonicalize-map.pre-repair.json stations/rides-extra-stations.pre-repair.json                                            # ☁
+```
+
+### Candidate rollout cost
+
+- **R2:** `normalized-next/` ~12.4 GB and the candidate rides keys ~29 GB (fewer where a slot's bytes didn't change) until GC, ~$0.65/mo meanwhile. Class A ops (~160 mirror copies + ~1.1k shard writes) inside the free tier.
+- **Batch:** two rides builds (~20 min each) + one canonicalize job, under $1.5.
+- **D1:** candidate register ~534 rows + backfill ~0.7M; cutover register ~534 + backfill ~0.7M; GC drop ~534 + prune ~1.4M deletes. ≈ 6M row-writes with indexes, inside the 50M included ($0). Size peaks ~+1.4 GB (4.0 → ~5.4 of 10 GB; the `d1-size` alert fires at 8) until the prune.
