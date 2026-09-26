@@ -207,16 +207,24 @@ async function listAllDelimited(
 }
 
 export async function getFeedHealth(r2: HealthR2): Promise<FeedHealth> {
-	const today = utcDate(new Date());
-	// R2's list limit caps at 1000 raw scan keys per page (and wrangler-dev
-	// caps lower); a full day has 1440 minute files, so listAll-paginate.
-	const todayAll = await listAll(r2, `gbfs/status/${today}/`, 3);
-	const todayCount = todayAll.objects.length;
+	// Last 7 days (today + 6 prior), newest first. Parallel listing, each
+	// paginated: R2's list caps at 1000 raw keys per page (wrangler-dev
+	// lower), and a full day has 1440 minute files.
+	const dates: string[] = Array.from({ length: 7 }, (_, i) => dateAtOffset(i));
+	const today = dates[0];
 	const todayExpected = minutesElapsedTodayUtc();
+	const lists = await Promise.all(dates.map((date) => listAll(r2, `gbfs/status/${date}/`, 3)));
+	const todayCount = lists[0].objects.length;
+	const counts = dates
+		.map((date, i) => ({ date, count: lists[i].objects.length, expected: date === today ? todayExpected : 1440 }))
+		.reverse();
 
+	// Newest WAL key across the window, not just today's: right after 00:00Z
+	// today's prefix is empty, and a today-only lookup read as "no poll ever".
 	let latestPoll: FeedHealth['latestPoll'] = null;
-	if (todayCount > 0) {
-		const sorted = [...todayAll.objects].sort((a, b) => a.key.localeCompare(b.key));
+	const newest = lists.find((l) => l.objects.length > 0);
+	if (newest) {
+		const sorted = [...newest.objects].sort((a, b) => a.key.localeCompare(b.key));
 		const latest = sorted[sorted.length - 1];
 		const m = latest.key.match(/gbfs\/status\/(\d{4}-\d{2}-\d{2})\/(\d{2}-\d{2})\.json$/);
 		if (m) {
@@ -228,15 +236,6 @@ export async function getFeedHealth(r2: HealthR2): Promise<FeedHealth> {
 			};
 		}
 	}
-
-	// Last 7 days (today + 6 prior). Parallel listing, each paginated.
-	const dates: string[] = Array.from({ length: 7 }, (_, i) => dateAtOffset(i)).reverse();
-	const counts = await Promise.all(
-		dates.map(async (date) => {
-			const r = await listAll(r2, `gbfs/status/${date}/`, 3);
-			return { date, count: r.objects.length, expected: date === today ? todayExpected : 1440 };
-		}),
-	);
 
 	const drift = latestPoll ? await getFeedDrift(r2, latestPoll.key) : null;
 
@@ -286,12 +285,15 @@ export async function getCompactionHealth(r2: HealthR2): Promise<CompactionHealt
 		count: dailyParquets.length,
 	};
 
-	// Hourly h1 for today.
-	const today = utcDate(new Date());
-	const h1Today = await r2.list({ prefix: `gbfs/avail/h1/${today}/`, limit: 30 });
-	const h1Sorted = [...h1Today.objects].sort((a, b) => a.key.localeCompare(b.key));
+	// Hourly h1: today's, falling back to yesterday's for `latestKey` — the
+	// first h1 of a UTC day lands ~1h after 00:00Z, and a today-only lookup
+	// read as "last shard ever" until then.
+	const [h1Today, h1Yesterday] = await Promise.all(
+		[dateAtOffset(0), dateAtOffset(1)].map((date) => r2.list({ prefix: `gbfs/avail/h1/${date}/`, limit: 30 })),
+	);
+	const h1Latest = (h1Today.objects.length > 0 ? h1Today : h1Yesterday).objects.map((o) => o.key).sort();
 	const hourly = {
-		latestKey: h1Sorted.length > 0 ? h1Sorted[h1Sorted.length - 1].key : null,
+		latestKey: h1Latest.length > 0 ? h1Latest[h1Latest.length - 1] : null,
 		todayCount: h1Today.objects.length,
 	};
 
