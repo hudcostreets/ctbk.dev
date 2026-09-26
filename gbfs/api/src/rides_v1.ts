@@ -321,7 +321,7 @@ export interface RidesVariant {
 }
 export const RIDES: RidesVariant = { prefix: 'rides', canonicalized: true };
 
-function ridesV5Pyramid(bucket: R2Bucket, variant: RidesVariant, anchor: Anchor, cells: boolean): GeoPyramid {
+export function ridesV5Pyramid(bucket: R2Bucket, variant: RidesVariant, anchor: Anchor, cells: boolean): GeoPyramid {
 	return {
 		storage: parquetBackend(retryingStorage(r2Storage(bucket))),
 		keyTemplate: `${variant.prefix}/${anchor}/{tier}/{shard}/{period}.parquet`,
