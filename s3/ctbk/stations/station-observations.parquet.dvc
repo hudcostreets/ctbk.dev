@@ -1,5 +1,5 @@
 outs:
-- md5: 99e4c1ed30432d298fb65002eee9b382
-  size: 16429487
+- md5: 13f7d5dad3b4346fd3ec3755d022ea7e
+  size: 17791977
   hash: md5
   path: station-observations.parquet
