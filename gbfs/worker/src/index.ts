@@ -108,7 +108,11 @@ let lastLu = 0;
  *  see specs/lu-attribution.md). Returns the LU when a write happened. */
 async function sampleStatus(bucket: R2Bucket): Promise<number | null> {
 	const polledAt = Math.floor(Date.now() / 1000);
-	const resp = await fetch(STATUS_URL);
+	// Unique query string: bypass any ~60s cache between this worker and
+	// Lyft's CloudFront (which ignores the param). From the worker, first-seen
+	// lag ran 0–60s (uniform) vs 3–5s from a laptop, and whenever a cached
+	// copy outlived the next LU, that LU was never seen (a missing WAL minute).
+	const resp = await fetch(`${STATUS_URL}?_=${Date.now()}`);
 	if (!resp.ok) throw new Error(`station_status fetch failed: ${resp.status}`);
 
 	const data = (await resp.json()) as StatusResponse;
@@ -128,7 +132,11 @@ async function sampleStatus(bucket: R2Bucket): Promise<number | null> {
 		httpMetadata: { contentType: 'application/json' },
 	});
 	lastLu = lu;
-	console.log(`Polled ${stations.length} stations, LU=${lu} (+${polledAt - lu}s) → ${jsonKey}`);
+	const h = (k: string) => resp.headers.get(k) ?? '-';
+	console.log(
+		`Polled ${stations.length} stations, LU=${lu} (+${polledAt - lu}s) → ${jsonKey}` +
+			` [age=${h('age')} x-cache=${h('x-cache')} pop=${h('x-amz-cf-pop')} cf=${h('cf-cache-status')}]`,
+	);
 	return lu;
 }
 
