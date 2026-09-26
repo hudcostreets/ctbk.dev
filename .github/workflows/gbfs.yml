@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'gbfs/worker/**'
+      - 'gbfs/poller-v11/**'
       - 'gbfs/loader/**'
       - 'gbfs/api/**'
       - 'gbfs/compactor/**'
@@ -16,7 +17,7 @@ on:
         description: 'Worker to deploy (default: all)'
         required: false
         type: choice
-        options: [all, worker, loader, api, compactor, cascade]
+        options: [all, worker, poller-v11, loader, api, compactor, cascade]
         default: all
       force:
         description: 'Skip the compare-and-swap check (prod is ahead of git / unstamped)'
@@ -29,6 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       worker: ${{ steps.filter.outputs.worker }}
+      poller-v11: ${{ steps.filter.outputs.poller-v11 }}
       loader: ${{ steps.filter.outputs.loader }}
       api: ${{ steps.filter.outputs.api }}
       compactor: ${{ steps.filter.outputs.compactor }}
@@ -44,6 +46,8 @@ jobs:
             worker:
               - 'gbfs/worker/**'
               - 'gbfs/lib/**'
+            poller-v11:
+              - 'gbfs/poller-v11/**'
             loader:
               - 'gbfs/loader/**'
               - 'gbfs/lib/**'
@@ -111,7 +115,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        worker: [worker, loader, api, compactor, cascade]
+        worker: [worker, poller-v11, loader, api, compactor, cascade]
     steps:
       - name: Check if this worker should deploy
         id: should
@@ -120,6 +124,7 @@ jobs:
           if [ "$want" = "all" ]; then
             case "${{ matrix.worker }}" in
               worker)    deploy="${{ needs.detect-changes.outputs.worker }}";;
+              poller-v11) deploy="${{ needs.detect-changes.outputs.poller-v11 }}";;
               loader)    deploy="${{ needs.detect-changes.outputs.loader }}";;
               api)       deploy="${{ needs.detect-changes.outputs.api }}";;
               compactor) deploy="${{ needs.detect-changes.outputs.compactor }}";;

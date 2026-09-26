@@ -46,6 +46,17 @@ The regen is the expensive step, and `specs/drop-luc-station-keys.md` (migration
 
 After that, remaining rebuild triggers are gone: station churn doesn't re-key (drop-LUC), attribution is settled (LU), and late data heals via shard-invalidation (pyrmts `specs/shard-invalidation.md`) instead of rebuilds.
 
+## Re-probe (2026-09-26): 2.3 now saw-tooths; 1.1 side-poller
+
+The 2.3 feed's advantage from the 2026-08-03 probe no longer holds:
+
+- **2.3 first-seen lag saw-tooths 0→60s** (~+6s/min, ~13-min period), from the worker (CF colo SIN, CloudFront `SIN3`) and from a laptop (JFK) alike. Each wrap skips a generation: a WAL hole with a +120s LU delta, ~70/day since ~2026-09-25 12:38Z (vs ~4–20/day before). A unique query string doesn't help (some CloudFront layers ignore it, and `last-modified` shows the origin object is fresh ~2s after LU while still served ~50s stale), so the staleness is inside Lyft's stack.
+- **1.1 is a separate generation**: stamped ~:01 vs 2.3's ~:48, with steady lag (Lyft URL ~48s, legacy `gbfs.citibikenyc.com/gbfs/en/` alias ~15s; identical content on both, 31/31 hashes) and no skips in a 30-min probe.
+- **Content time ≠ LU**: max `last_reported` is ~:39 in a 2.3 snapshot stamped :48, and ~:48–:49 in the following 1.1 snapshot stamped :01. So 1.1 is ~10s newer content, not an evenly staggered second update; consecutive snapshots are monotone (never an older `last_reported`). Any merge should order/attribute by max `last_reported`, not LU.
+- **`vehicle_types_available` is redundant** for Citi Bike: only types `1` (classic) and `2` (e-bike), i.e. the split `num_ebikes_available` already gives. 1.1 loses nothing substantive (and adds `legacy_id`, scooter counts).
+
+`gbfs/poller-v11` (worker `ctbk-gbfs-poller-v11`) records 1.1 beside the untouched 2.3 primary for a few weeks: both 1.1 URLs sampled every 15s, each LU saved once under `gbfs/probe/v11/` (a differing duplicate under `v11-alt/<src>/`), per-source sightings under `v11-obs/<src>/`, all-samples-failed markers under `v11-err/<src>/`, heartbeats under `v11-heartbeat/`. Outside `gbfs/status/`, so the loader never ingests it. Then: does 1.1 fill 2.3's holes, and is it worth merging into the normalized series (by `last_reported` content time)?
+
 ## Open questions
 
 - Whether to also record `vehicle_types_available` from the 2.3 feed (regular vs ebike split exists via `num_ebikes_available` already; per-type granularity is future-proofing) — cheap to add at poller v2 time, wasteful to backfill later.
