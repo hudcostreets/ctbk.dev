@@ -20,6 +20,7 @@ from os.path import dirname, exists, join
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 from time import time
+from typing import Callable
 
 import click
 import numpy as np
@@ -230,6 +231,9 @@ def build_id_summaries(
 # 1 shared month tolerates a messy transition. See `specs/station-id-coactivity.md`.
 CO_ACTIVE_MIN_RIDES = 50
 CO_ACTIVE_MAX_MONTHS = 1
+# Same normalized name within this distance = one dock (an extra dock bank, or
+# a relocation hand-off), whose overlapping months aren't a concurrency.
+SAME_DOCK_M = 30
 
 
 def _active_months(ids: list[str], monthly: dict[str, dict[str, int]]) -> set[str]:
@@ -246,9 +250,20 @@ def _co_active(
     ids_a: list[str],
     ids_b: list[str],
     monthly: dict[str, dict[str, int]],
+    same_dock: Callable[[str, str], bool] | None = None,
 ) -> set[str]:
-    """Shared substantially-active months between two id groups."""
-    return _active_months(ids_a, monthly) & _active_months(ids_b, monthly)
+    """Shared substantially-active months between two id groups: months where
+    some `a` and some `b` were both active, over pairs that aren't the same
+    dock (`_` variants, or `same_dock`) — an extra dock bank or a relocation
+    hand-off overlaps its twin without being a second station."""
+    same = same_dock or _variant_pair
+    return {
+        ym
+        for a in ids_a
+        for b in ids_b
+        if not same(a, b)
+        for ym in _active_months([a], monthly) & _active_months([b], monthly)
+    }
 
 
 def _variant_pair(a: str, b: str) -> bool:
@@ -271,6 +286,10 @@ def build_union_find(
     Both passes are gated by the co-activity guard (`_co_active`): a candidate
     union is rejected — and appended to `review` — when the two id groups are
     both substantially active in more than `CO_ACTIVE_MAX_MONTHS` shared months.
+    The guard compares the **live** groups (every id already unioned into each
+    side), since unions are transitive: checking only the ids being joined let
+    `5947.06` "E 15 St & 5 Ave" reach "E 16 St & 5 Ave" (co-active since 2024)
+    through its 58-ride `6022.04_Pillar` alias.
     `monthly_counts` is `{id: {ym: ride_count}}` (from `df_in`).
     """
     if review is None:
@@ -293,6 +312,33 @@ def build_union_find(
     # Initialize all IDs in union-find
     for sid in ids:
         uf.find(sid)
+    # Live group membership per root (maintained across both passes).
+    group: dict[str, list[str]] = {sid: [sid] for sid in ids}
+    has_ll = 'lat' in summary.columns
+
+    def same_dock(a: str, b: str) -> bool:
+        """`_` variants, or the same (normalized) name within `SAME_DOCK_M`."""
+        if _variant_pair(a, b):
+            return True
+        if not has_ll or not norm_names[a] or norm_names[a] != norm_names[b]:
+            return False
+        la, lo = summary.loc[a, 'lat'], summary.loc[a, 'lng']
+        lb, lob = summary.loc[b, 'lat'], summary.loc[b, 'lng']
+        return not (np.isnan(la) or np.isnan(lb)) and haversine(la, lo, lb, lob) <= SAME_DOCK_M
+
+    def co_active(a: str, b: str) -> set[str]:
+        return _co_active(members(a), members(b), monthly_counts, same_dock)
+
+    def members(sid: str) -> list[str]:
+        return group[uf.find(sid)]
+
+    def union(a: str, b: str):
+        ra, rb = uf.find(a), uf.find(b)
+        if ra == rb:
+            return
+        merged = group.pop(ra) + group.pop(rb)
+        uf.union(a, b)
+        group[uf.find(a)] = merged
 
     # Pass 1: Exact normalized name → union
     name_to_ids: dict[str, list[str]] = defaultdict(list)
@@ -306,36 +352,45 @@ def build_union_find(
     for nn, group_ids in name_to_ids.items():
         if len(group_ids) > 1:
             for sid in group_ids[1:]:
-                shared = _co_active([group_ids[0]], [sid], monthly_counts)
-                if len(shared) > CO_ACTIVE_MAX_MONTHS and not _variant_pair(group_ids[0], sid):
+                shared = co_active(group_ids[0], sid)
+                if len(shared) > CO_ACTIVE_MAX_MONTHS:
                     review.append({'pass': 'exact-name', 'a': group_ids[0], 'b': sid, 'shared_months': sorted(shared)})
                     exact_rejected += 1
                     continue
-                uf.union(group_ids[0], sid)
+                union(group_ids[0], sid)
                 exact_unions += 1
     err(f"Pass 1 (exact name): {exact_unions} unions across {len(name_to_ids)} unique names ({exact_rejected} rejected: co-active)")
 
-    # Pass 2: Fuzzy name + nearby coords + temporal adjacency
+    # Pass 2: Fuzzy name + nearby coords + temporal adjacency. Candidate pairs
+    # (over pass-1 components) are collected first and applied strongest match
+    # first (name similarity, then distance): with a guard over live groups,
+    # union order decides which of two conflicting candidates wins, and a
+    # renumber's true successor ("Frost St & Meeker St" → "... Meeker Ave")
+    # must beat a nearby co-active lookalike ("Leonard St & Meeker Ave").
     fuzzy_unions = 0
-    # Only attempt fuzzy matching between IDs that weren't already unioned
-    # Build list of component representatives
     components: dict[str, list[str]] = defaultdict(list)
     for sid in non_junk_ids:
         components[uf.find(sid)].append(sid)
 
+    def ym_diff(ym1, ym2):
+        """Months between two YYYYMM strings."""
+        y1, m1 = int(ym1[:4]), int(ym1[4:])
+        y2, m2 = int(ym2[:4]), int(ym2[4:])
+        return (y2 - y1) * 12 + (m2 - m1)
+
     reps = list(components.keys())
+    candidates: list[tuple[float, float, str, str]] = []
     for i, rep_a in enumerate(reps):
         ids_a = components[rep_a]
         nn_a = norm_names[ids_a[0]]
         if not nn_a:
             continue
-        lat_a = summary.loc[ids_a[0], 'lat'] if 'lat' in summary.columns else np.nan
-        lng_a = summary.loc[ids_a[0], 'lng'] if 'lng' in summary.columns else np.nan
+        lat_a = summary.loc[ids_a[0], 'lat'] if has_ll else np.nan
+        lng_a = summary.loc[ids_a[0], 'lng'] if has_ll else np.nan
+        last_a = max(summary.loc[sid, 'last_ym'] for sid in ids_a)
+        first_a = min(summary.loc[sid, 'first_ym'] for sid in ids_a)
 
         for rep_b in reps[i + 1:]:
-            if uf.find(rep_a) == uf.find(rep_b):
-                continue
-
             ids_b = components[rep_b]
             nn_b = norm_names[ids_b[0]]
             if not nn_b:
@@ -352,9 +407,9 @@ def build_union_find(
                 continue
 
             # Location proximity (if we have coords)
-            lat_b = summary.loc[ids_b[0], 'lat'] if 'lat' in summary.columns else np.nan
-            lng_b = summary.loc[ids_b[0], 'lng'] if 'lng' in summary.columns else np.nan
-
+            lat_b = summary.loc[ids_b[0], 'lat'] if has_ll else np.nan
+            lng_b = summary.loc[ids_b[0], 'lng'] if has_ll else np.nan
+            dist = np.nan
             if not (np.isnan(lat_a) or np.isnan(lat_b)):
                 dist = haversine(lat_a, lng_a, lat_b, lng_b)
                 if dist > 100:
@@ -363,40 +418,27 @@ def build_union_find(
             elif ratio < 0.95:
                 continue
 
-            # Temporal adjacency: check if one's last_ym is near other's first_ym
-            last_a = max(summary.loc[sid, 'last_ym'] for sid in ids_a)
-            first_a = min(summary.loc[sid, 'first_ym'] for sid in ids_a)
+            # Temporal adjacency: overlap, or a gap of at most 6 months
             last_b = max(summary.loc[sid, 'last_ym'] for sid in ids_b)
             first_b = min(summary.loc[sid, 'first_ym'] for sid in ids_b)
-
-            # Check for temporal overlap or adjacency (within 6 months gap)
-            def ym_diff(ym1, ym2):
-                """Months between two YYYYMM strings."""
-                y1, m1 = int(ym1[:4]), int(ym1[4:])
-                y2, m2 = int(ym2[:4]), int(ym2[4:])
-                return (y2 - y1) * 12 + (m2 - m1)
-
-            # Check: A ends before B starts, or B ends before A starts
-            gap_ab = ym_diff(last_a, first_b)  # positive means gap, negative means overlap
-            gap_ba = ym_diff(last_b, first_a)
-            min_gap = min(gap_ab, gap_ba)
-
-            # Allow overlap or gap up to 6 months
-            if min_gap > 6:
+            if min(ym_diff(last_a, first_b), ym_diff(last_b, first_a)) > 6:
                 continue
+            candidates.append((-ratio, 0.0 if np.isnan(dist) else dist, rep_a, rep_b))
 
-            # Co-activity guard: reject a fuzzy union of two groups that are both
-            # substantially active in the same month(s) — distinct stations, not
-            # a renumber. Flag borderline cases (exactly the tolerance) for review.
-            shared = _co_active(ids_a, ids_b, monthly_counts)
-            if len(shared) > CO_ACTIVE_MAX_MONTHS and not _variant_pair(ids_a[0], ids_b[0]):
-                review.append({'pass': 'fuzzy', 'a': ids_a[0], 'b': ids_b[0], 'shared_months': sorted(shared)})
-                continue
-            if shared and not _variant_pair(ids_a[0], ids_b[0]):
-                review.append({'pass': 'fuzzy-borderline', 'a': ids_a[0], 'b': ids_b[0], 'shared_months': sorted(shared), 'merged': True})
-
-            uf.union(rep_a, rep_b)
-            fuzzy_unions += 1
+    for _, _, rep_a, rep_b in sorted(candidates):
+        if uf.find(rep_a) == uf.find(rep_b):
+            continue
+        # Co-activity guard: reject a fuzzy union of two groups that are both
+        # substantially active in the same month(s) — distinct stations, not
+        # a renumber. Flag borderline cases (exactly the tolerance) for review.
+        shared = co_active(rep_a, rep_b)
+        if len(shared) > CO_ACTIVE_MAX_MONTHS:
+            review.append({'pass': 'fuzzy', 'a': rep_a, 'b': rep_b, 'shared_months': sorted(shared)})
+            continue
+        if shared:
+            review.append({'pass': 'fuzzy-borderline', 'a': rep_a, 'b': rep_b, 'shared_months': sorted(shared), 'merged': True})
+        union(rep_a, rep_b)
+        fuzzy_unions += 1
 
     err(f"Pass 2 (fuzzy): {fuzzy_unions} additional unions ({sum(1 for r in review if r['pass']=='fuzzy')} rejected: co-active)")
 

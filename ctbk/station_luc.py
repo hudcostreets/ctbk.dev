@@ -153,6 +153,21 @@ def historical_stations(active: dict[str, dict]) -> dict[str, dict]:
     }
 
 
+def merge_relabeled(stations: dict[str, dict], by_uuid: dict[str, str]) -> dict[str, str]:
+    """Collapse GBFS relabels: a short_name whose UUID now carries a
+    different short_name is that station's former label (e.g. `5685.04` →
+    `5685.06`, one UUID, docks moved ~20 m), not a second live station.
+    Losers are removed from `stations`; returns `{loser: current}`."""
+    merged = {
+        sn: by_uuid[v['uuid']]
+        for sn, v in stations.items()
+        if v.get('uuid') in by_uuid and by_uuid[v['uuid']] != sn
+    }
+    for sn in merged:
+        del stations[sn]
+    return merged
+
+
 def merge_same_dock(stations: dict[str, dict]) -> dict[str, str]:
     """Collapse L20-cell (~10 m) collision clusters: same physical dock
     under renamed/renumbered canonical ids that `station-id-map` never
@@ -252,7 +267,8 @@ def station_luc_build_cmd(date_from: str, no_history: bool, date_to: str | None,
             v['active'] = False
         err(f"  historical-only canonicals: {len(hist)}")
         by_short_name.update(hist)
-        merged = merge_same_dock(by_short_name)
+        merged = merge_relabeled(by_short_name, by_uuid)
+        merged |= merge_same_dock(by_short_name)
         if merged:
             err(f"  same-dock merges: {len(merged)}")
             for loser, survivor in sorted(merged.items()):
