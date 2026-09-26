@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Print a month- and family-scoped subset of `batch/reproc-targets` (the
+executable, `cmd`-bearing trips DAG), for a partial regen on Batch
+(specs/batch-pipeline.md).
+
+Runs inside the container (`batch/entrypoint.sh` appends its output when
+`$REGEN_TARGETS` is set): Batch caps `containerOverrides` at 8192 bytes, and a
+59-month × 7-family list (~400 paths) blows past it, so the submit carries the
+*spec*, not the paths.
+
+  batch/regen-targets -m 201306,201507-201912,202006-202008,202010
+  batch/regen-targets -m 202006-202008 -f cons -f smh-in -f smh-il
+  batch/regen-targets -l          # list families + counts
+
+Months: comma-separated `YYYYMM` or inclusive `YYYYMM-YYYYMM` ranges; omitted
+= every month (paths without a month are then included too). Families are
+derived from the path (see `FAMILIES`); default = all but `norm`/`v0` (a
+regen re-derives from pinned `norm` outputs — pass `-f norm` to include it,
+which re-reads `s3://tripdata`).
+"""
+import re
+import subprocess
+import sys
+from argparse import ArgumentParser
+from os.path import dirname, join
+
+ROOT = join(dirname(__file__), '..')
+
+# family -> path regex (month captured as `ym`), over `batch/reproc-targets` paths.
+FAMILIES = {
+    'norm': r'normalized/(?P<ym>\d{6})\.dvc$',
+    'v0': r'normalized/v0/(?P<ym>\d{6})\.dvc$',
+    'cons': r'normalized/(?P<ym>\d{6})\.parquet\.dvc$',
+    'smh-in': r'stations/meta_hists/in_(?P<ym>\d{6})\.parquet\.dvc$',
+    'smh-il': r'stations/meta_hists/il_(?P<ym>\d{6})\.parquet\.dvc$',
+    'e_c': r'aggregated/e_c_(?P<ym>\d{6})\.parquet\.dvc$',
+    'se_c': r'aggregated/se_c_(?P<ym>\d{6})\.parquet\.dvc$',
+    'ymrgtb_cd': r'aggregated/ymrgtb_cd_(?P<ym>\d{6})\.parquet\.dvc$',
+    'ymrgtbs_cd': r'aggregated/ymrgtbs_cd_(?P<ym>\d{6})\.parquet\.dvc$',
+    'ymrgtbe_cd': r'aggregated/ymrgtbe_cd_(?P<ym>\d{6})\.parquet\.dvc$',
+    'sm': r'aggregated/(?P<ym>\d{6})/stations\.json\.dvc$',
+    'spj': r'aggregated/(?P<ym>\d{6})/se_c\.json\.dvc$',
+}
+DEFAULT_EXCLUDE = {'norm', 'v0'}
+
+
+def parse_months(spec: str) -> set[str]:
+    months = set()
+    for part in spec.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.fullmatch(r'(\d{6})(?:-(\d{6}))?', part)
+        if not m:
+            raise SystemExit(f'bad month spec: {part!r}')
+        lo, hi = m.group(1), m.group(2) or m.group(1)
+        y, mo = int(lo[:4]), int(lo[4:])
+        while f'{y:04d}{mo:02d}' <= hi:
+            months.add(f'{y:04d}{mo:02d}')
+            y, mo = (y + 1, 1) if mo == 12 else (y, mo + 1)
+    return months
+
+
+def classify(path: str) -> tuple[str | None, str | None]:
+    for fam, pat in FAMILIES.items():
+        m = re.search(pat, path)
+        if m:
+            return fam, m.group('ym')
+    return None, None
+
+
+def main() -> None:
+    ap = ArgumentParser(description=__doc__.split('\n\n')[0])
+    ap.add_argument('-f', '--family', action='append', help=f'Family to include (repeatable; default: all but {sorted(DEFAULT_EXCLUDE)}). One of: {", ".join(FAMILIES)}')
+    ap.add_argument('-l', '--list', action='store_true', help='Print family counts (over the month filter) instead of paths.')
+    ap.add_argument('-m', '--months', help='Months: `YYYYMM` / `YYYYMM-YYYYMM`, comma-separated.')
+    args = ap.parse_args()
+
+    if args.family:
+        unknown = set(args.family) - set(FAMILIES)
+        if unknown:
+            raise SystemExit(f'unknown famil{"ies" if len(unknown) > 1 else "y"}: {sorted(unknown)}')
+        fams = set(args.family)
+    else:
+        fams = set(FAMILIES) - DEFAULT_EXCLUDE
+    months = parse_months(args.months) if args.months else None
+
+    paths = subprocess.run([join(ROOT, 'batch', 'reproc-targets')], check=True, capture_output=True, text=True).stdout.splitlines()
+    counts: dict[str, int] = {}
+    out = []
+    for p in paths:
+        fam, ym = classify(p)
+        if fam is None:
+            # Month-less stage: only in a whole-history (no `-m`) regen.
+            if months is None and not args.family:
+                out.append(p)
+                counts['(other)'] = counts.get('(other)', 0) + 1
+            continue
+        if fam not in fams or (months is not None and ym not in months):
+            continue
+        out.append(p)
+        counts[fam] = counts.get(fam, 0) + 1
+
+    if args.list:
+        for fam, n in sorted(counts.items()):
+            print(f'{n:5d}  {fam}')
+        print(f'{len(out):5d}  total', file=sys.stderr)
+    else:
+        print('\n'.join(out))
+
+
+if __name__ == '__main__':
+    main()

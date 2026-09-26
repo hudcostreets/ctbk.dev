@@ -1,0 +1,63 @@
+name: Regen on Batch
+# Noninteractive trips-DAG regen on AWS Batch (HCCS `ctbk-reproc`), via
+# `ctbk regen` (specs/batch-pipeline.md). The job pushes its changed `.dvc` /
+# tracked outputs as one commit to `regen-results/<ts>`; review + merge that
+# branch to publish (the R2 cache is content-addressed, so nothing is live
+# until then). The container runs the image's baked-in code (`reproc_image`
+# in the `hccs` Pulumi stack), not this checkout.
+on:
+  workflow_dispatch:
+    inputs:
+      months:
+        description: 'Months (YYYYMM / YYYYMM-YYYYMM, comma-separated; empty = all)'
+        required: false
+      families:
+        description: 'batch/regen-targets families, space-separated (empty = all but norm/v0)'
+        required: false
+      script:
+        description: 'Shell snippet to run instead of `dvx run` (then `dvx push -r r2`)'
+        required: false
+      base_ref:
+        description: 'Start from this branch''s s3/ data pointers (chain onto an earlier regen-results/<ts>)'
+        required: false
+      force:
+        description: '`dvx run -f` (re-run targets even if fresh)'
+        type: boolean
+        default: true
+
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      id-token: write  # HCCS AWS via OIDC (`.github/scripts/hccs-aws.sh`)
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Sync deps + activate venv
+        run: |
+          uv sync --frozen
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Submit + watch
+        env:
+          MONTHS: ${{ inputs.months }}
+          FAMILIES: ${{ inputs.families }}
+          SCRIPT: ${{ inputs.script }}
+          BASE_REF: ${{ inputs.base_ref }}
+          FORCE: ${{ inputs.force }}
+          HCCS_AWS_DURATION: '14400'
+        run: |
+          args=(-w -n "regen-${GITHUB_RUN_ID}")
+          [ -n "$MONTHS" ] && args+=(-m "$MONTHS")
+          for f in $FAMILIES; do args+=(-f "$f"); done
+          [ -n "$SCRIPT" ] && args+=(-s "$SCRIPT")
+          [ -n "$BASE_REF" ] && args+=(-b "$BASE_REF")
+          [ "$FORCE" = true ] || args+=(-F)
+          .github/scripts/hccs-aws.sh ctbk regen "${args[@]}"

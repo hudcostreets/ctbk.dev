@@ -6,10 +6,13 @@ The reproducibility audit's execution harness. Design + rationale:
 
 | File | Role |
 |---|---|
-| `Dockerfile` | Self-contained reproc image: blobless clone + `uv sync` + dvx overridden to `$DVX_REF` (default `95db406f7`, past the committed pin). |
-| `reproc-targets` | Prints the 1,363 in-scope `.dvc` (has `cmd:`, not `side_effect: true`). One definition of scope. |
-| `reproc.sh` | Local driver: `dvx run --no-commit <in-scope targets>` (+ passthrough flags). Mirrors the container's default. |
-| `entrypoint.sh` | Fargate entrypoint: runs dvx, then **one** atomic commit+push of the regenerated `.dvc`s to `reproc-results/<ts>` (needs `$FARGATE_GITHUB_RW_TOKEN`; read-only without it). |
+| `Dockerfile` | Self-contained image: blobless clone of `main` (or `REF`) + `uv sync` + dvx `[s3]` at the project pin. |
+| `reproc-targets` | Prints every executable in-scope `.dvc` (has `cmd:`, not `side_effect: true`). One definition of scope. |
+| `regen-targets` | Month- and family-scoped subset of `reproc-targets`, for partial regens (`-m 201306,201507-201912 -f cons`). |
+| `reproc.sh` | Local driver: `dvx run --no-commit <in-scope targets>` (+ passthrough flags). |
+| `entrypoint.sh` | Fargate entrypoint: `dvx run` (targets from `$REGEN_TARGETS` or `reproc-targets`, `--cached` pins from `$DVX_CACHED`) or `script '<sh>'`; optional `$BASE_REF` chaining; then **one** atomic commit+push to `$RESULTS_PREFIX/<ts>` (needs `$FARGATE_GITHUB_RW_TOKEN`). |
+
+**Regens** (publish to prod's `r2` remote via a reviewed results branch) run through `ctbk regen` / `.github/workflows/regen.yml` on the HCCS `ctbk-reproc` queue: see [`../specs/batch-pipeline.md`](../specs/batch-pipeline.md). The audit flow below predates the HCCS move; its RAC queue is gone, so audits now run on the same HCCS stack with `REPROC_URL` set.
 
 ## Reproc remote (one-time, local — never prod's `.dvc`)
 

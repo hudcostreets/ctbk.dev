@@ -82,7 +82,7 @@ WORKERS = {
 pulumi.export('workers', WORKERS)
 
 
-# ── HCCS AWS account (Lambda cascade, engine Batch, GHA OIDC) — `hccs` stack ─
+# ── HCCS AWS account (Lambda cascade, engine + trips-DAG Batch, GHA OIDC) — `hccs` stack ─
 if config.get_bool('manage_hccs_aws'):
     import aws_hccs
     aws_hccs.provision()

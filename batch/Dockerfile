@@ -1,26 +1,22 @@
-# Full-DAG reproc image (specs/batch-reproc.md).
+# Trips-DAG Batch image: full reproc audits (specs/batch-reproc.md) and
+# partial / full regens that publish to prod's `r2` DVX remote
+# (specs/batch-pipeline.md).
 #
-# Self-contained: python + uv + a blobless clone of ctbk.dev + `uv sync`.
-# Once dvx publishes its `dvx-batch` base image (`~/c/dvx/specs/batch-executor.md`
-# §1) this can become `FROM dvx-batch:<rev>` + clone + sync.
+# Self-contained: python + uv + a blobless clone of ctbk.dev at `$REF` +
+# `uv sync`. The clone (not COPY) keeps the build context tiny and gives dvx the
+# `.git` objects for any `git_deps` hashing; `--filter=blob:none` keeps full
+# history cheap. `batch/regen-targets` / `batch/reproc-targets` run from the
+# clone, so they're the versions at `$REF`.
 #
-# The committed `pyproject.toml` now pins dvx at `39062ef09`. We still override
-# dvx to `$DVX_REF` AFTER `uv sync` to guarantee the `[s3]` extra (boto3/s3fs)
-# is present; the default matches the project pin. `39062ef09` = `f5a483f31`
-# (= `95db406f7` + git-critical-section serialization + `write_dvc()`
-# preserve-outs) + per-project batch `prefix` + the leaf-dep-hash-rewrite fix
-# (record a tracked dep's `.dvc` out-hash, not a worktree re-hash) — the latter
-# is load-bearing for THIS reproc: without it a level-parallel `-f` run records
-# phantom leaf-dep hashes that the audit diff would mis-read as findings.
+# dvx: `uv sync` installs the project pin; `$DVX_REF` (default = the pin,
+# `93e790a6c`) is re-installed on top with the `[s3]` extra (boto3/s3fs) the
+# container needs for the R2 remote.
 #
-# The clone (not COPY) keeps the build context tiny and gives dvx the `.git`
-# objects for any `git_deps` hashing. `--filter=blob:none` (blobless): full
-# history, blobs fetched lazily on demand — cheap.
-#
-# Build (arm64, for Graviton Fargate):
-#   docker build --platform linux/arm64 \
-#     -t ctbk-reproc:$(git rev-parse --short HEAD) \
-#     --build-arg REF=$(git rev-parse HEAD) batch/
+# Build + push (arm64, Graviton Fargate), HCCS ECR:
+#   dvx batch push -c batch -p linux/arm64 \
+#     688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-reproc:$(git rev-parse --short HEAD)
+# (pass `--build-arg REF=$(git rev-parse HEAD)` via a plain `docker build` if
+# the commit isn't `main`'s HEAD; the default `REF=main` builds main).
 FROM python:3.13-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
@@ -37,7 +33,7 @@ RUN uv sync --frozen --no-dev
 
 # Override dvx past the committed pin (see header). `[s3]` extra is idempotent
 # if ctbk's own deps already cover it.
-ARG DVX_REF=39062ef09
+ARG DVX_REF=93e790a6c
 RUN uv pip install --python /app/.venv \
     "dvx[s3] @ git+https://github.com/runsascoded/dvx@${DVX_REF}"
 
@@ -49,11 +45,10 @@ ENV PATH="/app/.venv/bin:$PATH" \
 RUN git config --global user.name "dvx-batch" && \
     git config --global user.email "dvx-batch@localhost"
 
-# Push-back entrypoint: after the run, commits the regenerated `.dvc`s and
-# `git push`es them to a results branch when $FARGATE_GITHUB_RW_TOKEN is set
-# (see batch/entrypoint.sh), else runs read-only. It appends the reproc target
-# set to a bare `run` (Batch caps containerOverrides at 8192 bytes, and the
-# ~1.3k-path list blows past it — so the submit command is flags-only).
-# Copied to / (not /app) so the repo clone can't shadow it.
+# Push-back entrypoint (batch/entrypoint.sh): `dvx run` (targets appended
+# in-container from `$REGEN_TARGETS` / `batch/reproc-targets` — Batch caps
+# containerOverrides at 8192 bytes) or `script '<sh>'`, then ONE commit of the
+# changed tracked files to a results branch when $FARGATE_GITHUB_RW_TOKEN is
+# set. Copied to / (not /app) so the repo clone can't shadow it.
 COPY entrypoint.sh /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]

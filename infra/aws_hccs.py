@@ -15,6 +15,10 @@ New:
   (`secrets` block) instead of carrying R2 creds as plaintext env / submit
   overrides. Secret VALUES are set out-of-band (`aws secretsmanager
   put-secret-value`), never in code or Pulumi state.
+- The `ctbk-reproc` trips-DAG Batch stack (`_reproc`; specs/batch-pipeline.md):
+  ECR, Fargate Spot CE + queue, execution/task roles, logs, the
+  `ctbk/github-rw-token` secret, and (once `reproc_image` is configured) the
+  job definition.
 
 Deliberately unmanaged: the `pyrmts-engine` job definition (a new revision
 per engine image — `ctbk gbfs engine jobdef` copies the latest revision's
@@ -42,6 +46,8 @@ BATCH_SUBNETS = [
     'subnet-0f9e4bf751ef82fb6', 'subnet-082bb5ee050452f9a', 'subnet-067a10f3341418056',
 ]
 BATCH_SG = 'sg-0edaa1b17efc832eb'
+# The trips-DAG Batch stack's `dvx.batch` prefix (`batch/`, specs/batch-pipeline.md).
+REPROC = 'ctbk-reproc'
 
 
 def _assume(service: str) -> str:
@@ -164,6 +170,8 @@ def provision() -> None:
         })),
     )
 
+    reproc_queue = _reproc(r2_secrets)
+
     # ── GitHub Actions OIDC identity ──────────────────────────────────
     oidc = aws.iam.OpenIdConnectProvider(
         'github-actions', url='https://token.actions.githubusercontent.com',
@@ -188,14 +196,17 @@ def provision() -> None:
     )
     aws.iam.RolePolicy(
         'ctbk-gha-policy', role=gha.name,
-        policy=pulumi.Output.all(queue.arn, exec_role.arn, fn.arn).apply(lambda a: json.dumps({
+        policy=pulumi.Output.all(queue.arn, exec_role.arn, fn.arn, reproc_queue.arn).apply(lambda a: json.dumps({
             'Version': '2012-10-17',
             'Statement': [
                 {
                     'Sid': 'BatchSubmit',
                     'Effect': 'Allow',
                     'Action': ['batch:SubmitJob', 'batch:TagResource'],
-                    'Resource': [a[0], f'arn:aws:batch:{REGION}:{ACCOUNT}:job-definition/pyrmts-engine*'],
+                    'Resource': [
+                        a[0], f'arn:aws:batch:{REGION}:{ACCOUNT}:job-definition/pyrmts-engine*',
+                        a[3], f'arn:aws:batch:{REGION}:{ACCOUNT}:job-definition/{REPROC}*',
+                    ],
                 },
                 {
                     'Sid': 'BatchRead',
@@ -207,7 +218,10 @@ def provision() -> None:
                     'Sid': 'BatchJobLogs',
                     'Effect': 'Allow',
                     'Action': ['logs:GetLogEvents', 'logs:FilterLogEvents', 'logs:DescribeLogStreams'],
-                    'Resource': f'arn:aws:logs:{REGION}:{ACCOUNT}:log-group:/pyrmts-engine/batch:*',
+                    'Resource': [
+                        f'arn:aws:logs:{REGION}:{ACCOUNT}:log-group:/pyrmts-engine/batch:*',
+                        f'arn:aws:logs:{REGION}:{ACCOUNT}:log-group:/{REPROC}/batch:*',
+                    ],
                 },
                 {
                     # Citi Bike's public bucket: cross-account reads only need
@@ -229,3 +243,133 @@ def provision() -> None:
     )
     pulumi.export('gha_role_arn', gha.arn)
     pulumi.export('r2_secret_arns', [s.arn for s in r2_secrets])
+
+
+def _reproc(r2_secrets: list) -> aws.batch.JobQueue:
+    """The trips-DAG Batch stack (`batch/`, specs/batch-pipeline.md): reproc
+    audits and partial/full regens, submitted with `dvx batch submit -P
+    ctbk-reproc`. Names follow `dvx.batch`'s prefix convention (queue + job
+    def = the bare prefix, CE `<prefix>-spot`, log group `/<prefix>/batch`) so
+    dvx's submit/watch find them; unlike `dvx batch bootstrap`, this also gives
+    the job a task role (s3://tripdata reads for `norm`) and the explicit
+    subnets the pyrmts-engine CE uses (dvx bootstraps into default-VPC subnets).
+
+    The job definition exists once `reproc_image` is set in stack config (an
+    ECR ref pushed by `dvx batch push`); each image bump is `pulumi config set
+    reproc_image …` + `up` (a new revision; `submit` uses the latest)."""
+    repo = aws.ecr.Repository(
+        REPROC, name=REPROC, image_tag_mutability='MUTABLE',
+        image_scanning_configuration={'scan_on_push': False},
+        encryption_configurations=[{'encryption_type': 'AES256'}],
+    )
+    aws.ecr.LifecyclePolicy(
+        f'{REPROC}-lifecycle', repository=repo.name,
+        policy=json.dumps({'rules': [
+            {'rulePriority': 1, 'description': 'expire untagged after 7 days',
+             'selection': {'tagStatus': 'untagged', 'countType': 'sinceImagePushed', 'countUnit': 'days', 'countNumber': 7},
+             'action': {'type': 'expire'}},
+            {'rulePriority': 2, 'description': 'keep the 4 most recent tags',
+             'selection': {'tagStatus': 'tagged', 'tagPatternList': ['*'], 'countType': 'imageCountMoreThan', 'countNumber': 4},
+             'action': {'type': 'expire'}},
+        ]}),
+    )
+    log_group = aws.cloudwatch.LogGroup(
+        f'{REPROC}-batch-logs', name=f'/{REPROC}/batch', retention_in_days=90,
+    )
+
+    # GitHub push-back token for the entrypoint's results-branch commit: a
+    # fine-grained PAT, `contents:write` on hudcostreets/ctbk.dev only. Value
+    # set out-of-band.
+    gh_token = aws.secretsmanager.Secret(
+        'ctbk-github-rw-token', name='ctbk/github-rw-token',
+        description='Fine-grained GitHub PAT (hudcostreets/ctbk.dev contents:write) for ctbk-reproc Batch push-back (value set out-of-band)',
+    )
+    secret_arns = {
+        'R2_ACCESS_KEY_ID': r2_secrets[0].arn,
+        'R2_SECRET_ACCESS_KEY': r2_secrets[1].arn,
+        'FARGATE_GITHUB_RW_TOKEN': gh_token.arn,
+    }
+
+    exec_role = aws.iam.Role(
+        f'{REPROC}-batch-execution', name=f'{REPROC}-batch-execution',
+        assume_role_policy=_assume('ecs-tasks.amazonaws.com'),
+    )
+    ecs_exec = 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+    aws.iam.RolePolicyAttachment(f'{REPROC}-batch-execution-ecs', role=exec_role.name, policy_arn=ecs_exec)
+    aws.iam.RolePolicy(
+        f'{REPROC}-batch-secrets', name=f'{REPROC}-batch-secrets', role=exec_role.name,
+        policy=pulumi.Output.all(*secret_arns.values()).apply(lambda arns: json.dumps({
+            'Version': '2012-10-17',
+            'Statement': [{'Effect': 'Allow', 'Action': 'secretsmanager:GetSecretValue', 'Resource': sorted(arns)}],
+        })),
+    )
+    # Task role: what the job's own code may do in AWS. `norm` reads Citi
+    # Bike's public `s3://tripdata`; everything else is R2 (keys above).
+    job_role = aws.iam.Role(
+        f'{REPROC}-batch-job', name=f'{REPROC}-batch-job',
+        assume_role_policy=_assume('ecs-tasks.amazonaws.com'),
+    )
+    aws.iam.RolePolicy(
+        f'{REPROC}-batch-job-tripdata', role=job_role.name,
+        policy=json.dumps({
+            'Version': '2012-10-17',
+            'Statement': [{
+                'Sid': 'TripdataRead', 'Effect': 'Allow',
+                'Action': ['s3:ListBucket', 's3:GetObject'],
+                'Resource': ['arn:aws:s3:::tripdata', 'arn:aws:s3:::tripdata/*'],
+            }],
+        }),
+    )
+
+    # 64 vCPU: up to four 16-vCPU month-shard jobs at once (a full regen's
+    # fanout); a single-job run uses 16. Idle cost is zero.
+    ce = aws.batch.ComputeEnvironment(
+        f'{REPROC}-spot', name=f'{REPROC}-spot', type='MANAGED', state='ENABLED',
+        compute_resources={
+            'type': 'FARGATE_SPOT', 'max_vcpus': 64,
+            'subnets': BATCH_SUBNETS, 'security_group_ids': [BATCH_SG],
+        },
+    )
+    queue = aws.batch.JobQueue(
+        REPROC, name=REPROC, state='ENABLED', priority=1,
+        compute_environment_orders=[{'order': 1, 'compute_environment': ce.arn}],
+    )
+
+    image = pulumi.Config().get('reproc_image')
+    if image:
+        aws.batch.JobDefinition(
+            REPROC, name=REPROC, type='container', platform_capabilities=['FARGATE'],
+            # Retry a Spot reclaim, never an application failure (dvx.batch's
+            # RECLAIM_ONLY_RETRY: a bare `attempts` re-runs deterministic errors).
+            retry_strategy={
+                'attempts': 2,
+                'evaluate_on_exits': [
+                    {'on_status_reason': 'Host EC2*', 'action': 'RETRY'},
+                    {'on_reason': '*', 'action': 'EXIT'},
+                ],
+            },
+            container_properties=pulumi.Output.all(
+                exec_role.arn, job_role.arn, log_group.name, *secret_arns.values(),
+            ).apply(lambda a: json.dumps({
+                'image': image,
+                'runtimePlatform': {'operatingSystemFamily': 'LINUX', 'cpuArchitecture': 'ARM64'},
+                'resourceRequirements': [{'type': 'VCPU', 'value': '16'}, {'type': 'MEMORY', 'value': '65536'}],
+                'ephemeralStorage': {'sizeInGiB': 100},
+                'executionRoleArn': a[0],
+                'jobRoleArn': a[1],
+                'networkConfiguration': {'assignPublicIp': 'ENABLED'},
+                'logConfiguration': {'logDriver': 'awslogs', 'options': {'awslogs-group': a[2]}},
+                'environment': [
+                    {'name': 'AWS_DEFAULT_REGION', 'value': REGION},
+                    {'name': 'PYTHONFAULTHANDLER', 'value': '1'},
+                ],
+                'secrets': [
+                    {'name': name, 'valueFrom': arn}
+                    for name, arn in sorted(zip(secret_arns.keys(), a[3:]))
+                ],
+            })),
+        )
+    pulumi.export('reproc_queue', queue.name)
+    pulumi.export('reproc_ecr', f'{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/{REPROC}')
+    pulumi.export('github_rw_token_secret_arn', gh_token.arn)
+    return queue
