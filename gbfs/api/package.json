@@ -19,10 +19,10 @@
     "@rdub/file-tree": "https://github.com/runsascoded/file-tree#5731bbe913f3d7a1656867f99bda6ddec121057b",
     "@rdub/thrds": "https://github.com/runsascoded/thrds#ts-dist",
     "@resvg/resvg-wasm": "^2.6.2",
-    "hyparquet": "https://github.com/runsascoded/hyparquet#0f355ea5a37dcb9b29a43e33a3d45ce660c80798",
-    "pyrmts": "https://github.com/runsascoded/pyrmts#55825c1b0548732f93f753f9cf2eddd85eb23da5&path:/js/packages/pyrmts",
-    "pyrmts-cfw": "https://github.com/runsascoded/pyrmts#55825c1b0548732f93f753f9cf2eddd85eb23da5&path:/js/packages/pyrmts-cfw",
-    "pyrmts-geo": "https://github.com/runsascoded/pyrmts#55825c1b0548732f93f753f9cf2eddd85eb23da5&path:/js/packages/pyrmts-geo",
+    "hyparquet": "https://github.com/runsascoded/hyparquet#0fc22700f612f32c8a6ded303bfc8d4adcc57753",
+    "pyrmts": "https://github.com/runsascoded/pyrmts#01cb9739acd3c91f705f32b3c20f14da3f465396&path:/js/packages/pyrmts",
+    "pyrmts-cfw": "https://github.com/runsascoded/pyrmts#01cb9739acd3c91f705f32b3c20f14da3f465396&path:/js/packages/pyrmts-cfw",
+    "pyrmts-geo": "https://github.com/runsascoded/pyrmts#01cb9739acd3c91f705f32b3c20f14da3f465396&path:/js/packages/pyrmts-geo",
     "satori": "^0.26.0"
   }
 }

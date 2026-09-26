@@ -174,7 +174,7 @@ async function readH1ShardForStation(
 			metadata: meta,
 			rowStart,
 			rowEnd,
-			columnChunkAggregation: RG_COALESCE_BYTES,
+			...R2_COALESCE,
 		})) as Record<string, unknown>[];
 		for (const r of rows) {
 			if (r.station_id !== stationId) continue;
@@ -506,12 +506,11 @@ import { backfillManifestKey, manifestStatus, pruneManifestOrphans } from './rg_
  *
  * One `r2.head` round trip up front to learn `size`; subsequent `slice(start,
  * end)` calls become `r2.get(key, { range: { offset, length } })`. All
- * `parquetReadObjects` calls below should pass `columnChunkAggregation: 32 <<
- * 20` so hyparquet's planner coalesces all selected column chunks within a
- * row group into ONE byte range — without that, `columns: [...]` makes the
- * planner emit one fetch per column chunk, and on R2 each fetch carries
- * non-trivial CPU overhead. 5+ projected cols × N files trips the 1102
- * limit.
+ * `parquetReadObjects` calls below should spread `...R2_COALESCE` so
+ * hyparquet's planner coalesces selected column chunks into few byte ranges —
+ * without it, `columns: [...]` makes the planner merge only touching chunks,
+ * and on R2 each fetch carries non-trivial CPU overhead. 5+ projected cols × N
+ * files trips the 1102 limit.
  */
 async function asyncBufferFromR2(
 	r2: R2Bucket,
@@ -532,10 +531,15 @@ async function asyncBufferFromR2(
 	};
 }
 
-// Within-rg column-chunk coalescing threshold for R2 reads. Row groups in our
-// avail/trips parquets are well under this, so this effectively means "always
-// coalesce within an rg".
-const RG_COALESCE_BYTES = 32 << 20;
+// hyparquet coalescing budget for R2 reads: merge selected column chunks into
+// runs of ≤32MB — across row groups too — as long as unselected bytes stay
+// ≤25% of each run. Not `maxOverfetchRatio: 1` (the old per-rg
+// `columnChunkAggregation` analog): with runs now spanning rgs, 1 turns a
+// projected whole-file read into a whole-file GET (2-col read of a 75MB rides
+// shard: 1.5MB → 75MB). 0.25 bounds bytes at ≤1.33× the selected chunks while
+// matching or beating the old GET count on real shards (e.g. 4 of 7 cols of an
+// avail-v5 1m/2d shard: 5876 GETs → 23, +17% bytes).
+const R2_COALESCE = { maxRunBytes: 32 << 20, maxOverfetchRatio: 0.25 };
 
 /**
  * Read one parquet from R2, returning rows as plain objects. Returns `null` if
@@ -553,7 +557,7 @@ async function readR2Parquet(
 	const rows = await parquetReadObjects({
 		file,
 		columns,
-		columnChunkAggregation: RG_COALESCE_BYTES,
+		...R2_COALESCE,
 	}) as Record<string, unknown>[];
 	for (const r of rows) {
 		for (const k of Object.keys(r)) {
@@ -618,8 +622,8 @@ async function readR2ParquetStationPruned(
 	const sidSet = new Set(ids);
 	const out: Record<string, unknown>[] = [];
 	for (const { rowStart, rowEnd } of targetRanges) {
-		// Pass `metadata` to skip footer re-parse; pass `columnChunkAggregation`
-		// so hyparquet's planner coalesces all selected column chunks of this rg
+		// Pass `metadata` to skip footer re-parse; spread `R2_COALESCE` so
+		// hyparquet's planner coalesces all selected column chunks of this rg
 		// into ONE R2 GET (see `asyncBufferFromR2` doc).
 		const rows = (await parquetReadObjects({
 			file,
@@ -627,7 +631,7 @@ async function readR2ParquetStationPruned(
 			rowStart,
 			rowEnd,
 			columns,
-			columnChunkAggregation: RG_COALESCE_BYTES,
+			...R2_COALESCE,
 		})) as Record<string, unknown>[];
 		for (const r of rows) {
 			if (!sidSet.has(r[idCol] as string)) continue;
