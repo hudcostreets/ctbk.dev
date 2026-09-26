@@ -20,7 +20,7 @@
     "d3-color": "^3.1.0",
     "hyparquet": "^1.25.6",
     "leaflet": "^1.9.4",
-    "lodash": "^4.17.21",
+    "lodash": "^4.18.1",
     "moment": "^2.30.1",
     "plotly.js": "https://github.com/runsascoded/plotly.js#1aa3c51cfd293aefb31ea8861dcc6b14105848fe",
     "pltly": "https://gitlab.com/runsascoded/js/pltly/-/archive/9c64c11de2aa3656c308dfdad56eafbc5c2fb32e/pltly-9c64c11de2aa3656c308dfdad56eafbc5c2fb32e.tar.gz",
@@ -32,7 +32,7 @@
     "react-icons": "^5.5.0",
     "react-leaflet": "^4.2.1",
     "react-markdown": "^10.1.0",
-    "react-router-dom": "^6.28.0",
+    "react-router-dom": "^6.30.6",
     "uplot": "^1.6.32",
     "use-kbd": "https://github.com/runsascoded/use-kbd#e8de7954c2d39b639dc1b99203659b91fd8fd269",
     "use-prms": "https://github.com/runsascoded/use-prms#3db90a820b4372cea3efb7e02bac317dc049fa04"
@@ -44,14 +44,14 @@
     "@types/plotly.js": "^3.0.10",
     "@types/react": "^18.2.52",
     "@types/react-dom": "^18.2.18",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "^4.7.0",
     "s2js": "^1.44.0",
     "scrns": "https://gitlab.com/runsascoded/js/scrns/-/archive/17a7273a3d08d7b50e519dcecdbbfd42bf1623e9/scrns-17a7273a3d08d7b50e519dcecdbbfd42bf1623e9.tar.gz",
-    "serve": "^14.2.5",
+    "serve": "^14.2.6",
     "typescript": "^5.7.0",
-    "vite": "^6.0.0",
-    "wrangler": "^4.110.0",
-    "yaml": "^2.8.3"
+    "vite": "^6.4.3",
+    "wrangler": "^4.141.0",
+    "yaml": "^2.9.1"
   },
   "scripts": {
     "clean": "rm -rf node_modules/.vite",
@@ -82,6 +82,10 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "puppeteer"
-    ]
+    ],
+    "overrides": {
+      "picomatch@>=4 <4.0.4": "^4.0.4",
+      "protocol-buffers-schema@<3.6.1": "^3.6.1"
+    }
   }
 }
