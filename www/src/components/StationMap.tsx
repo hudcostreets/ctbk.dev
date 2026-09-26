@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Circle, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
+import { Circle, CircleMarker, MapContainer, Pane, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useTheme } from '../contexts/ThemeContext'
 import css from '../stations.module.css'
@@ -478,6 +478,12 @@ export interface StationMapProps {
   /** Optional overlay rendered top-right (e.g. for month label / context). */
   overlay?: React.ReactNode
 
+  /** "You are here" marker: a fixed-size ring at the page's station, drawn
+   *  regardless of whether it's in `stations` (a retired station isn't in
+   *  the current month's ride circles). `label` → a permanent tooltip, for
+   *  when no selected-circle tooltip names the station. */
+  focus?: { lat: number; lng: number; label?: string }
+
   /** POC: render per-station pies (starts vs ends) instead of solid fill.
    *  Lazy per-station fetch via `useRollupQuery`. Strictly opt-in. */
   pies?: boolean
@@ -508,6 +514,7 @@ export default function StationMap({
   overlay,
   pies,
   pieRange,
+  focus,
 }: StationMapProps) {
   const { actualTheme } = useTheme()
   const tileStyle = resolveTileStyle(tileCode, actualTheme)
@@ -548,6 +555,23 @@ export default function StationMap({
         stationColors={stationColors}
         hoverToSelect={hoverToSelect}
       />
+      {focus && (
+        <Pane name="focus" className={css.focus}>
+          <CircleMarker
+            key={`${focus.lat},${focus.lng}-${colors.selected}`}
+            center={[focus.lat, focus.lng]}
+            radius={11}
+            pathOptions={{ color: colors.selected, weight: 3, fillColor: colors.selected, fillOpacity: 0.3, dashArray: '4 3' }}
+            interactive={false}
+          >
+            {focus.label && (
+              <Tooltip className={css.tooltip} permanent direction="top" offset={[0, -12]} pane="focus">
+                <p>{focus.label}</p>
+              </Tooltip>
+            )}
+          </CircleMarker>
+        </Pane>
+      )}
       {pies && pieRange && (
         <StationPies stations={stations} pieRange={pieRange} />
       )}

@@ -137,6 +137,12 @@ export default function StationDetail() {
   const [binMs, setBinMs] = useUrlState('b', intParam(0))
 
   const { data: info } = useStationInfo(id)
+  // `in_gbfs = 0`: not in the current GBFS feed (retired). Availability
+  // exists only for stations the poller has seen (a GBFS id; scraping began
+  // 2026-04-07) — a station retired before then has none, so its avail
+  // sections are replaced by a note instead of a never-resolving spinner.
+  const retired = info?.in_gbfs === 0
+  const hasAvail = info == null || !!info.gbfs_station_id
 
   const rangeDuration = range.duration
   const rangeTimestampMs = range.timestamp?.getTime() ?? null
@@ -352,26 +358,39 @@ export default function StationDetail() {
   useEffect(() => {
     fetch(MANIFEST_URL)
       .then((r) => r.json())
-      .then((m: Manifest) => {
-        setManifest(m)
-        setMapMonth((cur) => cur ?? m.latestMonth)
-      })
+      .then((m: Manifest) => setManifest(m))
       .catch((err) => console.warn('Failed to load manifest:', err))
   }, [])
 
-  // (Re)load stations + pair data when mapMonth changes
+  // Default map month: the latest, or for a retired station its last month
+  // with ride data (so its circle + destinations fan show). An explicit
+  // pick (`mapMonth`) wins.
+  const defaultMapMonth = useMemo(() => {
+    if (!manifest) return null
+    const lastYm = retired && info?.last_seen ? info.last_seen.slice(0, 7).replace('-', '') : null
+    if (!lastYm) return manifest.latestMonth
+    const upTo = Object.keys(manifest.stations).filter((m) => m <= lastYm).sort()
+    return upTo.length ? upTo[upTo.length - 1] : manifest.latestMonth
+  }, [manifest, retired, info?.last_seen])
+  const effMapMonth = mapMonth ?? defaultMapMonth
+
+  // (Re)load stations + pair data when the map month changes
   useEffect(() => {
-    if (!manifest || !mapMonth) return
-    const stationsUrl = manifest.stations[mapMonth]
-    const pairsUrl = manifest.pairs[mapMonth]
+    if (!manifest || !effMapMonth) return
+    const stationsUrl = manifest.stations[effMapMonth]
+    const pairsUrl = manifest.pairs[effMapMonth]
     if (!stationsUrl) return
     setStations(null)
     setPairCounts(null)
+    // The default month can change once `info` arrives (a retired station's
+    // last month); drop a superseded month's late response.
+    let stale = false
     Promise.all([
       fetch(stationsUrl).then((r) => r.json()),
       pairsUrl ? fetch(pairsUrl).then((r) => r.json()) : Promise.resolve(null),
     ])
       .then(([stationsData, pairsData]) => {
+        if (stale) return
         setStations(stationsData)
         if (pairsData) {
           // Pairs use index keys; convert to ID keys
@@ -392,7 +411,8 @@ export default function StationDetail() {
         }
       })
       .catch((err) => console.warn('Failed to load month data:', err))
-  }, [manifest, mapMonth])
+    return () => { stale = true }
+  }, [manifest, effMapMonth])
 
   // Sorted list of available months (newest first)
   const availableMonths = useMemo(() => {
@@ -408,7 +428,8 @@ export default function StationDetail() {
   }, [info?.name, id])
 
   // Redirect to canonical /s/<slug> URL if we landed on a non-canonical form
-  // (covers: old /stations/:id route, UUID, short_name, or stale slug).
+  // (covers: old /stations/:id route, UUID, short_name, or a pre-rename
+  // slug — an alias).
   // Guard against firing with stale info from the previous station — when the
   // id changes we null out info first, but React runs effects together and
   // this effect's `info` snapshot may still be the previous station's until
@@ -416,11 +437,13 @@ export default function StationDetail() {
   useEffect(() => {
     if (!info?.slug || !id) return
     const matchesCurrentId =
-      info.slug === id || info.short_name === id || info.gbfs_station_id === id
+      info.slug === id || info.alias === id || info.short_name === id || info.gbfs_station_id === id
     if (!matchesCurrentId) return
-    const onLegacyRoute = window.location.pathname.startsWith('/stations/')
-    if (id !== info.slug || onLegacyRoute) {
-      navigate(`/s/${info.slug}${window.location.search}${window.location.hash}`, { replace: true })
+    // Also normalizes the path's spelling: Workers Assets 307s a slug's `+`
+    // to `%2B` (and stub paths may carry a trailing `/`); show `/s/a+b`.
+    const canonical = `/s/${info.slug}`
+    if (id !== info.slug || window.location.pathname !== canonical) {
+      navigate(`${canonical}${window.location.search}${window.location.hash}`, { replace: true })
     }
   }, [info, id, navigate])
 
@@ -431,7 +454,8 @@ export default function StationDetail() {
   if (info?.short_name) subtitleParts.push(`#${info.short_name}`)
   if (info?.capacity != null) subtitleParts.push(`${info.capacity} docks`)
   if (info?.station_type) subtitleParts.push(info.station_type)
-  if (info?.first_seen) subtitleParts.push(`since ${info.first_seen}`)
+  if (retired && info?.first_seen && info.last_seen) subtitleParts.push(`${info.first_seen} – ${info.last_seen}`)
+  else if (info?.first_seen) subtitleParts.push(`since ${info.first_seen}`)
 
   // Use station-history-sourced lat/lon for the map (so the marker matches the
   // pair-data dataset). Fall back to GBFS info if not yet loaded.
@@ -450,7 +474,21 @@ export default function StationDetail() {
 
   return (
     <Box p={{ xs: 1, sm: 2, md: 3 }} maxWidth={1200} mx="auto">
-      <Typography variant="h5" gutterBottom>{title}</Typography>
+      <Typography variant="h5" gutterBottom>
+        {title}
+        {retired && (
+          <Box
+            component="span"
+            sx={{
+              ml: 1.5, px: 1, py: 0.25, borderRadius: 1, fontSize: '0.5em', verticalAlign: 'middle',
+              letterSpacing: '0.04em', textTransform: 'uppercase',
+              border: 1, borderColor: 'text.disabled', color: 'text.secondary',
+            }}
+          >
+            retired{info?.last_seen ? ` ${info.last_seen.slice(0, 4)}` : ''}
+          </Box>
+        )}
+      </Typography>
       {(subtitleParts.length > 0 || mapsUrl) && (
         <Typography variant="body2" color="text.secondary" gutterBottom>
           {subtitleParts.join(' · ')}
@@ -465,122 +503,132 @@ export default function StationDetail() {
         </Typography>
       )}
 
-      <Typography variant="body2" color="text.secondary" gutterBottom>
-        {data ? `${data.rows.length.toLocaleString()} snapshots · ` : ''}
-        {formatTimeRange(range)}
-        {data?.last_polled_at != null && (
-          <>
-            {' · '}
-            <TimeAgo at={data.last_polled_at} prefix="updated" />
-          </>
-        )}
-        {data && data.rows.length > 0 && fromS <= data.rows[0].ts + 0.05 * rangeDuration / 1000 && (
-          <>
-            {' · '}
-            <span title="Scraping began on this date — no older data available">
-              ⟵ start of data ({new Date(data.rows[0].ts * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })})
-            </span>
-          </>
-        )}
-      </Typography>
-
-      <Box my={1} display="flex" alignItems="center" gap={2} flexWrap="wrap">
-        {/* Clicking "Latest" while already tracking still kicks `nowMs` so a
-            stale window jumps forward immediately (setRange alone would
-            no-op — the param value is unchanged). */}
-        <RangeWidthControl value={range} onChange={(r) => { if (r.timestamp === null) setNowMs(Date.now()); setRange(r) }} />
-        <BinSelect
-          value={binMs > 0 ? binMs : undefined}
-          onChange={(ms) => setBinMs(ms ?? 0)}
-          presets={AVAIL_BIN_PRESETS}
-          disabledMs={availDisabledBins(rangeDuration)}
-          disabledTitle={'Bin ≥ range — would render < 2 points.'}
-        />
-        {binMs === 0 && data?.binS != null && (
-          <Typography variant="body2" sx={{ opacity: 0.7 }}>
-            ({binLabel(data.binS)})
-          </Typography>
-        )}
-      </Box>
-
-      {error && (
-        <Typography color="error">Error: {error}</Typography>
+      {!hasAvail && (
+        <Typography variant="body2" color="text.secondary" sx={{ my: 2 }}>
+          No availability data: {retired ? `this station was retired${info?.last_seen ? ` (last ride ${info.last_seen})` : ''}` : 'this station never appeared in the live feed'}
+          {' '}before live tracking began ({new Date(GENESIS_S * 1000).toISOString().slice(0, 10)}).
+          Ride history is below.
+        </Typography>
       )}
 
-      {/* `chartContainerRef` measures the chart's available width for
-        * `pickAvailBinAuto`. Wrapping the spinner + chart together keeps the
-        * observed width stable across loading→loaded transitions.
-        *
-        * Negative `mx` cancels the page-level `Box p={{ xs: 1, sm: 2, md: 3 }}`
-        * padding so the chart spans edge-to-edge — important on mobile where
-        * the y-axis (40px) already eats a meaningful chunk. */}
-      <Box ref={chartContainerRef} sx={{ mx: { xs: -1, sm: -2, md: -3 } }}>
-        {!data && !error && (
-          <Box display="flex" flexDirection="column" alignItems="center" gap={1} p={4}>
-            <CircularProgress />
+      {hasAvail && (<>
+        <Typography variant="body2" color="text.secondary" gutterBottom>
+          {data ? `${data.rows.length.toLocaleString()} snapshots · ` : ''}
+          {formatTimeRange(range)}
+          {data?.last_polled_at != null && (
+            <>
+              {' · '}
+              <TimeAgo at={data.last_polled_at} prefix="updated" />
+            </>
+          )}
+          {data && data.rows.length > 0 && fromS <= data.rows[0].ts + 0.05 * rangeDuration / 1000 && (
+            <>
+              {' · '}
+              <span title="Scraping began on this date — no older data available">
+                ⟵ start of data ({new Date(data.rows[0].ts * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })})
+              </span>
+            </>
+          )}
+        </Typography>
+
+        <Box my={1} display="flex" alignItems="center" gap={2} flexWrap="wrap">
+          {/* Clicking "Latest" while already tracking still kicks `nowMs` so a
+              stale window jumps forward immediately (setRange alone would
+              no-op — the param value is unchanged). */}
+          <RangeWidthControl value={range} onChange={(r) => { if (r.timestamp === null) setNowMs(Date.now()); setRange(r) }} />
+          <BinSelect
+            value={binMs > 0 ? binMs : undefined}
+            onChange={(ms) => setBinMs(ms ?? 0)}
+            presets={AVAIL_BIN_PRESETS}
+            disabledMs={availDisabledBins(rangeDuration)}
+            disabledTitle={'Bin ≥ range — would render < 2 points.'}
+          />
+          {binMs === 0 && data?.binS != null && (
             <Typography variant="body2" sx={{ opacity: 0.7 }}>
-              Loading availability — {formatDuration(rangeDuration)}
-              {(() => {
-                const binS = binMs > 0
-                  ? Math.floor(binMs / 1000)
-                  : pickAvailBinAuto(rangeDuration / 1000, availViewportPx)
-                return ` × ${binLabel(binS)}`
-              })()}
+              ({binLabel(data.binS)})
             </Typography>
-          </Box>
+          )}
+        </Box>
+
+        {error && (
+          <Typography color="error">Error: {error}</Typography>
         )}
 
-        {data && data.rows.length > 0 && (
-          <Box sx={{ position: 'relative' }}>
-            <Box sx={{ opacity: rangeQuery.isFetching ? 0.4 : 1, transition: 'opacity 120ms' }}>
-              <StationAvailabilityChart
-                rows={data.rows}
-                capacity={info?.capacity ?? null}
-                visibleFromS={fromS}
-                visibleToS={toS}
-                binS={data.binS}
+        {/* `chartContainerRef` measures the chart's available width for
+          * `pickAvailBinAuto`. Wrapping the spinner + chart together keeps the
+          * observed width stable across loading→loaded transitions.
+          *
+          * Negative `mx` cancels the page-level `Box p={{ xs: 1, sm: 2, md: 3 }}`
+          * padding so the chart spans edge-to-edge — important on mobile where
+          * the y-axis (40px) already eats a meaningful chunk. */}
+        <Box ref={chartContainerRef} sx={{ mx: { xs: -1, sm: -2, md: -3 } }}>
+          {!data && !error && (
+            <Box display="flex" flexDirection="column" alignItems="center" gap={1} p={4}>
+              <CircularProgress />
+              <Typography variant="body2" sx={{ opacity: 0.7 }}>
+                Loading availability — {formatDuration(rangeDuration)}
+                {(() => {
+                  const binS = binMs > 0
+                    ? Math.floor(binMs / 1000)
+                    : pickAvailBinAuto(rangeDuration / 1000, availViewportPx)
+                  return ` × ${binLabel(binS)}`
+                })()}
+              </Typography>
+            </Box>
+          )}
+
+          {data && data.rows.length > 0 && (
+            <Box sx={{ position: 'relative' }}>
+              <Box sx={{ opacity: rangeQuery.isFetching ? 0.4 : 1, transition: 'opacity 120ms' }}>
+                <StationAvailabilityChart
+                  rows={data.rows}
+                  capacity={info?.capacity ?? null}
+                  visibleFromS={fromS}
+                  visibleToS={toS}
+                  binS={data.binS}
+                  onPan={onAvailPan}
+                />
+              </Box>
+              {rangeQuery.isFetching && (
+                <Box sx={{
+                  position: 'absolute', inset: 0,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  pointerEvents: 'none',
+                }}>
+                  <CircularProgress />
+                </Box>
+              )}
+            </Box>
+          )}
+
+          {data && data.rows.length === 0 && (
+            <Typography>No data yet for today.</Typography>
+          )}
+        </Box>
+
+        {/* OverviewAvailabilityChart was a separate "Mean bikes — daily bins"
+          * plot showing the full station history. It's been folded into the
+          * main chart's controls (Range + Bin selectors above) — pick e.g.
+          * Range=1y, Bin=1d to reproduce that view. Removed 2026-05-01. */}
+
+        {/* Station-minute states (`smg-v1`): the same window as the chart
+          * above (`r`), its own auto bin; drag-pan moves both. */}
+        {info?.short_name && (
+          <Box sx={{ mt: 2, mx: { xs: -1, sm: -2, md: -3 } }}>
+            <Typography variant="h6" sx={{ px: { xs: 1, sm: 2, md: 3 }, mb: 0.5 }}>Station state</Typography>
+            <Box sx={{ px: { xs: 1, sm: 2, md: 3 } }}>
+              <SmgPanel
+                sel={smgSel}
+                fromS={fromS}
+                toS={toS}
                 onPan={onAvailPan}
+                clampMinS={GENESIS_S}
+                height={220}
               />
             </Box>
-            {rangeQuery.isFetching && (
-              <Box sx={{
-                position: 'absolute', inset: 0,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                pointerEvents: 'none',
-              }}>
-                <CircularProgress />
-              </Box>
-            )}
           </Box>
         )}
-
-        {data && data.rows.length === 0 && (
-          <Typography>No data yet for today.</Typography>
-        )}
-      </Box>
-
-      {/* OverviewAvailabilityChart was a separate "Mean bikes — daily bins"
-        * plot showing the full station history. It's been folded into the
-        * main chart's controls (Range + Bin selectors above) — pick e.g.
-        * Range=1y, Bin=1d to reproduce that view. Removed 2026-05-01. */}
-
-      {/* Station-minute states (`smg-v1`): the same window as the chart
-        * above (`r`), its own auto bin; drag-pan moves both. */}
-      {info?.short_name && (
-        <Box sx={{ mt: 2, mx: { xs: -1, sm: -2, md: -3 } }}>
-          <Typography variant="h6" sx={{ px: { xs: 1, sm: 2, md: 3 }, mb: 0.5 }}>Station state</Typography>
-          <Box sx={{ px: { xs: 1, sm: 2, md: 3 } }}>
-            <SmgPanel
-              sel={smgSel}
-              fromS={fromS}
-              toS={toS}
-              onPan={onAvailPan}
-              clampMinS={GENESIS_S}
-              height={220}
-            />
-          </Box>
-        </Box>
-      )}
+      </>)}
 
       {mapCenter && mapShortName && (
         <>
@@ -600,15 +648,22 @@ export default function StationDetail() {
               onMarkerHover={onMarkerHover}
               pairCounts={pairCounts}
               center={mapCenter}
+              focus={{
+                lat: mapCenter[0],
+                lng: mapCenter[1],
+                // The selected circle's tooltip names stations present this
+                // month; label the ring only when there's none.
+                label: mapStations[mapShortName] ? undefined : `${title}${retired ? ' (retired)' : ''}`,
+              }}
               zoom={15}
               scrollWheelZoom
               style={{ height: '100%', width: '100%' }}
               overlay={
-                availableMonths.length > 0 && mapMonth ? (
+                availableMonths.length > 0 && effMapMonth ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, pointerEvents: 'auto' }}>
                     Citi Bike rides,{' '}
                     <select
-                      value={mapMonth}
+                      value={effMapMonth}
                       onChange={(e) => setMapMonth(e.target.value)}
                       style={{
                         background: 'transparent',

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Emit per-station HTML stubs (`dist/s/<slug>/index.html`) after `vite build`.
+ * Emit per-station HTML stubs (`dist/s/<slug>.html`) after `vite build`.
  *
  * GH Pages serves the SPA via a `404.html` fallback, so `/s/<slug>` deep
  * links return HTTP 404 with the generic homepage og meta — link-preview
@@ -13,6 +13,14 @@
  * Station list comes from the API worker's `/api/stations/slugs` (D1
  * `stations` rows with a slug — ~2k). Failure is fatal: a deploy without
  * stubs would silently regress share previews.
+ *
+ * Flat `<slug>.html`, not `<slug>/index.html`: Workers Assets serves the
+ * former at `/s/<slug>` directly, where the latter 307s to `/s/<slug>/` —
+ * and that redirect percent-encodes a slug's `+` (`/s/a%2Bb/`).
+ *
+ * A station's earlier slugs (`aliases`, space-separated) get stubs too,
+ * so old shared links still preview; their `og:url` is the current slug,
+ * and the SPA redirects there on load.
  */
 
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
@@ -40,16 +48,25 @@ const { stations } = await res.json()
 if (!stations?.length) throw new Error('no slugged stations returned')
 
 const template = readFileSync(join(distDir, 'index.html'), 'utf8')
+const stubDir = join(distDir, 's')
+mkdirSync(stubDir, { recursive: true })
 if (!/<title>/.test(template)) throw new Error('dist/index.html missing <title>')
 
-for (const { slug, name, capacity, station_type, first_seen } of stations) {
+let stubs = 0
+for (const { slug, aliases, name, capacity, station_type, first_seen, last_seen, in_gbfs } of stations) {
   const title = `${name} — Citi Bike station | ctbk.dev`
   const bits = []
   if (capacity) bits.push(`${capacity}-dock`)
   if (station_type) bits.push(station_type)
   const kind = bits.length ? `${bits.join(' ')} Citi Bike station` : 'Citi Bike station'
-  const since = first_seen ? `, in service since ${first_seen.slice(0, 4)}` : ''
-  const desc = `${name}: ${kind}${since} — live availability + ride history on ctbk.dev.`
+  // `in_gbfs`/`last_seen` absent from an older API = treat as active.
+  const retired = in_gbfs === 0 && last_seen
+  const since = first_seen
+    ? retired ? `, ${first_seen.slice(0, 4)}–${last_seen.slice(0, 4)}` : `, in service since ${first_seen.slice(0, 4)}`
+    : ''
+  const desc = retired
+    ? `${name}: retired ${kind}${since} — ride history on ctbk.dev.`
+    : `${name}: ${kind}${since} — live availability + ride history on ctbk.dev.`
   let html = template.replace(/<title>[^<]*<\/title>/, `<title>${escapeHtml(title)}</title>`)
   html = setMeta(html, 'og:title', title)
   html = setMeta(html, 'og:description', desc)
@@ -60,8 +77,9 @@ for (const { slug, name, capacity, station_type, first_seen } of stations) {
     /(<meta property="og:image"[^>]*\/>)/,
     `$1\n    <meta property="og:image:width" content="1200" />\n    <meta property="og:image:height" content="630" />`,
   )
-  const dir = join(distDir, 's', slug)
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'index.html'), html)
+  for (const s of [slug, ...(aliases ? aliases.split(' ') : [])]) {
+    writeFileSync(join(stubDir, `${s}.html`), html)
+    stubs++
+  }
 }
-console.error(`wrote ${stations.length} station stubs under dist/s/`)
+console.error(`wrote ${stubs} station stubs (${stations.length} stations) under dist/s/`)

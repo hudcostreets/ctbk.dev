@@ -16,6 +16,8 @@ export const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.
 export interface StationInfo {
   short_name: string
   slug: string | null
+  /** Set when looked up by an earlier slug (the page redirects to `slug`). */
+  alias?: string
   gbfs_station_id: string | null
   name: string | null
   lat: number | null

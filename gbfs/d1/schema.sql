@@ -48,6 +48,15 @@ CREATE TABLE IF NOT EXISTS stations (
 );
 CREATE INDEX IF NOT EXISTS idx_stations_gbfs_id ON stations(gbfs_station_id);
 
+-- Earlier slugs of each station (`gbfs/d1/load_station_slugs.py`); the api
+-- worker resolves them and the FE redirects to `stations.slug`.
+CREATE TABLE IF NOT EXISTS station_slug_aliases (
+  alias TEXT PRIMARY KEY,
+  short_name TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_station_slug_aliases_short_name ON station_slug_aliases(short_name);
+
 -- Per-station monthly trip counts and durations.
 -- Loaded from `aggregated/ymrsgtb_cd_<ym>.parquet` (is_start=1) and
 -- `aggregated/ymregtb_cd_<ym>.parquet` (is_start=0). Together: ~6M rows

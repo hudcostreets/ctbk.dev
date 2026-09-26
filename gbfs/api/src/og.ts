@@ -58,7 +58,9 @@ async function stationBySlug(db: D1Database, slug: string): Promise<StationRow |
 			.bind(slug).first<StationRow>();
 		if (row) return row;
 	}
-	return null;
+	return db.prepare(
+		`SELECT s.* FROM station_slug_aliases a JOIN stations s ON s.short_name = a.short_name WHERE a.alias = ?`
+	).bind(slug).first<StationRow>();
 }
 
 /** Station-LUC denorm (same file the FE + cascade worker read). Cached

@@ -4,7 +4,7 @@
 //
 // `not_found_handling: single-page-application` serves `index.html`
 // (HTTP 200) for any path with no asset — replaces the GH Pages
-// `404.html` hack. Per-station stubs (`dist/s/<slug>/index.html`) are
+// `404.html` hack. Per-station stubs (`dist/s/<slug>.html`) are
 // ordinary assets and win over the fallback for crawler og meta.
 {
   "$schema": "node_modules/wrangler/config-schema.json",

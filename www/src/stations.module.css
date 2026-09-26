@@ -100,6 +100,15 @@ a.subtitle:hover {
 .circles {
     z-index: 420 !important;
 }
+/* Page-station "you are here" ring: above the selected overlay, and like it
+ * click-through (the circle underneath stays the hit target). */
+.focus {
+    z-index: 510 !important;
+    pointer-events: none;
+}
+.focus * {
+    pointer-events: none !important;
+}
 
 /* Lines render above circles (the fan reads better over the rings), which
  * also means edges win hit-testing where they cross a station's clickable

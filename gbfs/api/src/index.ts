@@ -410,19 +410,26 @@ async function getStationRange(
 	return rows;
 }
 
-/** Detect ID format: slug | uuid | short_name. */
-function detectIdKind(id: string): 'uuid' | 'slug' | 'short_name' {
+/** Detect ID format: slug | uuid | short_name. Slugs are kebab words,
+ *  `+`-joined per street (`lafayette+classon`, `w52+11`, `4+99`). */
+export function detectIdKind(id: string): 'uuid' | 'slug' | 'short_name' {
 	if (/^[0-9a-f]{8}-[0-9a-f]{4}-/.test(id)) return 'uuid';
-	if (/^[a-z0-9-]+$/.test(id) && /[a-z]/.test(id)) return 'slug';
+	if (/^[a-z0-9+-]+$/.test(id) && /[a-z+]/.test(id)) return 'slug';
 	return 'short_name';
 }
 
-/** Look up a station by any ID form (slug, UUID, short_name). */
-async function lookupStation(db: D1Database, id: string): Promise<Record<string, unknown> | null> {
+/** Look up a station by any ID form: slug, UUID, short_name, or an earlier
+ *  slug (`station_slug_aliases`). An alias hit carries `alias: id`; its
+ *  `slug` is the current one, which the FE redirects to. */
+export async function lookupStation(db: D1Database, id: string): Promise<Record<string, unknown> | null> {
 	const kind = detectIdKind(id);
 	const col = kind === 'uuid' ? 'gbfs_station_id' : kind === 'slug' ? 'slug' : 'short_name';
 	const row = await db.prepare(`SELECT * FROM stations WHERE ${col} = ?`).bind(id).first();
 	if (row) return row;
+	const aliased = await db.prepare(
+		`SELECT s.*, a.alias FROM station_slug_aliases a JOIN stations s ON s.short_name = a.short_name WHERE a.alias = ?`
+	).bind(id).first();
+	if (aliased) return aliased;
 	// Fallback: try other columns (in case format detection was wrong)
 	const fallbackOrder = (['slug', 'short_name', 'gbfs_station_id'] as const).filter((c) => c !== col);
 	for (const c of fallbackOrder) {
@@ -1646,7 +1653,7 @@ export default {
 		// and re-render in the background (`ctx.waitUntil`), so only the
 		// very first request per station per colo pays the ~1-1.5s render
 		// (matters for crawlers with short preview-fetch timeouts).
-		const ogMatch = url.pathname.match(/^\/og\/s\/([a-z0-9-]+)\.png$/);
+		const ogMatch = url.pathname.match(/^\/og\/s\/([a-z0-9+-]+)\.png$/);
 		if (ogMatch) {
 			const cache = caches.default;
 			const cacheKey = new Request(url.toString(), { method: 'GET' });
@@ -1690,7 +1697,9 @@ export default {
 		// stub generation in www (one row per station page to emit).
 		if (url.pathname === '/api/stations/slugs') {
 			const { results } = await env.DB.prepare(
-				`SELECT slug, short_name, name, capacity, station_type, first_seen FROM stations WHERE slug IS NOT NULL ORDER BY slug`
+				`SELECT slug, short_name, name, capacity, station_type, first_seen, last_seen, in_gbfs,
+				        (SELECT GROUP_CONCAT(alias, ' ') FROM station_slug_aliases a WHERE a.short_name = s.short_name) AS aliases
+				 FROM stations s WHERE slug IS NOT NULL ORDER BY slug`
 			).all();
 			return jsonResponse({ stations: results }, env, {
 				headers: { 'Cache-Control': 'public, max-age=3600' },
