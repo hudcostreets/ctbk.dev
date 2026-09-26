@@ -3,3 +3,8 @@ outs:
   size: 129973
   hash: md5
   path: ymrgtbs_cd_202008.parquet
+meta:
+  computation:
+    cmd: ctbk agg create -w0 -g ymrgtbs -a cd 202008
+    deps:
+      /s3/ctbk/normalized/202008.parquet: 37da61752f1f3a6e7f5d47cee4c7a6fe
