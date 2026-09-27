@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'ctbk.dev commit/branch to build (default: this run''s SHA)'
+        description: 'ctbk.dev branch or FULL commit SHA to build (`actions/checkout` can''t fetch a short SHA; default: this run''s SHA)'
         required: false
 
 permissions:

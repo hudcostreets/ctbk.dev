@@ -155,7 +155,7 @@ python -c 'from ctbk.pyramid_cascade.rides_assets import regen_geo_json as g; g(
 git add -u && git commit -m 'repair: candidate station assets' && git push h trailing-zero-repair
 ```
 
-**Review** `station-luc-build`'s `LUC churn: N stations moved, M new` line. Moved stations' historical **avail** rows (`avail-v6`, `smg-v1`) are keyed under their old cell; incremental fills won't re-key them. If `N > 0`, decide before cutover whether to journal the WAL era for the avail pyramids (`ctbk gbfs invalidate -C avail-v6 2026-04-07T00:00:00Z <now>`, same for smg-v1), which is a large refold, or accept the drift for those stations.
+**Review** `station-luc-build`'s `LUC churn: N stations moved, M new` line. `avail-v6` / `smg-v1` key stations by identity (`s:<short_name>`) over a frozen vocab, so a moved LUC only matters if a vocab cell lies strictly between the old and new cell, which would change that cell's membership from now on. Check each moved station's set of vocab ancestors, old cell vs new. For this repair: 21 moved (19 refinements, where an un-merged historical canonical landed in the station's cell; 2 coarsenings, `5484.09` and `5685.06`, whose neighbor merged away), and every vocab-ancestor set was unchanged, so there's nothing to refold.
 
 ### 2. Candidate rides build
 
@@ -168,7 +168,7 @@ ctbk gbfs engine jobdef 688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-engine
 ctbk gbfs normalized-mirror -d normalized-next    # ☁ all 159 months (the build lists this prefix), ~12.4 GB server-side copies
 ctbk gbfs engine gaps -C rides-start -m manifest-next.jsonl | wc -l     # every slot (fresh manifest ⇒ full build)
 
-for a in start end; do                             # in parallel, ~20 min each
+for a in start end; do                             # ~20 min each; `pyrmts-engine-spot` caps at 16 vCPU, so they run back to back
   ctbk gbfs engine submit -C rides-$a -R -f -I -m manifest-next.jsonl \
     -e CTBK_NORMALIZED_PREFIX=normalized-next -e CTBK_STATION_LUC_KEY=$LUC_KEY -W &                                                         # ☁ Batch; new keys + manifest-next.jsonl
 done
