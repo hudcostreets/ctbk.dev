@@ -60,6 +60,7 @@ from utz.cli import flag
 
 from ctbk.avail_v3 import R2_BUCKET, r2_client
 from ctbk.cli.base import ctbk
+from ctbk.gbfs_cli import _use_r2_rw_env
 from ctbk.r2_keys import content_key
 
 OUTPUT_KEY = 'station-luc.json'                          # R2 key
@@ -250,6 +251,7 @@ def station_luc_build_cmd(content_addressed: bool, date_from: str, no_history: b
         dt = Date.fromisoformat(date_to)
 
     err(f"station-luc-build: window [{df}, {dt})")
+    _use_r2_rw_env()  # the default (RO) pair can't ListObjects `gbfs/info/`
     cli = r2_client()
 
     dates = list_info_dates(cli, df, dt)
