@@ -53,3 +53,34 @@
     height: 0.65em;
     border-radius: 2px;
 }
+
+.gridTip {
+    position: absolute;
+    z-index: 10;
+    pointer-events: none;
+    padding: 6px 9px;
+    border: 1px solid var(--border-secondary, #ccc);
+    border-radius: 4px;
+    background: var(--bg-primary, #fff);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    font-size: 12px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.gridTipHead {
+    font-weight: 600;
+    margin-bottom: 3px;
+}
+
+.gridTipRow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    line-height: 1.5;
+}
+
+.gridTipRow b {
+    margin-left: auto;
+    padding-left: 10px;
+}

@@ -122,6 +122,7 @@
 !src/components/Seg.tsx
 !src/components/SmgByHour.tsx
 !src/components/SmgChart.tsx
+!src/components/SmgGrid.tsx
 !src/components/SmgPanel.module.css
 !src/components/SmgPanel.tsx
 !src/components/SmgSummary.tsx
@@ -194,6 +195,8 @@
 !src/query/ridesV1.ts
 !src/query/rollups.ts
 !src/query/smg.ts
+!src/query/smgGrid.test.ts
+!src/query/smgGrid.ts
 !src/query/smgStats.test.ts
 !src/query/smgStats.ts
 !src/query/stations.ts

@@ -6,6 +6,7 @@ import controlCss from '../controls.module.css'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
 import SmgPanel from '../components/SmgPanel'
 import SmgByHour from '../components/SmgByHour'
+import SmgGrid from '../components/SmgGrid'
 import { smgCellsFor } from '../query/smg'
 import { RangeWidthControl } from '../components/RangeWidthControl'
 import { BinSelect, BIN_PRESETS } from '../components/BinSelect'
@@ -627,6 +628,10 @@ export default function StationDetail() {
                 height={220}
                 summary
               />
+            </Box>
+            <Typography variant="h6" sx={{ px: { xs: 1, sm: 2, md: 3 }, mt: 2, mb: 0.5 }}>By day and time</Typography>
+            <Box sx={{ px: { xs: 1, sm: 2, md: 3 } }}>
+              <SmgGrid sel={smgSel} fromS={fromS} toS={toS} />
             </Box>
             <Typography variant="h6" sx={{ px: { xs: 1, sm: 2, md: 3 }, mt: 2, mb: 0.5 }}>By hour of day</Typography>
             <Box sx={{ px: { xs: 1, sm: 2, md: 3 } }}>
