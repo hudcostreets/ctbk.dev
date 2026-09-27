@@ -94,6 +94,9 @@ class ProxyShardIndex:
         return registered_keys(self.pyramid_name)
 
 
+D1_MAX_PARAMS = 100
+
+
 def register_rows(rows: list[dict], batch_size: int = 40) -> None:
     """INSERT OR REPLACE `pyramid_shards` rows (dicts with `pyramid`, `tier`,
     `shard_dur`, `period_start`, `period_end`, `key`, `written_at`), in
@@ -101,6 +104,9 @@ def register_rows(rows: list[dict], batch_size: int = 40) -> None:
     op per batch), else D1 REST. Within a batch, a later row for the same
     slot (the PK) wins."""
     cols = ('pyramid', 'tier', 'shard_dur', 'period_start', 'period_end', 'key', 'written_at')
+    if not _proxy():
+        # D1 REST binds ≤100 parameters per statement.
+        batch_size = min(batch_size, D1_MAX_PARAMS // len(cols))
     for i in range(0, len(rows), batch_size):
         chunk = [{c: r[c] for c in cols} for r in rows[i:i + batch_size]]
         if _proxy():
