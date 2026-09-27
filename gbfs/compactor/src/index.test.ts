@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { buildColumnData, targetHour } from './index';
+import { buildColumnData, targetHour, withV11Fills } from './index';
 
 describe('targetHour', () => {
 	test('subtracts 1h and buckets to UTC date+hour', () => {
@@ -135,5 +135,21 @@ describe('buildColumnData', () => {
 			} as never]),
 		]);
 		expect(cols.find((c) => c.name === 'last_reported')!.data).toEqual([0n]);
+	});
+});
+
+describe('withV11Fills', () => {
+	test('adds 1.1 records only for minutes the 2.3 WAL lacks, in minute order', () => {
+		const wal = ['gbfs/status/2026-09-27/17-00.json', 'gbfs/status/2026-09-27/17-02.json'];
+		const v11 = ['gbfs/probe/v11/2026-09-27/17-00.json', 'gbfs/probe/v11/2026-09-27/17-01.json', 'gbfs/probe/v11/2026-09-27/17-02.json', 'gbfs/probe/v11/2026-09-27/17-03.json'];
+		expect(withV11Fills(wal, v11)).toEqual([
+			'gbfs/status/2026-09-27/17-00.json',
+			'gbfs/probe/v11/2026-09-27/17-01.json',
+			'gbfs/status/2026-09-27/17-02.json',
+			'gbfs/probe/v11/2026-09-27/17-03.json',
+		]);
+	});
+	test('no 1.1 records: the WAL as-is', () => {
+		expect(withV11Fills(['gbfs/status/d/01-05.json'], [])).toEqual(['gbfs/status/d/01-05.json']);
 	});
 });

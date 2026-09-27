@@ -50,6 +50,44 @@ def r2_exists(r2_key: str) -> bool:
     return result.returncode == 0
 
 
+V11_PREFIX = f'{R2_PREFIX}/probe/v11'
+
+
+def list_keys(prefix: str) -> list[str]:
+    """Keys under an R2 prefix (the CLI paginates)."""
+    result = subprocess.run(
+        [
+            'aws', 's3api', 'list-objects-v2', '--bucket', R2_BUCKET, '--prefix', prefix,
+            '--query', 'Contents[].Key', '--output', 'json',
+            *AWS_PROFILE_ARGS,
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(result.stdout or 'null') or []
+
+
+def fill_from_v11(date_str: str, out_dir: Path) -> int:
+    """Copy in the 1.1 side-poller's snapshot for each minute the 2.3 WAL lacks.
+
+    `gbfs-poller-v11` records Lyft's 1.1 `station_status` under the same
+    LU-minute keys (`gbfs/probe/v11/<date>/<HH-MM>.json`, `{ts, polled_at,
+    src, hash, stations}`, same slim station fields minus
+    `vehicle_types_available`). It's the same system on another publish
+    phase (1.1 at ~:03, 2.3 at ~:46), so a 1.1 record is a genuine reading
+    of that minute. Only minutes with no 2.3 record are filled; which ones
+    were filled is exactly the set of names absent from `gbfs/status/<date>/`.
+    """
+    have = {f.name for f in out_dir.glob('*.json')}
+    v11 = [k for k in list_keys(f'{V11_PREFIX}/{date_str}/') if k.endswith('.json')]
+    missing = [k for k in v11 if k.rsplit('/', 1)[1] not in have]
+    for k in missing:
+        subprocess.run(
+            ['aws', 's3', 'cp', f's3://{R2_BUCKET}/{k}', str(out_dir / k.rsplit('/', 1)[1]), *AWS_PROFILE_ARGS],
+            capture_output=True, text=True, check=True,
+        )
+    return len(missing)
+
+
 def download(date_str: str):
     """Download all WAL JSONs for a date from R2 via aws s3 sync."""
     out_dir = WAL_DIR / date_str
@@ -70,6 +108,10 @@ def download(date_str: str):
 
     count = len(list(out_dir.glob('*.json')))
     print(f"Downloaded {count} WAL files for {date_str}")
+    filled = fill_from_v11(date_str, out_dir)
+    if filled:
+        print(f"Filled {filled} missing minute(s) from the 1.1 side-poller ({V11_PREFIX}/{date_str}/)")
+        count += filled
     if count == 0:
         print("No WAL files found — is the date correct?", file=sys.stderr)
         sys.exit(1)

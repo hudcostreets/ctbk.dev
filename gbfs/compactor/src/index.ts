@@ -92,8 +92,7 @@ function h1Key(date: string, hour: string): string {
  * prefix listing is what we need; the trailing `MM.json` filter is implicit
  * in the prefix when we use `gbfs/status/<date>/<hour>-`.
  */
-async function listMinuteKeys(r2: R2Bucket, date: string, hour: string): Promise<string[]> {
-	const prefix = statusPrefix(date, hour);
+async function listMinuteKeys(r2: R2Bucket, prefix: string): Promise<string[]> {
 	const keys: string[] = [];
 	let cursor: string | undefined;
 	while (true) {
@@ -105,6 +104,18 @@ async function listMinuteKeys(r2: R2Bucket, date: string, hour: string): Promise
 		cursor = result.cursor;
 	}
 	return keys.sort();
+}
+
+/** The 2.3 WAL's minute keys plus, for each minute it lacks, the 1.1
+ *  side-poller's record (`gbfs/probe/v11/<date>/<HH-MM>.json`: same LU-minute
+ *  keying and slim station fields, minus `vehicle_types_available`; the same
+ *  system on another publish phase). Which minutes were filled is exactly the
+ *  v11 keys returned. Sorted by minute. */
+export function withV11Fills(walKeys: readonly string[], v11Keys: readonly string[]): string[] {
+	const base = (k: string) => k.slice(k.lastIndexOf('/') + 1);
+	const have = new Set(walKeys.map(base));
+	const fills = v11Keys.filter((k) => !have.has(base(k)));
+	return [...walKeys, ...fills].sort((a, b) => (base(a) < base(b) ? -1 : base(a) > base(b) ? 1 : 0));
 }
 
 /** Fetch + parse one WAL JSON. Returns `null` if the object is missing/corrupt. */
@@ -189,7 +200,9 @@ async function snapshotsToParquet(snapshots: Snapshot[]): Promise<ArrayBuffer | 
 
 /** Compact one (date, hour) window. Returns the count of minutes compacted. */
 export async function compactHour(r2: R2Bucket, date: string, hour: string): Promise<{ minutes: number; rows: number; bytes: number }> {
-	const keys = await listMinuteKeys(r2, date, hour);
+	const wal = await listMinuteKeys(r2, statusPrefix(date, hour));
+	const keys = withV11Fills(wal, await listMinuteKeys(r2, `gbfs/probe/v11/${date}/${hour}-`));
+	if (keys.length > wal.length) console.log(`${date} ${hour}h: filled ${keys.length - wal.length} minute(s) from the 1.1 side-poller`);
 	if (keys.length === 0) {
 		console.log(`No minute JSONs for ${date} hour ${hour}; skipping`);
 		return { minutes: 0, rows: 0, bytes: 0 };

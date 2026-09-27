@@ -696,6 +696,19 @@ def gbfs_r2_put(content_type: str, src: str, key: str) -> None:
 	err(f'{src} → r2://{bucket}/{key} ({len(body):,} B)')
 
 
+@gbfs_r2.command('get', help='Download an R2 object: to stdout, or to a file with -o.')
+@option('-o', '--out', 'out', default=None, help='Write here instead of stdout.')
+@argument('key', metavar='KEY')
+def gbfs_r2_get(out: str | None, key: str) -> None:
+	client, bucket = _r2_client()
+	body = client.get_object(Bucket=bucket, Key=key)['Body'].read()  # type: ignore[attr-defined]
+	if out is None:
+		sys.stdout.buffer.write(body)
+	else:
+		Path(out).write_bytes(body)
+		err(f'r2://{bucket}/{key} → {out} ({len(body):,} B)')
+
+
 @gbfs_r2.command('rm', help='Delete R2 keys — exact keys, or everything under a -p/--prefix.')
 @option('-n', '--dry-run', is_flag=True, help='With -p: list what would be deleted and exit.')
 @option('-p', '--prefix', is_flag=True, help='Treat each KEY as a prefix: page + batch-delete every object under it (1000/batch).')
