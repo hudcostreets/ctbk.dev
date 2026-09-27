@@ -57,6 +57,11 @@ if [ -n "${FARGATE_GITHUB_RW_TOKEN:-}" ]; then
         "https://x-access-token:${FARGATE_GITHUB_RW_TOKEN}@github.com/hudcostreets/ctbk.dev.git"
     branch="${RESULTS_BRANCH:-${RESULTS_PREFIX:-reproc-results}/$(date -u +%Y%m%d-%H%M%S)}"
     git checkout -B "$branch"
+    # With BASE_REF, commit the taken `s3/` first, so the results commit (and
+    # the "nothing to push" check) holds only what this job changed.
+    if [ -n "${BASE_REF:-}" ] && ! git diff --cached --quiet; then
+        git commit -q -m "base: s3/ from $BASE_REF"
+    fi
     push_back=yes
     echo "entrypoint: will commit+push results to origin/$branch after the run" >&2
 else
