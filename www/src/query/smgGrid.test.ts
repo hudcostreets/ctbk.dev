@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SmgBin } from './smg'
-import { etDayMinute, smgGrid } from './smgGrid'
+import { etDayMinute, etDayStartS, smgGrid } from './smgGrid'
 
 const bin = (dtS: number, counts: Record<number, number>): SmgBin => {
   const state = Array.from({ length: 10 }, (_, i) => counts[i] ?? 0)
@@ -16,6 +16,14 @@ describe('etDayMinute', () => {
     expect(etDayMinute(MON)).toEqual(['2026-09-21', 0])
     expect(etDayMinute(MON + 8.5 * H)).toEqual(['2026-09-21', 510])
     expect(etDayMinute(MON - 60)).toEqual(['2026-09-20', 1439])
+  })
+})
+
+describe('etDayStartS', () => {
+  it('floors to ET midnight', () => {
+    expect(etDayStartS(MON)).toBe(MON)
+    expect(etDayStartS(MON + 8.5 * H + 17)).toBe(MON)
+    expect(etDayStartS(MON - 1)).toBe(MON - 24 * H)
   })
 })
 

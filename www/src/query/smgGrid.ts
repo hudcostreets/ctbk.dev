@@ -26,6 +26,13 @@ export function etDayMinute(tS: number): [string, number] {
   return [`${p.year}-${p.month}-${p.day}`, Number(p.hour) * 60 + Number(p.minute)]
 }
 
+/** Start (unix s) of the ET calendar day containing `tS` (midnight is never
+ *  a DST transition in ET, so minute-of-day × 60 back from `tS` lands on it). */
+export function etDayStartS(tS: number): number {
+  const t = Math.floor(tS / 60) * 60
+  return t - etDayMinute(t)[1] * 60
+}
+
 /** Rows newest-first; `binS` must divide a day. */
 export function smgGrid(bins: readonly SmgBin[], binS: number, ff: boolean): GridRow[] {
   const nCols = Math.round(86400 / binS)

@@ -77,7 +77,7 @@ test.describe('Station page', () => {
       'SPAN: N% empty N% full N% no e-bikes N% offline N% unmeasured',
     )
 
-    await expect(page.getByTestId('smg-grid').locator('canvas')).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByTestId('smg-grid').locator('canvas').last()).toBeVisible({ timeout: 30_000 })
 
     const byHour = page.getByTestId('smg-by-hour')
     await expect(byHour.locator('summary')).toHaveText('All days')

@@ -9,15 +9,19 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { boolParam, useUrlState } from 'use-prms'
 import { useTheme } from '../contexts/ThemeContext'
 import { SMG_STATES, useSmgHist, type SmgSelection } from '../query/smg'
-import { smgGrid, type GridRow } from '../query/smgGrid'
+import { etDayStartS, smgGrid, type GridRow } from '../query/smgGrid'
 import { canvasFill, swatchStyle } from './smgStyle'
 import css from './SmgPanel.module.css'
 
 const SLOT_S = 300
 const ROW_H = 14
 const ROW_GAP = 2
+const ROW_PITCH = ROW_H + ROW_GAP
 const LABEL_W = 64
 const AXIS_H = 16
+/** Rows shown before the grid scrolls (the 2w window's worth), so longer
+ *  windows scroll inside a fixed-height box instead of growing the page. */
+const VISIBLE_ROWS = 14
 
 const dayLabel = (day: string) => {
   const [y, m, d] = day.split('-').map(Number)
@@ -25,6 +29,20 @@ const dayLabel = (day: string) => {
   return `${wd} ${m}/${d}`
 }
 const hhmm = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`
+const hourLabel = (h: number) => (h === 0 ? '12a' : h === 12 ? '12p' : h < 12 ? `${h}a` : `${h - 12}p`)
+
+/** Size `cv` for `w`×`h` CSS px at the device pixel ratio; returns its context. */
+function sized(cv: HTMLCanvasElement, w: number, h: number): CanvasRenderingContext2D {
+  const dpr = devicePixelRatio || 1
+  cv.width = Math.round(w * dpr)
+  cv.height = Math.round(h * dpr)
+  const g = cv.getContext('2d')!
+  g.setTransform(dpr, 0, 0, dpr, 0, 0)
+  g.clearRect(0, 0, w, h)
+  g.font = '11px -apple-system, sans-serif'
+  g.textBaseline = 'middle'
+  return g
+}
 
 interface Hover { x: number; y: number; row: GridRow; col: number }
 
@@ -32,55 +50,57 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
   const [ff] = useUrlState('sff', boolParam)
   const { actualTheme } = useTheme()
   const dark = actualTheme === 'dark'
-  const q = useSmgHist(sel, Math.floor(fromS / SLOT_S) * SLOT_S, Math.ceil(toS / SLOT_S) * SLOT_S, 0, SLOT_S)
+  // From ET midnight of the window's first day, so the oldest row is whole.
+  const q = useSmgHist(sel, etDayStartS(fromS), Math.ceil(toS / SLOT_S) * SLOT_S, 0, SLOT_S)
   const binS = q.data?.binS ?? SLOT_S
   const rows = useMemo(() => (q.data ? smgGrid(q.data.bins, binS, ff) : []), [q.data, binS, ff])
 
   const wrapRef = useRef<HTMLDivElement>(null)
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const headRef = useRef<HTMLCanvasElement>(null)
+  const bodyRef = useRef<HTMLCanvasElement>(null)
   const [width, setWidth] = useState(800)
   const [hover, setHover] = useState<Hover | null>(null)
+  const hasRows = rows.length > 0
   useEffect(() => {
-    const el = wrapRef.current
+    const el = scrollRef.current
     if (!el) return
+    // Content box: excludes the scrollbar, so columns never sit under it.
     const ro = new ResizeObserver(([e]) => setWidth(Math.max(200, Math.round(e.contentRect.width))))
     ro.observe(el)
     return () => ro.disconnect()
-  }, [])
+  }, [hasRows])
 
   const nCols = Math.round(86400 / binS)
   const colW = (width - LABEL_W) / nCols
-  const height = AXIS_H + rows.length * (ROW_H + ROW_GAP)
+  const bodyH = rows.length * ROW_PITCH
 
   useEffect(() => {
-    const cv = canvasRef.current
-    if (!cv || !rows.length) return
-    const dpr = devicePixelRatio || 1
-    cv.width = Math.round(width * dpr)
-    cv.height = Math.round(height * dpr)
-    const g = cv.getContext('2d')!
-    g.setTransform(dpr, 0, 0, dpr, 0, 0)
-    g.clearRect(0, 0, width, height)
+    const head = headRef.current
+    const body = bodyRef.current
+    if (!head || !body || !rows.length) return
     const ink = dark ? '#cfcfcf' : '#333'
-    g.font = '11px -apple-system, sans-serif'
-    g.fillStyle = ink
-    g.textBaseline = 'middle'
-    // Hour ticks every 3h.
+    const rule = dark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.15)'
+    const hg = sized(head, width, AXIS_H)
+    const bg = sized(body, width, bodyH)
+    // Hour ticks every 3h: labels + stubs in the sticky header, rules in the body.
     for (let h = 0; h <= 24; h += 3) {
       const x = LABEL_W + (h * 3600 / binS) * colW
-      g.fillStyle = dark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.15)'
-      g.fillRect(x, AXIS_H - 3, 1, height - AXIS_H + 3)
+      hg.fillStyle = rule
+      hg.fillRect(x, AXIS_H - 3, 1, 3)
+      bg.fillStyle = rule
+      bg.fillRect(x, 0, 1, bodyH)
       if (h < 24) {
-        g.fillStyle = ink
-        g.textAlign = h === 0 ? 'left' : 'center'
-        g.fillText(h === 0 ? '12a' : h === 12 ? '12p' : h < 12 ? `${h}a` : `${h - 12}p`, x, AXIS_H / 2)
+        hg.fillStyle = ink
+        hg.textAlign = h === 0 ? 'left' : 'center'
+        hg.fillText(hourLabel(h), x, AXIS_H / 2)
       }
     }
     rows.forEach((row, r) => {
-      const y0 = AXIS_H + r * (ROW_H + ROW_GAP)
-      g.fillStyle = ink
-      g.textAlign = 'left'
-      g.fillText(dayLabel(row.day), 0, y0 + ROW_H / 2)
+      const y0 = r * ROW_PITCH
+      bg.fillStyle = ink
+      bg.textAlign = 'left'
+      bg.fillText(dayLabel(row.day), 0, y0 + ROW_H / 2)
       row.cells.forEach((c, col) => {
         if (!c) return
         const total = c.reduce((a, v) => a + v, 0)
@@ -92,21 +112,20 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
           if (!v) continue
           const h = (v / total) * ROW_H
           y -= h
-          g.fillStyle = canvasFill(st, dark)
-          g.fillRect(x, y, Math.max(colW, 1), h)
+          bg.fillStyle = canvasFill(st, dark)
+          bg.fillRect(x, y, Math.max(colW, 1), h)
         }
       })
     })
-  }, [rows, width, height, colW, binS, dark])
+  }, [rows, width, bodyH, colW, binS, dark])
 
   const onMove = (e: React.MouseEvent) => {
-    const rect = canvasRef.current!.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
-    const r = Math.floor((y - AXIS_H) / (ROW_H + ROW_GAP))
-    const col = Math.floor((x - LABEL_W) / colW)
+    const body = bodyRef.current!.getBoundingClientRect()
+    const wrap = wrapRef.current!.getBoundingClientRect()
+    const r = Math.floor((e.clientY - body.top) / ROW_PITCH)
+    const col = Math.floor((e.clientX - body.left - LABEL_W) / colW)
     if (r < 0 || r >= rows.length || col < 0 || col >= nCols || !rows[r].cells[col]) { setHover(null); return }
-    setHover({ x, y, row: rows[r], col })
+    setHover({ x: e.clientX - wrap.left, y: e.clientY - wrap.top, row: rows[r], col })
   }
 
   const legend = [...SMG_STATES].reverse()
@@ -118,8 +137,16 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
         {q.isError && <span className={css.error}>states fetch failed</span>}
       </div>
       <div ref={wrapRef} style={{ position: 'relative', width: '100%' }} onMouseLeave={() => setHover(null)}>
-        {rows.length > 0 && (
-          <canvas ref={canvasRef} style={{ width, height, display: 'block' }} onMouseMove={onMove} />
+        {hasRows && (
+          <div
+            ref={scrollRef}
+            className={css.gridScroll}
+            style={{ maxHeight: AXIS_H + VISIBLE_ROWS * ROW_PITCH }}
+            onScroll={() => setHover(null)}
+          >
+            <canvas ref={headRef} className={css.gridHead} style={{ width, height: AXIS_H }} />
+            <canvas ref={bodyRef} style={{ width, height: bodyH, display: 'block' }} onMouseMove={onMove} />
+          </div>
         )}
         {hover && (() => {
           const c = hover.row.cells[hover.col]!

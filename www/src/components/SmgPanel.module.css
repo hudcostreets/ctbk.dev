@@ -54,6 +54,17 @@
     border-radius: 2px;
 }
 
+.gridScroll {
+    overflow-y: auto;
+}
+
+.gridHead {
+    display: block;
+    position: sticky;
+    top: 0;
+    background: var(--bg-primary, #fff);
+}
+
 .gridTip {
     position: absolute;
     z-index: 10;
