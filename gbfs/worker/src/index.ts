@@ -128,9 +128,12 @@ async function sampleStatus(bucket: R2Bucket): Promise<number | null> {
 	if (lu <= lastLu) return null;
 
 	const stations = data.data.stations.map(slimStation);
-	const record: MinuteRecord = {
+	// `pop`: the CloudFront edge that served this snapshot (health's
+	// `feed-pop` alert: a non-US edge means stale, update-skipping reads).
+	const record: MinuteRecord & { pop?: string } = {
 		ts: lu,
 		polled_at: polledAt,
+		pop: resp.headers.get('x-amz-cf-pop') ?? undefined,
 		stations,
 	};
 

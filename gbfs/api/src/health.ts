@@ -57,6 +57,8 @@ export interface FeedDrift {
 	polledAt: number;
 	/** `[polled_at epoch s, drift s]` points, ≤24h old, oldest first. */
 	series: Array<[number, number]>;
+	/** CloudFront POP that served the latest record (`x-amz-cf-pop`), when recorded. */
+	pop?: string | null;
 }
 
 export interface FeedHealth {
@@ -309,7 +311,7 @@ const FEED_DRIFT_WINDOW_S = 24 * 3600;
 async function getFeedDrift(r2: HealthR2, latestKey: string): Promise<FeedDrift | null> {
 	const obj = await r2.get(latestKey);
 	if (!obj) return null;
-	const rec = await obj.json<{ ts?: number; polled_at?: number }>();
+	const rec = await obj.json<{ ts?: number; polled_at?: number; pop?: string }>();
 	if (typeof rec.ts !== 'number' || typeof rec.polled_at !== 'number') return null;
 	const latestS = rec.polled_at - rec.ts;
 
@@ -324,7 +326,7 @@ async function getFeedDrift(r2: HealthR2, latestKey: string): Promise<FeedDrift 
 		if (r2.put) await r2.put(FEED_DRIFT_KEY, JSON.stringify(series));
 	}
 
-	return { latestS, ts: rec.ts, polledAt: rec.polled_at, series };
+	return { latestS, ts: rec.ts, polledAt: rec.polled_at, series, pop: rec.pop ?? null };
 }
 
 export async function getCompactionHealth(r2: HealthR2): Promise<CompactionHealth> {

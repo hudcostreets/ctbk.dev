@@ -74,6 +74,24 @@ export function unexplainedGaps(s: HealthSnapshot): string[] {
  *  LU within ~15s; a lag near 60s means samples are hitting a stale cache,
  *  and LUs superseded before the cache refreshes are never seen (the
  *  2026-09 SIN CloudFront-cache gaps). */
+/** CloudFront POP codes are IATA airport codes + a suffix (`IAD12-P5`).
+ *  From non-US POPs Lyft's 2.3 feed lags and skips updates, so the pollers
+ *  fetch via a US-placed proxy (`gbfs/fetcher/`); a non-US serving POP means
+ *  that path broke. */
+const US_POP_PREFIXES = new Set([
+	'IAD', 'JFK', 'EWR', 'BOS', 'PHL', 'BWI', 'PIT', 'CLT', 'RDU', 'ATL', 'MIA', 'TPA', 'JAX', 'MCO',
+	'ORD', 'DTW', 'CMH', 'IND', 'MSP', 'MCI', 'OMA', 'STL', 'BNA', 'MEM', 'DFW', 'IAH', 'AUS', 'SAT',
+	'DEN', 'SLC', 'PHX', 'LAS', 'LAX', 'SFO', 'SJC', 'SEA', 'PDX', 'HIO', 'ANC', 'HNL',
+]);
+
+export function feedPop(s: HealthSnapshot): string | null {
+	return s.feed.drift?.pop ?? null;
+}
+
+export function isUsPop(pop: string): boolean {
+	return US_POP_PREFIXES.has(pop.slice(0, 3).toUpperCase());
+}
+
 export function feedLagP90Seconds(s: HealthSnapshot): number {
 	const series = s.feed.drift?.series ?? [];
 	const cutoff = Date.now() / 1000 - 3600;
@@ -173,7 +191,15 @@ export const DEFAULT_RULES: Rule[] = [
 		description: `p90 first-seen LU lag ≤ ${FEED_LAG_P90_MAX_S}s over the last hour`,
 		check: (s) => feedLagP90Seconds(s) > FEED_LAG_P90_MAX_S,
 		firingText: (s) =>
-			`:warning: *GBFS feed lag* — p90 first-seen lag ${feedLagP90Seconds(s)}s over the last hour (threshold: ${FEED_LAG_P90_MAX_S}s); the poller is likely reading a stale cache and can miss LUs`,
+			`:warning: *GBFS feed lag* — p90 first-seen lag ${feedLagP90Seconds(s)}s over the last hour (threshold: ${FEED_LAG_P90_MAX_S}s); the poller is likely reading a stale cache and can miss LUs` +
+			(feedPop(s) ? ` (serving POP: ${feedPop(s)})` : ''),
+	},
+	{
+		id: 'feed-pop',
+		description: 'The 2.3 poller\'s latest snapshot came from a US CloudFront POP',
+		check: (s) => { const pop = feedPop(s); return pop !== null && !isUsPop(pop); },
+		firingText: (s) =>
+			`:rotating_light: *GBFS poller reading a non-US edge* — latest snapshot served by CloudFront \`${feedPop(s)}\`; from non-US POPs Lyft's 2.3 feed skips updates. Check the \`ctbk-gbfs-fetch\` proxy + the pollers' \`FETCH\` binding`,
 	},
 	{
 		id: 'hourly-compaction-stale',

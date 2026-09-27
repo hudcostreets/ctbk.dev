@@ -1,19 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import type { HealthSnapshot } from './health';
-import {
-	d1SizeGB,
-	DEFAULT_RULES,
-	diffRules,
-	feedLagP90Seconds,
-	feedStaleMinutes,
-	hourlyCompactionStaleMinutes,
-	pyramidTipAgeHours,
-	snapshotAgeMinutes,
-	stationsStaleHours,
-	type AlertState,
-	type FiringEntry,
-	type Rule,
-} from './alerts';
+import { d1SizeGB, DEFAULT_RULES, diffRules, feedLagP90Seconds, feedStaleMinutes, hourlyCompactionStaleMinutes, pyramidTipAgeHours, snapshotAgeMinutes, stationsStaleHours, type AlertState, type FiringEntry, type Rule, isUsPop } from './alerts';
 
 const FIXED_NOW = new Date('2026-05-24T12:00:00Z');
 
@@ -252,5 +239,18 @@ describe('DEFAULT_RULES on a full snapshot', () => {
 			d1: { sizeBytes: 8.5e9 },
 		}))).toEqual(['feed-lag', 'd1-size']);
 		expect(d1SizeGB(fresh({ d1: { sizeBytes: 4.01e9 } }))).toBe(4.01);
+	});
+
+	it('a non-US serving POP fires `feed-pop`; the lag text names the POP', () => {
+		const now = FIXED_NOW.getTime() / 1000;
+		const series: Array<[number, number]> = Array.from({ length: 30 }, (_, i) => [now - 60 * (30 - i), 45]);
+		const asia = fresh({ feed: { ...snap().feed, drift: { latestS: 45, ts: now, polledAt: now, series, pop: 'TPE53-P1' } } });
+		expect(firingIds(asia)).toEqual(['feed-lag', 'feed-pop']);
+		expect(DEFAULT_RULES.find((r) => r.id === 'feed-lag')!.firingText(asia)).toBe(
+			':warning: *GBFS feed lag* — p90 first-seen lag 45s over the last hour (threshold: 30s); the poller is likely reading a stale cache and can miss LUs (serving POP: TPE53-P1)',
+		);
+		const us = fresh({ feed: { ...snap().feed, drift: { latestS: 5, ts: now, polledAt: now, series: [[now, 5]], pop: 'IAD12-P5' } } });
+		expect(firingIds(us)).toEqual([]);
+		expect([isUsPop('IAD12-P5'), isUsPop('jfk50-c1'), isUsPop('NRT12-P9')]).toEqual([true, true, false]);
 	});
 });
