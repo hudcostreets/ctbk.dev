@@ -49,7 +49,7 @@ export default function YmrgtbChart({
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  const { traces, months } = useMemo(() => buildTraces(rows, {
+  const { traces, months, inactive } = useMemo(() => buildTraces(rows, {
     ...config,
     isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor,
   }), [rows, config, isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor])
@@ -58,13 +58,14 @@ export default function YmrgtbChart({
 
   const layout = useMemo(() => buildLayout({
     months,
+    inactive,
     plotWidth: windowWidth,
     stackPercents: config.stackPercents,
     showLegend: showLegendEffective,
     tickcolor, gridcolor, isDark,
     uiRevision: uiRevision ?? 'static',
     yAxisRevision,
-  }), [months, windowWidth, config.stackPercents, showLegendEffective, tickcolor, gridcolor, isDark, uiRevision, yAxisRevision])
+  }), [months, inactive, windowWidth, config.stackPercents, showLegendEffective, tickcolor, gridcolor, isDark, uiRevision, yAxisRevision])
 
   return (
     <div className={className} style={style}>

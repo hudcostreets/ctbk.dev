@@ -94,6 +94,7 @@
 !scrns.config.json
 !src/chart/YmrgtbChart.tsx
 !src/chart/ymrgtb-layout.ts
+!src/chart/ymrgtb-traces.test.ts
 !src/chart/ymrgtb-traces.ts
 !src/colors.ts
 !src/components/BinSelect.tsx

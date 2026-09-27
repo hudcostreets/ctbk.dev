@@ -50,6 +50,33 @@ export function monthToDate(ym: string): Date {
   return new Date(year, month - 1, 1)
 }
 
+/** `YYYY-MM` months from `a` through `b`, inclusive. */
+export function monthSpan(a: string, b: string): string[] {
+  const out: string[] = []
+  let [y, m] = a.split('-').map(Number)
+  for (let ym = a; ym <= b; ym = `${y}-${String(m).padStart(2, '0')}`) {
+    out.push(ym)
+    if (++m > 12) { m = 1; y++ }
+  }
+  return out
+}
+
+/** Interior runs of ≥ `minMonths` consecutive months with no rows at all (a
+ *  station out of service, e.g. closed for construction), as `[first, last]`. */
+export function inactiveRuns(data: readonly { m: string }[], minMonths = 2): [string, string][] {
+  const seen = new Set(data.map((r) => r.m))
+  const sorted = [...seen].sort()
+  if (sorted.length < 2) return []
+  const out: [string, string][] = []
+  let run: string[] = []
+  for (const m of monthSpan(sorted[0], sorted[sorted.length - 1])) {
+    if (!seen.has(m)) { run.push(m); continue }
+    if (run.length >= minMonths) out.push([run[0], run[run.length - 1]])
+    run = []
+  }
+  return out
+}
+
 // Bar width in ms (roughly 25 days, leaves gaps between months for readability)
 export const BAR_WIDTH_MS = 25 * 24 * 60 * 60 * 1000
 
@@ -78,6 +105,8 @@ export interface BuildTracesResult {
   traces: Data[]
   months: string[]
   allMonths: string[]
+  /** Interior months with no rides at all (see `inactiveRuns`). */
+  inactive: [string, string][]
 }
 
 /** Darken a hex color by a factor in [0, 1]. */
@@ -92,7 +121,7 @@ function darken(hex: string, factor: number): string {
 }
 
 export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig): BuildTracesResult {
-  if (!data) return { traces: [], months: [], allMonths: [] }
+  if (!data) return { traces: [], months: [], allMonths: [], inactive: [] }
 
   const {
     yAxis, stackBy, stackPercents,
@@ -130,7 +159,10 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
     allGrouped[m][stackVal] = (allGrouped[m][stackVal] || 0) + val
   }
 
-  const allMonths = Object.keys(allGrouped).sort()
+  // Interior months with no rows count as zero (not skipped), so rolling
+  // averages dip through an inactive stretch instead of bridging it.
+  const seenMonths = Object.keys(allGrouped).sort()
+  const allMonths = seenMonths.length ? monthSpan(seenMonths[0], seenMonths[seenMonths.length - 1]) : []
   const months = allMonths.filter((m) => m >= start && m < end)
   const grouped = allGrouped
 
@@ -284,5 +316,5 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
     }
   }
 
-  return { traces: [...barTraces, ...rollingTraces] as Data[], months, allMonths }
+  return { traces: [...barTraces, ...rollingTraces] as Data[], months, allMonths, inactive: inactiveRuns(data) }
 }

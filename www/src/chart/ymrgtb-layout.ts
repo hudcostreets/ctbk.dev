@@ -7,6 +7,8 @@ import { monthToDate } from './ymrgtb-traces'
 export interface BuildLayoutConfig {
   /** Visible months (YYYY-MM strings). */
   months: string[]
+  /** `[first, last]` month runs with no rides at all, shaded + labeled. */
+  inactive?: [string, string][]
   /** Estimated plot width in px (for tick-density heuristic). */
   plotWidth: number
   /** Show stack percents on y-axis (0–100%). */
@@ -28,7 +30,7 @@ export interface BuildLayoutConfig {
 
 export function buildLayout(cfg: BuildLayoutConfig): Partial<Layout> {
   const {
-    months, plotWidth, stackPercents, showLegend,
+    months, inactive = [], plotWidth, stackPercents, showLegend,
     tickcolor, gridcolor, isDark, uiRevision, yAxisRevision,
   } = cfg
 
@@ -65,8 +67,36 @@ export function buildLayout(cfg: BuildLayoutConfig): Partial<Layout> {
     new Date(monthToDate(months[months.length - 1]).getTime() + 15 * 24 * 60 * 60 * 1000),
   ] : undefined
 
+  const HALF_MONTH_MS = 15 * 24 * 60 * 60 * 1000
+  const fmtMonth = (ym: string) => monthToDate(ym).toLocaleDateString('en-US', { month: 'short', year: '2-digit' }).replace(' ', " '")
+  const shown = inactive.filter(([a, b]) => months.length && b >= months[0] && a <= months[months.length - 1])
+  const inactiveShapes = shown.map(([a, b]) => ({
+    type: 'rect' as const, layer: 'below' as const,
+    xref: 'x' as const, x0: new Date(monthToDate(a).getTime() - HALF_MONTH_MS), x1: new Date(monthToDate(b).getTime() + HALF_MONTH_MS),
+    yref: 'paper' as const, y0: 0, y1: 1,
+    fillcolor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)',
+    line: { width: 1, dash: 'dot' as const, color: isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.2)' },
+  }))
+  const inactiveNotes = shown.map(([a, b]) => {
+    const span = a === b ? fmtMonth(a) : `${fmtMonth(a)} – ${fmtMonth(b)}`
+    return {
+      xref: 'x' as const, x: (monthToDate(a).getTime() + monthToDate(b).getTime()) / 2,
+      yref: 'paper' as const, y: 0.5, showarrow: false,
+      text: `<b>Station inactive</b><br>no rides ${span}`,
+      font: { size: 12, color: tickcolor },
+      // Opaque-ish chip: the label is wider than a short band and sits over bars.
+      bgcolor: isDark ? 'rgba(32,32,36,0.85)' : 'rgba(255,255,255,0.85)',
+      bordercolor: isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.2)',
+      borderpad: 4,
+      hovertext: `Citi Bike's own trip data has no rides<br>starting or ending here ${span}:<br>the station was out of service,<br>not a gap in this site's data`,
+      hoverlabel: { bgcolor: isDark ? 'rgba(32,32,36,0.95)' : 'rgba(255,255,255,0.95)', font: { color: tickcolor } },
+    }
+  })
+
   return {
     autosize: true,
+    shapes: inactiveShapes,
+    annotations: inactiveNotes,
     barmode: 'stack',
     bargap: 0,
     dragmode: 'pan',
