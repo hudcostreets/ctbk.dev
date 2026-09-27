@@ -58,6 +58,18 @@ interface StatusResponse {
 
 export interface Env {
 	BUCKET: R2Bucket;
+	FETCH?: Fetcher;
+}
+
+/** Service binding to `ctbk-gbfs-fetch` (US-placed; `gbfs/fetcher/`), set
+ *  per invocation from `env.FETCH`. Crons run wherever Cloudflare puts them,
+ *  and from Asian CloudFront POPs the 2.3 feed skips updates; routing the
+ *  request through a fetch handler (which placement does apply to) makes it
+ *  leave from us-east-1. Absent (tests, local): fetch directly. */
+let upstream: Fetcher | undefined;
+
+function getFeed(url: string): Promise<Response> {
+	return upstream ? upstream.fetch(`https://fetch/?url=${encodeURIComponent(url)}`) : fetch(url);
 }
 
 const pad2 = (n: number) => n.toString().padStart(2, '0');
@@ -130,7 +142,7 @@ export async function observe(bucket: R2Bucket, src: Source, doc: StatusResponse
 }
 
 async function fetchStatus(src: Source): Promise<StatusResponse> {
-	const resp = await fetch(SOURCES[src]);
+	const resp = await getFeed(SOURCES[src]);
 	if (!resp.ok) throw new Error(`${src} ${resp.status}`);
 	return (await resp.json()) as StatusResponse;
 }
@@ -180,6 +192,7 @@ export async function pollTick(bucket: R2Bucket, scheduledTime: number, fetcher 
 
 export default {
 	async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+		upstream = env.FETCH;
 		const path = minutePath(Math.floor(event.scheduledTime / 1000));
 		ctx.waitUntil(env.BUCKET.put(`gbfs/probe/v11-heartbeat/${path}.txt`, 'ok\n'));
 		ctx.waitUntil(pollTick(env.BUCKET, event.scheduledTime));

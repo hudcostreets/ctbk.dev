@@ -9,6 +9,7 @@ on:
       - 'gbfs/api/**'
       - 'gbfs/compactor/**'
       - 'gbfs/cascade/**'
+      - 'gbfs/fetcher/**'
       - 'gbfs/lib/**'
       - '.github/workflows/gbfs.yml'
   workflow_dispatch:
@@ -17,7 +18,7 @@ on:
         description: 'Worker to deploy (default: all)'
         required: false
         type: choice
-        options: [all, worker, poller-v11, loader, api, compactor, cascade]
+        options: [all, fetcher, worker, poller-v11, loader, api, compactor, cascade]
         default: all
       force:
         description: 'Skip the compare-and-swap check (prod is ahead of git / unstamped)'
@@ -35,6 +36,7 @@ jobs:
       api: ${{ steps.filter.outputs.api }}
       compactor: ${{ steps.filter.outputs.compactor }}
       cascade: ${{ steps.filter.outputs.cascade }}
+      fetcher: ${{ steps.filter.outputs.fetcher }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -48,6 +50,8 @@ jobs:
               - 'gbfs/lib/**'
             poller-v11:
               - 'gbfs/poller-v11/**'
+            fetcher:
+              - 'gbfs/fetcher/**'
             loader:
               - 'gbfs/loader/**'
               - 'gbfs/lib/**'
@@ -115,7 +119,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        worker: [worker, poller-v11, loader, api, compactor, cascade]
+        worker: [fetcher, worker, poller-v11, loader, api, compactor, cascade]
     steps:
       - name: Check if this worker should deploy
         id: should
@@ -125,6 +129,7 @@ jobs:
             case "${{ matrix.worker }}" in
               worker)    deploy="${{ needs.detect-changes.outputs.worker }}";;
               poller-v11) deploy="${{ needs.detect-changes.outputs.poller-v11 }}";;
+              fetcher)   deploy="${{ needs.detect-changes.outputs.fetcher }}";;
               loader)    deploy="${{ needs.detect-changes.outputs.loader }}";;
               api)       deploy="${{ needs.detect-changes.outputs.api }}";;
               compactor) deploy="${{ needs.detect-changes.outputs.compactor }}";;

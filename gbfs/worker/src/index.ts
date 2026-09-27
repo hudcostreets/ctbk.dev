@@ -65,6 +65,18 @@ interface StatusResponse {
 
 interface Env {
 	BUCKET: R2Bucket;
+	FETCH?: Fetcher;
+}
+
+/** Service binding to `ctbk-gbfs-fetch` (US-placed; `gbfs/fetcher/`), set
+ *  per invocation from `env.FETCH`. Crons run wherever Cloudflare puts them,
+ *  and from Asian CloudFront POPs the 2.3 feed skips updates; routing the
+ *  request through a fetch handler (which placement does apply to) makes it
+ *  leave from us-east-1. Absent (tests, local): fetch directly. */
+let upstream: Fetcher | undefined;
+
+function getFeed(url: string): Promise<Response> {
+	return upstream ? upstream.fetch(`https://fetch/?url=${encodeURIComponent(url)}`) : fetch(url);
 }
 
 function pad2(n: number): string {
@@ -108,7 +120,7 @@ let lastLu = 0;
  *  see specs/lu-attribution.md). Returns the LU when a write happened. */
 async function sampleStatus(bucket: R2Bucket): Promise<number | null> {
 	const polledAt = Math.floor(Date.now() / 1000);
-	const resp = await fetch(STATUS_URL);
+	const resp = await getFeed(STATUS_URL);
 	if (!resp.ok) throw new Error(`station_status fetch failed: ${resp.status}`);
 
 	const data = (await resp.json()) as StatusResponse;
@@ -131,7 +143,7 @@ async function sampleStatus(bucket: R2Bucket): Promise<number | null> {
 	const h = (k: string) => resp.headers.get(k) ?? '-';
 	console.log(
 		`Polled ${stations.length} stations, LU=${lu} (+${polledAt - lu}s) → ${jsonKey}` +
-			` [age=${h('age')} x-cache=${h('x-cache')} pop=${h('x-amz-cf-pop')} cf=${h('cf-cache-status')}]`,
+			` [colo=${h('x-fetch-colo')} age=${h('age')} x-cache=${h('x-cache')} pop=${h('x-amz-cf-pop')} cf=${h('cf-cache-status')}]`,
 	);
 	return lu;
 }
@@ -172,7 +184,7 @@ async function pollInfo(bucket: R2Bucket): Promise<void> {
 		return;
 	}
 
-	const resp = await fetch(INFO_URL);
+	const resp = await getFeed(INFO_URL);
 	if (!resp.ok) throw new Error(`station_information fetch failed: ${resp.status}`);
 
 	const data = await resp.arrayBuffer();
@@ -194,12 +206,14 @@ function writeHeartbeat(bucket: R2Bucket, scheduledTime: number): Promise<unknow
 
 export default {
 	async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+		upstream = env.FETCH;
 		ctx.waitUntil(writeHeartbeat(env.BUCKET, event.scheduledTime));
 		ctx.waitUntil(pollStatus(env.BUCKET));
 		ctx.waitUntil(pollInfo(env.BUCKET));
 	},
 
 	async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+		upstream = env.FETCH;
 		const url = new URL(request.url);
 		if (url.pathname === '/poll') {
 			// Single sample (not the full minute loop) — manual poke.

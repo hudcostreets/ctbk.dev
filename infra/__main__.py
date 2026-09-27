@@ -101,6 +101,8 @@ pulumi.export('queue_name', gbfs_events_queue.queue_name)
 # reference the Pulumi-provisioned resources above.
 WORKERS = {
     'ctbk-gbfs-poller':  'gbfs/worker',  # cron */1 *: poll GBFS → R2
+    'ctbk-gbfs-poller-v11': 'gbfs/poller-v11',  # cron */1 *: 1.1 side-poller → R2 probe prefixes
+    'ctbk-gbfs-fetch':   'gbfs/fetcher',  # US-placed fetch proxy the pollers call (service binding)
     'ctbk-gbfs-loader':  'gbfs/loader',  # queue consumer: R2 events → D1
     'ctbk-gbfs-api':     'gbfs/api',     # HTTP API: D1 reads, daily cleanup cron
 }

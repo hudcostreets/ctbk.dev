@@ -8,3 +8,9 @@ crons = ["* * * * *"]
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "ctbk"
+
+# Lyft requests go through the US-placed fetch proxy (`gbfs/fetcher/`); see
+# its wrangler.toml for why. Deploy `ctbk-gbfs-fetch` before this worker.
+[[services]]
+binding = "FETCH"
+service = "ctbk-gbfs-fetch"

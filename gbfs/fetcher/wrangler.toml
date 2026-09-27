@@ -1,0 +1,14 @@
+# US-pinned fetch proxy for the GBFS pollers. Cron triggers run wherever
+# Cloudflare schedules them (placement doesn't apply to `scheduled()`), and
+# from Asian CloudFront POPs Lyft's 2.3 feed skips ~1 update / 11 min. The
+# pollers call this worker's `fetch()` over a service binding; placement
+# DOES apply to fetch handlers, so the Lyft request leaves from us-east-1.
+# No public route: service-binding access only.
+name = "ctbk-gbfs-fetch"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+workers_dev = false
+preview_urls = false
+
+[placement]
+region = "aws:us-east-1"
