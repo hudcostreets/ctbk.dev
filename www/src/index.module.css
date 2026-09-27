@@ -63,9 +63,7 @@
    with the plot's legend — the legend sits below the plot, so the row and
    the expanded controls panel flow down without overlapping the plot. */
 .legendRow {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
+    position: relative;
     width: 100%;
     margin-top: -2em;
 }
@@ -76,7 +74,13 @@
         margin-top: 0;
     }
 }
+/* Out of flow, so the controls below get the row's full width (as a flex
+   sibling it claimed a column the controls could never wrap into). */
 .examplesTrigger {
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 11;  /* above `.controls` */
     cursor: default;
     user-select: none;
     white-space: nowrap;

@@ -38,6 +38,10 @@ const memberColor = (i: number) => MEMBER_COLORS[i % MEMBER_COLORS.length]
 
 const DATA_START_MS = isoToMs('2013-06-01')
 const ANCHORS = ['start', 'end'] as const
+/** Members as stacked bars (default: each month's composition, summing to the
+ *  `c:` row) or as lines (compare co-active members' levels). */
+const CHART_MODES = ['bars', 'lines'] as const
+type ChartMode = typeof CHART_MODES[number]
 
 const fmtInt = (n: number) => n.toLocaleString('en-US')
 const fmtDist = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${round(m)} m`)
@@ -162,7 +166,7 @@ function MemberMap({ members }: { members: Member[] }) {
   )
 }
 
-function SeriesChart({ canon, members, anchor }: { canon: string | null, members: Member[], anchor: Anchor }) {
+function SeriesChart({ canon, members, anchor, mode }: { canon: string | null, members: Member[], anchor: Anchor, mode: ChartMode }) {
   const ids = useMemo(() => members.map((m) => m.id), [members])
   const q = useClusterSeries(canon, ids, anchor)
   const { actualTheme } = useTheme()
@@ -180,11 +184,11 @@ function SeriesChart({ canon, members, anchor }: { canon: string | null, members
       return {
         x: months.map(monthDate),
         y: months.map((mo) => s.get(mo)!),
-        type: 'scatter' as const,
-        mode: 'lines' as const,
         name: `s:${m.id}`,
-        line: { color: memberColor(i), width: 2 },
         hovertemplate: `s:${m.id}: %{y:,}<extra></extra>`,
+        ...(mode === 'bars'
+          ? { type: 'bar' as const, marker: { color: memberColor(i) } }
+          : { type: 'scatter' as const, mode: 'lines' as const, line: { color: memberColor(i), width: 2 } }),
       }
     })
     const cs = q.data.canon
@@ -202,13 +206,15 @@ function SeriesChart({ canon, members, anchor }: { canon: string | null, members
       },
       ...ts,
     ]
-  }, [q.data, members, canon, tickcolor])
+  }, [q.data, members, canon, tickcolor, mode])
 
   const layout = useMemo(() => ({
     autosize: true,
     height: 280,
     hovermode: 'x unified' as const,
     dragmode: 'pan' as const,
+    barmode: 'stack' as const,
+    bargap: 0.1,
     showlegend: true,
     legend: { orientation: 'h' as const, x: 0, y: 1.14, font: { color: tickcolor, size: 11 } },
     xaxis: { type: 'date' as const, gridcolor, tickfont: { color: tickcolor, size: 11 }, hoverformat: '%b %Y' },
@@ -303,12 +309,17 @@ function MembersTable({ members, refPos, nowMs, last }: {
   )
 }
 
-function AnchorToggle({ anchor, setAnchor }: { anchor: Anchor, setAnchor: (a: Anchor) => void }) {
+function Seg<T extends string>({ label, options, value, set }: {
+  label: string
+  options: readonly (readonly [T, string])[]
+  value: T
+  set: (v: T) => void
+}) {
   return (
-    <div className={css.seg} role="radiogroup" aria-label="Anchor">
-      {ANCHORS.map((a) => (
-        <button key={a} type="button" role="radio" aria-checked={anchor === a} className={anchor === a ? css.segOn : ''} onClick={() => setAnchor(a)}>
-          {a === 'start' ? 'Starts' : 'Ends'}
+    <div className={css.seg} role="radiogroup" aria-label={label}>
+      {options.map(([v, text]) => (
+        <button key={v} type="button" role="radio" aria-checked={value === v} className={value === v ? css.segOn : ''} onClick={() => set(v)}>
+          {text}
         </button>
       ))}
     </div>
@@ -323,14 +334,18 @@ function SeriesAndMap({ canon, members, anchor, setAnchor, mapKey }: {
   setAnchor: (a: Anchor) => void
   mapKey: string
 }) {
+  const [mode, setMode] = useUrlState('m', enumParam<ChartMode>('bars', CHART_MODES))
   return (
     <section className={css.split}>
       <div className={css.splitMain}>
         <div className={css.sectionHead}>
           <h3>Monthly {anchor === 'start' ? 'starts' : 'ends'}</h3>
-          <AnchorToggle anchor={anchor} setAnchor={setAnchor} />
+          <div className={css.segs}>
+            <Seg label="Chart" options={[['bars', 'Bars'], ['lines', 'Lines']] as const} value={mode} set={setMode} />
+            <Seg label="Anchor" options={[['start', 'Starts'], ['end', 'Ends']] as const} value={anchor} set={setAnchor} />
+          </div>
         </div>
-        <SeriesChart canon={canon} members={members} anchor={anchor} />
+        <SeriesChart canon={canon} members={members} anchor={anchor} mode={mode} />
       </div>
       <div className={css.splitSide}>
         <h3>Last positions</h3>

@@ -428,6 +428,12 @@ button.chip[aria-pressed="true"] {
   gap: 8px;
 }
 
+.segs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .seg {
   display: inline-flex;
   border: 1px solid var(--border-secondary);
