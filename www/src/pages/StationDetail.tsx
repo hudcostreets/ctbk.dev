@@ -5,6 +5,7 @@ import css from '../index.module.css'
 import controlCss from '../controls.module.css'
 import StationAvailabilityChart from '../components/StationAvailabilityChart'
 import SmgPanel from '../components/SmgPanel'
+import SmgByHour from '../components/SmgByHour'
 import { smgCellsFor } from '../query/smg'
 import { RangeWidthControl } from '../components/RangeWidthControl'
 import { BinSelect, BIN_PRESETS } from '../components/BinSelect'
@@ -624,7 +625,12 @@ export default function StationDetail() {
                 onPan={onAvailPan}
                 clampMinS={GENESIS_S}
                 height={220}
+                summary
               />
+            </Box>
+            <Typography variant="h6" sx={{ px: { xs: 1, sm: 2, md: 3 }, mt: 2, mb: 0.5 }}>By hour of day</Typography>
+            <Box sx={{ px: { xs: 1, sm: 2, md: 3 } }}>
+              <SmgByHour sel={smgSel} />
             </Box>
           </Box>
         )}

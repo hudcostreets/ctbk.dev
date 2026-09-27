@@ -51,6 +51,9 @@ jobs:
       - name: Typecheck
         working-directory: www
         run: pnpm tc
+      - name: Unit tests
+        working-directory: www
+        run: pnpm test:unit
       - name: Install Playwright browsers
         working-directory: www
         run: pnpm exec playwright install --with-deps chromium

@@ -1,0 +1,91 @@
+.dropdown {
+  position: relative;
+  display: inline-block;
+  font-size: 0.85rem;
+}
+
+.dropdown summary {
+  cursor: pointer;
+  padding: 2px 10px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px;
+  list-style: none;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.dropdown summary::-webkit-details-marker {
+  display: none;
+}
+
+.dropdown summary::after {
+  content: " ▾";
+  opacity: 0.7;
+}
+
+.list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 11em;
+  padding: 4px 0;
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+.selectAll,
+.row label {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  cursor: pointer;
+}
+
+.selectAll {
+  padding: 3px 10px;
+}
+
+.section {
+  border-top: 1px solid var(--border-secondary);
+  padding-top: 2px;
+  margin-top: 2px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6em;
+  padding: 3px 10px;
+}
+
+.row:hover {
+  background: rgba(128, 128, 128, 0.12);
+}
+
+.groupActive {
+  background: rgba(128, 128, 128, 0.08);
+}
+
+.solo {
+  opacity: 0;
+  font-size: 0.7rem;
+  padding: 0 0.4em;
+  border-radius: 3px;
+  background: rgba(128, 128, 128, 0.18);
+  cursor: pointer;
+}
+
+.row:hover .solo,
+.solo:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .solo {
+    opacity: 1;
+  }
+}

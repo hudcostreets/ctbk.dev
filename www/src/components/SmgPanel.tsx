@@ -13,6 +13,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { boolParam, useUrlState } from 'use-prms'
 import SmgChart from './SmgChart'
+import SmgSummary from './SmgSummary'
 import { Checkbox } from './Checkbox'
 import { useSmgHist, type SmgSelection } from '../query/smg'
 import { formatDuration } from '../time-range'
@@ -30,9 +31,11 @@ interface Props {
   toolbar?: ReactNode
   /** Manual bin override (seconds); undefined = auto from the viewport. */
   binOverrideS?: number
+  /** Show the window's empty/full/… shares (single-station pages). */
+  summary?: boolean
 }
 
-export default function SmgPanel({ sel, fromS, toS, onPan, clampMinS, clampMaxS, height, toolbar, binOverrideS }: Props) {
+export default function SmgPanel({ sel, fromS, toS, onPan, clampMinS, clampMaxS, height, toolbar, binOverrideS, summary }: Props) {
   const [counts, setCounts] = useUrlState('sc', boolParam)
   const [ff, setFf] = useUrlState('sff', boolParam)
 
@@ -72,6 +75,7 @@ export default function SmgPanel({ sel, fromS, toS, onPan, clampMinS, clampMaxS,
         {q.isFetching && <span className={css.status}>loading…</span>}
         {q.isError && <span className={css.error}>states fetch failed</span>}
       </div>
+      {summary && bins.length > 0 && <SmgSummary bins={bins} ff={ff} fromS={fromS} toS={viewToS} />}
       <div ref={wrapRef} className={css.chart} style={{ opacity: q.isFetching && bins.length ? 0.5 : 1 }}>
         {bins.length > 0 && binS != null && (
           <SmgChart
