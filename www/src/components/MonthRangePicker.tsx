@@ -85,7 +85,7 @@ export default function MonthRangePicker({
   start, end, minDate, maxDate, onChange, className,
 }: Props) {
   return (
-    <span className={className} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+    <span className={className} style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4 }}>
       <Field
         label="Start month"
         value={start}

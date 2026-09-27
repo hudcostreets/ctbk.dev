@@ -69,6 +69,13 @@
     width: 100%;
     margin-top: -2em;
 }
+/* The plot legend spans the full width on narrow screens, so "Examples"
+   can't share its band there. */
+@media (max-width: 600px) {
+    .legendRow {
+        margin-top: 0;
+    }
+}
 .examplesTrigger {
     cursor: default;
     user-select: none;
