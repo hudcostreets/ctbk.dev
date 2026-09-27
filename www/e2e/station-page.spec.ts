@@ -67,6 +67,25 @@ test.describe('Station page', () => {
     await expect(page.getByText(/No availability data/)).toHaveCount(0)
   })
 
+  test('active station: window summary + by-hour panel; Weekdays solo updates the URL', async ({ page }) => {
+    await page.goto('/s/herkimer+eastern')
+    // Live data: normalize the numbers, assert the shape and stat order.
+    const summary = page.getByTestId('smg-summary')
+    await expect(summary).toBeVisible({ timeout: 30_000 })  // live smg-v1; cold worker
+    const text = (await summary.innerText()).replace(/\s+/g, ' ').trim()
+    expect(text.replace(/[\d.]+%/g, 'N%').replace(/^\w{3} \d+ – \w{3} \d+:/, 'SPAN:')).toBe(
+      'SPAN: N% empty N% full N% no e-bikes N% offline N% unmeasured',
+    )
+
+    const byHour = page.getByTestId('smg-by-hour')
+    await expect(byHour.locator('summary')).toHaveText('All days')
+    await expect(byHour.locator('.js-plotly-plot')).toBeVisible({ timeout: 30_000 })
+    await byHour.locator('summary').click()
+    await byHour.getByText('Weekdays', { exact: true }).locator('xpath=..').getByText('only').click()
+    await expect(byHour.locator('summary')).toHaveText('Weekdays')
+    expect(new URL(page.url()).searchParams.get('hd')).toBe('mtwrf')
+  })
+
   for (const [from, to] of [
     ['/s/lafayette-ave-classon-ave', '/s/lafayette+classon'],
     ['/s/4452.01', '/s/lafayette+classon'],

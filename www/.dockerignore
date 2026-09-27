@@ -13,6 +13,7 @@
 !e2e/month-range.spec.ts
 !e2e/shortcuts.spec.ts
 !e2e/station-map.spec.ts
+!e2e/station-page.spec.ts
 !eslint.config.js
 !fix-mime-type.sh
 !gbfs/README.md
@@ -105,6 +106,8 @@
 !src/components/Heading.module.css
 !src/components/Heading.tsx
 !src/components/MonthRangePicker.tsx
+!src/components/MultiSelect.module.css
+!src/components/MultiSelect.tsx
 !src/components/OverviewAvailabilityChart.tsx
 !src/components/PipelineContext.tsx
 !src/components/PipelineDiagram.tsx
@@ -115,9 +118,13 @@
 !src/components/RidesTable.tsx
 !src/components/RollupTripsChart.tsx
 !src/components/S2CellTip.tsx
+!src/components/Seg.module.css
+!src/components/Seg.tsx
+!src/components/SmgByHour.tsx
 !src/components/SmgChart.tsx
 !src/components/SmgPanel.module.css
 !src/components/SmgPanel.tsx
+!src/components/SmgSummary.tsx
 !src/components/StageCard.tsx
 !src/components/StationAvailabilityChart.css
 !src/components/StationAvailabilityChart.tsx
@@ -186,6 +193,8 @@
 !src/query/ridesV1.ts
 !src/query/rollups.ts
 !src/query/smg.ts
+!src/query/smgStats.test.ts
+!src/query/smgStats.ts
 !src/query/stations.ts
 !src/stations.module.css
 !src/theme.ts

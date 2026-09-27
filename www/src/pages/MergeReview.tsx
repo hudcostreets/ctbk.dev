@@ -17,6 +17,7 @@ import { Link } from 'react-router-dom'
 import { CircleMarker, MapContainer, TileLayer, Tooltip as LTooltip, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { Plot } from 'pltly/react'
+import Seg from '../components/Seg'
 import { enumParam, stringParam, stringsParam, useUrlState } from 'use-prms'
 import { useTheme } from '../contexts/ThemeContext'
 import { Tip, TipRows } from '../components/Tip'
@@ -305,23 +306,6 @@ function MembersTable({ members, refPos, nowMs, last }: {
           })}
         </tbody>
       </table>
-    </div>
-  )
-}
-
-function Seg<T extends string>({ label, options, value, set }: {
-  label: string
-  options: readonly (readonly [T, string])[]
-  value: T
-  set: (v: T) => void
-}) {
-  return (
-    <div className={css.seg} role="radiogroup" aria-label={label}>
-      {options.map(([v, text]) => (
-        <button key={v} type="button" role="radio" aria-checked={value === v} className={value === v ? css.segOn : ''} onClick={() => set(v)}>
-          {text}
-        </button>
-      ))}
     </div>
   )
 }
