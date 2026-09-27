@@ -50,13 +50,15 @@ def test_job_command_script():
 
 def test_regen_targets_one_month_default_families():
     # Default families exclude `norm`/`v0` (a regen re-derives from pinned norm
-    # outputs); `ymrgtb{s,e}_cd` have no `cmd` at 201801, so they're absent.
+    # outputs).
     assert sorted(regen_targets('-m', '201801')) == [
         's3/ctbk/aggregated/201801/se_c.json.dvc',
         's3/ctbk/aggregated/201801/stations.json.dvc',
         's3/ctbk/aggregated/e_c_201801.parquet.dvc',
         's3/ctbk/aggregated/se_c_201801.parquet.dvc',
         's3/ctbk/aggregated/ymrgtb_cd_201801.parquet.dvc',
+        's3/ctbk/aggregated/ymrgtbe_cd_201801.parquet.dvc',
+        's3/ctbk/aggregated/ymrgtbs_cd_201801.parquet.dvc',
         's3/ctbk/normalized/201801.parquet.dvc',
         's3/ctbk/stations/meta_hists/il_201801.parquet.dvc',
         's3/ctbk/stations/meta_hists/in_201801.parquet.dvc',
