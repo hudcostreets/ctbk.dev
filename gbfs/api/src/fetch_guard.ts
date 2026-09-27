@@ -21,7 +21,22 @@
 // once the RG manifest is filled for a key, this path never runs for it
 // again.
 export const FOOTER_FETCH_MAX_INFLIGHT = 1;
-let footerFetchesInFlight = 0;
+
+/** A held slot older than this is presumed leaked and reclaimed. A request
+ *  the runtime cancels mid-parse (client disconnect, limits) never resumes,
+ *  so its `finally { release() }` never runs; with an isolate-wide count the
+ *  slot then stayed taken for the isolate's life, 503ing every footer-path
+ *  request routed there (2026-09-27: `smg-v1` station pages, 15s then
+ *  "busy"). Legitimate parses take seconds. */
+export const FOOTER_SLOT_LEASE_MS = 60_000;
+
+/** Held slots by token → acquire time; a reclaimed token's late release is a no-op. */
+const held = new Map<number, number>();
+let nextToken = 0;
+
+export function resetFooterSlotsForTest(): void {
+	held.clear();
+}
 
 export class FetchBusyError extends Error {
 	constructor() {
@@ -31,15 +46,17 @@ export class FetchBusyError extends Error {
 }
 
 function takeSlot(): (() => void) | null {
-	if (footerFetchesInFlight >= FOOTER_FETCH_MAX_INFLIGHT) return null;
-	footerFetchesInFlight++;
-	let released = false;
-	return () => {
-		if (!released) {
-			released = true;
-			footerFetchesInFlight--;
+	const now = Date.now();
+	for (const [token, at] of held) {
+		if (now - at > FOOTER_SLOT_LEASE_MS) {
+			console.warn(`fetch_guard: reclaiming footer slot held ${Math.round((now - at) / 1000)}s (leaked by a cancelled request)`);
+			held.delete(token);
 		}
-	};
+	}
+	if (held.size >= FOOTER_FETCH_MAX_INFLIGHT) return null;
+	const token = nextToken++;
+	held.set(token, now);
+	return () => { held.delete(token); };
 }
 
 /** Acquire a footer-fetch slot, poll-waiting up to `timeoutMs` before
