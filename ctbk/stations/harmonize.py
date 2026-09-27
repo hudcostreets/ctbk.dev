@@ -1013,3 +1013,21 @@ def trailing_zero_audit(dry_run: bool):
         json.dump(reps, f, separators=(',', ':'))
         f.write('\n')
     err(f"Wrote {out} ({len(reps)} repairs)")
+
+
+@station_harmonize.command(help="List mid-life station closures: runs of days a (canonical) station has no rides, with activity before and after (from `station-observations.parquet`). Tab-separated: station, name, first, last, days; longest first.")
+@option('-a', '--min-active', type=int, default=60, help="Observed days required on each side of a gap.")
+@option('-d', '--min-days', type=int, default=14, help="Minimum closure length, in system-active days.")
+@option('-n', '--limit', type=int, help="Print at most this many closures.")
+def gaps(min_active: int, min_days: int, limit: int | None):
+    from ctbk.stations.closures import closures
+
+    sh = StationHarmonize()
+    stations_dir = dirname(sh.id_map_url)
+    obs = pd.read_parquet(join(stations_dir, 'station-observations.parquet'), columns=['date', 'id', 'name'])
+    with open(join(stations_dir, 'station-canonicalize-map.json')) as f:
+        canon = json.load(f)
+    found = closures(obs, canon, min_days=min_days, min_active=min_active)
+    err(f"{len(found)} closures ≥ {min_days}d")
+    for c in found[:limit]:
+        print(f"{c.station}\t{c.name}\t{c.first}\t{c.last}\t{c.days}")
