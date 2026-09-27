@@ -1,6 +1,6 @@
 # Unified page architecture: (station-set × time-range) → {rides, map, avail, states}
 
-Status: draft (for review before building)
+Status: in progress on `wip-deckgl` (rebased onto `main` 2026-09-27): map mechanics + lens shipped on the Leaflet map; GL map at Stage 3 (arc fan) behind `?gl=1`
 Author: Ryan + Claude
 Date: 2026-09-08
 
@@ -111,6 +111,15 @@ Added on top of Stage 1 (all typecheck-clean + render-verified; the click/hover/
 Built and **functionally working**: deck.gl `9.4.0` + `maplibre-gl 5.24` + `react-map-gl 8.1` (React-18-compatible; installed to match `jc-taxes`). Pattern = MapLibre root `<Map>` + deck via `MapboxOverlay` (overlaid, not interleaved — interleaved left the basemap unpainted). All ~2,700 stations render as one `ScatterplotLayer` colored by `flowLens` (ported unchanged into `getFillColor`), with GPU picking (`pickable`/`autoHighlight`, no more hit-circles), source-set pink+white rings, and the hover drawer. Click model: hover sets a `hoveredIdRef`; the map's `click` reads it (station → `onTogglePin(id, meta/ctrl)`, empty → clear) — race-free since hover precedes click. Basemap is **raster Stadia** (the Leaflet map's tiles), because the CARTO **vector** style never rendered under Vite: style/TileJSON/sprite fetch 200 but **zero `.mvt` tiles are ever requested** (maplibre worker not running under our `optimizeDeps` config) → revisit for vector later.
 
 **"Basemap black on load" was a screenshot artifact, not a bug.** maplibre renders *on-demand* (not a continuous RAF loop), so between renders its WebGL drawing buffer is empty; a screen-capture of a `preserveDrawingBuffer:false` canvas grabs that empty buffer as **black**, even though the compositor shows the real frame on screen. deck renders continuously, so *it* captured fine — which is why only the basemap looked black in CIC screenshots, and why a pan (forcing a maplibre render right before capture) "fixed" it. Confirmed by direct on-screen observation: the basemap loads normally. Lesson: **for the GL map, interact-then-capture, or trust on-screen/DOM over a raw screenshot** (`react-map-gl` doesn't expose `preserveDrawingBuffer` as a prop). No compositing fix is needed; the ~dozen `resize`/`idle`/nudge attempts chased this ghost and were reverted. **We stay on maplibre** (the 3D-capable target arch) — no Leaflet detour.
+
+#### Stage 3 (`ArcLayer` fan, behind `?gl=1&fan=1`)
+
+**Shipped.** `flowLens.ts::flowArcs(stations, pairCounts, selIds, dir)` → one arc per directed (set ↔ other) pair, in riding direction (`?dir=out`: set → other; `in`: other → set). Same `pairCounts` the Leaflet fan reads, and the lens and the arcs now share one pair walk (`directedPairs`; `flowTotals` = its per-station sum). Arcs take the lens's `FLOOR_FRAC` cut (pairs < 4% of the heaviest are dropped — the 1–3-trip tail is what piled into the SVG fan's red blob), are ranked for ramp color (`rampRgb(t)`, exported from `flowLens.ts`), and are sorted light→heavy so heavy arcs draw on top. Rendering (`StationMapGL.tsx`): an `ArcLayer` *under* the station `ScatterplotLayer`, `pickable: false` (decoration, like the Leaflet fan's `interactive={false}` edges); width `1 + 5·sqrt(count/max)` px; color fades along the arc from 40α at the origin to 230α at the destination, so direction reads without arrowheads and the origin stays legible; `getTilt: 90` + `getHeight: 0.35` lay each arc's plane flat so it reads as a curve from straight above (a 0-tilt arc is a straight line at pitch 0). Sources = the lens sources: the `?sel=` set, or (nothing pinned) the hover-preview station — so sweeping the cursor previews each station's fan live. Multi-source sets draw every source's pairs (per-pair rank, so arc color can differ slightly from the per-station lens color of the same destination). e2e: `e2e/station-map-gl.spec.ts` (GL surface mounts in place of Leaflet, legend names the source, ⇄ flips `?dir=`; no WebGL-pixel assertions).
+
+Open (Stage 3):
+- **Fan default on GL.** Still opt-in via `?fan=` (same param as the Leaflet fan, off by default). With the floor + fade the GL fan no longer blobs, so defaulting it on under `gl` is reasonable; left for the user's pick.
+- **Tilt/curvature.** All arcs bow the same way (`getTilt` constant). A per-arc sign (e.g. by bearing) would spread the bundle symmetrically; a pitched camera (Stage 4) would show the arcs' real height instead.
+- **Ribbons vs arcs.** `ArcLayer` covers the "radiating" case well; geo-sankey ribbons (bundled trunks) remain a separate, heavier design.
 
 ## Examples, reconceived
 
