@@ -16,6 +16,9 @@ R2_BUCKET_NAME = "ctbk"
 # r2.dev public URL — anonymous direct reads from R2. Used as a sync
 # `getUrl(path)` fallback when the browser opts out of presigning.
 R2_PUBLIC_BASE_URL = "https://pub-4b6c7e01aa2349b8b8d6ed788df2a9d1.r2.dev"
+# Folded into the `/api/rides*` edge-cache key; bump on a data repair so
+# cached past-window responses rotate (`specs/station-id-trailing-zero.md`).
+RIDES_CACHE_GEN = "trailing-zero-repair"
 
 # Bundle .ttf font files as raw bytes (satori og:image rendering).
 # NOTE: defining ANY [[rules]] displaces wrangler's defaults, so the
