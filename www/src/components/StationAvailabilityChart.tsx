@@ -4,6 +4,7 @@ import 'uplot/dist/uPlot.min.css'
 import './StationAvailabilityChart.css'
 import { useTheme } from '../contexts/ThemeContext'
 import { useDragPan } from '../uplot'
+import { BrushOverlay, useBrush } from './smgBrush'
 
 export interface AvailabilityRow {
   polled_at: number
@@ -96,6 +97,7 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
   // null = all visible. Otherwise set of visible keys (used for solo / hidden).
   const [visible, setVisible] = useState<Set<SeriesKey> | null>(null)
   const [hovered, setHovered] = useState<SeriesKey | null>(null)
+  const { setBrush } = useBrush()
 
   useEffect(() => {
     if (!containerRef.current || !rows.length) return
@@ -184,8 +186,10 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
             const idx = u.cursor.idx
             if (idx == null || idx < 0 || idx >= rows.length) {
               setTooltip(null)
+              setBrush(null)
               return
             }
+            setBrush({ kind: 't', tS: rows[idx].polled_at, spanS: binS ?? 60, src: 'avail' })
             // `cursor.left/top` are relative to the plot area (inside the axes),
             // but the tooltip is absolute-positioned inside the outer wrapper
             // which includes the axes. Shift by bbox origin so the tooltip
@@ -282,13 +286,14 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
   return (
     <div
       style={{ position: 'relative', width: '100%' }}
-      onMouseLeave={() => setTooltip(null)}
+      onMouseLeave={() => { setTooltip(null); setBrush(null) }}
     >
       <div
         ref={containerRef}
         className={`station-availability-chart ${actualTheme}`}
         style={{ width: '100%' }}
       />
+      <BrushOverlay plot={plotRef.current} self="avail" dark={actualTheme === 'dark'} />
       <div
         style={{
           display: 'flex',

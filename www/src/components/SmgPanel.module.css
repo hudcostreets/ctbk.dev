@@ -55,6 +55,7 @@
 }
 
 .gridScroll {
+    position: relative;
     overflow-y: auto;
 }
 
@@ -62,7 +63,25 @@
     display: block;
     position: sticky;
     top: 0;
+    z-index: 2;
     background: var(--bg-primary, #fff);
+}
+
+.gridMark,
+.gridBand {
+    position: absolute;
+    z-index: 1;
+    pointer-events: none;
+}
+
+.gridMark {
+    outline: 2px solid var(--text-primary, #000);
+    border-radius: 1px;
+}
+
+.gridBand {
+    background: rgba(127, 127, 127, 0.3);
+    box-shadow: inset 1px 0 var(--text-primary, #000), inset -1px 0 var(--text-primary, #000);
 }
 
 .gridTip {

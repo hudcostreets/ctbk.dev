@@ -58,13 +58,13 @@ export interface SmgState {
  *  band on top. "Full, no e-bikes" is "full" plus the no-e-bike hatch it shares
  *  with "no e-bikes": the hatch alone carries the e-bike dimension. */
 export const SMG_STATES: readonly SmgState[] = [
-  { id: 5, key: 'empty',          label: 'Empty',               group: 'live', light: '#f57c00', dark: '#ffa726' },
+  { id: 5, key: 'empty',          label: 'Empty',               group: 'live', light: '#a1420f', dark: '#c0561b' },
   { id: 6, key: 'full',           label: 'Full',                group: 'live', light: '#d32f2f', dark: '#ef5350' },
   { id: 7, key: 'full_no_ebikes', label: 'Full, no e-bikes',    group: 'live', light: '#d32f2f', dark: '#ef5350', hatch: true },
   { id: 8, key: 'classic_only',   label: 'No e-bikes',          group: 'live', light: '#f9a825', dark: '#fdd835', hatch: true },
   { id: 3, key: 'offline',        label: 'Offline',             group: 'dead', light: '#616161', dark: '#9e9e9e' },
   { id: 4, key: 'bogus',          label: 'Bogus (0 bikes, 0 docks)', group: 'dead', light: '#8d6e63', dark: '#a1887f' },
-  { id: 9, key: 'ok',             label: 'OK',                  group: 'live', light: '#43a047', dark: '#4caf50' },
+  { id: 9, key: 'ok',             label: 'OK',                  group: 'live', light: '#a3c9a0', dark: '#4e7a51' },
   { id: 2, key: 'absent',         label: 'Absent from feed',    group: 'gap',  light: '#bdbdbd', dark: '#616161' },
   { id: 1, key: 'stale_feed',     label: 'Stale feed',          group: 'gap',  light: '#b0bec5', dark: '#546e7a' },
   { id: 0, key: 'no_poll',        label: 'No poll',             group: 'gap',  light: '#e0e0e0', dark: '#424242' },

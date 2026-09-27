@@ -9,7 +9,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { boolParam, useUrlState } from 'use-prms'
 import { useTheme } from '../contexts/ThemeContext'
 import { SMG_STATES, useSmgHist, type SmgSelection } from '../query/smg'
-import { etDayStartS, smgGrid, type GridRow } from '../query/smgGrid'
+import { etDayMinute, etDayStartS, smgGrid, type GridRow } from '../query/smgGrid'
+import { useBrush } from './smgBrush'
 import { canvasFill, swatchStyle } from './smgStyle'
 import css from './SmgPanel.module.css'
 
@@ -19,9 +20,9 @@ const ROW_GAP = 2
 const ROW_PITCH = ROW_H + ROW_GAP
 const LABEL_W = 64
 const AXIS_H = 16
-/** Rows shown before the grid scrolls (the 2w window's worth), so longer
- *  windows scroll inside a fixed-height box instead of growing the page. */
-const VISIBLE_ROWS = 14
+/** Rows shown before the grid scrolls (a 4w window, plus its partial newest
+ *  day), so longer windows scroll inside a box instead of growing the page. */
+const VISIBLE_ROWS = 29
 
 const dayLabel = (day: string) => {
   const [y, m, d] = day.split('-').map(Number)
@@ -29,6 +30,11 @@ const dayLabel = (day: string) => {
   return `${wd} ${m}/${d}`
 }
 const hhmm = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`
+/** Start (unix s) of ET day `YYYY-MM-DD` (noon UTC is always that ET date). */
+const dayStartS = (day: string) => {
+  const [y, m, d] = day.split('-').map(Number)
+  return etDayStartS(Date.UTC(y, m - 1, d, 12) / 1000)
+}
 const hourLabel = (h: number) => (h === 0 ? '12a' : h === 12 ? '12p' : h < 12 ? `${h}a` : `${h - 12}p`)
 
 /** Size `cv` for `w`×`h` CSS px at the device pixel ratio; returns its context. */
@@ -62,6 +68,7 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
   const [width, setWidth] = useState(800)
   const [hover, setHover] = useState<Hover | null>(null)
   const hasRows = rows.length > 0
+  const { brush, setBrush } = useBrush()
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
@@ -74,6 +81,39 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
   const nCols = Math.round(86400 / binS)
   const colW = (width - LABEL_W) / nCols
   const bodyH = rows.length * ROW_PITCH
+
+  // Another plot's brush, as `[row, col0, col1)` cell runs (a time range) or
+  // a column band (an hour of day).
+  const rowOf = useMemo(() => new Map(rows.map((r, i) => [r.day, i])), [rows])
+  const runs = useMemo(() => {
+    if (!brush || brush.src === 'grid' || brush.kind !== 't') return []
+    const out: [number, number, number][] = []
+    const end = brush.tS + brush.spanS
+    for (let t = Math.floor(brush.tS / binS) * binS; t < end; t += binS) {
+      const [day, minute] = etDayMinute(t)
+      const r = rowOf.get(day)
+      if (r == null) continue
+      const col = Math.floor((minute * 60) / binS)
+      const last = out[out.length - 1]
+      if (last && last[0] === r && last[2] === col) last[2] = col + 1
+      else out.push([r, col, col + 1])
+    }
+    return out
+  }, [brush, rowOf, binS])
+  const band = brush && brush.src !== 'grid' && brush.kind === 'hod'
+    ? [(brush.hour * 3600) / binS, ((brush.hour + 1) * 3600) / binS]
+    : null
+
+  // Bring a brushed row into view (within the grid only; never the page).
+  const firstRun = runs[0]?.[0]
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el || firstRun == null) return
+    const y0 = firstRun * ROW_PITCH
+    const view = el.clientHeight - AXIS_H
+    if (y0 < el.scrollTop) el.scrollTop = y0
+    else if (y0 + ROW_H > el.scrollTop + view) el.scrollTop = y0 + ROW_H - view
+  }, [firstRun])
 
   useEffect(() => {
     const head = headRef.current
@@ -124,8 +164,9 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
     const wrap = wrapRef.current!.getBoundingClientRect()
     const r = Math.floor((e.clientY - body.top) / ROW_PITCH)
     const col = Math.floor((e.clientX - body.left - LABEL_W) / colW)
-    if (r < 0 || r >= rows.length || col < 0 || col >= nCols || !rows[r].cells[col]) { setHover(null); return }
+    if (r < 0 || r >= rows.length || col < 0 || col >= nCols || !rows[r].cells[col]) { setHover(null); setBrush(null); return }
     setHover({ x: e.clientX - wrap.left, y: e.clientY - wrap.top, row: rows[r], col })
+    setBrush({ kind: 't', tS: dayStartS(rows[r].day) + col * binS, spanS: binS, src: 'grid' })
   }
 
   const legend = [...SMG_STATES].reverse()
@@ -136,7 +177,7 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
         {q.isFetching && <span className={css.status}>loading…</span>}
         {q.isError && <span className={css.error}>states fetch failed</span>}
       </div>
-      <div ref={wrapRef} style={{ position: 'relative', width: '100%' }} onMouseLeave={() => setHover(null)}>
+      <div ref={wrapRef} style={{ position: 'relative', width: '100%' }} onMouseLeave={() => { setHover(null); setBrush(null) }}>
         {hasRows && (
           <div
             ref={scrollRef}
@@ -146,6 +187,19 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
           >
             <canvas ref={headRef} className={css.gridHead} style={{ width, height: AXIS_H }} />
             <canvas ref={bodyRef} style={{ width, height: bodyH, display: 'block' }} onMouseMove={onMove} />
+            {runs.map(([r, c0, c1]) => (
+              <div
+                key={`${r}-${c0}`}
+                className={css.gridMark}
+                style={{ left: LABEL_W + c0 * colW - 1, top: AXIS_H + r * ROW_PITCH - 1, width: (c1 - c0) * colW + 2, height: ROW_H + 2 }}
+              />
+            ))}
+            {band && (
+              <div
+                className={css.gridBand}
+                style={{ left: LABEL_W + band[0] * colW, top: AXIS_H, width: (band[1] - band[0]) * colW, height: bodyH }}
+              />
+            )}
           </div>
         )}
         {hover && (() => {

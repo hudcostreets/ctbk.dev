@@ -7,6 +7,7 @@ import StationAvailabilityChart from '../components/StationAvailabilityChart'
 import SmgPanel from '../components/SmgPanel'
 import SmgByHour from '../components/SmgByHour'
 import SmgGrid from '../components/SmgGrid'
+import { BrushProvider } from '../components/smgBrush'
 import { smgCellsFor } from '../query/smg'
 import { RangeWidthControl } from '../components/RangeWidthControl'
 import { BinSelect, BIN_PRESETS } from '../components/BinSelect'
@@ -94,7 +95,13 @@ const MAP_HEIGHT_SS_KEY = 'stationDetail.mapHeightPx'
 const DEFAULT_MAP_HEIGHT_PX = 600
 const MIN_MAP_HEIGHT_PX = 200
 
+/** Page root: the cross-plot hover brush spans the availability, state,
+ *  grid and hour-of-day plots. */
 export default function StationDetail() {
+  return <BrushProvider><StationDetailPage /></BrushProvider>
+}
+
+function StationDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [stations, setStations] = useState<Stations | null>(null)

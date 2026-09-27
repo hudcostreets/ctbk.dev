@@ -15,6 +15,7 @@ import { useTheme } from '../contexts/ThemeContext'
 import { SMG_STATES, useSmgHist, type SmgSelection } from '../query/smg'
 import { smgByEtHour, type Dow } from '../query/smgStats'
 import MultiSelect from './MultiSelect'
+import { etHoursOf, useBrush } from './smgBrush'
 import { plotlyMarker } from './smgStyle'
 import css from './SmgPanel.module.css'
 
@@ -37,6 +38,10 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
   const [ff] = useUrlState('sff', boolParam)
   const { actualTheme } = useTheme()
   const dark = actualTheme === 'dark'
+  const { brush, setBrush } = useBrush()
+  // Hours another plot's time brush touches (joined, so the layout only
+  // changes when the set does).
+  const brushed = brush && brush.src !== 'hod' && brush.kind === 't' ? etHoursOf(brush.tS, brush.spanS).join(',') : ''
 
   // Whole ET-aligned hours (every US offset is whole hours).
   const q = useSmgHist(sel, Math.floor(fromS / HOUR_S) * HOUR_S, Math.ceil(toS / HOUR_S) * HOUR_S, 0, HOUR_S)
@@ -60,6 +65,14 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
   }, [rows, dark])
 
   const layout = useMemo(() => ({
+    // A brush spanning every hour highlights nothing.
+    shapes: (brushed && brushed.split(',').length < 24 ? brushed.split(',').map(Number) : []).map((h) => ({
+      type: 'rect' as const, layer: 'above' as const,
+      xref: 'x' as const, x0: h - 0.5, x1: h + 0.5,
+      yref: 'paper' as const, y0: 0, y1: 1,
+      line: { color: tick, width: 1.5 },
+      fillcolor: dark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.12)',
+    })),
     autosize: true,
     height: PLOT_H,
     barmode: 'stack' as const,
@@ -77,7 +90,7 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
     paper_bgcolor: 'rgba(0,0,0,0)',
     plot_bgcolor: 'rgba(0,0,0,0)',
     margin: { t: 8, r: 8, b: 30, l: 40 },
-  }), [tick, grid, dark])
+  }), [tick, grid, dark, brushed])
 
   const hasData = rows?.some((r) => LIVE.some((st) => r[st.id] > 0))
   return (
@@ -96,7 +109,13 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
         {q.isError && <span className={css.error}>states fetch failed</span>}
       </div>
       {hasData
-        ? <Plot data={traces} layout={layout} style={{ width: '100%', height: PLOT_H }} config={{ displayModeBar: false, scrollZoom: false }} />
+        ? <Plot data={traces} layout={layout} style={{ width: '100%', height: PLOT_H }} config={{ displayModeBar: false, scrollZoom: false }}
+            onHover={(e) => {
+              const i = e?.points?.[0]?.pointIndex
+              if (typeof i === 'number') setBrush({ kind: 'hod', hour: i, src: 'hod' })
+            }}
+            onUnhover={() => setBrush(null)}
+          />
         : !q.isFetching && <span className={css.status}>{days.length ? 'no station-state data for these days' : 'no days selected'}</span>}
     </div>
   )

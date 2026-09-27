@@ -1,0 +1,94 @@
+/**
+ * Cross-plot brushing on the station page: hovering any of the time plots
+ * (availability, states, day × time grid) brushes an instant range; hovering
+ * an hour-of-day bar brushes that ET hour. Every other plot draws the brush
+ * (spikeline / range / band / highlighted bar), so one hover reads across all
+ * four views. `src` names the emitting plot, which skips drawing its own.
+ */
+import { createContext, useContext, useMemo, useState, type ReactNode } from 'react'
+import type uPlot from 'uplot'
+import { etDayMinute, etDayStartS } from '../query/smgGrid'
+
+export type Brush =
+  | { kind: 't'; tS: number; spanS: number; src: string }
+  | { kind: 'hod'; hour: number; src: string }
+  | null
+
+interface Ctx { brush: Brush; setBrush: (b: Brush) => void }
+const BrushCtx = createContext<Ctx>({ brush: null, setBrush: () => {} })
+
+export function BrushProvider({ children }: { children: ReactNode }) {
+  const [brush, setBrush] = useState<Brush>(null)
+  const value = useMemo(() => ({ brush, setBrush }), [brush])
+  return <BrushCtx.Provider value={value}>{children}</BrushCtx.Provider>
+}
+
+export const useBrush = () => useContext(BrushCtx)
+
+const HOUR_S = 3600
+
+/** `[start, end)` instants of ET hour `hour` on each day overlapping `[fromS, toS)`. */
+export function hodIntervals(hour: number, fromS: number, toS: number): [number, number][] {
+  const out: [number, number][] = []
+  for (let day = etDayStartS(fromS); day < toS; day = etDayStartS(day + 26 * HOUR_S)) {
+    let start = day + hour * HOUR_S
+    // DST days: the naive offset lands an hour off; nudge onto the ET hour.
+    const [, minute] = etDayMinute(start)
+    start += (hour * 60 - minute) * 60
+    if (start + HOUR_S > fromS && start < toS) out.push([start, start + HOUR_S])
+  }
+  return out
+}
+
+/** ET hours of day touched by `[tS, tS + spanS)`; all 24 once it spans a day. */
+export function etHoursOf(tS: number, spanS: number): number[] {
+  if (spanS >= 86400) return Array.from({ length: 24 }, (_, h) => h)
+  const hours = new Set<number>()
+  for (let t = tS; t < tS + spanS; t += HOUR_S) hours.add(Math.floor(etDayMinute(t)[1] / 60))
+  hours.add(Math.floor(etDayMinute(tS + spanS - 1)[1] / 60))
+  return [...hours].sort((a, b) => a - b)
+}
+
+/** The brush drawn over a uPlot time chart, as absolutely positioned divs in
+ *  the chart's (position: relative) wrapper: a spikeline for a narrow range,
+ *  a shaded span for a wide one, and one band per day for an hour-of-day. */
+export function BrushOverlay({ plot, self, dark }: { plot: uPlot | null; self: string; dark: boolean }) {
+  const { brush } = useBrush()
+  if (!plot || !brush || brush.src === self) return null
+  const { min, max } = plot.scales.x
+  if (min == null || max == null) return null
+  const dpr = devicePixelRatio || 1
+  const left = plot.bbox.left / dpr
+  const top = plot.bbox.top / dpr
+  const width = plot.bbox.width / dpr
+  const height = plot.bbox.height / dpr
+  const spans: [number, number][] = brush.kind === 't'
+    ? [[brush.tS, brush.tS + brush.spanS]]
+    : hodIntervals(brush.hour, min, max)
+  const ink = dark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.75)'
+  const shade = dark ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.16)'
+  return (
+    <>
+      {spans.map(([a, b]) => {
+        const x0 = Math.max(0, plot.valToPos(a, 'x'))
+        const x1 = Math.min(width, plot.valToPos(b, 'x'))
+        if (x1 < 0 || x0 > width) return null
+        const w = x1 - x0
+        const line = w < 3
+        return (
+          <div
+            key={a}
+            style={{
+              position: 'absolute', pointerEvents: 'none', zIndex: 5,
+              left: left + (line ? (x0 + x1) / 2 : x0), top, height,
+              width: line ? 0 : w,
+              borderLeft: line ? `1px dashed ${ink}` : undefined,
+              background: line ? undefined : shade,
+              boxShadow: line ? undefined : `inset 1px 0 ${ink}, inset -1px 0 ${ink}`,
+            }}
+          />
+        )
+      })}
+    </>
+  )
+}

@@ -155,6 +155,8 @@
 !src/components/icons/index.ts
 !src/components/parquetCells.module.css
 !src/components/parquetCells.tsx
+!src/components/smgBrush.test.ts
+!src/components/smgBrush.tsx
 !src/components/smgStyle.ts
 !src/contexts/FlagsContext.tsx
 !src/contexts/ThemeContext.tsx
