@@ -159,6 +159,10 @@ export function decodeTimeRange(encoded: string | undefined, defaultDuration: nu
   if (encoded.startsWith('-')) {
     return { timestamp: null, duration: parseDuration(encoded.slice(1)) }
   }
+  // A bare duration (`14d`, `1mo`) is what people type: latest + that width.
+  if (/^(\d+(mo|[ydhm]))+$/.test(encoded)) {
+    return { timestamp: null, duration: parseDuration(encoded) }
+  }
   const dash = encoded.indexOf('-')
   if (dash === -1) return { timestamp: parseCompactTimestamp(encoded), duration: defaultDuration }
   return {

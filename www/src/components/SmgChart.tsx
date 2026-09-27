@@ -20,6 +20,8 @@ import './StationAvailabilityChart.css'
 import { useTheme } from '../contexts/ThemeContext'
 import { useDragPan } from '../uplot'
 import { N_STATES, SMG_ERAS, SMG_STATES, type SmgBin, type SmgState } from '../query/smg'
+import { canvasFill, swatchStyle } from './smgStyle'
+import { Tip } from './Tip'
 
 const { floor, max } = Math
 
@@ -121,6 +123,7 @@ export default function SmgChart({
 
     const stepped = uPlot.paths.stepped!({ align: 1 })
     const dim = (id: number, base: string) => (hovered != null && hovered !== id ? base + '40' : base)
+    const dimFill = (st: SmgState) => canvasFill(st, isDark, hovered != null && hovered !== st.id ? '40' : '')
     const yMax = pct ? 100 : max(...totals) * 1.02 || 1
 
     const erasInView = (u: uPlot) => {
@@ -150,7 +153,7 @@ export default function SmgChart({
         ...SMG_STATES.map((s, j) => ({
           label: s.label,
           stroke: dim(s.id, colorOf(s)),
-          fill: j === 0 ? dim(s.id, colorOf(s)) : undefined,
+          fill: j === 0 ? dimFill(s) : undefined,
           paths: stepped,
           width: 1,
         })),
@@ -158,7 +161,7 @@ export default function SmgChart({
       bands: SMG_STATES.slice(1).map((s, j) => ({
         // series indices are 1-based (0 is time): band j+2 over j+1.
         series: [j + 2, j + 1] as [number, number],
-        fill: dim(s.id, colorOf(s)),
+        fill: dimFill(s),
       })),
       hooks: {
         setCursor: [
@@ -247,13 +250,14 @@ export default function SmgChart({
     }
   }
 
-  // Legend reads top-of-stack first (gap band → live band), like the plot.
+  // Legend reads top-of-stack first (unmeasured → OK → problem states), like the plot.
   const legend = [...SMG_STATES].reverse()
   const textColor = isDark ? '#e0e0e0' : '#222'
 
   return (
     <div style={{ position: 'relative', width: '100%' }} onMouseLeave={() => setTooltip(null)}>
       <div ref={containerRef} className={`station-availability-chart ${actualTheme}`} style={{ width: '100%' }} />
+      <Tip content="Click to solo · Shift-click to toggle · Double-click to reset" placement="bottom">
       <div
         style={{
           display: 'flex', justifyContent: 'center', flexWrap: 'wrap', gap: '4px 0',
@@ -261,7 +265,6 @@ export default function SmgChart({
         }}
         onDoubleClick={() => setVisible(null)}
         onMouseLeave={() => setHovered(null)}
-        title="Click to solo · Shift-click to toggle · Double-click to reset"
       >
         {legend.map((s) => {
           const shown = isShown(s.id)
@@ -276,12 +279,13 @@ export default function SmgChart({
                 background: hovered === s.id ? (isDark ? '#3a3a3a' : '#f0f0f0') : 'transparent',
               }}
             >
-              <span style={{ display: 'inline-block', width: 12, height: 12, background: colorOf(s), borderRadius: 2 }} />
+              <span style={{ display: 'inline-block', width: 12, height: 12, borderRadius: 2, ...swatchStyle(s, isDark) }} />
               <span style={{ textDecoration: shown ? 'none' : 'line-through' }}>{s.label}</span>
             </div>
           )
         })}
       </div>
+      </Tip>
       {tooltip && (() => {
         const plotW = containerRef.current?.clientWidth ?? 1000
         const flipH = tooltip.left > plotW * 0.6
@@ -309,7 +313,7 @@ export default function SmgChart({
               const empty = v === 0
               return (
                 <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 6, lineHeight: 1.5, opacity: empty ? 0.4 : 1 }}>
-                  <span style={{ display: 'inline-block', width: 10, height: 10, background: colorOf(s), borderRadius: 2 }} />
+                  <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, ...swatchStyle(s, isDark) }} />
                   <span style={{ flex: 1, paddingRight: 12 }}>{s.label}</span>
                   <span style={{ fontVariantNumeric: 'tabular-nums', opacity: 0.7, paddingRight: 8 }}>
                     {empty ? '' : fmtCount(v)}

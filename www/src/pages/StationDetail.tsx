@@ -630,7 +630,7 @@ export default function StationDetail() {
             </Box>
             <Typography variant="h6" sx={{ px: { xs: 1, sm: 2, md: 3 }, mt: 2, mb: 0.5 }}>By hour of day</Typography>
             <Box sx={{ px: { xs: 1, sm: 2, md: 3 } }}>
-              <SmgByHour sel={smgSel} />
+              <SmgByHour sel={smgSel} fromS={fromS} toS={toS} />
             </Box>
           </Box>
         )}

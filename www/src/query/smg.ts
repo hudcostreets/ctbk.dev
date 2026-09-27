@@ -47,18 +47,24 @@ export interface SmgState {
   group: SmgGroup
   light: string
   dark: string
+  /** "No e-bike available": drawn with a hatch over the base color, so the
+   *  e-bike dimension reads independently of the hue. */
+  hatch?: true
 }
 
-/** The 10-state partition, in stack order (bottom → top): the live states
- *  first so `ok` sits on the x-axis, then the dead band, then the gap band. */
+/** The 10-state partition, in stack order (bottom → top): problem states
+ *  first, so the y-axis reads off how much of the time the station was a
+ *  problem for riders (then + offline/bogus); `ok` next; the unmeasured gap
+ *  band on top. "Full, no e-bikes" is worse than "full" (a rider can neither
+ *  dock nor take an e-bike) and shares the no-e-bike hatch with "no e-bikes". */
 export const SMG_STATES: readonly SmgState[] = [
-  { id: 9, key: 'ok',             label: 'OK',                  group: 'live', light: '#43a047', dark: '#4caf50' },
-  { id: 8, key: 'classic_only',   label: 'No e-bikes',          group: 'live', light: '#9ccc65', dark: '#aed581' },
-  { id: 7, key: 'full_no_ebikes', label: 'Full, no e-bikes',    group: 'live', light: '#ffb74d', dark: '#ffcc80' },
-  { id: 6, key: 'full',           label: 'Full',                group: 'live', light: '#ef6c00', dark: '#fb8c00' },
-  { id: 5, key: 'empty',          label: 'Empty',               group: 'live', light: '#e53935', dark: '#ef5350' },
+  { id: 5, key: 'empty',          label: 'Empty',               group: 'live', light: '#d32f2f', dark: '#ef5350' },
+  { id: 6, key: 'full',           label: 'Full',                group: 'live', light: '#f57c00', dark: '#ffa726' },
+  { id: 7, key: 'full_no_ebikes', label: 'Full, no e-bikes',    group: 'live', light: '#bf360c', dark: '#ff7043', hatch: true },
+  { id: 8, key: 'classic_only',   label: 'No e-bikes',          group: 'live', light: '#f9a825', dark: '#fdd835', hatch: true },
+  { id: 3, key: 'offline',        label: 'Offline',             group: 'dead', light: '#616161', dark: '#9e9e9e' },
   { id: 4, key: 'bogus',          label: 'Bogus (0 bikes, 0 docks)', group: 'dead', light: '#8d6e63', dark: '#a1887f' },
-  { id: 3, key: 'offline',        label: 'Offline',             group: 'dead', light: '#757575', dark: '#9e9e9e' },
+  { id: 9, key: 'ok',             label: 'OK',                  group: 'live', light: '#43a047', dark: '#4caf50' },
   { id: 2, key: 'absent',         label: 'Absent from feed',    group: 'gap',  light: '#bdbdbd', dark: '#616161' },
   { id: 1, key: 'stale_feed',     label: 'Stale feed',          group: 'gap',  light: '#b0bec5', dark: '#546e7a' },
   { id: 0, key: 'no_poll',        label: 'No poll',             group: 'gap',  light: '#e0e0e0', dark: '#424242' },
