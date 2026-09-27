@@ -1,13 +1,12 @@
 import { test, expect, Page } from '@playwright/test'
 
 /**
- * /stations map: hover/click interactions + tooltip overlap behavior.
+ * /stations map: hover/click interactions.
  *
- * When a station is selected and the user hovers one of its destination
- * lines, three tooltips are visible together (per
- * `3562f8d8` + `b676d3d1`): the permanent source-station tooltip, a
- * mid-edge tooltip (`→ {dst}: {count}`), and a destination-station
- * tooltip popped at the line's other end.
+ * Map mechanics (see `specs/unified-page-architecture.md`): no Leaflet
+ * tooltips at all — a single HTML hover drawer names the hovered station;
+ * the destination fan is off by default (`?fan=1` opts in) and its edges are
+ * non-interactive decoration under the station dots.
  */
 
 /** Wait until the first-month station data has rendered. */
@@ -56,105 +55,37 @@ async function selectBiggestStation(page: Page): Promise<{ x: number; y: number 
   return coords
 }
 
-/**
- * Hover a rendered destination line and wait for the 3-tooltip state
- * (permanent source tooltip + `→` mid-edge tooltip + destination tooltip).
- *
- * Targets actual `path`s in the "lines" pane rather than a fixed offset
- * from the source station — which line fan exists at any pixel shifts with
- * each data month. Each polyline is a straight 2-point segment, so its
- * bbox center lies ON the line; try the longest few (midpoint farthest
- * from the source hit-circle, widest hover target) until one sticks.
- */
-async function hoverDestinationLine(page: Page): Promise<boolean> {
-  const tooltips = page.locator('.leaflet-container .leaflet-tooltip')
-  const candidates = await page.evaluate(() => {
-    const paths = document.querySelectorAll<SVGPathElement>('.leaflet-pane.leaflet-lines-pane path')
-    return [...paths]
-      .map(p => {
-        const b = p.getBoundingClientRect()
-        return { x: b.left + b.width / 2, y: b.top + b.height / 2, len: Math.hypot(b.width, b.height) }
-      })
-      .sort((a, b) => b.len - a.len)
-      .slice(0, 5)
-  })
-  for (const { x, y } of candidates) {
-    await page.mouse.move(x, y)
-    try {
-      await expect.poll(async () => {
-        const texts = await tooltips.allTextContents()
-        return texts.length === 3 && texts.filter(t => /→/.test(t)).length === 1
-      }, { timeout: 1500 }).toBe(true)
-      return true
-    } catch {
-      continue
-    }
-  }
-  return false
+/** Station-name text of the hover drawer, or `null` when it's hidden. */
+async function hoverDrawerName(page: Page): Promise<string | null> {
+  const name = page.locator('[class*="hoverDrawerName"]')
+  return (await name.count()) ? await name.textContent() : null
 }
 
-test.describe('Station map — selection + overlap', () => {
-  test('selecting a station on /stations draws destination lines + permanent tooltip', async ({ page }) => {
+const LINES = '.leaflet-pane.leaflet-lines-pane path'
+
+test.describe('Station map — hover drawer + fan', () => {
+  test('hovering a station fills the hover drawer; no map tooltips, no fan by default', async ({ page }) => {
     await page.goto('/stations')
     await waitForStations(page)
     await selectBiggestStation(page)
 
-    // Destination lines are polylines in the "lines" pane.
-    const lines = page.locator('.leaflet-container path.leaflet-interactive').filter({
-      has: page.locator(':scope'),  // noop; kept for readability
-    })
-    // Simpler: wait for the permanent tooltip (rendered only when a station
-    // is selected).
-    const permanentTip = page.locator('.leaflet-tooltip-pane .leaflet-tooltip')
-      .or(page.locator('.leaflet-container .leaflet-tooltip'))
-    await expect(permanentTip.first()).toBeVisible()
-    // Many polylines should appear post-selection.
-    expect(await lines.count()).toBeGreaterThan(100)
+    await expect.poll(() => hoverDrawerName(page)).toMatch(/\S/)
+    expect(await page.locator('.leaflet-container .leaflet-tooltip').count()).toBe(0)
+    expect(await page.locator(LINES).count()).toBe(0)
+
+    // Cursor off the map → drawer hides.
+    await page.mouse.move(5, 5)
+    await expect.poll(() => hoverDrawerName(page)).toBe(null)
   })
 
-  test('hovering a destination line shows source + edge + dest tooltips', async ({ page }) => {
-    await page.goto('/stations')
+  test('`?fan=1` draws non-interactive destination lines for the hover-selected station', async ({ page }) => {
+    await page.goto('/stations?fan=1')
     await waitForStations(page)
     await selectBiggestStation(page)
-
-    // Move cursor off the source station's hit area first — otherwise the
-    // station's hover tooltip stacks on top of its permanent tooltip
-    // (`hoverToSelect` mode renders both when cursor is on the hit circle).
     await page.mouse.move(5, 5)
 
-    const tooltips = page.locator('.leaflet-container .leaflet-tooltip')
-    await expect.poll(async () => await tooltips.count(),
-      { timeout: 3000, message: 'baseline: source-station permanent tooltip only' }).toBe(1)
-    expect(await tooltips.first().textContent()).not.toMatch(/→/)
-
-    // While hovering a line: three tooltips. The source station's permanent
-    // tooltip stays put, the mid-edge tooltip ("→ {dst}: {count}") appears,
-    // and a permanent destination tooltip pops at the line's other end.
-    expect(await hoverDestinationLine(page),
-      '3 tooltips: 1 with "→", 2 plain (source + dest)').toBe(true)
-  })
-
-  test('moving the cursor off the line collapses back to the source tooltip', async ({ page }) => {
-    await page.goto('/stations')
-    await waitForStations(page)
-    await selectBiggestStation(page)
-
-    // Settle to baseline (just the permanent source TT, see test above).
-    await page.mouse.move(5, 5)
-    const tooltips = page.locator('.leaflet-container .leaflet-tooltip')
-    await expect.poll(async () => await tooltips.count(), { timeout: 3000 }).toBe(1)
-
-    // Hover a line (confirm transition to 3-tooltip state), then move far
-    // away off the map.
-    expect(await hoverDestinationLine(page), 'reached 3-tooltip hover state').toBe(true)
-
-    await page.mouse.move(5, 5)
-
-    // Back to just the source-station tooltip — 1 TT, no arrow.
-    await expect.poll(async () => {
-      const texts = await tooltips.allTextContents()
-      return texts.length === 1 && !/→/.test(texts[0])
-    }, { timeout: 3000, message: 'collapsed to source tooltip only' }).toBe(true)
+    await expect.poll(() => page.locator(LINES).count(), { timeout: 5000 }).toBeGreaterThan(100)
+    expect(await page.locator(`${LINES}.leaflet-interactive`).count()).toBe(0)
   })
 })
 
