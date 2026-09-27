@@ -154,6 +154,7 @@
 !src/components/icons/index.ts
 !src/components/parquetCells.module.css
 !src/components/parquetCells.tsx
+!src/components/smgStyle.ts
 !src/contexts/FlagsContext.tsx
 !src/contexts/ThemeContext.tsx
 !src/controls.module.css
@@ -198,6 +199,7 @@
 !src/query/stations.ts
 !src/stations.module.css
 !src/theme.ts
+!src/time-range.test.ts
 !src/time-range.ts
 !src/uplot/index.ts
 !src/uplot/useDragPan.ts

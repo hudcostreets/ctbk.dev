@@ -1,25 +1,22 @@
 /**
  * Hour-of-day profile of a station's states (`specs/avail-smg-pyramid.md`
- * "HH" view): `smg-v1` 1h bins over a trailing lookback, filtered to chosen
- * days of week (Eastern time), summed per ET hour, and drawn as each hour's
- * share of usable minutes (states 5–9) per state. Single-station pages only.
+ * "HH" view): `smg-v1` 1h bins over the page's window (the same `r` range
+ * the availability + states charts show), filtered to chosen days of week
+ * (Eastern time), summed per ET hour, and drawn as each hour's share of
+ * usable minutes (states 5–9) per state. Single-station pages only.
  *
- * URL state: `hl` lookback (1w | 4w | 12w), `hd` days (codes m t w r f s u;
- * omitted = all); `sff` (forward-fill) is shared with the states panel.
+ * URL state: `hd` days (codes m t w r f s u; omitted = all); `sff`
+ * (forward-fill) is shared with the states panel.
  */
 import { useMemo } from 'react'
 import { Plot } from 'pltly/react'
-import { boolParam, codesParam, enumParam, useUrlState } from 'use-prms'
+import { boolParam, codesParam, useUrlState } from 'use-prms'
 import { useTheme } from '../contexts/ThemeContext'
 import { SMG_STATES, useSmgHist, type SmgSelection } from '../query/smg'
 import { smgByEtHour, type Dow } from '../query/smgStats'
 import MultiSelect from './MultiSelect'
-import Seg from './Seg'
+import { plotlyMarker } from './smgStyle'
 import css from './SmgPanel.module.css'
-
-const LOOKBACKS = ['1w', '4w', '12w'] as const
-type Lookback = typeof LOOKBACKS[number]
-const WEEKS: Record<Lookback, number> = { '1w': 1, '4w': 4, '12w': 12 }
 
 const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const
 type Day = typeof DAYS[number]
@@ -35,17 +32,14 @@ const PLOT_H = 260
 
 const same = (a: readonly Day[], b: readonly Day[]) => a.length === b.length && a.every((d) => b.includes(d))
 
-export default function SmgByHour({ sel }: { sel: SmgSelection | null }) {
-  const [lookback, setLookback] = useUrlState('hl', enumParam<Lookback>('4w', LOOKBACKS))
+export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | null; fromS: number; toS: number }) {
   const [days, setDays] = useUrlState('hd', daysParam)
   const [ff] = useUrlState('sff', boolParam)
   const { actualTheme } = useTheme()
   const dark = actualTheme === 'dark'
 
-  // Whole hours, so the query key is stable within an hour.
-  const toS = Math.floor(Date.now() / 1000 / HOUR_S) * HOUR_S
-  const fromS = toS - WEEKS[lookback] * 7 * 86400
-  const q = useSmgHist(sel, fromS, toS, 0, HOUR_S)
+  // Whole ET-aligned hours (every US offset is whole hours).
+  const q = useSmgHist(sel, Math.floor(fromS / HOUR_S) * HOUR_S, Math.ceil(toS / HOUR_S) * HOUR_S, 0, HOUR_S)
 
   const dows = useMemo(() => new Set(days.map((d) => DAYS.indexOf(d) as Dow)), [days])
   const rows = useMemo(() => (q.data ? smgByEtHour(q.data.bins, ff, dows) : null), [q.data, ff, dows])
@@ -60,7 +54,7 @@ export default function SmgByHour({ sel }: { sel: SmgSelection | null }) {
       name: st.label,
       x: HOUR_LABELS,
       y: rows.map((r, h) => (live[h] ? (100 * r[st.id]) / live[h] : 0)),
-      marker: { color: dark ? st.dark : st.light },
+      marker: plotlyMarker(st, dark),
       hovertemplate: `${st.label}: %{y:.1f}%<extra></extra>`,
     }))
   }, [rows, dark])
@@ -71,6 +65,11 @@ export default function SmgByHour({ sel }: { sel: SmgSelection | null }) {
     barmode: 'stack' as const,
     bargap: 0.08,
     hovermode: 'x unified' as const,
+    hoverlabel: {
+      bgcolor: dark ? '#2d2d2d' : '#fff',
+      bordercolor: dark ? '#555' : '#ccc',
+      font: { color: tick, size: 12 },
+    },
     showlegend: true,
     legend: { orientation: 'h' as const, x: 0, y: -0.18, font: { color: tick, size: 11 } },
     xaxis: { type: 'category' as const, tickfont: { color: tick, size: 11 }, fixedrange: true },
@@ -78,13 +77,12 @@ export default function SmgByHour({ sel }: { sel: SmgSelection | null }) {
     paper_bgcolor: 'rgba(0,0,0,0)',
     plot_bgcolor: 'rgba(0,0,0,0)',
     margin: { t: 8, r: 8, b: 30, l: 40 },
-  }), [tick, grid])
+  }), [tick, grid, dark])
 
   const hasData = rows?.some((r) => LIVE.some((st) => r[st.id] > 0))
   return (
     <div className={css.panel} data-testid="smg-by-hour">
       <div className={css.toolbar}>
-        <Seg label="Lookback" options={LOOKBACKS.map((l) => [l, l] as const)} value={lookback} set={setLookback} />
         <MultiSelect
           items={DAYS.map((d) => ({ value: d, label: DAY_LABEL[d] }))}
           selected={days}

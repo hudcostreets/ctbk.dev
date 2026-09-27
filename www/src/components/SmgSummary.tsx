@@ -3,6 +3,7 @@
 import { useTheme } from '../contexts/ThemeContext'
 import { SMG_STATES, type SmgBin } from '../query/smg'
 import { smgSummary, smgTotals, type SmgSummary as Summary } from '../query/smgStats'
+import { swatchStyle } from './smgStyle'
 import { Tip } from './Tip'
 import css from './SmgPanel.module.css'
 
@@ -11,10 +12,7 @@ const day = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', mon
 const span = (fromS: number, toS: number) => `${day.format(fromS * 1000)} – ${day.format((toS - 1) * 1000)}`
 
 const pct = (x: number) => `${(100 * x).toFixed(x < 0.1 ? 1 : 0)}%`
-const color = (id: number, dark: boolean) => {
-  const s = SMG_STATES.find((st) => st.id === id)!
-  return dark ? s.dark : s.light
-}
+const stateOf = (id: number) => SMG_STATES.find((st) => st.id === id)!
 
 const STATS: { key: keyof Summary; label: string; id: number; tip: string }[] = [
   { key: 'empty', label: 'empty', id: 5, tip: 'No bikes of any kind, as a share of minutes the station was usable (OK, empty, full, or partially stocked).' },
@@ -35,7 +33,7 @@ export default function SmgSummary({ bins, ff, fromS, toS }: { bins: readonly Sm
       {STATS.map(({ key, label, id, tip }) => (
         <Tip key={key} content={tip}>
           <span className={css.stat}>
-            <span className={css.dot} style={{ background: color(id, dark) }} />
+            <span className={css.dot} style={swatchStyle(stateOf(id), dark)} />
             <b>{pct(s[key] as number)}</b> {label}
           </span>
         </Tip>
