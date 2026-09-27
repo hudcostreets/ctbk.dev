@@ -266,11 +266,13 @@ def slice_stations(date_str: str):
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print("Usage: compact-r2.py <download|compact|upload|all> [YYYY-MM-DD]")
+        print("Usage: compact-r2.py <download|compact|upload|all> [YYYY-MM-DD] [--force]")
         sys.exit(1)
 
-    cmd = sys.argv[1]
-    date_str = sys.argv[2] if len(sys.argv) > 2 else (
+    args = [a for a in sys.argv[1:] if a != '--force']
+    force = len(args) < len(sys.argv) - 1  # `all --force`: recompact an already-compacted day
+    cmd = args[0]
+    date_str = args[1] if len(args) > 1 else (
         datetime.now(timezone.utc) - timedelta(days=1)
     ).strftime('%Y-%m-%d')
 
@@ -283,7 +285,7 @@ if __name__ == '__main__':
     elif cmd == 'slice':
         slice_stations(date_str)
     elif cmd == 'all':
-        if r2_exists(f'{R2_PREFIX}/status/{date_str}.parquet'):
+        if not force and r2_exists(f'{R2_PREFIX}/status/{date_str}.parquet'):
             print(f"Already compacted: {date_str}.parquet exists in R2")
             sys.exit(0)
         download(date_str)

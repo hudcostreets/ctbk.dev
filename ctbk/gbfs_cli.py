@@ -1308,6 +1308,7 @@ def gbfs_invalidate(
 ) -> None:
 	from pyrmts_engine.invalidation import invalidate, journal_key, load_invalidations
 	from ctbk.pyramid_cascade.engine_check import load_pyramid
+	_use_r2_rw_env()  # the journal lives under the pyramid prefix, not readable with the RO pair
 	pyramid = load_pyramid(config_name)
 	if list_only:
 		if from_ is not None or to is not None:

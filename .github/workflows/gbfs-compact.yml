@@ -7,6 +7,11 @@ on:
       date:
         description: 'Date to compact (YYYY-MM-DD, default: yesterday)'
         required: false
+      force:
+        description: 'Rebuild an already-compacted day (status parquet, empty bitmaps, SMG day parquet); invalidate its smg-v1 / avail-v6 range first so the fills rebuild'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   compact:
@@ -51,7 +56,7 @@ jobs:
           echo "year=$(echo $DATE | cut -c 1-4)" >> "$GITHUB_OUTPUT"
 
       - name: Compact WAL → parquet
-        run: python3 gbfs/compact-r2.py all ${{ steps.date.outputs.date }}
+        run: python3 gbfs/compact-r2.py all ${{ steps.date.outputs.date }} ${{ inputs.force && '--force' || '' }}
 
       # Empty/full station bitmaps (`specs/avail-empty-bitmaps.md`): the day's four
       # planes → `empty-v1/` Zarr day-shards, from the daily parquet just written.
@@ -61,7 +66,7 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: ctbk gbfs empty build -C -V ${{ steps.date.outputs.date }}
+        run: ctbk gbfs empty build -C -V ${{ inputs.force && '-f' || '' }} ${{ steps.date.outputs.date }}
 
       # SMG source (`specs/avail-smg-pyramid.md`): `empty build` above also wrote the
       # day's `gbfs/smg/<day>.parquet`. This self-heals any day that has a status
@@ -73,7 +78,7 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: ctbk gbfs smg backfill -C -k -t ${{ steps.date.outputs.date }}
+        run: ctbk gbfs smg backfill -C -k ${{ inputs.force && format('-F -f {0}', steps.date.outputs.date) || '' }} -t ${{ steps.date.outputs.date }}
 
       # SMG pyramid: a declarative Batch gap-fill (`-f`) builds only the rungs the new
       # day completes, into the REAL prefix (`-p smg-v1` — the default would be the
