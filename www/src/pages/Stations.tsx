@@ -7,7 +7,7 @@ import { SpeedDial, useHotkeysContext } from 'use-kbd'
 import StationMap, {
   type Stations, type StationPairCounts, TILE_COLORS, resolveTileStyle,
 } from '../components/StationMap'
-import { flowLens, type LensChannel, type FlowDirection } from '../components/flowLens'
+import { flowArcs, flowLens, type LensChannel, type FlowDirection } from '../components/flowLens'
 import StationMapGL from '../components/StationMapGL'
 import StationRidesPanel from '../components/StationRidesPanel'
 import { RangeWidthControl } from '../components/RangeWidthControl'
@@ -331,6 +331,13 @@ export default function Stations() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [lensSourceIds.join(','), effectiveStations, pairCounts, lens, dir],
   )
+  // GL arc fan (Stage 3): same `pairCounts` + source set + direction as the
+  // lens; opt-in via `?fan=1`, like the Leaflet fan.
+  const arcs = useMemo(
+    () => (gl && fan && effectiveStations ? flowArcs(effectiveStations, pairCounts, lensSourceIds, dir) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [gl, fan, lensSourceIds.join(','), effectiveStations, pairCounts, dir],
+  )
   const effectiveColors = flowStyle?.colors ?? stationColors
   const effectiveRadii = flowStyle?.radii ?? null
 
@@ -389,6 +396,7 @@ export default function Stations() {
             stationColors={effectiveColors}
             stationRadii={effectiveRadii}
             mark={mark}
+            arcs={arcs}
             setSelectedId={setSelectedId}
             onHoverStation={setHoverPreviewId}
             center={[view.lat, view.lng]}

@@ -1,5 +1,5 @@
 /**
- * GPU station map (deck.gl over a MapLibre CARTO basemap) — Stage 1 of the
+ * GPU station map (deck.gl over a MapLibre raster basemap) — Stage 1 of the
  * migration off react-leaflet SVG (see `specs/unified-page-architecture.md`
  * "Rendering architecture"). Renders all ~2,700 stations as ONE instanced
  * `ScatterplotLayer` with GPU picking, fed by the same `stationColors` the
@@ -7,26 +7,31 @@
  * not a re-mount of thousands of SVG nodes.
  *
  * MapLibre owns the map + camera (root `<Map>`); deck.gl is layered on via a
- * `MapboxOverlay` control (`interleaved`), so the basemap and deck marks share
- * one GL context and sort correctly. Picking is GPU-based (`pickable`), so the
- * old invisible hit-circle hack is gone.
+ * `MapboxOverlay` control (overlaid, in its own canvas above the basemap — see
+ * `DeckOverlay`). Picking is GPU-based (`pickable`), so the old invisible
+ * hit-circle hack is gone. Stage 3 adds the `ArcLayer` flow fan (`arcs`).
  *
  * Opt-in via `?gl=1` on `/stations` while it reaches parity with `StationMap`.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Map as MaplibreMap, useControl, type MapLayerMouseEvent } from 'react-map-gl/maplibre'
 import { MapboxOverlay } from '@deck.gl/mapbox'
-import { ScatterplotLayer } from '@deck.gl/layers'
+import { ArcLayer, ScatterplotLayer } from '@deck.gl/layers'
 import type { Layer, PickingInfo } from '@deck.gl/core'
 import type { Map as MaplibreMapInstance, StyleSpecification } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useTheme } from '../contexts/ThemeContext'
 import css from '../stations.module.css'
 import type { Stations, StationPairCounts } from './StationMap'
+import { rampRgb, type FlowArc } from './flowLens'
 
 const { round, sqrt, max } = Math
 
 type RGBA = [number, number, number, number]
+
+/** Arc tilt (degrees): rotates each arc's plane off vertical so it reads as a
+ *  curve from straight above (a 0-tilt arc is a straight line at pitch 0). */
+const ARC_TILT = 90
 
 /** Parse `#rrggbb` → `[r,g,b]`. Falls back to mid-grey on anything unexpected. */
 function hexToRgb(hex: string): [number, number, number] {
@@ -90,6 +95,9 @@ export interface StationMapGLProps {
   stationRadii?: Record<string, number> | null
   /** Mark style: solid `fill` (default) or hollow `ring`. */
   mark?: 'fill' | 'ring'
+  /** Flow-arc fan (Stage 3): one `ArcLayer` arc per directed pair between the
+   *  lens source set and other stations (`flowArcs`). Null/empty = no fan. */
+  arcs?: readonly FlowArc[] | null
   /** Transient hover selection (drives the title-bar subtitle link). */
   setSelectedId?: (id: string | undefined) => void
   /** Hovered station id → parent, for the live hover-preview lens. */
@@ -110,6 +118,7 @@ export default function StationMapGL({
   stationColors,
   stationRadii,
   mark = 'fill',
+  arcs,
   setSelectedId,
   onHoverStation,
   center,
@@ -222,7 +231,30 @@ export default function StationMapGL({
   const radiusUnits = stationRadii ? 'pixels' : 'meters'
   const radiusTrigger = stationRadii ? `px:${Object.keys(stationRadii).length}` : 'm'
 
+  // Arc fan: under the station dots, non-pickable (pure decoration, like the
+  // Leaflet fan's `interactive={false}` edges). Each arc runs origin →
+  // destination in riding direction and fades in along its length (faint at
+  // the origin, full ramp color at the destination), so direction reads
+  // without arrowheads and the origin doesn't pile up into a solid blob.
+  // Width + color both by rank/volume; tilted so arcs curve visibly even in
+  // the top-down (pitch 0) view.
+  const arcMax = arcs?.length ? arcs[arcs.length - 1].count : 1
+  const arcLayer = arcs?.length ? new ArcLayer<FlowArc>({
+    id: 'flow-arcs',
+    data: arcs as FlowArc[],
+    getSourcePosition: (d) => d.source,
+    getTargetPosition: (d) => d.target,
+    getSourceColor: (d) => [...rampRgb(d.t), 40],
+    getTargetColor: (d) => [...rampRgb(d.t), 230],
+    getWidth: (d) => 1 + 5 * sqrt(d.count / arcMax),
+    widthUnits: 'pixels',
+    getHeight: 0.35,
+    getTilt: ARC_TILT,
+    pickable: false,
+  }) : null
+
   const layers: Layer[] = [
+    ...(arcLayer ? [arcLayer] : []),
     new ScatterplotLayer<StationDatum>({
       id: 'stations',
       data,

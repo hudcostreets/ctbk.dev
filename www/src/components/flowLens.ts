@@ -65,7 +65,8 @@ const R_DIM = 2
 const R_MIN = 4
 const R_MAX = 22
 
-function rampColor(t: number): string {
+/** Ramp position `t` ∈ [0, 1] → `[r, g, b]`. */
+export function rampRgb(t: number): [number, number, number] {
   const clamped = t < 0 ? 0 : t > 1 ? 1 : t
   let lo = RAMP[0]
   let hi = RAMP[RAMP.length - 1]
@@ -79,37 +80,63 @@ function rampColor(t: number): string {
   const span = hi.at - lo.at || 1
   const f = (clamped - lo.at) / span
   const c = (a: number, b: number) => Math.round(a + (b - a) * f)
-  return `#${[0, 1, 2].map((i) => c(lo.rgb[i], hi.rgb[i]).toString(16).padStart(2, '0')).join('')}`
+  return [c(lo.rgb[0], hi.rgb[0]), c(lo.rgb[1], hi.rgb[1]), c(lo.rgb[2], hi.rgb[2])]
 }
 
-/** Directed trip counts between the selected set and every *other* station.
- *  `out`: sum of `pairCounts[src][other]` over the set. `in`: sum of
- *  `pairCounts[other][t]` over the set. Within-set pairs are excluded. */
+function rampColor(t: number): string {
+  return `#${rampRgb(t).map((v) => v.toString(16).padStart(2, '0')).join('')}`
+}
+
+/** One directed (riding-direction) station pair between the set and another
+ *  station: `from` → `to`, `count` trips. `other` is the non-set end. */
+type DirectedPair = { from: string; to: string; other: string; count: number }
+
+/** Every directed pair between the selected set and every *other* station.
+ *  `out`: `pairCounts[src][other]` for each set member. `in`:
+ *  `pairCounts[other][t]` for each set member. Within-set pairs and stations
+ *  missing from `stations` are excluded. Shared by the lens (summed per
+ *  `other`) and the arc fan (one arc per pair). */
+function directedPairs(
+  stations: Stations,
+  pairCounts: StationPairCounts | null,
+  selIds: readonly string[],
+  direction: FlowDirection,
+): DirectedPair[] {
+  if (!pairCounts || selIds.length === 0) return []
+  const set = new Set(selIds)
+  const out: DirectedPair[] = []
+  if (direction === 'out') {
+    for (const src of selIds) {
+      const dsts = pairCounts[src]
+      if (!dsts || !stations[src]) continue
+      for (const [dst, count] of Object.entries(dsts)) {
+        if (set.has(dst) || !stations[dst] || !(count > 0)) continue
+        out.push({ from: src, to: dst, other: dst, count })
+      }
+    }
+  } else {
+    for (const [origin, dsts] of Object.entries(pairCounts)) {
+      if (set.has(origin) || !stations[origin]) continue
+      for (const t of selIds) {
+        const count = dsts[t] ?? 0
+        if (count > 0 && stations[t]) out.push({ from: origin, to: t, other: origin, count })
+      }
+    }
+  }
+  return out
+}
+
+/** Directed trip counts between the selected set and every *other* station
+ *  (`directedPairs` summed per non-set station). */
 function flowTotals(
   stations: Stations,
   pairCounts: StationPairCounts | null,
   selIds: readonly string[],
   direction: FlowDirection,
 ): Record<string, number> | null {
-  if (!pairCounts || selIds.length === 0) return null
-  const set = new Set(selIds)
   const totals: Record<string, number> = {}
-  if (direction === 'out') {
-    for (const src of selIds) {
-      const dsts = pairCounts[src]
-      if (!dsts) continue
-      for (const [dst, count] of Object.entries(dsts)) {
-        if (set.has(dst) || !stations[dst]) continue
-        totals[dst] = (totals[dst] ?? 0) + count
-      }
-    }
-  } else {
-    for (const [origin, dsts] of Object.entries(pairCounts)) {
-      if (set.has(origin) || !stations[origin]) continue
-      let sum = 0
-      for (const t of selIds) sum += dsts[t] ?? 0
-      if (sum > 0) totals[origin] = sum
-    }
+  for (const { other, count } of directedPairs(stations, pairCounts, selIds, direction)) {
+    totals[other] = (totals[other] ?? 0) + count
   }
   return Object.keys(totals).length ? totals : null
 }
@@ -181,4 +208,50 @@ export function flowLens(
     topCount: maxCount,
     floorCount: n ? survivors[n - 1][1] : 0,
   }
+}
+
+/** One flow arc (riding direction) for the GPU fan (`ArcLayer`). */
+export type FlowArc = {
+  from: string
+  to: string
+  /** `[lng, lat]` of the riding-direction origin / destination. */
+  source: [number, number]
+  target: [number, number]
+  count: number
+  /** Rank position on the lens ramp (1 = heaviest pair, 0 = lightest shown). */
+  t: number
+}
+
+/**
+ * Arc fan for a source set: one arc per directed (set ↔ other) station pair,
+ * in riding direction (`out`: set → other; `in`: other → set). Same data as
+ * the Leaflet destination fan (`pairCounts`), but with the lens's
+ * `FLOOR_FRAC` cut (pairs below 4% of the heaviest pair are dropped — the
+ * long 1–3-trip tail is what stacked into the SVG fan's red blob) and ranked
+ * so each arc can take its ramp color. Sorted light→heavy, so heavy arcs draw
+ * on top.
+ */
+export function flowArcs(
+  stations: Stations,
+  pairCounts: StationPairCounts | null,
+  selIds: readonly string[],
+  direction: FlowDirection = 'out',
+): FlowArc[] {
+  const pairs = directedPairs(stations, pairCounts, selIds, direction)
+  if (!pairs.length) return []
+  const maxCount = Math.max(...pairs.map((p) => p.count))
+  const kept = pairs.filter((p) => p.count >= maxCount * FLOOR_FRAC).sort((a, b) => a.count - b.count)
+  const n = kept.length
+  return kept.map(({ from, to, count }, i) => {
+    const a = stations[from]
+    const b = stations[to]
+    return {
+      from,
+      to,
+      source: [a.lng, a.lat],
+      target: [b.lng, b.lat],
+      count,
+      t: n <= 1 ? 1 : i / (n - 1),
+    }
+  })
 }
