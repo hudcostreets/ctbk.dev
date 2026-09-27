@@ -18,17 +18,24 @@ const SLOT_S = 300
 const ROW_H = 14
 const ROW_GAP = 2
 const ROW_PITCH = ROW_H + ROW_GAP
-const LABEL_W = 64
+// Left gutter, as table columns: weekday (left-aligned), M/D (right-aligned
+// at MD_X), then the day's own state histogram (a 100% bar), then the grid.
+const MD_X = 60
+const HIST_X = 66
+const HIST_W = 60
+const LABEL_W = HIST_X + HIST_W + 6
 const AXIS_H = 16
-/** Rows shown before the grid scrolls (a 4w window, plus its partial newest
- *  day), so longer windows scroll inside a box instead of growing the page. */
-const VISIBLE_ROWS = 29
+/** Rows shown before the grid scrolls (a month-long window, plus partial end
+ *  days), so longer windows scroll inside a box instead of growing the page. */
+const VISIBLE_ROWS = 32
 
-const dayLabel = (day: string) => {
+const dayParts = (day: string): [string, string] => {
   const [y, m, d] = day.split('-').map(Number)
   const wd = new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' })
-  return `${wd} ${m}/${d}`
+  return [wd, `${m}/${d}`]
 }
+const dayLabel = (day: string) => dayParts(day).join(' ')
+const pctLabel = (p: number) => (p < 1 ? `${p.toFixed(1)}%` : `${Math.round(p)}%`)
 const hhmm = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`
 /** Start (unix s) of ET day `YYYY-MM-DD` (noon UTC is always that ET date). */
 const dayStartS = (day: string) => {
@@ -50,7 +57,8 @@ function sized(cv: HTMLCanvasElement, w: number, h: number): CanvasRenderingCont
   return g
 }
 
-interface Hover { x: number; y: number; row: GridRow; col: number }
+/** A hovered slot (`col`) or day histogram (`col` null), with its counts. */
+interface Hover { x: number; y: number; row: GridRow; col: number | null; counts: number[] }
 
 export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null; fromS: number; toS: number }) {
   const [ff] = useUrlState('sff', boolParam)
@@ -82,6 +90,12 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
   const nCols = Math.round(86400 / binS)
   const colW = (width - LABEL_W) / nCols
   const bodyH = rows.length * ROW_PITCH
+  // Per-day station-minutes by state (the row's own histogram).
+  const rowTotals = useMemo(() => rows.map((r) => {
+    const t = new Array<number>(SMG_STATES.length).fill(0)
+    for (const c of r.cells) if (c) c.forEach((v, i) => { t[i] += v })
+    return t
+  }), [rows])
 
   // Another plot's brush, as `[row, col0, col1)` cell runs (a time range) or
   // a column band (an hour of day).
@@ -124,6 +138,11 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
     const rule = dark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.15)'
     const hg = sized(head, width, AXIS_H)
     const bg = sized(body, width, bodyH)
+    hg.fillStyle = ink
+    hg.globalAlpha = 0.7
+    hg.textAlign = 'center'
+    hg.fillText('whole day', HIST_X + HIST_W / 2, AXIS_H / 2)
+    hg.globalAlpha = 1
     // Hour ticks every 3h: labels + stubs in the sticky header, rules in the body.
     for (let h = 0; h <= 24; h += 3) {
       const x = LABEL_W + (h * 3600 / binS) * colW
@@ -137,11 +156,30 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
         hg.fillText(hourLabel(h), x, AXIS_H / 2)
       }
     }
+    const fade = (st: { id: number }) => (hl != null && hl !== st.id ? '30' : '')
     rows.forEach((row, r) => {
       const y0 = r * ROW_PITCH
+      const tot = rowTotals[r]
+      const [wd, md] = dayParts(row.day)
+      // Days where a legend-hovered state never occurs fade out.
+      bg.globalAlpha = hl != null && !tot[hl] ? 0.3 : 1
       bg.fillStyle = ink
       bg.textAlign = 'left'
-      bg.fillText(dayLabel(row.day), 0, y0 + ROW_H / 2)
+      bg.fillText(wd, 0, y0 + ROW_H / 2)
+      bg.textAlign = 'right'
+      bg.fillText(md, MD_X, y0 + ROW_H / 2)
+      bg.globalAlpha = 1
+      const sum = tot.reduce((a, v) => a + v, 0)
+      if (sum) {
+        let x = HIST_X
+        for (const st of SMG_STATES) {
+          const w = (tot[st.id] / sum) * HIST_W
+          if (!w) continue
+          bg.fillStyle = canvasFill(st, dark, fade(st))
+          bg.fillRect(x, y0, w, ROW_H)
+          x += w
+        }
+      }
       row.cells.forEach((c, col) => {
         if (!c) return
         const total = c.reduce((a, v) => a + v, 0)
@@ -153,20 +191,29 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
           if (!v) continue
           const h = (v / total) * ROW_H
           y -= h
-          bg.fillStyle = canvasFill(st, dark, hl != null && hl !== st.id ? '30' : '')
+          bg.fillStyle = canvasFill(st, dark, fade(st))
           bg.fillRect(x, y, Math.max(colW, 1), h)
         }
       })
     })
-  }, [rows, width, bodyH, colW, binS, dark, hl])
+  }, [rows, rowTotals, width, bodyH, colW, binS, dark, hl])
 
   const onMove = (e: React.MouseEvent) => {
     const body = bodyRef.current!.getBoundingClientRect()
     const wrap = wrapRef.current!.getBoundingClientRect()
     const r = Math.floor((e.clientY - body.top) / ROW_PITCH)
-    const col = Math.floor((e.clientX - body.left - LABEL_W) / colW)
-    if (r < 0 || r >= rows.length || col < 0 || col >= nCols || !rows[r].cells[col]) { setHover(null); clearBrush('grid'); return }
-    setHover({ x: e.clientX - wrap.left, y: e.clientY - wrap.top, row: rows[r], col })
+    const x = e.clientX - body.left
+    const at = { x: e.clientX - wrap.left, y: e.clientY - wrap.top }
+    if (r >= 0 && r < rows.length && x >= HIST_X && x < HIST_X + HIST_W) {
+      // A day's histogram brushes the whole day.
+      setHover({ ...at, row: rows[r], col: null, counts: rowTotals[r] })
+      setBrush({ kind: 't', tS: dayStartS(rows[r].day), spanS: 86400, src: 'grid' })
+      return
+    }
+    const col = Math.floor((x - LABEL_W) / colW)
+    const cell = r >= 0 && r < rows.length && col >= 0 && col < nCols ? rows[r].cells[col] : null
+    if (!cell) { setHover(null); clearBrush('grid'); return }
+    setHover({ ...at, row: rows[r], col, counts: cell })
     setBrush({ kind: 't', tS: dayStartS(rows[r].day) + col * binS, spanS: binS, src: 'grid' })
   }
 
@@ -192,7 +239,7 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
               <div
                 key={`${r}-${c0}`}
                 className={css.gridMark}
-                style={{ left: LABEL_W + c0 * colW - 1, top: AXIS_H + r * ROW_PITCH - 1, width: (c1 - c0) * colW + 2, height: ROW_H + 2 }}
+                style={{ left: LABEL_W + c0 * colW - 1, top: AXIS_H + r * ROW_PITCH - 1, width: Math.min((c1 - c0) * colW + 2, width - (LABEL_W + c0 * colW)), height: ROW_H + 2 }}
               />
             ))}
             {band && (
@@ -204,21 +251,24 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
           </div>
         )}
         {hover && (() => {
-          const c = hover.row.cells[hover.col]!
+          const c = hover.counts
           const total = c.reduce((a, v) => a + v, 0)
-          const start = Math.round((hover.col * binS) / 60)
+          const start = hover.col == null ? 0 : Math.round((hover.col * binS) / 60)
+          const title = hover.col == null
+            ? `${dayLabel(hover.row.day)} · whole day`
+            : `${dayLabel(hover.row.day)} ${hhmm(start)}–${hhmm(start + binS / 60)}`
           const flip = hover.x > width * 0.6
           return (
             <div
               className={css.gridTip}
               style={{ left: hover.x + (flip ? -12 : 12), top: hover.y + 12, transform: flip ? 'translateX(-100%)' : undefined }}
             >
-              <div className={css.gridTipHead}>{dayLabel(hover.row.day)} {hhmm(start)}–{hhmm(start + binS / 60)}</div>
+              <div className={css.gridTipHead}>{title}</div>
               {legend.filter((s) => c[s.id] > 0).map((s) => (
                 <div key={s.id} className={css.gridTipRow}>
                   <span className={css.dot} style={swatchStyle(s, dark)} />
                   <span>{s.label}</span>
-                  <b>{Math.round((100 * c[s.id]) / total)}%</b>
+                  <b>{pctLabel((100 * c[s.id]) / total)}</b>
                 </div>
               ))}
             </div>

@@ -261,7 +261,9 @@ export default function SmgChart({
   }
 
   // Legend reads top-of-stack first (unmeasured → OK → problem states), like the plot.
-  const legend = [...SMG_STATES].reverse()
+  // States absent from the window are left out of the legend.
+  const present = new Set(bins.flatMap((b) => (ff ? b.ff : b.state).flatMap((v, i) => (v ? [i] : []))))
+  const legend = [...SMG_STATES].reverse().filter((s) => present.has(s.id))
   const textColor = isDark ? '#e0e0e0' : '#222'
 
   return (

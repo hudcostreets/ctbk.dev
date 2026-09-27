@@ -54,13 +54,20 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
   const traces = useMemo(() => {
     if (!rows) return []
     const live = rows.map((r) => LIVE.reduce((s, st) => s + r[st.id], 0))
-    return LIVE.map((st) => ({
+    // States absent from the window get no trace (so no legend item).
+    return LIVE.filter((st) => rows.some((r) => r[st.id] > 0)).map((st) => ({
       type: 'bar' as const,
       name: st.label,
       x: HOUR_LABELS,
       y: rows.map((r, h) => (live[h] ? (100 * r[st.id]) / live[h] : 0)),
       marker: plotlyMarker(st, dark),
       hovertemplate: `${st.label}: %{y:.1f}%<extra></extra>`,
+      // Each segment's share, where it fits (`uniformtext` hides the rest).
+      texttemplate: '%{y:.0f}%',
+      textposition: 'inside' as const,
+      insidetextanchor: 'middle' as const,
+      // Dark ink on the light hatched (yellow) states, white on the rest.
+      textfont: { size: 10, color: st.hatch ? '#1a1a1a' : '#fff' },
     }))
   }, [rows, dark])
 
@@ -76,6 +83,7 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
     autosize: true,
     height: PLOT_H,
     barmode: 'stack' as const,
+    uniformtext: { minsize: 9, mode: 'hide' as const },
     bargap: 0.08,
     hovermode: 'x unified' as const,
     hoverlabel: {
