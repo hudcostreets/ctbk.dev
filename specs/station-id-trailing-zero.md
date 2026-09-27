@@ -101,7 +101,7 @@ Order matters: each step's inputs come from the previous one. Heavy steps run on
 0. **Before anything else:** `ctbk station-harmonize trailing-zero-audit` (local; needs the current, corrupted meta_hists), then commit `station-trailing-zero-repairs.json`. Already done on `merge-review`.
 3. **`ctbk station-harmonize create -f`** on `e`. It enforces `station-merge-decisions.yaml`. `-f` is required, because cached observations for the 59 months are corrupted. It needs every consolidated month locally (~5–8 GB). Check the id-map diff against the preview above; expect 71 changes (the owner's calls on `3104`/`233` included).
 4. **`ctbk station-luc-build -R`** (local only, no upload) → review the `moved`/`new` LUC churn. New historical canonicals (`3090`, `JC103`, …) and dropping `5685.04` can move neighbors' LUCs, which matters for avail serving. Then ☁ upload (`ctbk station-luc-build`, no `-R`).
-5. **Rides assets:** `ctbk rides-canonicalize-map -u` (☁ writes `stations/station-canonicalize-map.json` + `rides-extra-stations.json`), then `ctbk rides-merge-review` (regenerates `www/public/assets/station-merges.json`), and regenerate `gbfs/engine/station-geo.json` via `rides_assets.regen_geo_json` (inputs are the new `station-observations.parquet`).
+5. **Rides assets:** `ctbk rides-canonicalize-map -u` (☁ writes `stations/station-canonicalize-map.json` + `rides-extra-stations.json`), then regenerate `gbfs/engine/station-geo.json` via `rides_assets.regen_geo_json` (inputs are the new `station-observations.parquet`), then `ctbk rides-merge-review` (regenerates `www/public/assets/station-merges.json`; its member positions come from `station-geo.json`).
 6. **Engine image:** commit the new `station-id-map.json`/`station-geo.json` → ☁ `pyrmts-engine batch push -c . -f gbfs/engine/Dockerfile -p linux/arm64 688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-engine:<sha>` → ☁ `ctbk gbfs engine jobdef -s <image>`.
 7. ☁ **`ctbk gbfs normalized-mirror`** for the 59 months (R2 server-side copies to the plain `normalized/` keys the rides factory lists).
 8. **Rebuild both rides pyramids over full history.** Raw `s:` leaves change for 2013–2020, and id-map changes move rides between S2 cells as late as 2026 (`5947.06`, `6474.12`), so a `c:`-only canonicalize pass isn't enough:
@@ -150,8 +150,8 @@ Prereq: this tooling (`repair-cutover`) on `main`. Its api changes are prod-neut
 ctbk station-luc-build -c                         # ☁ station-luc.<h>.json only; prints the key → $LUC_KEY
                                                   #   also rewrites www/public/assets/station-luc.json (the FE copy)
 ctbk rides-canonicalize-map -u -c                 # ☁ prints CANON_MAP_KEY=… EXTRA_STATIONS_KEY=… (reads the new local luc's `merged` overlay)
-ctbk rides-merge-review                           # www/public/assets/station-merges.json (/merge-review input)
-python -c 'from ctbk.pyramid_cascade.rides_assets import regen_geo_json as g; g()'   # gbfs/engine/station-geo.json
+python -c 'from ctbk.pyramid_cascade.rides_assets import regen_geo_json as g; g()'   # gbfs/engine/station-geo.json (needs `dvx pull` of station-observations.parquet)
+ctbk rides-merge-review                           # www/public/assets/station-merges.json (/merge-review input; reads station-geo.json, so after it)
 git add -u && git commit -m 'repair: candidate station assets' && git push h trailing-zero-repair
 ```
 
