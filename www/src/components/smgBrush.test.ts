@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { etHoursOf, hodIntervals } from './smgBrush'
+import type { SmgBin } from '../query/smg'
+import { etHoursOf, hodIntervals, stateSpans } from './smgBrush'
 
 const H = 3600
 // 2026-09-21 00:00 EDT = 04:00Z.
@@ -24,5 +25,23 @@ describe('etHoursOf', () => {
     expect(etHoursOf(MON + 8 * H + 1800, 300)).toEqual([8])
     expect(etHoursOf(MON + 22 * H, 3 * H)).toEqual([0, 22, 23])
     expect(etHoursOf(MON, 24 * H)).toEqual(Array.from({ length: 24 }, (_, h) => h))
+  })
+})
+
+describe('stateSpans', () => {
+  const bin = (dtS: number, counts: Record<number, number>): SmgBin => {
+    const state = Array.from({ length: 10 }, (_, i) => counts[i] ?? 0)
+    return { dtS, state, ff: state }
+  }
+  it('merges adjacent bins where the state occurs, pooling its share', () => {
+    expect(stateSpans([
+      bin(0, { 6: 30, 9: 30 }),
+      bin(H, { 6: 60 }),
+      bin(2 * H, { 9: 60 }),
+      bin(3 * H, { 6: 15, 9: 45 }),
+    ], H, false, 6)).toEqual([
+      [0, 2 * H, 0.75],
+      [3 * H, 4 * H, 0.25],
+    ])
   })
 })

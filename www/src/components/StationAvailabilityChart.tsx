@@ -97,7 +97,7 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
   // null = all visible. Otherwise set of visible keys (used for solo / hidden).
   const [visible, setVisible] = useState<Set<SeriesKey> | null>(null)
   const [hovered, setHovered] = useState<SeriesKey | null>(null)
-  const { setBrush } = useBrush()
+  const { setBrush, clearBrush } = useBrush()
 
   useEffect(() => {
     if (!containerRef.current || !rows.length) return
@@ -186,7 +186,7 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
             const idx = u.cursor.idx
             if (idx == null || idx < 0 || idx >= rows.length) {
               setTooltip(null)
-              setBrush(null)
+              clearBrush('avail')
               return
             }
             setBrush({ kind: 't', tS: rows[idx].polled_at, spanS: binS ?? 60, src: 'avail' })
@@ -286,7 +286,7 @@ export default function StationAvailabilityChart({ rows, capacity, height = 400,
   return (
     <div
       style={{ position: 'relative', width: '100%' }}
-      onMouseLeave={() => { setTooltip(null); setBrush(null) }}
+      onMouseLeave={() => { setTooltip(null); clearBrush('avail') }}
     >
       <div
         ref={containerRef}

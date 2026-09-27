@@ -20,7 +20,7 @@ import './StationAvailabilityChart.css'
 import { useTheme } from '../contexts/ThemeContext'
 import { useDragPan } from '../uplot'
 import { N_STATES, SMG_ERAS, SMG_STATES, type SmgBin, type SmgState } from '../query/smg'
-import { BrushOverlay, useBrush } from './smgBrush'
+import { BrushOverlay, brushedState, stateSpans, useBrush } from './smgBrush'
 import { canvasFill, swatchStyle } from './smgStyle'
 import { Tip } from './Tip'
 
@@ -91,8 +91,15 @@ export default function SmgChart({
   const [tooltip, setTooltip] = useState<TooltipState | null>(null)
   // null = all states shown; otherwise the visible subset (solo / toggles).
   const [visible, setVisible] = useState<Set<number> | null>(null)
-  const [hovered, setHovered] = useState<number | null>(null)
-  const { setBrush } = useBrush()
+  const [legendHover, setLegendHover] = useState<number | null>(null)
+  const { brush, setBrush, clearBrush } = useBrush()
+  // A state hovered here, or in another plot's legend.
+  const hovered = legendHover ?? brushedState(brush)
+  const hoverLegend = (id: number | null) => {
+    setLegendHover(id)
+    if (id == null) clearBrush('smg')
+    else setBrush({ kind: 'state', id, spans: stateSpans(bins, binS, ff, id), src: 'smg' })
+  }
 
   const colorOf = (s: SmgState) => (isDark ? s.dark : s.light)
   const isShown = (id: number) => visible == null || visible.has(id)
@@ -169,7 +176,7 @@ export default function SmgChart({
         setCursor: [
           (u) => {
             const idx = u.cursor.idx
-            if (idx == null || idx < 0 || idx >= bins.length) { setTooltip(null); setBrush(null); return }
+            if (idx == null || idx < 0 || idx >= bins.length) { setTooltip(null); clearBrush('smg', 't'); return }
             setBrush({ kind: 't', tS: bins[idx].dtS, spanS: binS, src: 'smg' })
             const dpr = devicePixelRatio
             setTooltip({
@@ -258,7 +265,7 @@ export default function SmgChart({
   const textColor = isDark ? '#e0e0e0' : '#222'
 
   return (
-    <div style={{ position: 'relative', width: '100%' }} onMouseLeave={() => { setTooltip(null); setBrush(null) }}>
+    <div style={{ position: 'relative', width: '100%' }} onMouseLeave={() => { setTooltip(null); clearBrush('smg', 't') }}>
       <div ref={containerRef} className={`station-availability-chart ${actualTheme}`} style={{ width: '100%' }} />
       <BrushOverlay plot={plotRef.current} self="smg" dark={isDark} />
       <Tip content="Click to solo · Shift-click to toggle · Double-click to reset" placement="bottom">
@@ -268,7 +275,7 @@ export default function SmgChart({
           padding: '6px 12px', fontSize: 12, color: textColor, userSelect: 'none',
         }}
         onDoubleClick={() => setVisible(null)}
-        onMouseLeave={() => setHovered(null)}
+        onMouseLeave={() => hoverLegend(null)}
       >
         {legend.map((s) => {
           const shown = isShown(s.id)
@@ -276,7 +283,7 @@ export default function SmgChart({
             <div
               key={s.id}
               onClick={(e) => onLegendClick(e, s.id)}
-              onMouseEnter={() => setHovered(s.id)}
+              onMouseEnter={() => hoverLegend(s.id)}
               style={{
                 display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
                 opacity: shown ? 1 : 0.4, padding: '2px 8px', borderRadius: 3,

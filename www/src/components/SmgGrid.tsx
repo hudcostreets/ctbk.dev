@@ -10,7 +10,7 @@ import { boolParam, useUrlState } from 'use-prms'
 import { useTheme } from '../contexts/ThemeContext'
 import { SMG_STATES, useSmgHist, type SmgSelection } from '../query/smg'
 import { etDayMinute, etDayStartS, smgGrid, type GridRow } from '../query/smgGrid'
-import { useBrush } from './smgBrush'
+import { brushedState, useBrush } from './smgBrush'
 import { canvasFill, swatchStyle } from './smgStyle'
 import css from './SmgPanel.module.css'
 
@@ -68,7 +68,8 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
   const [width, setWidth] = useState(800)
   const [hover, setHover] = useState<Hover | null>(null)
   const hasRows = rows.length > 0
-  const { brush, setBrush } = useBrush()
+  const { brush, setBrush, clearBrush } = useBrush()
+  const hl = brushedState(brush)
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
@@ -152,19 +153,19 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
           if (!v) continue
           const h = (v / total) * ROW_H
           y -= h
-          bg.fillStyle = canvasFill(st, dark)
+          bg.fillStyle = canvasFill(st, dark, hl != null && hl !== st.id ? '30' : '')
           bg.fillRect(x, y, Math.max(colW, 1), h)
         }
       })
     })
-  }, [rows, width, bodyH, colW, binS, dark])
+  }, [rows, width, bodyH, colW, binS, dark, hl])
 
   const onMove = (e: React.MouseEvent) => {
     const body = bodyRef.current!.getBoundingClientRect()
     const wrap = wrapRef.current!.getBoundingClientRect()
     const r = Math.floor((e.clientY - body.top) / ROW_PITCH)
     const col = Math.floor((e.clientX - body.left - LABEL_W) / colW)
-    if (r < 0 || r >= rows.length || col < 0 || col >= nCols || !rows[r].cells[col]) { setHover(null); setBrush(null); return }
+    if (r < 0 || r >= rows.length || col < 0 || col >= nCols || !rows[r].cells[col]) { setHover(null); clearBrush('grid'); return }
     setHover({ x: e.clientX - wrap.left, y: e.clientY - wrap.top, row: rows[r], col })
     setBrush({ kind: 't', tS: dayStartS(rows[r].day) + col * binS, spanS: binS, src: 'grid' })
   }
@@ -177,7 +178,7 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
         {q.isFetching && <span className={css.status}>loading…</span>}
         {q.isError && <span className={css.error}>states fetch failed</span>}
       </div>
-      <div ref={wrapRef} style={{ position: 'relative', width: '100%' }} onMouseLeave={() => { setHover(null); setBrush(null) }}>
+      <div ref={wrapRef} style={{ position: 'relative', width: '100%' }} onMouseLeave={() => { setHover(null); clearBrush('grid') }}>
         {hasRows && (
           <div
             ref={scrollRef}

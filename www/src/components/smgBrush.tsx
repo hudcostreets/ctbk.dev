@@ -5,27 +5,61 @@
  * (spikeline / range / band / highlighted bar), so one hover reads across all
  * four views. `src` names the emitting plot, which skips drawing its own.
  */
-import { createContext, useContext, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
 import type uPlot from 'uplot'
+import type { SmgBin } from '../query/smg'
 import { etDayMinute, etDayStartS } from '../query/smgGrid'
 
 export type Brush =
   | { kind: 't'; tS: number; spanS: number; src: string }
   | { kind: 'hod'; hour: number; src: string }
+  /** A hovered legend state: `spans` are `[start, end, share]` runs where it
+   *  occurs (share = its fraction of the run's station-minutes). */
+  | { kind: 'state'; id: number; spans: [number, number, number][]; src: string }
   | null
 
-interface Ctx { brush: Brush; setBrush: (b: Brush) => void }
-const BrushCtx = createContext<Ctx>({ brush: null, setBrush: () => {} })
+interface Ctx {
+  brush: Brush
+  setBrush: (b: Brush) => void
+  /** Clear the brush only if `src` set it (and it's of `kind`, if given): a
+   *  plot re-initializing or losing its cursor mustn't wipe another plot's (or
+   *  its own legend's) live brush. */
+  clearBrush: (src: string, kind?: NonNullable<Brush>['kind']) => void
+}
+const BrushCtx = createContext<Ctx>({ brush: null, setBrush: () => {}, clearBrush: () => {} })
 
 export function BrushProvider({ children }: { children: ReactNode }) {
   const [brush, setBrush] = useState<Brush>(null)
-  const value = useMemo(() => ({ brush, setBrush }), [brush])
+  const clearBrush = useCallback(
+    (src: string, kind?: NonNullable<Brush>['kind']) => setBrush((b) => (b?.src === src && (!kind || b.kind === kind) ? null : b)),
+    [],
+  )
+  const value = useMemo(() => ({ brush, setBrush, clearBrush }), [brush, clearBrush])
   return <BrushCtx.Provider value={value}>{children}</BrushCtx.Provider>
 }
 
 export const useBrush = () => useContext(BrushCtx)
 
 const HOUR_S = 3600
+
+/** Where state `id` occurs in `bins`, as `[start, end, share]` runs: adjacent
+ *  bins merge (share = the run's pooled fraction). */
+export function stateSpans(bins: readonly SmgBin[], binS: number, ff: boolean, id: number): [number, number, number][] {
+  const out: [number, number, number, number, number][] = []  // start, end, share, v, total
+  for (const b of bins) {
+    const c = ff ? b.ff : b.state
+    const v = c[id]
+    if (!v) continue
+    const total = c.reduce((a, x) => a + x, 0)
+    const last = out[out.length - 1]
+    if (last && last[1] === b.dtS) { last[1] = b.dtS + binS; last[3] += v; last[4] += total }
+    else out.push([b.dtS, b.dtS + binS, 0, v, total])
+  }
+  return out.map(([a, b, , v, total]) => [a, b, total ? v / total : 0])
+}
+
+/** The state id a `state` brush highlights (null otherwise). */
+export const brushedState = (b: Brush) => (b?.kind === 'state' ? b.id : null)
 
 /** `[start, end)` instants of ET hour `hour` on each day overlapping `[fromS, toS)`. */
 export function hodIntervals(hour: number, fromS: number, toS: number): [number, number][] {
@@ -62,6 +96,27 @@ export function BrushOverlay({ plot, self, dark }: { plot: uPlot | null; self: s
   const top = plot.bbox.top / dpr
   const width = plot.bbox.width / dpr
   const height = plot.bbox.height / dpr
+  if (brush.kind === 'state') {
+    return (
+      <>
+        {brush.spans.map(([a, b, share]) => {
+          const x0 = Math.max(0, plot.valToPos(a, 'x'))
+          const x1 = Math.min(width, plot.valToPos(b, 'x'))
+          if (x1 <= 0 || x0 >= width) return null
+          return (
+            <div
+              key={a}
+              style={{
+                position: 'absolute', pointerEvents: 'none', zIndex: 5,
+                left: left + x0, top, height, width: Math.max(1, x1 - x0),
+                background: dark ? '#fff' : '#000', opacity: 0.12 + 0.4 * share,
+              }}
+            />
+          )
+        })}
+      </>
+    )
+  }
   const spans: [number, number][] = brush.kind === 't'
     ? [[brush.tS, brush.tS + brush.spanS]]
     : hodIntervals(brush.hour, min, max)
