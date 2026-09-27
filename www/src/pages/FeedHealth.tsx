@@ -17,6 +17,7 @@ interface CoverageDay {
   live: number
   observed_minutes: number
   gaps: Array<[number, number, number]>  // [start_minute, length, min_observed_count]
+  filled?: number[]  // UTC minutes the 2.3 WAL missed, filled from the 1.1 side-poller
   /** Feed `last_updated` cadence (absent on docs written before it existed). */
   lu_updates?: number
   lu_per_hour?: number[]
@@ -114,7 +115,7 @@ export default function FeedHealth() {
           <Section title="Update intervals" hint="seconds between consecutive feed last_updated values, summed over the range">
             <IntervalHistogram range={data} />
           </Section>
-          <Section title="Per day" hint="one row per UTC day, newest first · top strip = 1,440 minutes (red = no feed tick); bottom strip = 24 hours (amber = skipped update cycles). Hover a strip to scrub; click a row to list its gaps. Toggle “wide” for full width.">
+          <Section title="Per day" hint="one row per UTC day, newest first · top strip = 1,440 minutes (red = no feed tick; blue = missed by 2.3, filled from the 1.1 side-poller); bottom strip = 24 hours (amber = skipped update cycles). Hover a strip to scrub; click a row to list its gaps. Toggle “wide” for full width.">
             <CoverageTable range={data} />
           </Section>
         </>
@@ -264,6 +265,7 @@ function CoverageTable({ range }: { range: CoverageRange }) {
           <tr style={{ opacity: 0.6 }}>
             <th style={cell('left')}>Date</th>
             <th style={cell('right')}><Tip content="share of the day's 1,440 minutes in which ≥50% of live stations were observed"><span>Obs %</span></Tip></th>
+            <th style={cell('right')}><Tip content="minutes the 2.3 poller missed that compaction filled from the 1.1 side-poller (counted as observed in Obs % / Lost)"><span>Filled</span></Tip></th>
             <th style={cell('right')}>
               <Tip content={<TipRows rows={[['lost', 'minutes with no feed tick (below the 50% threshold)'], ['hover', 'a cell for the gap count, longest gap, and live-station denominator']]} />}>
                 <span>Lost</span>
@@ -286,7 +288,7 @@ function CoverageTable({ range }: { range: CoverageRange }) {
         <tbody>
           {rows.map((d) => <DayRow key={d.day} d={d} isOpen={open.has(d.day)} onToggle={() => toggle(d.day)} />)}
           {range.missing.length > 0 && (
-            <tr><td colSpan={5} style={{ ...cell('left'), opacity: 0.6 }}>no coverage doc yet: {range.missing.join(', ')}</td></tr>
+            <tr><td colSpan={6} style={{ ...cell('left'), opacity: 0.6 }}>no coverage doc yet: {range.missing.join(', ')}</td></tr>
           )}
         </tbody>
       </table>
@@ -315,6 +317,7 @@ function DayRow({ d, isOpen, onToggle }: { d: CoverageDay; isOpen: boolean; onTo
           <span style={{ display: 'inline-block', width: '1em', opacity: 0.5 }}>{isOpen ? '▾' : '▸'}</span>{d.day}
         </td>
         <td style={cell('right', pctColor(pct))}>{(100 * pct).toFixed(1)}%</td>
+        <td style={cell('right', d.filled?.length ? '#6fa8dc' : undefined)}>{d.filled?.length ? d.filled.length : '—'}</td>
         <td style={cell('right')}>
           <Tip content={<TipRows rows={[['lost minutes', String(lost)], ['gaps', String(d.gaps.length)], ['longest gap', longest ? `${longest} min` : '—'], ['live stations', String(d.live)]]} />}>
             <span style={{ color: lost >= 60 ? 'salmon' : lost >= 15 ? '#cc9933' : undefined }}>{lost}</span>
@@ -331,7 +334,7 @@ function DayRow({ d, isOpen, onToggle }: { d: CoverageDay; isOpen: boolean; onTo
       </tr>
       {isOpen && (
         <tr>
-          <td colSpan={5} style={{ ...cell('left'), whiteSpace: 'normal', background: 'rgba(127,127,127,0.06)' }}>
+          <td colSpan={6} style={{ ...cell('left'), whiteSpace: 'normal', background: 'rgba(127,127,127,0.06)' }}>
             <DayDetail day={d} brush={brush} onBrush={setBrush} />
           </td>
         </tr>
@@ -476,6 +479,7 @@ function GapStrip({ day, skipsPerHour, highlight }: { day: CoverageDay; skipsPer
       >
         <rect x={0} y={0} width={1440} height={14} fill="#5db75d" opacity={0.55} />
         {d && <path d={d} fill="salmon" />}
+        {day.filled?.length ? <path d={day.filled.map((m) => `M${m} 0h2v14h-2z`).join('')} fill="#6fa8dc" /> : null}
         {highlight && (
           <rect x={highlight[0]} y={0} width={Math.max(highlight[1], 5)} height={14} fill="#ffef99" stroke="#fff" strokeWidth={0.7} />
         )}

@@ -348,7 +348,7 @@ def coverage_key(d: date) -> str:
     return f'{COVERAGE_PREFIX}/{d.strftime(ISO_DAY)}.json'
 
 
-def coverage_doc(dp: DayPlanes) -> dict:
+def coverage_doc(dp: DayPlanes, filled: list[int] | None = None) -> dict:
     """Fleet-wide observed-minute coverage for one day, from the `observed` plane: per-minute
     count of observed stations, the day's live-station count, and gap runs (`[start_minute,
     length, min_count]`) where fewer than `GAP_FRACTION` of live stations were observed. This
@@ -374,7 +374,7 @@ def coverage_doc(dp: DayPlanes) -> dict:
         'live': live,
         'observed_minutes': int((~gap).sum()),
         'gaps': gaps,
-        **lu_cadence(dp),
+        **lu_cadence(dp, filled),
         'counts': [int(c) for c in counts],
     }
 
@@ -382,14 +382,19 @@ def coverage_doc(dp: DayPlanes) -> dict:
 LU_SKIP_S = 90  # an interval this long or longer between feed updates = ≥1 skipped ~60 s cycle
 
 
-def lu_cadence(dp: DayPlanes) -> dict:
+def lu_cadence(dp: DayPlanes, filled: list[int] | None = None) -> dict:
     """Feed `last_updated` cadence for the day: distinct updates per UTC hour (60 expected),
     skipped cycles per hour (Σ round(interval/60) − 1 over intervals ≥ `LU_SKIP_S`, credited to
     the hour the interval starts in), and interval quantiles. Intervals are within-day only.
     The feed ticks every 60 ± 1 s, so "> 60 s" is noise; skipped cycles are the signal — each
     one is a minute with no LU record for any station, i.e. a fleet-wide lost minute."""
-    ts = dp.lu_ts
     day0 = int(datetime.combine(dp.day, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    ts = dp.lu_ts
+    if filled:
+        # Cadence is the 2.3 feed's: drop the 1.1 fill ticks (another publish phase, ~:03
+        # vs ~:46), which would otherwise count as 2.3 updates and split each skip's
+        # interval into two odd ones in `lu_hist`.
+        ts = ts[~np.isin((ts - day0) // 60, np.asarray(filled))]
     hours = ((ts - day0) // 3600).clip(0, 23)
     per_hour = np.bincount(hours, minlength=24)[:24]
     gaps = np.diff(ts)
@@ -410,8 +415,29 @@ def lu_cadence(dp: DayPlanes) -> dict:
     }
 
 
+def _minute_names(cli, prefix: str) -> set[str]:
+    names: set[str] = set()
+    for page in cli.get_paginator('list_objects_v2').paginate(Bucket=BUCKET, Prefix=prefix):
+        for o in page.get('Contents', []):
+            if o['Key'].endswith('.json'):
+                names.add(o['Key'].rsplit('/', 1)[1])
+    return names
+
+
+def filled_minutes(cli, d: date) -> list[int]:
+    """UTC minutes of the day the 2.3 WAL (`gbfs/status/<day>/`) lacks but the 1.1
+    side-poller (`gbfs/probe/v11/<day>/`) recorded — the minutes daily compaction
+    filled from 1.1 (`compact-r2.py` `fill_from_v11`). The coverage doc carries them so
+    `/health/feed` can tell "observed via 1.1" apart from 2.3 capture."""
+    day = d.strftime(ISO_DAY)
+    missing = _minute_names(cli, f'gbfs/probe/v11/{day}/') - _minute_names(cli, f'gbfs/status/{day}/')
+    return sorted(int(n[:2]) * 60 + int(n[3:5]) for n in missing)
+
+
 def write_coverage(cli, dp: DayPlanes) -> dict:
-    doc = coverage_doc(dp)
+    filled = filled_minutes(cli, dp.day)
+    doc = coverage_doc(dp, filled)
+    doc['filled'] = filled
     cli.put_object(Bucket=BUCKET, Key=coverage_key(dp.day), Body=json.dumps(doc, separators=(',', ':')).encode(), ContentType='application/json')
     return doc
 
@@ -933,6 +959,8 @@ def backfill_cmd(cache: Path, no_cache: bool, from_: str | None, force: bool, la
 @option('-f', '--from', 'from_', default=None)
 @option('-t', '--to', default=None)
 def coverage_cmd(cache: Path, no_cache: bool, from_: str | None, to: str | None) -> None:
+    from ctbk.gbfs_cli import _use_r2_rw_env
+    _use_r2_rw_env()  # writes coverage docs; lists `gbfs/probe/v11/` (not readable with the RO pair)
     cli = r2_client()
     vocab = load_vocab(cli) or init_vocab(cli)
     days = _status_days(cli)

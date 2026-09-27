@@ -29,6 +29,8 @@ export interface CoverageDay {
 	gaps: Array<[number, number, number]>;
 	/** Per-minute observed-station counts (1440); only when requested. */
 	counts?: number[];
+	/** UTC minutes the 2.3 WAL missed that compaction filled from the 1.1 side-poller. */
+	filled?: number[];
 }
 
 export interface CoverageRange {
