@@ -228,6 +228,8 @@ for a in start end; do
   ctbk gbfs engine register -P rides-$a s3://ctbk/rides/$a/manifest-next.jsonl                                                               # ☁ D1: prod serves the candidate
   ctbk gbfs r2 cp -f rides/$a/manifest-next.jsonl rides/$a/manifest.jsonl                                                                    # ☁ monthly `rides-extend` builds on it
 done
+ctbk gbfs d1 drop -y -p rides-next-start -p rides-next-end                                                                                    # ☁ free D1 BEFORE the prod backfill (below)
+ctbk gbfs manifest prune -p rides-next-start -p rides-next-end -p rides-start -p rides-end                                                   # ☁ candidate + superseded pre-repair RG rows
 ctbk gbfs manifest backfill -p rides-start -p rides-end                                                                                       # ☁ RG rows are per (pyramid, key)
 for k in station-luc.json stations/station-canonicalize-map.json stations/rides-extra-stations.json; do
   ctbk gbfs r2 cp $k ${k%.json}.pre-repair.json                                                                                               # ☁ rollback copies
@@ -240,6 +242,8 @@ ctbk gbfs engine jobdef 688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-engine
 ```
 
 Then merge `trailing-zero-repair` into `main` with `RIDES_CACHE_GEN = "trailing-zero-repair"` added under `[vars]` in `gbfs/api/wrangler.toml` (the push deploys the api worker, rotating its cached rides responses, and www with the new `station-luc.json` / `station-merges.json`), run `ctbk gbfs api-check -u` if any golden moved and commit the diff, and redeploy the dev worker without the `--var`s. Browsers that already hold a past-window response keep it until its 24h `immutable` expiry; nothing server-side can reach those.
+
+**D1 capacity.** `rg_manifest` rows average ~4 KB, so one full rides backfill (both anchors, ~920k RGs) is ~3.7 GB against D1's 10 GB per-database cap. On 2026-09-27 the pre-repair keys' rows + the candidate's (`rides-next-*`) + a partial prod backfill hit the cap (`D1_ERROR: Exceeded maximum DB size`), blocking every D1 write (registry included) until the drop + prune above freed 1.84M rows. Never hold more than two rides RG copies at once; the pre-repair keys' RG rows go in the same prune (rollback then re-backfills; they only speed reads).
 
 **Rollback** (until GC): `engine register -P rides-$a s3://ctbk/rides/$a/manifest-pre-repair.jsonl`, `r2 cp -f` the `manifest-pre-repair.jsonl` and `*.pre-repair.json` copies back, `engine jobdef $LIVE_IMAGE`, `normalized-mirror` from a `main` checkout from before the merge, revert the merge, and bump `RIDES_CACHE_GEN` again.
 
