@@ -15,7 +15,7 @@ import { useTheme } from '../contexts/ThemeContext'
 import { SMG_STATES, useSmgHist, type SmgSelection } from '../query/smg'
 import { smgByEtHour, type Dow } from '../query/smgStats'
 import MultiSelect from './MultiSelect'
-import { brushedState, etHoursOf, stateSpans, useBrush } from './smgBrush'
+import { brushedState, etHoursOf, isShown, useBrush } from './smgBrush'
 import { plotlyMarker } from './smgStyle'
 import css from './SmgPanel.module.css'
 
@@ -38,7 +38,7 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
   const [ff] = useUrlState('sff', boolParam)
   const { actualTheme } = useTheme()
   const dark = actualTheme === 'dark'
-  const { brush, setBrush, clearBrush } = useBrush()
+  const { brush, setBrush, clearBrush, visible } = useBrush()
   // Hours another plot's time brush touches (joined, so the layout only
   // changes when the set does).
   const brushed = brush && brush.src !== 'hod' && brush.kind === 't' ? etHoursOf(brush.tS, brush.spanS).join(',') : ''
@@ -54,8 +54,8 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
   const traces = useMemo(() => {
     if (!rows) return []
     const live = rows.map((r) => LIVE.reduce((s, st) => s + r[st.id], 0))
-    // States absent from the window get no trace (so no legend item).
-    return LIVE.filter((st) => rows.some((r) => r[st.id] > 0)).map((st) => ({
+    // States absent from the window (or soloed out in the legend) get no trace.
+    return LIVE.filter((st) => isShown(visible, st.id) && rows.some((r) => r[st.id] > 0)).map((st) => ({
       type: 'bar' as const,
       name: st.label,
       x: HOUR_LABELS,
@@ -69,7 +69,7 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
       // Dark ink on the light hatched (yellow) states, white on the rest.
       textfont: { size: 10, color: st.hatch ? '#1a1a1a' : '#fff' },
     }))
-  }, [rows, dark])
+  }, [rows, dark, visible])
 
   const layout = useMemo(() => ({
     // A brush spanning every hour highlights nothing.
@@ -91,8 +91,8 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
       bordercolor: dark ? '#555' : '#ccc',
       font: { color: tick, size: 12 },
     },
-    showlegend: true,
-    legend: { orientation: 'h' as const, x: 0, y: -0.18, font: { color: tick, size: 11 } },
+    // The states legend (`SmgLegend`, above the states chart) serves this plot too.
+    showlegend: false,
     xaxis: { type: 'category' as const, tickfont: { color: tick, size: 11 }, fixedrange: true },
     yaxis: { range: [0, 100], ticksuffix: '%', gridcolor: grid, tickfont: { color: tick, size: 11 }, fixedrange: true },
     paper_bgcolor: 'rgba(0,0,0,0)',
@@ -104,7 +104,7 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
   const extState = ext == null ? null : SMG_STATES.find((s) => s.id === ext)?.label ?? null
   const hasData = rows?.some((r) => LIVE.some((st) => r[st.id] > 0))
   return (
-    <div className={css.panel} data-testid="smg-by-hour">
+    <div className={css.panel} data-smg data-testid="smg-by-hour">
       <div className={css.toolbar}>
         <MultiSelect
           items={DAYS.map((d) => ({ value: d, label: DAY_LABEL[d] }))}
@@ -126,11 +126,6 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
             }}
             onUnhover={() => clearBrush('hod')}
             externalActiveTrace={extState}
-            onHoverTraceChange={(name) => {
-              const st = LIVE.find((s) => s.label === name)
-              if (st && q.data) setBrush({ kind: 'state', id: st.id, spans: stateSpans(q.data.bins, HOUR_S, ff, st.id), src: 'hod' })
-              else clearBrush('hod')
-            }}
           />
         : !q.isFetching && <span className={css.status}>{days.length ? 'no station-state data for these days' : 'no days selected'}</span>}
     </div>

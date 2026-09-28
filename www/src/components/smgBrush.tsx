@@ -4,8 +4,11 @@
  * an hour-of-day bar brushes that ET hour. Every other plot draws the brush
  * (spikeline / range / band / highlighted bar), so one hover reads across all
  * four views. `src` names the emitting plot, which skips drawing its own.
+ *
+ * The same context carries the legend's solo/toggle set (`visible`), so one
+ * legend (`SmgLegend`) drives every state plot.
  */
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react'
 import type uPlot from 'uplot'
 import type { SmgBin } from '../query/smg'
 import { etDayMinute, etDayStartS } from '../query/smgGrid'
@@ -25,20 +28,27 @@ interface Ctx {
    *  plot re-initializing or losing its cursor mustn't wipe another plot's (or
    *  its own legend's) live brush. */
   clearBrush: (src: string, kind?: NonNullable<Brush>['kind']) => void
+  /** Legend solo/toggle: null = every state shown, else the shown subset. */
+  visible: Set<number> | null
+  setVisible: Dispatch<SetStateAction<Set<number> | null>>
 }
-const BrushCtx = createContext<Ctx>({ brush: null, setBrush: () => {}, clearBrush: () => {} })
+const BrushCtx = createContext<Ctx>({ brush: null, setBrush: () => {}, clearBrush: () => {}, visible: null, setVisible: () => {} })
 
 export function BrushProvider({ children }: { children: ReactNode }) {
   const [brush, setBrush] = useState<Brush>(null)
+  const [visible, setVisible] = useState<Set<number> | null>(null)
   const clearBrush = useCallback(
     (src: string, kind?: NonNullable<Brush>['kind']) => setBrush((b) => (b?.src === src && (!kind || b.kind === kind) ? null : b)),
     [],
   )
-  const value = useMemo(() => ({ brush, setBrush, clearBrush }), [brush, clearBrush])
+  const value = useMemo(() => ({ brush, setBrush, clearBrush, visible, setVisible }), [brush, clearBrush, visible])
   return <BrushCtx.Provider value={value}>{children}</BrushCtx.Provider>
 }
 
 export const useBrush = () => useContext(BrushCtx)
+
+/** Whether state `id` is shown under the legend's solo/toggle set. */
+export const isShown = (visible: Set<number> | null, id: number) => visible == null || visible.has(id)
 
 const HOUR_S = 3600
 

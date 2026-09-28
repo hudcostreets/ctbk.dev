@@ -10,7 +10,7 @@ import { boolParam, useUrlState } from 'use-prms'
 import { useTheme } from '../contexts/ThemeContext'
 import { SMG_STATES, useSmgHist, type SmgSelection } from '../query/smg'
 import { etDayMinute, etDayStartS, smgGrid, type GridRow } from '../query/smgGrid'
-import { brushedState, useBrush } from './smgBrush'
+import { brushedState, isShown, useBrush } from './smgBrush'
 import { canvasFill, swatchStyle } from './smgStyle'
 import css from './SmgPanel.module.css'
 
@@ -76,7 +76,7 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
   const [width, setWidth] = useState(800)
   const [hover, setHover] = useState<Hover | null>(null)
   const hasRows = rows.length > 0
-  const { brush, setBrush, clearBrush } = useBrush()
+  const { brush, setBrush, clearBrush, visible } = useBrush()
   const hl = brushedState(brush)
   useEffect(() => {
     const el = scrollRef.current
@@ -174,7 +174,7 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
         let x = HIST_X
         for (const st of SMG_STATES) {
           const w = (tot[st.id] / sum) * HIST_W
-          if (!w) continue
+          if (!w || !isShown(visible, st.id)) continue
           bg.fillStyle = canvasFill(st, dark, fade(st))
           bg.fillRect(x, y0, w, ROW_H)
           x += w
@@ -188,7 +188,7 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
         let y = y0 + ROW_H
         for (const st of SMG_STATES) {
           const v = c[st.id]
-          if (!v) continue
+          if (!v || !isShown(visible, st.id)) continue
           const h = (v / total) * ROW_H
           y -= h
           bg.fillStyle = canvasFill(st, dark, fade(st))
@@ -196,7 +196,7 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
         }
       })
     })
-  }, [rows, rowTotals, width, bodyH, colW, binS, dark, hl])
+  }, [rows, rowTotals, width, bodyH, colW, binS, dark, hl, visible])
 
   const onMove = (e: React.MouseEvent) => {
     const body = bodyRef.current!.getBoundingClientRect()
@@ -219,7 +219,7 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
 
   const legend = [...SMG_STATES].reverse()
   return (
-    <div className={css.panel} data-testid="smg-grid">
+    <div className={css.panel} data-smg data-testid="smg-grid">
       <div className={css.toolbar}>
         <span className={css.status}>Eastern time · {Math.round(binS / 60)}-minute slots · newest day first</span>
         {q.isFetching && <span className={css.status}>loading…</span>}

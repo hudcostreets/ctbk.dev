@@ -127,9 +127,9 @@
 !src/components/SmgByHour.tsx
 !src/components/SmgChart.tsx
 !src/components/SmgGrid.tsx
+!src/components/SmgLegend.tsx
 !src/components/SmgPanel.module.css
 !src/components/SmgPanel.tsx
-!src/components/SmgSummary.tsx
 !src/components/StageCard.tsx
 !src/components/StationAvailabilityChart.css
 !src/components/StationAvailabilityChart.tsx

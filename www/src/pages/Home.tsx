@@ -51,6 +51,7 @@ import { buildTraces, monthToDate } from '../chart/ymrgtb-traces'
 import { buildLayout } from '../chart/ymrgtb-layout'
 import { useRidesV1, type Pyramid, type ApiTarget } from '../query/ridesV1'
 import SmgPanel from '../components/SmgPanel'
+import { BrushProvider } from '../components/smgBrush'
 import { RangeWidthControl, type DurationPreset } from '../components/RangeWidthControl'
 import { SMG_GENESIS_S, SYSTEM_BBOX } from '../query/smg'
 import { rangeToUnixSeconds, roundDuration, timeRangeParam } from '../time-range'
@@ -466,16 +467,18 @@ export default function Home() {
 
           <h3 id="states">Station states</h3>
           <p>Every station-minute since April 2026, classified from the live GBFS feed: OK, no e-bikes, full, empty, offline, or unmeasured (drag to pan; click a legend entry to solo it). Rebuilt daily from the <Link to="/health/feed">feed archive</Link>.</p>
-          <SmgPanel
-            sel={SMG_SYSTEM_SEL}
-            fromS={smgFromS}
-            toS={smgToS}
-            onPan={onSmgPan}
-            clampMinS={SMG_GENESIS_S}
-            clampMaxS={smgNowS}
-            height={300}
-            toolbar={<RangeWidthControl value={smgRange} onChange={setSmgRange} presets={SMG_RANGE_PRESETS} />}
-          />
+          <BrushProvider>
+            <SmgPanel
+              sel={SMG_SYSTEM_SEL}
+              fromS={smgFromS}
+              toS={smgToS}
+              onPan={onSmgPan}
+              clampMinS={SMG_GENESIS_S}
+              clampMaxS={smgNowS}
+              height={300}
+              toolbar={<RangeWidthControl value={smgRange} onChange={setSmgRange} presets={SMG_RANGE_PRESETS} />}
+            />
+          </BrushProvider>
 
           <hr />
 

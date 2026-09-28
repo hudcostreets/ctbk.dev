@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { etDowHour, smgByEtHour, smgShares, smgSummary, smgTotals, type Dow } from './smgStats'
 import type { SmgBin } from './smg'
-import { etDowHour, smgByEtHour, smgSummary, smgTotals, type Dow } from './smgStats'
 
 /** A bin with `counts[id]` station-minutes; `ff` = the raw counts with gap
  *  states (0–2) folded into `ok` (enough to tell the two apart). */
@@ -46,6 +46,15 @@ describe('smgSummary', () => {
   })
   it('is null with no live minutes', () => {
     expect(smgSummary([60, 0, 0, 0, 0, 0, 0, 0, 0, 0])).toBeNull()
+  })
+})
+
+describe('smgShares', () => {
+  it('is each state\'s share of all minutes', () => {
+    expect(smgShares([4, 0, 0, 10, 0, 20, 10, 5, 15, 36])).toEqual([0.04, 0, 0, 0.1, 0, 0.2, 0.1, 0.05, 0.15, 0.36])
+  })
+  it('is all zero with no minutes', () => {
+    expect(smgShares(new Array(10).fill(0))).toEqual(new Array(10).fill(0))
   })
 })
 

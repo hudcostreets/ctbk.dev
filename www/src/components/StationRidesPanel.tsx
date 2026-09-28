@@ -17,6 +17,7 @@ import { BIN_PRESETS, BinSelect } from './BinSelect'
 import { RangeWidthControl, type DurationPreset } from './RangeWidthControl'
 import StationRidesChart, { ENDS_COLOR, STARTS_COLOR } from './StationRidesChart'
 import SmgPanel from './SmgPanel'
+import { BrushProvider } from './smgBrush'
 import { useMultiStationRides } from '../query/ridesMulti'
 import { SMG_GENESIS_S, smgCellsFor } from '../query/smg'
 import { formatDuration, rangeToUnixSeconds, roundDuration, timeRangeParam } from '../time-range'
@@ -178,15 +179,17 @@ export default function StationRidesPanel({ shortNames, stations, onRemove, onCl
         </div>
       </div>
       {showStates && (
-        <SmgPanel
-          sel={smgSel}
-          fromS={max(fromS, SMG_GENESIS_S)}
-          toS={toS}
-          onPan={onPan}
-          clampMinS={SMG_GENESIS_S}
-          clampMaxS={nowS}
-          height={200}
-        />
+        <BrushProvider>
+          <SmgPanel
+            sel={smgSel}
+            fromS={max(fromS, SMG_GENESIS_S)}
+            toS={toS}
+            onPan={onPan}
+            clampMinS={SMG_GENESIS_S}
+            clampMaxS={nowS}
+            height={200}
+          />
+        </BrushProvider>
       )}
       <div ref={chartWrapRef} hidden={showStates}>
         {rows.length > 0 && binS != null && (

@@ -1,22 +1,23 @@
 /**
- * `SmgChart` + its query + the two view toggles, for one selection over a
- * visible window. The three surfaces differ only in the selection and in
- * where the window comes from:
+ * `SmgChart` + its query, legend, and the forward-fill toggle, for one
+ * selection over a visible window. The three surfaces differ only in the
+ * selection and in where the window comes from:
  *   - `/`: system bbox, own range param (`ar`);
  *   - `/s/:slug`: `s:<short_name>`, the page's availability window (`r`);
  *   - `/stations?sel=`: the set's `s:` keys, the rides panel's window (`rr`).
  *
  * URL state (shared names — the surfaces never share a page):
- *   - `sc`: plot counts instead of % shares
  *   - `sff`: forward-filled partition (`state_ff`)
+ *
+ * Needs a `BrushProvider` above it (the legend's hover/solo state lives there).
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { boolParam, useUrlState } from 'use-prms'
 import SmgChart from './SmgChart'
-import SmgSummary from './SmgSummary'
-import { Checkbox } from './Checkbox'
+import SmgLegend from './SmgLegend'
 import { useSmgHist, type SmgSelection } from '../query/smg'
 import { formatDuration } from '../time-range'
+import { Tip } from './Tip'
 import css from './SmgPanel.module.css'
 
 interface Props {
@@ -31,12 +32,21 @@ interface Props {
   toolbar?: ReactNode
   /** Manual bin override (seconds); undefined = auto from the viewport. */
   binOverrideS?: number
-  /** Show the window's empty/full/… shares (single-station pages). */
+  /** Show the window's span + per-state shares in the legend (single-station pages). */
   summary?: boolean
 }
 
+const FF_TIP = 'Forward-fill: minutes with no measurement (no poll, stale feed, absent from the feed) take the station\'s last measured state, so the unmeasured band disappears and shares are of measured time.'
+
+/** A stepped line that continues, dashed, past its last point. */
+const FfIcon = () => (
+  <svg width="14" height="12" viewBox="0 0 14 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <path d="M1 10 H4.5 V6 H8" />
+    <path d="M8 6 H13" strokeDasharray="2 1.6" />
+  </svg>
+)
+
 export default function SmgPanel({ sel, fromS, toS, onPan, clampMinS, clampMaxS, height, toolbar, binOverrideS, summary }: Props) {
-  const [counts, setCounts] = useUrlState('sc', boolParam)
   const [ff, setFf] = useUrlState('sff', boolParam)
 
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -66,22 +76,26 @@ export default function SmgPanel({ sel, fromS, toS, onPan, clampMinS, clampMaxS,
   const viewToS = dataMaxS != null ? Math.min(toS, dataMaxS) : toS
 
   return (
-    <div className={css.panel}>
+    <div className={css.panel} data-smg>
       <div className={css.toolbar}>
         {toolbar}
-        <Checkbox label="Counts" checked={counts} cb={setCounts} />
-        <Checkbox label="Forward-fill" checked={ff} cb={setFf} />
+        <Tip content={FF_TIP} placement="bottom">
+          <button type="button" className={css.toggle} aria-pressed={ff} onClick={() => setFf(!ff)}>
+            <FfIcon /> forward-fill
+          </button>
+        </Tip>
         {binS != null && <span className={css.status}>bin: {formatDuration(binS * 1000)}</span>}
         {q.isFetching && <span className={css.status}>loading…</span>}
         {q.isError && <span className={css.error}>states fetch failed</span>}
       </div>
-      {summary && bins.length > 0 && <SmgSummary bins={bins} ff={ff} fromS={fromS} toS={viewToS} />}
+      {bins.length > 0 && binS != null && (
+        <SmgLegend bins={bins} binS={binS} ff={ff} fromS={fromS} toS={viewToS} stats={summary} />
+      )}
       <div ref={wrapRef} className={css.chart} style={{ opacity: q.isFetching && bins.length ? 0.5 : 1 }}>
         {bins.length > 0 && binS != null && (
           <SmgChart
             bins={bins}
             binS={binS}
-            pct={!counts}
             ff={ff}
             height={height}
             visibleFromS={fromS}

@@ -5,13 +5,12 @@
  *
  * Stack order (bottom → top) is `SMG_STATES`: the live states (`ok` on the
  * axis, then no-e-bikes / full / empty), the dead band (bogus, offline),
- * then the gap band (absent, stale feed, no poll). In `pct` mode each
- * state is its share of ALL station-minutes in the bin, so soloing e.g.
- * `Empty` reads directly as "% of station-minutes with no bikes".
- *
- * Legend: click solos, shift-click toggles, double-click resets. Era
- * boundaries (`SMG_ERAS`) are drawn as dashed verticals when in view.
- * Drag-pan mirrors `StationAvailabilityChart` (`useDragPan`).
+ * then the gap band (absent, stale feed, no poll). Each state is its share
+ * of ALL station-minutes in the bin, so soloing e.g. `Empty` (from
+ * `SmgLegend`, via the brush context's `visible` set) reads directly as
+ * "% of station-minutes with no bikes". Era boundaries (`SMG_ERAS`) are
+ * drawn as dashed verticals when in view. Drag-pan mirrors
+ * `StationAvailabilityChart` (`useDragPan`).
  */
 import { useEffect, useRef, useState } from 'react'
 import uPlot, { type AlignedData, type Options } from 'uplot'
@@ -19,18 +18,15 @@ import 'uplot/dist/uPlot.min.css'
 import './StationAvailabilityChart.css'
 import { useTheme } from '../contexts/ThemeContext'
 import { useDragPan } from '../uplot'
-import { N_STATES, SMG_ERAS, SMG_STATES, type SmgBin, type SmgState } from '../query/smg'
-import { BrushOverlay, brushedState, stateSpans, useBrush } from './smgBrush'
+import { SMG_ERAS, SMG_STATES, type SmgBin, type SmgState } from '../query/smg'
+import { BrushOverlay, brushedState, isShown, useBrush } from './smgBrush'
 import { canvasFill, swatchStyle } from './smgStyle'
-import { Tip } from './Tip'
 
-const { floor, max } = Math
+const { floor } = Math
 
 interface Props {
   bins: SmgBin[]
   binS: number
-  /** Plot shares of the bin's station-minutes (0–100%) instead of counts. */
-  pct: boolean
   /** Plot the forward-filled partition (`state_ff`) instead of the raw one. */
   ff: boolean
   height?: number
@@ -82,27 +78,18 @@ function binTitle(dtS: number, binS: number): string {
 }
 
 export default function SmgChart({
-  bins, binS, pct, ff, height = 260, visibleFromS, visibleToS, onPan, clampMinS, clampMaxS,
+  bins, binS, ff, height = 260, visibleFromS, visibleToS, onPan, clampMinS, clampMaxS,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
   const { actualTheme } = useTheme()
   const isDark = actualTheme === 'dark'
   const [tooltip, setTooltip] = useState<TooltipState | null>(null)
-  // null = all states shown; otherwise the visible subset (solo / toggles).
-  const [visible, setVisible] = useState<Set<number> | null>(null)
-  const [legendHover, setLegendHover] = useState<number | null>(null)
-  const { brush, setBrush, clearBrush } = useBrush()
-  // A state hovered here, or in another plot's legend.
-  const hovered = legendHover ?? brushedState(brush)
-  const hoverLegend = (id: number | null) => {
-    setLegendHover(id)
-    if (id == null) clearBrush('smg')
-    else setBrush({ kind: 'state', id, spans: stateSpans(bins, binS, ff, id), src: 'smg' })
-  }
+  const { brush, setBrush, clearBrush, visible } = useBrush()
+  // A state hovered in the legend (or another plot).
+  const hovered = brushedState(brush)
 
   const colorOf = (s: SmgState) => (isDark ? s.dark : s.light)
-  const isShown = (id: number) => visible == null || visible.has(id)
 
   useEffect(() => {
     if (!containerRef.current || !bins.length) return
@@ -119,9 +106,9 @@ export default function SmgChart({
     const cum: (number | null)[][] = SMG_STATES.map(() => [])
     for (let i = 0; i < bins.length; i++) {
       let acc = 0
-      const denom = pct ? (totals[i] || 1) / 100 : 1
+      const denom = (totals[i] || 1) / 100
       SMG_STATES.forEach((s, j) => {
-        if (isShown(s.id)) acc += counts[i][s.id] / denom
+        if (isShown(visible, s.id)) acc += counts[i][s.id] / denom
         cum[j].push(acc)
       })
     }
@@ -133,7 +120,6 @@ export default function SmgChart({
     const stepped = uPlot.paths.stepped!({ align: 1 })
     const dim = (id: number, base: string) => (hovered != null && hovered !== id ? base + '40' : base)
     const dimFill = (st: SmgState) => canvasFill(st, isDark, hovered != null && hovered !== st.id ? '40' : '')
-    const yMax = pct ? 100 : max(...totals) * 1.02 || 1
 
     const erasInView = (u: uPlot) => {
       const { min, max: mx } = u.scales.x
@@ -147,13 +133,13 @@ export default function SmgChart({
       cursor: { x: true, y: false, drag: { x: false, y: false } },
       scales: {
         x: { time: true, auto: visibleFromS == null || visibleToS == null },
-        y: { range: () => [0, yMax] },
+        y: { range: () => [0, 100] },
       },
       axes: [
         { stroke: axisColor, grid: { stroke: gridColor }, ticks: { stroke: tickColor } },
         {
           stroke: axisColor, grid: { stroke: gridColor }, ticks: { stroke: tickColor }, size: 46,
-          values: (_u, vals) => vals.map((v) => (pct ? `${v}%` : fmtCount(v))),
+          values: (_u, vals) => vals.map((v) => `${v}%`),
         },
       ],
       legend: { show: false },
@@ -231,7 +217,7 @@ export default function SmgChart({
     }
     // `visibleFromS/ToS` are synced via `setScale` below, not a rebuild.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bins, binS, pct, ff, height, isDark, visible, hovered])
+  }, [bins, binS, ff, height, isDark, visible, hovered])
 
   useEffect(() => {
     const plot = plotRef.current
@@ -246,59 +232,16 @@ export default function SmgChart({
     clampMaxS: clampMaxS ?? floor(Date.now() / 1000),
   })
 
-  const onLegendClick = (e: React.MouseEvent, id: number) => {
-    e.preventDefault()
-    if (e.shiftKey) {
-      setVisible((v) => {
-        const next = new Set(v ?? SMG_STATES.map((s) => s.id))
-        if (next.has(id)) next.delete(id)
-        else next.add(id)
-        return next.size === N_STATES ? null : next
-      })
-    } else {
-      setVisible((v) => (v && v.size === 1 && v.has(id) ? null : new Set([id])))
-    }
-  }
-
-  // Legend reads top-of-stack first (unmeasured → OK → problem states), like the plot.
-  // States absent from the window are left out of the legend.
+  // Tooltip rows read top-of-stack first (unmeasured → OK → problem states),
+  // like the plot; states absent from the window are left out.
   const present = new Set(bins.flatMap((b) => (ff ? b.ff : b.state).flatMap((v, i) => (v ? [i] : []))))
-  const legend = [...SMG_STATES].reverse().filter((s) => present.has(s.id))
+  const rows = [...SMG_STATES].reverse().filter((s) => present.has(s.id))
   const textColor = isDark ? '#e0e0e0' : '#222'
 
   return (
-    <div style={{ position: 'relative', width: '100%' }} onMouseLeave={() => { setTooltip(null); clearBrush('smg', 't') }}>
+    <div style={{ position: 'relative', width: '100%' }} data-smg onMouseLeave={() => { setTooltip(null); clearBrush('smg', 't') }}>
       <div ref={containerRef} className={`station-availability-chart ${actualTheme}`} style={{ width: '100%' }} />
       <BrushOverlay plot={plotRef.current} self="smg" dark={isDark} />
-      <Tip content="Click to solo · Shift-click to toggle · Double-click to reset" placement="bottom">
-      <div
-        style={{
-          display: 'flex', justifyContent: 'center', flexWrap: 'wrap', gap: '4px 0',
-          padding: '6px 12px', fontSize: 12, color: textColor, userSelect: 'none',
-        }}
-        onDoubleClick={() => setVisible(null)}
-        onMouseLeave={() => hoverLegend(null)}
-      >
-        {legend.map((s) => {
-          const shown = isShown(s.id)
-          return (
-            <div
-              key={s.id}
-              onClick={(e) => onLegendClick(e, s.id)}
-              onMouseEnter={() => hoverLegend(s.id)}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
-                opacity: shown ? 1 : 0.4, padding: '2px 8px', borderRadius: 3,
-                background: hovered === s.id ? (isDark ? '#3a3a3a' : '#f0f0f0') : 'transparent',
-              }}
-            >
-              <span style={{ display: 'inline-block', width: 12, height: 12, borderRadius: 2, ...swatchStyle(s, isDark) }} />
-              <span style={{ textDecoration: shown ? 'none' : 'line-through' }}>{s.label}</span>
-            </div>
-          )
-        })}
-      </div>
-      </Tip>
       {tooltip && (() => {
         const plotW = containerRef.current?.clientWidth ?? 1000
         const flipH = tooltip.left > plotW * 0.6
@@ -321,7 +264,7 @@ export default function SmgChart({
             <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 4 }}>
               {fmtCount(tooltip.total)} station-minutes{ff ? ', forward-filled' : ''}
             </div>
-            {legend.map((s) => {
+            {rows.map((s) => {
               const v = tooltip.counts[s.id]
               const empty = v === 0
               return (

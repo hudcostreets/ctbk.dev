@@ -26,25 +26,71 @@
     color: #d32f2f;
 }
 
-.summary {
+.toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35em;
+    padding: 0.1em 0.6em 0.1em 0.5em;
+    border: 1px solid var(--border-secondary, #bbb);
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    line-height: 1.4;
+    cursor: pointer;
+    user-select: none;
+}
+
+.toggle:hover {
+    border-color: var(--text-primary, #222);
+}
+
+.toggle[aria-pressed="true"] {
+    background: var(--text-primary, #222);
+    border-color: var(--text-primary, #222);
+    color: var(--bg-primary, #fff);
+}
+
+.legend {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.2em 1em;
+    gap: 0.2em 0.6em;
     margin-bottom: 0.4em;
     font-size: 0.9em;
     font-variant-numeric: tabular-nums;
+    user-select: none;
 }
 
-.summaryLead {
+.legendLead {
     opacity: 0.7;
+    cursor: default;
 }
 
-.stat {
+.legendItem {
     display: inline-flex;
     align-items: center;
     gap: 0.3em;
-    cursor: default;
+    padding: 0.1em 0.4em;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.legendHot {
+    background: rgba(127, 127, 127, 0.2);
+}
+
+.legendOff {
+    opacity: 0.4;
+}
+
+.legendOff .legendLabel {
+    text-decoration: line-through;
+}
+
+.legendHint {
+    margin-top: 0.3em;
+    opacity: 0.65;
 }
 
 .dot {

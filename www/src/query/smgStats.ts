@@ -36,6 +36,13 @@ export interface SmgSummary {
 
 const sum = (c: readonly number[], ids: readonly number[]) => ids.reduce((s, i) => s + c[i], 0)
 
+/** Each state's share of all station-minutes in `totals` (a partition that
+ *  sums to 1; all zero when there are no minutes). */
+export function smgShares(totals: readonly number[]): number[] {
+  const all = totals.reduce((a, v) => a + v, 0)
+  return totals.map((v) => (all ? v / all : 0))
+}
+
 /** The spec's folds; null when there are no live minutes to divide by. */
 export function smgSummary(c: readonly number[]): SmgSummary | null {
   const live = sum(c, [5, 6, 7, 8, 9])
