@@ -1766,6 +1766,35 @@ ENGINE_R2_SECRETS = {
 }
 
 
+BATCH_LIVE_STATUSES = {'SUBMITTED', 'PENDING', 'RUNNABLE', 'STARTING', 'RUNNING'}
+
+
+@gbfs_engine.command('watch', help='Poll AWS Batch jobs (ids from `engine submit`) until none is still queued or running; one status line per poll. Exits nonzero if any job FAILED.')
+@option('-i', '--interval', type=float, default=20, show_default=True, help='Seconds between polls.')
+@option('-t', '--timeout', type=float, default=3600, show_default=True, help='Give up after this many seconds (exit 2).')
+@argument('job_ids', nargs=-1, required=True)
+def gbfs_engine_watch(interval: float, timeout: float, job_ids: tuple[str, ...]) -> None:
+	import boto3
+	batch = boto3.client('batch', region_name='us-east-1')
+	deadline = time.monotonic() + timeout
+	while True:
+		jobs = batch.describe_jobs(jobs=list(job_ids))['jobs']
+		by_id = {j['jobId']: j for j in jobs}
+		line = ' · '.join(f"{by_id[i]['jobName']} {by_id[i]['status']}" if i in by_id else f'{i} ?' for i in job_ids)
+		err(f'{datetime.now(timezone.utc):%H:%M:%S} {line}')
+		if not any(j['status'] in BATCH_LIVE_STATUSES for j in jobs):
+			break
+		if time.monotonic() > deadline:
+			err('timeout')
+			sys.exit(2)
+		time.sleep(interval)
+	for j in jobs:
+		if j['status'] != 'SUCCEEDED':
+			err(f"{j['jobName']}: {j['status']} — {j.get('statusReason')}")
+	if any(j['status'] != 'SUCCEEDED' for j in jobs):
+		sys.exit(1)
+
+
 @gbfs_engine.command('jobdef', help='Register a new `pyrmts-engine` job-definition revision: latest revision\'s properties with the container image swapped (creds/env copied wholesale, never read).')
 @option('-n', '--dry-run', is_flag=True, help='Print current + new image; no registration.')
 @option('-s', '--r2-secrets', is_flag=True, help='Source the R2 creds from Secrets Manager (`ctbk/r2-*`, by ARN in the current account) — dropping any plaintext copies from `environment`. Seed once; later revisions copy the `secrets` block forward.')
