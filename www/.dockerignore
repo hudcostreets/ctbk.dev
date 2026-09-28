@@ -15,6 +15,7 @@
 !e2e/station-map-gl.spec.ts
 !e2e/station-map.spec.ts
 !e2e/station-page.spec.ts
+!e2e/timelapse.spec.ts
 !eslint.config.js
 !fix-mime-type.sh
 !gbfs/README.md
@@ -199,6 +200,7 @@
 !src/pages/Pipeline.mdx
 !src/pages/StationDetail.tsx
 !src/pages/Stations.tsx
+!src/pages/Timelapse.tsx
 !src/query/client.ts
 !src/query/mergeReview.ts
 !src/query/ridesMulti.ts
@@ -218,6 +220,7 @@
 !src/theme.ts
 !src/time-range.test.ts
 !src/time-range.ts
+!src/timelapse.module.css
 !src/uplot/index.ts
 !src/uplot/useDragPan.ts
 !src/vite-env.d.ts

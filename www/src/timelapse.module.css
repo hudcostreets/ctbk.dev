@@ -1,0 +1,231 @@
+/* `/timelapse` (`specs/timelapse-map.md` "UX"): full-bleed GL map with a
+ * clock (top-left), legend (top-right), and a control bar (bottom). Dark
+ * chrome reads on both light and dark basemaps. */
+.page {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+}
+
+.map {
+    width: 100%;
+    height: 100%;
+}
+
+.clock {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    pointer-events: none;
+    backdrop-filter: blur(4px);
+}
+
+.clockDate {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: 0.01em;
+}
+
+.clockSub {
+    font-size: 12px;
+    opacity: 0.8;
+}
+
+.badges {
+    display: flex;
+    gap: 6px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+}
+
+.badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.16);
+}
+
+.badgeWarn {
+    background: #b8860b;
+    color: #fff;
+}
+
+.badgeError {
+    background: #a52a2a;
+    color: #fff;
+}
+
+.legend {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 1000;
+    width: 220px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font-size: 11px;
+    pointer-events: none;
+    backdrop-filter: blur(4px);
+}
+
+.legendTitle {
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+.legendBar {
+    height: 10px;
+    border-radius: 3px;
+    margin: 4px 0 2px;
+    background: linear-gradient(to right, #3878dc, #969696, #eb501e);
+}
+
+.legendLabels {
+    display: flex;
+    justify-content: space-between;
+    opacity: 0.85;
+}
+
+.legendNote {
+    margin-top: 6px;
+    opacity: 0.8;
+}
+
+.controls {
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font-size: 12px;
+    backdrop-filter: blur(4px);
+}
+
+.btn {
+    min-width: 34px;
+    height: 30px;
+    padding: 0 8px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.btn:hover {
+    background: rgba(255, 255, 255, 0.18);
+}
+
+.select {
+    height: 30px;
+    padding: 0 4px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 5px;
+    background: rgba(0, 0, 0, 0.4);
+    color: #fff;
+    font-size: 12px;
+}
+
+.check {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+/* Scrubber: the range input sits over an SVG totals strip (Σ starts per bin
+ * from cached chunks; uncached spans stay blank). */
+.scrub {
+    position: relative;
+    flex: 1;
+    height: 34px;
+}
+
+.strip {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+.range {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    background: transparent;
+    -webkit-appearance: none;
+    appearance: none;
+    cursor: pointer;
+}
+
+.range::-webkit-slider-runnable-track {
+    height: 100%;
+    background: transparent;
+}
+
+.range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 4px;
+    height: 34px;
+    border-radius: 2px;
+    background: #ffd24a;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+
+.range::-moz-range-track {
+    height: 100%;
+    background: transparent;
+}
+
+.range::-moz-range-thumb {
+    width: 4px;
+    height: 34px;
+    border: 0;
+    border-radius: 2px;
+    background: #ffd24a;
+}
+
+.rangeLabel {
+    white-space: nowrap;
+    opacity: 0.8;
+    font-variant-numeric: tabular-nums;
+}
+
+.loading {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1000;
+    padding: 0.6em 1.2em;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font-size: 1.1rem;
+    pointer-events: none;
+}

@@ -1,5 +1,9 @@
 import { defineConfig, devices } from '@playwright/test'
 
+// `BASE_URL=http://localhost:<port>` targets another dev server (e.g. a
+// worktree's) instead of starting/reusing the default one on 3456.
+const baseURL = process.env.BASE_URL ?? 'http://localhost:3456'
+
 export default defineConfig({
   testDir: './e2e',
   testIgnore: ['**/bundle.spec.ts'],
@@ -9,7 +13,7 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: 'html',
   use: {
-    baseURL: 'http://localhost:3456',
+    baseURL,
     trace: 'on-first-retry',
   },
   projects: [
@@ -20,7 +24,7 @@ export default defineConfig({
   ],
   webServer: {
     command: 'pnpm dev',
-    url: 'http://localhost:3456',
+    url: baseURL,
     reuseExistingServer: !process.env.CI,
   },
 })

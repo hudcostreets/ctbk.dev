@@ -46,6 +46,7 @@ const Health = lazy(() => import("./pages/Health"))
 const FeedHealth = lazy(() => import("./pages/FeedHealth"))
 const CellsDebug = lazy(() => import("./pages/CellsDebug"))
 const MergeReview = lazy(() => import("./pages/MergeReview"))
+const Timelapse = lazy(() => import("./pages/Timelapse"))
 
 function Pipeline() {
   return (
@@ -82,6 +83,7 @@ function AppContent() {
           <Route path="/health/feed" element={<FeedHealth />} />
           <Route path="/cells-debug" element={<CellsDebug />} />
           <Route path="/merge-review" element={<MergeReview />} />
+          <Route path="/timelapse" element={<Timelapse />} />
           {/* Catch-all: the CFW assets router SPA-fallbacks unknown paths
               to index.html with a 200 (specs/done/www-cfw-migration.md),
               so the router must render a real 404 page, not an empty
