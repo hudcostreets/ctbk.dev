@@ -22,6 +22,7 @@ import { Checklist } from "../components/Checklist"
 import { Footer } from "../components/Footer"
 import { Tip } from "../components/Tip"
 import MonthRangePicker from "../components/MonthRangePicker"
+import { useHashScroll } from "../hooks/useHashScroll"
 import { Radios } from "../components/Radios"
 import { useIsInView } from "../hooks/useIsInView"
 import { useTheme } from "../contexts/ThemeContext"
@@ -105,6 +106,7 @@ const StackByV2QueryStrings: [StackByV2, string][] = [
 
 export default function Home() {
   useLocation()
+  useHashScroll()
   const { actualTheme, toggleTheme } = useTheme()
 
   const [yAxis, setYAxis] = useUrlState('y', codeParam<YAxis>('Rides', YAxisQueryStrings))

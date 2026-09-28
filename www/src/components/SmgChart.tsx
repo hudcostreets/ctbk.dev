@@ -96,6 +96,8 @@ export default function SmgChart({
 
     const axisColor = isDark ? '#e0e0e0' : '#222'
     const gridColor = isDark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.07)'
+    // x-grid redrawn over the stacked fills, which otherwise hide it.
+    const overGridColor = isDark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.14)'
     const tickColor = isDark ? 'rgba(255,255,255,0.20)' : 'rgba(0,0,0,0.20)'
 
     const counts = bins.map((b) => (ff ? b.ff : b.state))
@@ -176,9 +178,20 @@ export default function SmgChart({
         ],
         draw: [
           (u) => {
+            const ctx = u.ctx
+            ctx.save()
+            ctx.strokeStyle = overGridColor
+            ctx.lineWidth = devicePixelRatio
+            for (const v of (u.axes[0] as { _splits?: number[] })._splits ?? []) {
+              const x = Math.round(u.valToPos(v, 'x', true)) + 0.5
+              ctx.beginPath()
+              ctx.moveTo(x, u.bbox.top)
+              ctx.lineTo(x, u.bbox.top + u.bbox.height)
+              ctx.stroke()
+            }
+            ctx.restore()
             const eras = erasInView(u)
             if (!eras.length) return
-            const ctx = u.ctx
             ctx.save()
             ctx.setLineDash([4 * devicePixelRatio, 4 * devicePixelRatio])
             ctx.lineWidth = devicePixelRatio

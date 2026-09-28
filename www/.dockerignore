@@ -169,6 +169,7 @@
 !src/date-range.ts
 !src/hooks/useCellsDebugOmnibar.ts
 !src/hooks/useGlobalStationsOmnibar.ts
+!src/hooks/useHashScroll.ts
 !src/hooks/useIsInView.ts
 !src/hooks/useKeyboardShortcuts.ts
 !src/hooks/useScrollToHash.ts
