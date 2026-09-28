@@ -6,9 +6,13 @@
  * React re-renders when a chunk lands. The pure math lives in
  * `timelapseFrames.ts`.
  *
- * INTERIM (P1): there is no `/api/tl` / `rides-tl` pyramid yet, so
- * `fetchChunk` is pluggable with two sources:
+ * `fetchChunk` is pluggable, with three sources:
  *
+ * - `api` (P2, the real one): `GET ${API_BASE}/api/tl?anchor=&bin=&chunk=`
+ *   (`gbfs/api/src/tl.ts`) over the time-first `rides-tl` pyramids — one
+ *   edge-cacheable JSON block per chunk. A `partial` chunk (frames the
+ *   pyramid doesn't cover yet: the full-history build is in flight) is
+ *   `TlUnavailable`, so `auto` falls through to the interim sources below.
  * - `shard`: read the existing station-first rides pyramid straight from
  *   `data.ctbk.dev` (public, range-readable, CORS-open) with hyparquet —
  *   resolve the covering `1d` shard(s) through `manifest.jsonl`, project
@@ -22,19 +26,22 @@
  * - `synth`: frames synthesized from the monthly `stations[ym].json` `ends`
  *   (`synthChunk`), so the UI is exercisable over any range. Badged in the UI.
  *
- * `auto` (the default) tries `shard` and falls back to `synth` per chunk.
- * Delete both when P2's endpoint lands.
+ * `auto` (the default) tries `api`, then `shard`, then `synth`, per chunk.
+ * Delete the interim two once `rides-tl` covers all of history.
  */
 import { useEffect, useMemo, useState } from 'react'
 import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { asyncBufferFromUrl, parquetMetadataAsync, parquetRead, type AsyncBuffer, type FileMetaData } from 'hyparquet'
+import { API_BASE } from './stations'
+import { dbgFetch } from '../lib/dbg'
 import {
-  chunkFromBlocks, chunkMs, chunkOf, chunksCovering, frameIndex, frameSlice, pickShards, pivotBlock, prefetchOrder,
-  synthChunk, ymOf,
-  type Anchor, type Bin, type Block, type Chunk, type ManifestRow, type Triple,
+  chunkFromApi, chunkFromBlocks, chunkMs, chunkOf, chunksCovering, frameIndex, frameSlice, pickShards, pivotBlock,
+  prefetchOrder, synthChunk, TlUnavailable, ymOf,
+  type Anchor, type ApiChunk, type Bin, type Block, type Chunk, type ManifestRow, type Triple,
 } from './timelapseFrames'
 
-export type SourceMode = 'auto' | 'shard' | 'synth'
+export { TlUnavailable }
+export type SourceMode = 'auto' | 'api' | 'shard' | 'synth'
 
 const DATA_BASE = 'https://data.ctbk.dev'
 const STATION_URLS = '/assets/station-urls.json'
@@ -44,15 +51,6 @@ export const MAX_SHARD_BYTES = 64 * 1024 * 1024
 /** Concurrent range requests per shard read. */
 const MAX_INFLIGHT = 16
 const CHUNK_GC_MS = 10 * 60_000
-
-/** Thrown by the `shard` source when no small-enough shard covers a chunk;
- *  `auto` falls back to `synth` on it. */
-export class TlUnavailable extends Error {
-  constructor(msg: string) {
-    super(msg)
-    this.name = 'TlUnavailable'
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Shared static inputs (manifests, id-map), all `staleTime: Infinity`.
@@ -115,6 +113,20 @@ function monthEnds(qc: QueryClient, url: string): Promise<Record<string, number>
       return out
     },
   })
+}
+
+// ---------------------------------------------------------------------------
+// `api` source: `/api/tl`.
+// ---------------------------------------------------------------------------
+
+async function fetchApiChunk(_qc: QueryClient, anchor: Anchor, bin: Bin, k: number): Promise<Chunk> {
+  const url = new URL(`${API_BASE}/api/tl`)
+  url.searchParams.set('anchor', anchor)
+  url.searchParams.set('bin', bin)
+  url.searchParams.set('chunk', String(k))
+  const res = await dbgFetch(url.toString())
+  if (!res.ok) throw new Error(`/api/tl ${bin} chunk ${k}: HTTP ${res.status}`)
+  return chunkFromApi(anchor, bin, k, (await res.json()) as ApiChunk)
 }
 
 // ---------------------------------------------------------------------------
@@ -247,17 +259,26 @@ async function fetchSynthChunk(qc: QueryClient, anchor: Anchor, bin: Bin, k: num
 
 export type FetchChunk = (qc: QueryClient, anchor: Anchor, bin: Bin, k: number) => Promise<Chunk>
 
+/** Try each source in order; a `TlUnavailable` falls through, anything
+ *  else (network, HTTP, decode) surfaces. */
+function firstAvailable(...sources: FetchChunk[]): FetchChunk {
+  return async (qc, anchor, bin, k) => {
+    for (let i = 0; i < sources.length; i++) {
+      try {
+        return await sources[i](qc, anchor, bin, k)
+      } catch (e) {
+        if (!(e instanceof TlUnavailable) || i === sources.length - 1) throw e
+      }
+    }
+    throw new Error('unreachable')
+  }
+}
+
 const SOURCES: Record<SourceMode, FetchChunk> = {
+  api: fetchApiChunk,
   shard: fetchShardChunk,
   synth: fetchSynthChunk,
-  auto: async (qc, anchor, bin, k) => {
-    try {
-      return await fetchShardChunk(qc, anchor, bin, k)
-    } catch (e) {
-      if (e instanceof TlUnavailable) return fetchSynthChunk(qc, anchor, bin, k)
-      throw e
-    }
-  },
+  auto: firstAvailable(fetchApiChunk, fetchShardChunk, fetchSynthChunk),
 }
 
 export const chunkKey = (src: SourceMode, anchor: Anchor, bin: Bin, k: number) => ['tl', src, anchor, bin, k] as const

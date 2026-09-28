@@ -8,30 +8,41 @@
  *
  * Time model: bins are local wall-clock time stored as if UTC (as the rides
  * pyramids do), so every date computation here uses `Date.UTC` / `getUTC*`
- * and the FE formats with `timeZone: 'UTC'`. Frames are numbered from genesis
- * (2013-06-01) in units of the bin; a chunk is `K` consecutive frames aligned
- * to `k·K`.
+ * and the FE formats with `timeZone: 'UTC'`. Frames are numbered in units of
+ * the bin from an origin at or before genesis (2013-06-01): genesis floored
+ * to the `K·bin` grid, so a chunk of `K` frames aligned to `k·K` sits exactly
+ * on the pyramid's (epoch-aligned) shard grid — a `1d` chunk is one `1d@32d`
+ * shard, a `1h` chunk one `1h@2d`. Identical to `/api/tl`'s numbering
+ * (`gbfs/api/src/tl.ts`), which is what the `api` source relies on.
  */
 
 export type Anchor = 'start' | 'end'
-/** Exposed bins. Only `1d` is wired in P1. */
-export type Bin = '1d'
-export type Source = 'shard' | 'synth'
+/** Exposed bins. */
+export type Bin = '1h' | '1d'
+export const BINS: readonly Bin[] = ['1h', '1d']
+export type Source = 'api' | 'shard' | 'synth'
 
 export const GENESIS_MS = Date.UTC(2013, 5, 1)
+export const HOUR_MS = 3_600_000
 export const DAY_MS = 86_400_000
-export const BIN_MS: Record<Bin, number> = { '1d': DAY_MS }
-/** Frames per chunk. */
-export const CHUNK_K: Record<Bin, number> = { '1d': 32 }
+export const BIN_MS: Record<Bin, number> = { '1h': HOUR_MS, '1d': DAY_MS }
+/** Frames per chunk (`1h` → 2 days, `1d` → 32 days). */
+export const CHUNK_K: Record<Bin, number> = { '1h': 48, '1d': 32 }
+
+/** Frame 0's start: genesis floored to the `K·bin` grid (see module doc). */
+export function originMs(bin: Bin): number {
+  const grid = CHUNK_K[bin] * BIN_MS[bin]
+  return Math.floor(GENESIS_MS / grid) * grid
+}
 
 /** Frame index containing `ms` (a local-as-UTC instant). */
 export function frameIndex(bin: Bin, ms: number): number {
-  return Math.floor((ms - GENESIS_MS) / BIN_MS[bin])
+  return Math.floor((ms - originMs(bin)) / BIN_MS[bin])
 }
 
 /** Start instant (local-as-UTC ms) of frame `i`. */
 export function frameStartMs(bin: Bin, i: number): number {
-  return GENESIS_MS + i * BIN_MS[bin]
+  return originMs(bin) + i * BIN_MS[bin]
 }
 
 export function chunkOf(bin: Bin, i: number): number {
@@ -213,6 +224,58 @@ export function chunksCovering(bin: Bin, iA: number, iB: number): number[] {
 }
 
 // ---------------------------------------------------------------------------
+// `api` source: `/api/tl` chunk bodies (`gbfs/api/src/tl.ts`).
+// ---------------------------------------------------------------------------
+
+/** `GET /api/tl?anchor=&bin=&chunk=` body. `counts` is `k × ids.length`
+ *  frame-major; `partial` means some frames of the chunk have no shard
+ *  (`covered` lists the frame sub-ranges that do). */
+export interface ApiChunk {
+  anchor: Anchor
+  bin: string
+  chunk: number
+  k: number
+  t0: string
+  ids: string[]
+  counts: number[]
+  unmapped: number[]
+  partial: boolean
+  covered: [number, number][]
+}
+
+/** Thrown when a source can't serve a chunk (no covering shard, partial
+ *  API coverage); `auto` falls through to the next source on it. */
+export class TlUnavailable extends Error {
+  constructor(msg: string) {
+    super(msg)
+    this.name = 'TlUnavailable'
+  }
+}
+
+/** An `/api/tl` body as a `Chunk`. Throws on a body for another
+ *  (bin, chunk, K) than requested (a proxy/cache mix-up), and
+ *  `TlUnavailable` on `partial` (the caller falls back to another source
+ *  rather than rendering empty frames as zeros). */
+export function chunkFromApi(anchor: Anchor, bin: Bin, k: number, body: ApiChunk): Chunk {
+  const K = CHUNK_K[bin]
+  if (body.bin !== bin || body.chunk !== k || body.k !== K) {
+    throw new Error(`/api/tl returned ${body.bin}/${body.chunk}/${body.k}, wanted ${bin}/${k}/${K}`)
+  }
+  if (body.partial) throw new TlUnavailable(`/api/tl ${bin} chunk ${k}: partial coverage ${JSON.stringify(body.covered)}`)
+  const S = body.ids.length
+  if (body.counts.length !== K * S) throw new Error(`/api/tl ${bin} chunk ${k}: ${body.counts.length} counts for ${K}×${S}`)
+  const counts = Uint32Array.from(body.counts)
+  const totals = new Float64Array(K)
+  for (let f = 0; f < K; f++) {
+    let sum = 0
+    for (let s = 0; s < S; s++) sum += counts[f * S + s]
+    totals[f] = sum
+  }
+  const i0 = k * K
+  return { anchor, bin, chunk: k, k: K, i0, n: K, t0: frameStartMs(bin, i0), ids: body.ids, counts, totals, source: 'api' }
+}
+
+// ---------------------------------------------------------------------------
 // Interim shard source: pick covering shards from a pyramid `manifest.jsonl`.
 // ---------------------------------------------------------------------------
 
@@ -280,12 +343,12 @@ export function weekdayFactor(dow: number): number {
 
 /**
  * Synthesize a chunk from monthly per-station ride totals (`stations[ym].json`
- * `ends`): each frame day gets the month's daily mean × a weekday factor, and
- * the two anchors are pushed apart by a per-station bias so the `flow`
- * preset has something to color (`start` = mean × (1 + b), `end` = mean ×
- * (1 − b), `b` ∈ [−0.25, 0.25] from `hash01(id)`). Deterministic; clearly
- * marked `source: 'synth'` so the UI can badge it. INTERIM — delete with
- * the P2 endpoint.
+ * `ends`): each frame gets the month's daily mean (× the bin's fraction of a
+ * day) × a weekday factor, and the two anchors are pushed apart by a
+ * per-station bias so the `flow` preset has something to color (`start` =
+ * mean × (1 + b), `end` = mean × (1 − b), `b` ∈ [−0.25, 0.25] from
+ * `hash01(id)`). Deterministic; clearly marked `source: 'synth'` so the UI
+ * can badge it. INTERIM — the fallback where `/api/tl` has no coverage yet.
  */
 export function synthChunk(
   anchor: Anchor,
@@ -300,7 +363,7 @@ export function synthChunk(
     const month = monthEnds[ymOf(ms)]
     if (!month) continue
     const dim = daysInMonth(ms)
-    const wf = weekdayFactor(new Date(ms).getUTCDay())
+    const wf = weekdayFactor(new Date(ms).getUTCDay()) * (BIN_MS[bin] / DAY_MS)
     for (const [id, ends] of Object.entries(month)) {
       const b = (hash01(id) - 0.5) * 0.5
       const count = Math.round((ends / dim) * wf * (anchor === 'start' ? 1 + b : 1 - b))
@@ -371,8 +434,8 @@ export function accumulateFrame(
  *  (P1: a constant; the spec's `tl-scale.json` sidecar replaces it), never
  *  the per-frame max, so the map "breathes" with the system. */
 export const FLOW = {
-  /** starts + ends at which the radius saturates (`1d`). */
-  scaleMax: { '1d': 1000 } as Record<Bin, number>,
+  /** starts + ends at which the radius saturates, per bin. */
+  scaleMax: { '1h': 80, '1d': 1000 } as Record<Bin, number>,
   rMin: 2,
   rMax: 11,
   /** Pseudo-counts damping net share: 1 start / 0 ends shouldn't max the ramp. */
@@ -448,8 +511,25 @@ export function flowAttributes(
 }
 
 // ---------------------------------------------------------------------------
-// URL codecs' pure halves: `YYMMDD` dates (local-as-UTC).
+// URL codecs' pure halves: `YYMMDD` dates, `YYMMDD[THH]` instants (local-as-UTC).
 // ---------------------------------------------------------------------------
+
+/** `YYMMDD` or `YYMMDDTHH` → local-as-UTC ms, or null when malformed. */
+export function parseT(s: string): number | null {
+  const m = /^(\d{6})(?:T(\d{2}))?$/.exec(s)
+  if (!m) return null
+  const day = parseYmd(m[1])
+  if (day === null) return null
+  const hh = m[2] === undefined ? 0 : Number(m[2])
+  if (hh > 23) return null
+  return day + hh * HOUR_MS
+}
+
+/** Local-as-UTC ms → `YYMMDD` at midnight, else `YYMMDDTHH` (whole hours). */
+export function formatT(ms: number): string {
+  const hh = new Date(ms).getUTCHours()
+  return hh === 0 ? formatYmd(ms) : `${formatYmd(ms)}T${String(hh).padStart(2, '0')}`
+}
 
 /** `YYMMDD` → local-as-UTC ms at midnight, or null when malformed. */
 export function parseYmd(s: string): number | null {

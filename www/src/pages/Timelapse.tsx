@@ -1,13 +1,13 @@
 /**
- * `/timelapse` (`specs/timelapse-map.md`, P1): every station, one `1d` bin
- * per frame, on the shared `GLMap`. One `ScatterplotLayer` with binary
- * per-frame attributes (`flow` preset: radius ∝ √(starts + ends), diverging
- * color on damped net share), frames lerped in JS from a continuous playhead
- * `t` (frame index + φ) driven by one rAF loop that stalls (badge) while the
- * next chunk isn't cached. Chunks come from `query/timelapse.ts` (interim
- * sources, see there); station positions/names from the static assets
- * (`stations-regional.json` + `station-luc.json`) until the `tl-stations.json`
- * sidecar exists.
+ * `/timelapse` (`specs/timelapse-map.md`, P1–P2): every station, one bin
+ * (`1d` or `1h`) per frame, on the shared `GLMap`. One `ScatterplotLayer`
+ * with binary per-frame attributes (`flow` preset: radius ∝ √(starts + ends),
+ * diverging color on damped net share), frames lerped in JS from a continuous
+ * playhead `t` (frame index + φ) driven by one rAF loop that stalls (badge)
+ * while the next chunk isn't cached. Chunks come from `query/timelapse.ts`
+ * (`/api/tl` first, interim sources where it has no coverage yet); station
+ * positions/names from the static assets (`stations-regional.json` +
+ * `station-luc.json`) until the `tl-stations.json` sidecar exists.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -18,22 +18,20 @@ import { boolParam, codeParam, intParam, llzParam, useUrlState, type LLZ, type P
 import GLMap from '../components/GLMap'
 import { cachedChunks, useTlFrames, useTlTotals, type SourceMode } from '../query/timelapse'
 import {
-  accumulateFrame, buildStationTable, chunkIndexMap, chunksCovering, flowAttributes, formatYmd, frameIndex,
-  frameStartMs, parseYmd, snapToCached, type Bin, type Chunk, type StationTable, DAY_MS, FLOW,
+  accumulateFrame, buildStationTable, chunkIndexMap, chunksCovering, flowAttributes, formatT, formatYmd, frameIndex,
+  frameStartMs, parseT, parseYmd, snapToCached, type Bin, type Chunk, type StationTable, BINS, DAY_MS, FLOW,
 } from '../query/timelapseFrames'
 import stationsCss from '../stations.module.css'
 import css from '../timelapse.module.css'
 
 const { floor, max, min } = Math
 
-/** Only `1d` is wired in P1 (`b` stays URL-addressable for P2's ladder). */
-const BIN: Bin = '1d'
-const binParam = codeParam<Bin>('1d', [['1d', '1d']])
+const binParam = codeParam<Bin>('1d', [['1d', '1d'], ['1h', '1h']])
 const SPEEDS = [1, 2, 4, 8, 16, 32]
 const SYSTEM_LLZ: LLZ = { lat: 40.735, lng: -73.975, zoom: 11 }
 const viewParam = llzParam({ default: SYSTEM_LLZ, latLngDecimals: 3 })
 const styleParam = codeParam<'flow'>('flow', [['flow', 'f']])
-const srcParam = codeParam<SourceMode>('auto', [['auto', 'a'], ['shard', 'sh'], ['synth', 'sy']])
+const srcParam = codeParam<SourceMode>('auto', [['auto', 'a'], ['api', 'api'], ['shard', 'sh'], ['synth', 'sy']])
 
 /** Today's local calendar date as a local-as-UTC midnight. */
 function todayMs(): number {
@@ -41,24 +39,31 @@ function todayMs(): number {
   return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())
 }
 
-/** Default range: the trailing full year ending yesterday. */
-const DEFAULT_RANGE: [number, number] = [todayMs() - 365 * DAY_MS, todayMs() - DAY_MS]
-
-/** `?d=YYMMDD-YYMMDD`: inclusive local day range. */
-const rangeParam: Param<[number, number]> = {
-  encode: (v) => (v[0] === DEFAULT_RANGE[0] && v[1] === DEFAULT_RANGE[1] ? undefined : `${formatYmd(v[0])}-${formatYmd(v[1])}`),
-  decode: (raw) => {
-    const m = raw ? /^(\d{6})-(\d{6})$/.exec(raw) : null
-    const a = m ? parseYmd(m[1]) : null
-    const b = m ? parseYmd(m[2]) : null
-    return a !== null && b !== null && a <= b ? [a, b] : DEFAULT_RANGE
-  },
+/** Default range: the trailing full year (`1d`) or full week (`1h`) ending yesterday. */
+function defaultRange(bin: Bin): [number, number] {
+  const days = bin === '1h' ? 7 : 365
+  return [todayMs() - days * DAY_MS, todayMs() - DAY_MS]
 }
 
-/** `?t=YYMMDD`: playhead day; absent = range start. */
+/** `?d=YYMMDD-YYMMDD`: inclusive local day range. */
+function rangeParam(bin: Bin): Param<[number, number]> {
+  const def = defaultRange(bin)
+  return {
+    encode: (v) => (v[0] === def[0] && v[1] === def[1] ? undefined : `${formatYmd(v[0])}-${formatYmd(v[1])}`),
+    decode: (raw) => {
+      const m = raw ? /^(\d{6})-(\d{6})$/.exec(raw) : null
+      const a = m ? parseYmd(m[1]) : null
+      const b = m ? parseYmd(m[2]) : null
+      return a !== null && b !== null && a <= b ? [a, b] : def
+    },
+  }
+}
+
+/** `?t=YYMMDD[THH]`: playhead instant (local-as-UTC ms); absent = range start.
+ *  Bin-independent, so switching bins keeps the same instant. */
 const tParam: Param<number | undefined> = {
-  encode: (v) => (v === undefined ? undefined : formatYmd(v)),
-  decode: (raw) => (raw ? parseYmd(raw) ?? undefined : undefined),
+  encode: (v) => (v === undefined ? undefined : formatT(v)),
+  decode: (raw) => (raw ? parseT(raw) ?? undefined : undefined),
 }
 
 type StationMeta = { name?: string; lat: number; lng: number }
@@ -92,47 +97,59 @@ function useStationTable(): StationTable | null {
 }
 
 const DATE_FMT = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+const HOUR_FMT = new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' })
+const UNIT: Record<Bin, string> = { '1h': 'hour', '1d': 'day' }
+/** shift+←/→: a day (`1h`) or a week (`1d`), in frames. */
+const BIG_STEP: Record<Bin, number> = { '1h': 24, '1d': 7 }
 
 export default function Timelapse() {
   const qc = useQueryClient()
-  // `b` / `st` are registered (URL round-trip) but fixed in P1.
-  useUrlState('b', binParam)
-  const [range] = useUrlState('d', rangeParam)
+  const [bin, setBin] = useUrlState('b', binParam)
+  const rangeP = useMemo(() => rangeParam(bin), [bin])
+  const [range] = useUrlState('d', rangeP)
   const [tUrl, setTUrl] = useUrlState('t', tParam)
   const [sp, setSp] = useUrlState('sp', intParam(8))
   const [view, setView] = useUrlState('ll', viewParam)
-  useUrlState('st', styleParam)
+  useUrlState('st', styleParam)  // registered (URL round-trip) but fixed until the other presets land
   const [loop, setLoop] = useUrlState('lp', boolParam)
   const [src] = useUrlState('src', srcParam)
 
-  const iStart = frameIndex(BIN, range[0])
-  const iEnd = frameIndex(BIN, range[1])
+  const iStart = frameIndex(bin, range[0])
+  // Inclusive last frame: the last day, or its last hour.
+  const iEnd = bin === '1h' ? frameIndex(bin, range[1] + DAY_MS) - 1 : frameIndex(bin, range[1])
   const clampI = useCallback((i: number) => max(iStart, min(iEnd, i)), [iStart, iEnd])
+  const tToI = useCallback((ms: number | undefined) => clampI(ms === undefined ? iStart : frameIndex(bin, ms)), [bin, clampI, iStart])
 
   // Continuous playhead (frame index + φ). The ref is the source of truth for
   // the rAF loop; the state mirrors it for rendering.
-  const tRef = useRef(clampI(tUrl === undefined ? iStart : frameIndex(BIN, tUrl)))
+  const tRef = useRef(tToI(tUrl))
   const [t, setT] = useState(tRef.current)
   const [playing, setPlaying] = useState(false)
-
-  // Normalize a URL `t` that fell outside the range (it was clamped above).
-  useEffect(() => {
-    if (tUrl !== undefined && frameIndex(BIN, tUrl) !== tRef.current) commitT(tRef.current)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const table = useStationTable()
-  const frames = useTlFrames(src, BIN, t, 1)
-  const readyRef = useRef(frames.ready)
-  readyRef.current = frames.ready
 
   // Write `t` (replace) only on pause/step/scrub — never per frame.
   const commitT = useCallback((i: number) => {
     const c = clampI(i)
     tRef.current = c
     setT(c)
-    setTUrl(c === iStart ? undefined : frameStartMs(BIN, c))
-  }, [clampI, iStart, setTUrl])
+    setTUrl(c === iStart ? undefined : frameStartMs(bin, c))
+  }, [bin, clampI, iStart, setTUrl])
+
+  // On mount and on a bin switch: re-derive the frame under the URL's
+  // instant (`t` is bin-independent) and normalize it (clamped to the
+  // range, floored to the bin).
+  useEffect(() => {
+    setPlaying(false)
+    const i = tToI(tUrl)
+    tRef.current = i
+    setT(i)
+    if (tUrl !== undefined && frameStartMs(bin, i) !== tUrl) commitT(i)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bin])
+
+  const table = useStationTable()
+  const frames = useTlFrames(src, bin, t, 1)
+  const readyRef = useRef(frames.ready)
+  readyRef.current = frames.ready
 
   const play = useCallback(() => {
     if (floor(tRef.current) >= iEnd) commitT(iStart)
@@ -165,7 +182,7 @@ export default function Timelapse() {
             tRef.current = iEnd
             setT(iEnd)
             setPlaying(false)
-            setTUrl(frameStartMs(BIN, iEnd))
+            setTUrl(frameStartMs(bin, iEnd))
             return
           }
         }
@@ -176,29 +193,32 @@ export default function Timelapse() {
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [playing, sp, iStart, iEnd, loop, setTUrl])
+  }, [playing, sp, iStart, iEnd, loop, setTUrl, bin])
 
   // Keyboard (`use-kbd`): all show up in the ShortcutsModal / Omnibar.
+  const unit = UNIT[bin]
+  const bigUnit = bin === '1h' ? 'day' : 'week'
   useAction('tl:play', { label: 'Play / pause', group: 'Timelapse', defaultBindings: ['space'], handler: toggle })
-  useAction('tl:prev', { label: 'Previous day', group: 'Timelapse', defaultBindings: ['arrowleft'], handler: () => step(-1) })
-  useAction('tl:next', { label: 'Next day', group: 'Timelapse', defaultBindings: ['arrowright'], handler: () => step(1) })
-  useAction('tl:prev-week', { label: 'Back one week', group: 'Timelapse', defaultBindings: ['shift+arrowleft'], handler: () => step(-7) })
-  useAction('tl:next-week', { label: 'Forward one week', group: 'Timelapse', defaultBindings: ['shift+arrowright'], handler: () => step(7) })
+  useAction('tl:prev', { label: `Previous ${unit}`, group: 'Timelapse', defaultBindings: ['arrowleft'], handler: () => step(-1) })
+  useAction('tl:next', { label: `Next ${unit}`, group: 'Timelapse', defaultBindings: ['arrowright'], handler: () => step(1) })
+  useAction('tl:prev-week', { label: `Back one ${bigUnit}`, group: 'Timelapse', defaultBindings: ['shift+arrowleft'], handler: () => step(-BIG_STEP[bin]) })
+  useAction('tl:next-week', { label: `Forward one ${bigUnit}`, group: 'Timelapse', defaultBindings: ['shift+arrowright'], handler: () => step(BIG_STEP[bin]) })
   useAction('tl:slower', { label: 'Slower', group: 'Timelapse', defaultBindings: ['['], handler: () => setSp(SPEEDS[max(0, SPEEDS.indexOf(sp) - 1)] ?? SPEEDS[0]) })
   useAction('tl:faster', { label: 'Faster', group: 'Timelapse', defaultBindings: [']'], handler: () => setSp(SPEEDS[min(SPEEDS.length - 1, SPEEDS.indexOf(sp) + 1)] ?? SPEEDS[SPEEDS.length - 1]) })
   useAction('tl:home', { label: 'Jump to range start', group: 'Timelapse', defaultBindings: ['home'], handler: () => { setPlaying(false); commitT(iStart) } })
   useAction('tl:end', { label: 'Jump to range end', group: 'Timelapse', defaultBindings: ['end'], handler: () => { setPlaying(false); commitT(iEnd) } })
+  useAction('tl:bin', { label: 'Cycle bin (hour / day)', group: 'Timelapse', defaultBindings: ['b'], handler: () => setBin(BINS[(BINS.indexOf(bin) + 1) % BINS.length]) })
   useAction('tl:loop', { label: 'Toggle loop', group: 'Timelapse', defaultBindings: ['l'], handler: () => setLoop(!loop) })
 
   // Jumps land on the nearest cached frame while the real chunk loads.
-  const rangeChunks = useMemo(() => chunksCovering(BIN, iStart, iEnd), [iStart, iEnd])
+  const rangeChunks = useMemo(() => chunksCovering(bin, iStart, iEnd), [bin, iStart, iEnd])
   const shown = useMemo(() => {
     if (frames.ready) return t
-    const cached = cachedChunks(qc, src, BIN, rangeChunks)
-    return snapToCached(cached, BIN, floor(t), 1) ?? t
+    const cached = cachedChunks(qc, src, bin, rangeChunks)
+    return snapToCached(cached, bin, floor(t), 1) ?? t
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frames, t, qc, src, rangeChunks])
-  const shownFrames = useTlFrames(src, BIN, shown, 0)
+  }, [frames, t, qc, src, bin, rangeChunks])
+  const shownFrames = useTlFrames(src, bin, shown, 0)
 
   // Per-frame attributes: lerp starts/ends between frames ⌊t⌋ and ⌊t⌋+1,
   // then the `flow` preset's radius/color. Fresh typed arrays per frame so
@@ -226,9 +246,9 @@ export default function Timelapse() {
       add(starts, f.chunkB.start, f.startB, phi)
       add(ends, f.chunkB.end, f.endB, phi)
     }
-    const { radius, color } = flowAttributes(starts, ends, BIN)
+    const { radius, color } = flowAttributes(starts, ends, bin)
     return { starts, ends, radius, color, unmapped, source: f.chunkA.start?.source }
-  }, [table, shown, shownFrames])
+  }, [table, shown, shownFrames, bin])
 
   const [hover, setHover] = useState<number | null>(null)
   const layers = useMemo<Layer[]>(() => {
@@ -253,10 +273,11 @@ export default function Timelapse() {
     ]
   }, [table, frame])
 
-  const totals = useTlTotals(src, BIN, iStart, iEnd)
+  const totals = useTlTotals(src, bin, iStart, iEnd)
   const i = floor(shown)
   const stalled = playing && !frames.ready
-  const dateStr = DATE_FMT.format(new Date(frameStartMs(BIN, i)))
+  const iMs = frameStartMs(bin, i)
+  const dateStr = bin === '1h' ? `${DATE_FMT.format(new Date(iMs))} · ${HOUR_FMT.format(new Date(iMs))}` : DATE_FMT.format(new Date(iMs))
   const fmt = (n: number) => Math.round(n).toLocaleString()
 
   return (
@@ -272,27 +293,28 @@ export default function Timelapse() {
         <div className={css.clock}>
           <span className={css.clockDate} data-testid="tl-clock">{dateStr}</span>
           <span className={css.clockSub}>
-            {formatYmd(range[0])} – {formatYmd(range[1])} · day {i - iStart + 1} of {iEnd - iStart + 1}
+            {formatYmd(range[0])} – {formatYmd(range[1])} · {unit} {i - iStart + 1} of {iEnd - iStart + 1}
             {frame && <> · {fmt(frame.starts.reduce((a, b) => a + b, 0))} starts</>}
           </span>
           <div className={css.badges}>
             {stalled && <span className={`${css.badge} ${css.badgeWarn}`}>buffering…</span>}
             {!frames.ready && !playing && !frames.error && <span className={css.badge}>loading…</span>}
             {frames.error && <span className={`${css.badge} ${css.badgeError}`} title={frames.error.message}>error: {frames.error.message}</span>}
-            {frame?.source === 'synth' && <span className={`${css.badge} ${css.badgeWarn}`} title="No small-enough rides shard covers this day; frames are synthesized from monthly station totals (interim, P1)">synthetic</span>}
-            {frame?.source === 'shard' && <span className={css.badge} title="Read from the live rides pyramid shards (interim tail-read)">live shard</span>}
+            {frame?.source === 'api' && <span className={css.badge} title="Frames from /api/tl over the time-first rides-tl pyramid">rides-tl</span>}
+            {frame?.source === 'synth' && <span className={`${css.badge} ${css.badgeWarn}`} title="rides-tl doesn't cover this range yet and no small-enough rides shard does either; frames are synthesized from monthly station totals (interim)">synthetic</span>}
+            {frame?.source === 'shard' && <span className={css.badge} title="rides-tl doesn't cover this range yet; read from the live rides pyramid shards (interim tail-read)">live shard</span>}
             {frame && frame.unmapped > 0 && <span className={css.badge} title="Rides at station ids with no known position">{fmt(frame.unmapped)} unmapped</span>}
           </div>
         </div>
         <div className={css.legend}>
-          <div className={css.legendTitle}>Rides per day, by station</div>
+          <div className={css.legendTitle}>Rides per {unit}, by station</div>
           <div className={css.legendBar} />
           <div className={css.legendLabels}>
             <span>net arrivals</span>
             <span>balanced</span>
             <span>net departures</span>
           </div>
-          <div className={css.legendNote}>size = √(starts + ends), fixed scale (max {FLOW.scaleMax[BIN]}); faint dot = no rides that day</div>
+          <div className={css.legendNote}>size = √(starts + ends), fixed scale (max {FLOW.scaleMax[bin]}); faint dot = no rides that {unit}</div>
         </div>
         {hover !== null && table && frame && (
           <div className={stationsCss.hoverDrawer} style={{ top: 120 }}>
@@ -306,16 +328,20 @@ export default function Timelapse() {
           <button type="button" className={css.btn} onClick={toggle} aria-label={playing ? 'Pause' : 'Play'} title="Space">
             {playing ? '❚❚' : '▶'}
           </button>
-          <button type="button" className={css.btn} onClick={() => step(-1)} aria-label="Previous day" title="←">◀</button>
-          <button type="button" className={css.btn} onClick={() => step(1)} aria-label="Next day" title="→">▶</button>
+          <button type="button" className={css.btn} onClick={() => step(-1)} aria-label={`Previous ${unit}`} title="←">◀</button>
+          <button type="button" className={css.btn} onClick={() => step(1)} aria-label={`Next ${unit}`} title="→">▶</button>
+          <select className={css.select} value={bin} onChange={(e) => setBin(e.target.value as Bin)} aria-label="Bin" title="b">
+            <option value="1h">hourly</option>
+            <option value="1d">daily</option>
+          </select>
           <select className={css.select} value={sp} onChange={(e) => setSp(Number(e.target.value))} aria-label="Speed" title="[ / ]">
-            {SPEEDS.map((s) => <option key={s} value={s}>{s} d/s</option>)}
+            {SPEEDS.map((s) => <option key={s} value={s}>{s} {bin === '1h' ? 'h' : 'd'}/s</option>)}
           </select>
           <label className={css.check}>
             <input type="checkbox" checked={loop} onChange={(e) => setLoop(e.target.checked)} /> loop
           </label>
           <Scrubber iStart={iStart} iEnd={iEnd} i={floor(t)} totals={totals} onScrub={(v) => { tRef.current = v; setT(v) }} onCommit={commitT} />
-          <span className={css.rangeLabel}>{formatYmd(frameStartMs(BIN, i))}</span>
+          <span className={css.rangeLabel}>{formatT(iMs)}</span>
         </div>
       </GLMap>
     </div>

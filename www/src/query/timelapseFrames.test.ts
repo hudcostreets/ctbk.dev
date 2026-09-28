@@ -1,26 +1,37 @@
 import { describe, expect, test } from 'vitest'
 import {
-  accumulateFrame, buildStationTable, chunkFrames, chunkFromBlocks, chunkIndexMap, chunkMs, chunkOf, chunksCovering,
-  daysInMonth, divergingRgb, flowAttributes, flowRadius, formatYmd, frameIndex, frameSlice, frameStartMs, hash01,
-  netShare, parseYmd, pickShards, pivotBlock, pivotRows, prefetchOrder, snapToCached, synthChunk, weekdayFactor, ymOf,
-  type ManifestRow,
+  accumulateFrame, buildStationTable, chunkFrames, chunkFromApi, chunkFromBlocks, chunkIndexMap, chunkMs, chunkOf,
+  chunksCovering, daysInMonth, divergingRgb, flowAttributes, flowRadius, formatT, formatYmd, frameIndex, frameSlice,
+  frameStartMs, hash01, netShare, originMs, parseT, parseYmd, pickShards, pivotBlock, pivotRows, prefetchOrder,
+  snapToCached, synthChunk, TlUnavailable, weekdayFactor, ymOf,
+  type ApiChunk, type ManifestRow,
 } from './timelapseFrames'
 
-const D = (y: number, m: number, d: number) => Date.UTC(y, m - 1, d)
+const D = (y: number, m: number, d: number, h = 0) => Date.UTC(y, m - 1, d, h)
 
-describe('frame / chunk index math (1d, genesis 2013-06-01)', () => {
-  test('frameIndex', () => {
-    expect(frameIndex('1d', D(2013, 6, 1))).toBe(0)
-    expect(frameIndex('1d', D(2013, 6, 2))).toBe(1)
-    expect(frameIndex('1d', D(2013, 5, 31))).toBe(-1)
-    expect(frameIndex('1d', D(2013, 6, 2) + 12 * 3_600_000)).toBe(1)
+describe('frame / chunk index math (origin = genesis floored to the K·bin grid)', () => {
+  test('originMs: 1d/32 → 2013-05-15 (epoch-aligned 32d grid), 1h/48 → 2013-05-31', () => {
+    expect(originMs('1d')).toBe(D(2013, 5, 15))
+    expect(originMs('1h')).toBe(D(2013, 5, 31))
   })
-  test('frameStartMs / chunkOf / chunkFrames / chunkMs', () => {
-    expect(frameStartMs('1d', 32)).toBe(D(2013, 7, 3))
+  test('frameIndex', () => {
+    expect(frameIndex('1d', D(2013, 6, 1))).toBe(17)
+    expect(frameIndex('1d', D(2013, 5, 15))).toBe(0)
+    expect(frameIndex('1d', D(2013, 5, 14))).toBe(-1)
+    expect(frameIndex('1d', D(2013, 6, 2, 12))).toBe(18)
+    expect(frameIndex('1d', D(2025, 6, 10))).toBe(4409)
+    expect(frameIndex('1h', D(2013, 6, 1))).toBe(24)
+    expect(frameIndex('1h', D(2025, 6, 10, 8))).toBe(105440)
+  })
+  test('frameStartMs / chunkOf / chunkFrames / chunkMs land on the shard grid', () => {
+    expect(frameStartMs('1d', 32)).toBe(D(2013, 6, 16))
     expect(chunkOf('1d', 31)).toBe(0)
     expect(chunkOf('1d', 32)).toBe(1)
     expect(chunkFrames('1d', 2)).toEqual([64, 96])
-    expect(chunkMs('1d', 1)).toEqual([D(2013, 7, 3), D(2013, 8, 4)])
+    expect(chunkMs('1d', 1)).toEqual([D(2013, 6, 16), D(2013, 7, 18)])
+    expect(chunkMs('1d', 137)).toEqual([D(2025, 5, 16), D(2025, 6, 17)])
+    expect(chunkOf('1h', 105440)).toBe(2196)
+    expect(chunkMs('1h', 2196)).toEqual([D(2025, 6, 9), D(2025, 6, 11)])
   })
   test('chunksCovering / prefetchOrder', () => {
     expect(chunksCovering('1d', 31, 64)).toEqual([0, 1, 2])
@@ -46,7 +57,7 @@ describe('pivotRows', () => {
     totals[0] = 7
     totals[1] = 3
     expect(chunk).toEqual({
-      anchor: 'start', bin: '1d', chunk: 1, k: 32, i0: 32, n: 32, t0: D(2013, 7, 3),
+      anchor: 'start', bin: '1d', chunk: 1, k: 32, i0: 32, n: 32, t0: D(2013, 6, 16),
       ids: ['a', 'b'], counts, totals, source: 'shard',
     })
   })
@@ -74,9 +85,40 @@ describe('chunkFromBlocks', () => {
     totals[1] = 4
     totals[2] = 30
     expect(chunkFromBlocks('start', '1d', 1, [x, y])).toEqual({
-      anchor: 'start', bin: '1d', chunk: 1, k: 32, i0: 32, n: 32, t0: D(2013, 7, 3),
+      anchor: 'start', bin: '1d', chunk: 1, k: 32, i0: 32, n: 32, t0: D(2013, 6, 16),
       ids: ['a'], counts, totals, source: 'shard',
     })
+  })
+})
+
+describe('chunkFromApi', () => {
+  const body = (o: Partial<ApiChunk> = {}): ApiChunk => ({
+    anchor: 'start', bin: '1h', chunk: 2196, k: 48, t0: '2025-06-09T00:00:00',
+    ids: ['a', 'b'], counts: new Array<number>(96).fill(0), unmapped: new Array<number>(48).fill(0),
+    partial: false, covered: [[0, 48]], ...o,
+  })
+  test('dense block → Chunk with per-frame totals, source api', () => {
+    // 2025-06-10T08 = frame 105440 = chunk-relative 32 (chunk 2196 starts 2025-06-09T00).
+    const counts = new Array<number>(96).fill(0)
+    counts[32 * 2] = 5
+    counts[32 * 2 + 1] = 7
+    counts[33 * 2 + 1] = 1
+    const c = chunkFromApi('start', '1h', 2196, body({ counts }))
+    const totals = new Float64Array(48)
+    totals[32] = 12
+    totals[33] = 1
+    expect(c).toEqual({
+      anchor: 'start', bin: '1h', chunk: 2196, k: 48, i0: 2196 * 48, n: 48, t0: D(2025, 6, 9),
+      ids: ['a', 'b'], counts: Uint32Array.from(counts), totals, source: 'api',
+    })
+    expect(frameSlice(c, 105440)).toEqual(new Uint32Array([5, 7]))
+  })
+  test('partial → TlUnavailable; mismatched identity or shape → Error', () => {
+    expect(() => chunkFromApi('start', '1h', 2196, body({ partial: true, covered: [[0, 14]] })))
+      .toThrow(TlUnavailable)
+    expect(() => chunkFromApi('start', '1h', 2197, body())).toThrow('/api/tl returned 1h/2196/48, wanted 1h/2197/48')
+    expect(() => chunkFromApi('start', '1d', 2196, body())).toThrow('/api/tl returned 1h/2196/48, wanted 1d/2196/32')
+    expect(() => chunkFromApi('start', '1h', 2196, body({ counts: [1] }))).toThrow('/api/tl 1h chunk 2196: 1 counts for 48×2')
   })
 })
 
@@ -116,17 +158,25 @@ describe('synth source', () => {
     expect([weekdayFactor(0), weekdayFactor(3), weekdayFactor(6)]).toEqual([0.7, 1.12, 0.7])
   })
   test('synthChunk: month mean × weekday × anchor bias; months without data are empty', () => {
+    // Chunk 0 = 2013-05-15 .. 2013-06-16; only June has data.
     const c = synthChunk('start', '1d', 0, { '201306': { s1: 300 } })
     const b = (hash01('s1') - 0.5) * 0.5
-    // June 2013 = 30 days → mean 10/day; 2013-06-01 is a Saturday.
+    // June 2013 = 30 days → mean 10/day; 2013-06-01 (frame 17) is a Saturday.
     const expected = new Uint32Array(32)
-    for (let f = 0; f < 30; f++) expected[f] = Math.round(10 * weekdayFactor((6 + f) % 7) * (1 + b))
+    for (let f = 17; f < 32; f++) expected[f] = Math.round(10 * weekdayFactor((6 + f - 17) % 7) * (1 + b))
     expect(c.ids).toEqual(['s1'])
     expect(c.source).toBe('synth')
     expect(c.counts).toEqual(expected)
     expect(Array.from(c.totals)).toEqual(Array.from(expected))
-    expect(c.counts[0]).toBe(Math.round(7 * (1 + b)))
-    expect(c.counts[2]).toBe(Math.round(11.2 * (1 + b)))
+    expect(c.counts[17]).toBe(Math.round(7 * (1 + b)))
+    expect(c.counts[19]).toBe(Math.round(11.2 * (1 + b)))
+  })
+  test('synthChunk 1h: the daily mean spread over 24 bins', () => {
+    // Chunk 2196 = 2025-06-09 .. 2025-06-11 (Mon, Tue); June 2025 = 30 days.
+    const c = synthChunk('start', '1h', 2196, { '202506': { s1: 30 * 24 * 100 } })
+    const b = (hash01('s1') - 0.5) * 0.5
+    expect(c.ids).toEqual(['s1'])
+    expect(c.counts).toEqual(new Uint32Array(48).fill(Math.round(100 * 1.12 * (1 + b))))
   })
 })
 
@@ -169,11 +219,19 @@ describe('flow preset styling', () => {
   })
 })
 
-describe('YYMMDD codecs', () => {
+describe('YYMMDD / YYMMDDTHH codecs', () => {
   test('parseYmd / formatYmd', () => {
     expect(parseYmd('250609')).toBe(D(2025, 6, 9))
     expect(parseYmd('2506')).toBeNull()
     expect(parseYmd('251301')).toBeNull()
     expect(formatYmd(D(2025, 6, 9))).toBe('250609')
+  })
+  test('parseT / formatT', () => {
+    expect(parseT('250610')).toBe(D(2025, 6, 10))
+    expect(parseT('250610T08')).toBe(D(2025, 6, 10, 8))
+    expect(parseT('250610T24')).toBeNull()
+    expect(parseT('250610T8')).toBeNull()
+    expect(formatT(D(2025, 6, 10))).toBe('250610')
+    expect(formatT(D(2025, 6, 10, 8))).toBe('250610T08')
   })
 })
