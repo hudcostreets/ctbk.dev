@@ -211,6 +211,9 @@
 !src/query/smgStats.test.ts
 !src/query/smgStats.ts
 !src/query/stations.ts
+!src/query/timelapse.ts
+!src/query/timelapseFrames.test.ts
+!src/query/timelapseFrames.ts
 !src/stations.module.css
 !src/theme.ts
 !src/time-range.test.ts
@@ -224,4 +227,5 @@
 !tsconfig.json
 !tsconfig.node.json
 !vite.config.ts
+!vitest.config.ts
 !wrangler.jsonc
