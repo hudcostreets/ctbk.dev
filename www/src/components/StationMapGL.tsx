@@ -6,26 +6,25 @@
  * flow lens produces — so recolor is a GPU attribute update (`updateTriggers`),
  * not a re-mount of thousands of SVG nodes.
  *
- * MapLibre owns the map + camera (root `<Map>`); deck.gl is layered on via a
- * `MapboxOverlay` control (overlaid, in its own canvas above the basemap — see
- * `DeckOverlay`). Picking is GPU-based (`pickable`), so the old invisible
- * hit-circle hack is gone. Stage 3 adds the `ArcLayer` flow fan (`arcs`).
+ * The basemap + deck overlay + camera live in `GLMap` (shared with
+ * `/timelapse`); this component owns the `/stations` layers (lens-colored
+ * dots, pin rings, arc fan), rectangle select and the hover drawer. Picking is
+ * GPU-based (`pickable`), so the old invisible hit-circle hack is gone. Stage 3
+ * adds the `ArcLayer` flow fan (`arcs`).
  *
  * Opt-in via `?gl=1` on `/stations` while it reaches parity with `StationMap`.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Map as MaplibreMap, useControl, type MapLayerMouseEvent } from 'react-map-gl/maplibre'
-import { MapboxOverlay } from '@deck.gl/mapbox'
 import { ArcLayer, ScatterplotLayer } from '@deck.gl/layers'
 import type { Layer, PickingInfo } from '@deck.gl/core'
-import type { Map as MaplibreMapInstance, StyleSpecification } from 'maplibre-gl'
-import 'maplibre-gl/dist/maplibre-gl.css'
+import type { Map as MaplibreMapInstance } from 'maplibre-gl'
 import { useTheme } from '../contexts/ThemeContext'
 import css from '../stations.module.css'
 import type { Stations, StationPairCounts } from './StationMap'
 import { rampRgb, type FlowArc } from './flowLens'
+import GLMap from './GLMap'
 
-const { round, sqrt, max } = Math
+const { sqrt, max } = Math
 
 type RGBA = [number, number, number, number]
 
@@ -41,42 +40,12 @@ function hexToRgb(hex: string): [number, number, number] {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
 }
 
-/**
- * Raster basemap style (Stadia tiles — the same ones the react-leaflet map
- * uses, so they're already allowlisted for this origin). Deliberately raster,
- * not a CARTO vector style: under Vite the maplibre vector-tile worker wasn't
- * running (style + TileJSON + sprite load 200, but zero .mvt tiles ever
- * requested → black map). Raster tiles decode on the main thread, so they
- * render regardless. Revisit CARTO vector once the worker is sorted.
- */
-function rasterStyle(dark: boolean): StyleSpecification {
-  const url = dark
-    ? 'https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}.png'
-    : 'https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}.png'
-  return {
-    version: 8,
-    sources: { base: { type: 'raster', tiles: [url], tileSize: 256 } },
-    layers: [{ id: 'base', type: 'raster', source: 'base' }],
-  }
-}
-
 type StationDatum = {
   id: string
   name: string
   ends: number
   position: [number, number]
   color: RGBA
-}
-
-/** deck.gl layers as a MapLibre control, updated in place each render. */
-function DeckOverlay({ layers }: { layers: Layer[] }) {
-  // Overlaid (not interleaved): deck renders in its own canvas ABOVE maplibre's
-  // basemap canvas. Interleaved mode (deck drawing into maplibre's GL context)
-  // left the basemap unpainted here — tiles fetched 200 but never composited.
-  // Overlaid is exactly the stacking we want (marks over basemap) anyway.
-  const overlay = useControl(() => new MapboxOverlay({ interleaved: false, layers }))
-  overlay.setProps({ layers })
-  return null
 }
 
 export interface StationMapGLProps {
@@ -129,7 +98,6 @@ export default function StationMapGL({
 }: StationMapGLProps) {
   const { actualTheme } = useTheme()
   const dark = actualTheme === 'dark'
-  const mapStyle = useMemo(() => rasterStyle(dark), [dark])
 
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   // Read by the click handler: hover fires before click at the same point, so
@@ -325,36 +293,23 @@ export default function StationMapGL({
 
   // Empty-space click → clear, UNLESS a station's layer onClick just fired for
   // this same click (deck picks fire alongside maplibre's click).
-  const handleClick = (_e: MapLayerMouseEvent) => {
+  const handleClick = () => {
     if (Date.now() - justPickedRef.current < 150) return
     onClick?.()
   }
 
   return (
-    <div ref={containerRef} style={{ position: 'relative' }} className={css.homeMap}>
-      <MaplibreMap
-        initialViewState={{ longitude: center[1], latitude: center[0], zoom }}
-        mapStyle={mapStyle}
-        attributionControl={false}
-        cursor={hoveredId ? 'pointer' : 'grab'}
-        onMove={(e) => onMove?.(round(e.viewState.latitude * 1000) / 1000, round(e.viewState.longitude * 1000) / 1000, round(e.viewState.zoom))}
-        onClick={handleClick}
-        // maplibre renders black until (a) it's resized to the settled flex/100vh
-        // container size, and (b) a reflow flushes the WebGL canvas to the
-        // compositor (Chrome doesn't paint it otherwise in this layout). Resize
-        // + keep-in-sync ResizeObserver, then a one-frame opacity toggle to
-        // force the composite. Without this the basemap stays black until the
-        // first user interaction.
-        onLoad={(e) => {
-          const m = e.target
-          mapRef.current = m
-          m.resize()
-          new ResizeObserver(() => m.resize()).observe(m.getContainer())
-        }}
-        style={{ width: '100%', height: '100%' }}
-      >
-        <DeckOverlay layers={layers} />
-      </MaplibreMap>
+    <GLMap
+      layers={layers}
+      center={center}
+      zoom={zoom}
+      onMove={onMove}
+      onClick={handleClick}
+      onReady={(m) => { mapRef.current = m }}
+      cursor={hoveredId ? 'pointer' : 'grab'}
+      className={css.homeMap}
+      containerRef={containerRef}
+    >
       {overlay && (
         <div style={{
           position: 'absolute', top: 8, right: 8, zIndex: 1000,
@@ -388,6 +343,6 @@ export default function StationMapGL({
           )}
         </div>
       )}
-    </div>
+    </GLMap>
   )
 }

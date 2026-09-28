@@ -12,6 +12,7 @@
 !e2e/merge-review.spec.ts
 !e2e/month-range.spec.ts
 !e2e/shortcuts.spec.ts
+!e2e/station-map-gl.spec.ts
 !e2e/station-map.spec.ts
 !e2e/station-page.spec.ts
 !eslint.config.js
@@ -107,6 +108,7 @@
 !src/components/FlagsPanel.tsx
 !src/components/Footer.module.css
 !src/components/Footer.tsx
+!src/components/GLMap.tsx
 !src/components/Heading.module.css
 !src/components/Heading.tsx
 !src/components/MonthRangePicker.tsx
@@ -135,6 +137,7 @@
 !src/components/StationAvailabilityChart.tsx
 !src/components/StationMap.tsx
 !src/components/StationMapEmbed.tsx
+!src/components/StationMapGL.tsx
 !src/components/StationPies.tsx
 !src/components/StationRidesChart.tsx
 !src/components/StationRidesPanel.module.css
@@ -148,6 +151,7 @@
 !src/components/TimeAgo.tsx
 !src/components/Tip.module.css
 !src/components/Tip.tsx
+!src/components/flowLens.ts
 !src/components/icons/Bluesky.tsx
 !src/components/icons/Command.tsx
 !src/components/icons/GitHub.tsx
