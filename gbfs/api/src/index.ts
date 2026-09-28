@@ -58,9 +58,21 @@ interface Env extends ServeEnv {
 	 *    blobs[3] = status, doubles[0] = perCallMs, doubles[1] = wallMs.
 	 *  Queryable via CF GraphQL `viewer.accounts.workersAnalyticsEngine`. */
 	PERF?: AnalyticsEngineDataset;
-	/** Folded into the `/api/rides*` edge-cache key; bump to rotate every
-	 *  cached rides response after a data cutover. */
+	/** Folded into the `/api/rides*` + `/api/tl` edge-cache keys; bump to
+	 *  rotate every cached rides response after a data cutover. */
 	RIDES_CACHE_GEN?: string;
+	/** `/api/tl` (`tl.ts`): R2 prefix of the time-first rides pyramids
+	 *  (`{prefix}/{start,end}/…`; default `rides-tl`). Part of the edge-cache
+	 *  key, so flipping it rotates cached chunks. */
+	TL_PREFIX?: string;
+	/** `/api/tl`: `1` once the `rides-tl` pyramids hold materialized `c:`
+	 *  rollups (`pyrmts-engine canonicalize`); unset ⇒ fold raw leaves via
+	 *  the id-map at serve time. */
+	TL_CANONICALIZED?: string;
+	/** `/api/tl` local dev only: read shards over HTTP from this base (e.g.
+	 *  `https://data.ctbk.dev`) instead of the R2 binding, whose `wrangler
+	 *  dev` simulator is empty. `wrangler dev --var TL_HTTP_BASE:…`. */
+	TL_HTTP_BASE?: string;
 }
 
 function todayUtc(): string {
@@ -510,6 +522,8 @@ import { RIDES, serveRides } from './rides_v1';
 import { retryingStorage, withR2Retry } from './r2_retry';
 import { r2Storage } from 'pyrmts-cfw';
 import { backfillManifestKey, manifestStatus, pruneManifestOrphans } from './rg_manifest';
+import { serveTl } from './tl';
+import { httpStorage } from './http_storage';
 
 /**
  * Build an `AsyncBuffer` (hyparquet's slice-based file abstraction) backed by
@@ -1551,6 +1565,46 @@ export default {
 				resp = new Response(resp.body, { status: resp.status, headers });
 				ctx.waitUntil(cache.put(cacheKey, resp.clone()));
 			}
+			return resp;
+		}
+
+		// /api/tl — timelapse frame chunks from the time-first `rides-tl`
+		// pyramids (`tl.ts`, `specs/timelapse-map.md`). Same edge-cache shape
+		// as `/api/rides`: `serveTl` sets `Cache-Control` (closed chunks
+		// immutable, tip chunks 1h), the key folds in `RIDES_CACHE_GEN` and
+		// the prefix.
+		if (url.pathname === '/api/tl') {
+			const prefix = env.TL_PREFIX || 'rides-tl';
+			const cache = caches.default;
+			const cacheUrl = new URL(url.toString());
+			if (env.RIDES_CACHE_GEN) cacheUrl.searchParams.set('cache_gen', env.RIDES_CACHE_GEN);
+			cacheUrl.searchParams.set('tl_prefix', prefix);
+			const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
+			const hit = await cache.match(cacheKey);
+			if (hit) {
+				const headers = new Headers(hit.headers);
+				headers.set('X-Cache', 'HIT');
+				return new Response(hit.body, { status: hit.status, headers });
+			}
+			const tStart = performance.now();
+			const storage = env.TL_HTTP_BASE ? httpStorage(env.TL_HTTP_BASE) : retryingStorage(r2Storage(env.R2));
+			let resp: Response;
+			try {
+				resp = await serveTl(storage, request, env.CORS_ORIGIN ?? '*', {
+					prefix,
+					canonicalized: env.TL_CANONICALIZED === '1',
+				});
+			} catch (err: any) {
+				return errorResponse(err.message ?? 'tl error', 500, env);
+			}
+			if (env.PERF) {
+				env.PERF.writeDataPoint({
+					blobs: ['/api/tl', resp.headers.get('X-Worker-Colo') ?? '', String(resp.status)],
+					doubles: [performance.now() - tStart],
+					indexes: ['/api/tl'],
+				});
+			}
+			if (resp.ok) ctx.waitUntil(cache.put(cacheKey, resp.clone()));
 			return resp;
 		}
 
