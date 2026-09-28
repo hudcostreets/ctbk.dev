@@ -20,11 +20,11 @@ R2_PUBLIC_BASE_URL = "https://pub-4b6c7e01aa2349b8b8d6ed788df2a9d1.r2.dev"
 # cached past-window responses rotate (`specs/station-id-trailing-zero.md`).
 RIDES_CACHE_GEN = "trailing-zero-repair"
 # `/api/tl` (`src/tl.ts`): R2 prefix of the time-first `rides-tl-{start,end}`
-# pyramids. `rides-tl-p0b` is the 2025-06 scratch build (`specs/timelapse-map.md`
-# P0); flip to `rides-tl` once the full-history build lands. Part of the
-# edge-cache key. Set `TL_CANONICALIZED = "1"` once `canonicalize` has run
-# on the prefix (materialized `c:` rows).
-TL_PREFIX = "rides-tl-p0b"
+# pyramids (`specs/timelapse-map.md`; `rides-tl` = the full-history build,
+# `rides-tl-p0b` = the 2025-06 scratch build). Part of the edge-cache key.
+# Set `TL_CANONICALIZED = "1"` once `canonicalize` has run on the prefix
+# (materialized `c:` rows).
+TL_PREFIX = "rides-tl"
 
 # Bundle .ttf font files as raw bytes (satori og:image rendering).
 # NOTE: defining ANY [[rules]] displaces wrangler's defaults, so the
@@ -93,7 +93,7 @@ R2_PUBLIC_BASE_URL = "https://pub-4b6c7e01aa2349b8b8d6ed788df2a9d1.r2.dev"
 # CANON_MAP_KEY = "stations/station-canonicalize-map.<hash12>.json"
 # EXTRA_STATIONS_KEY = "stations/rides-extra-stations.<hash12>.json"
 # RIDES_CACHE_GEN = "<label>"  # folded into the `/api/rides*` edge-cache key
-TL_PREFIX = "rides-tl-p0b"
+TL_PREFIX = "rides-tl"
 
 [[env.dev.d1_databases]]
 binding = "DB"
