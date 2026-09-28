@@ -2,7 +2,7 @@ from datetime import date, timedelta
 
 from pandas import DataFrame
 
-from ctbk.stations.closures import Closure, closures
+from ctbk.stations.closures import Closure, closures, closures_by_id
 
 
 def obs(rows: list[tuple[str, str, str]]) -> DataFrame:
@@ -38,3 +38,18 @@ def test_needs_activity_on_both_sides():
     rows = [(d, 'a', 'A St') for d in all_days]
     rows += [(d, 'b', 'B St') for d in all_days[:3] + all_days[20:]]
     assert closures(obs(rows), {}, min_days=5, min_active=5) == []
+
+
+def test_closures_by_id():
+    found = [
+        Closure('c:b', 'B St', date(2024, 6, 1), date(2024, 6, 30), 30),
+        Closure('c:b', 'B St', date(2023, 1, 11), date(2023, 1, 25), 15),
+        Closure('c:d', 'D St', date(2022, 3, 1), date(2022, 4, 1), 32),
+    ]
+    canon = {'s:b0': 'c:b', 's:b': 'c:b', 's:a0': 'c:a'}
+    b = [['2023-01-11', '2023-01-25'], ['2024-06-01', '2024-06-30']]
+    assert closures_by_id(found, canon) == {
+        'b': b,
+        'b0': b,
+        'd': [['2022-03-01', '2022-04-01']],
+    }

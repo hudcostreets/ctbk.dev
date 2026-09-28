@@ -24,7 +24,7 @@ import { useStationTrips } from '../hooks/useStationTrips'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   pickAvailBinAuto, prefetchStationDetail,
-  useStationInfo, useStationAvailabilityRouted,
+  useStationClosures, useStationInfo, useStationAvailabilityRouted,
   type AvailSource,
 } from '../query/stations'
 import { useRollupQuery, type Side } from '../query/rollups'
@@ -264,6 +264,8 @@ function StationDetailPage() {
 
   // Monthly trip history from the rides-v5 pyramid (by LUC cell).
   const { rows: tripsRows } = useStationTrips(info?.short_name)
+  const { data: closuresById } = useStationClosures()
+  const closures = info?.short_name ? closuresById?.[info.short_name] : undefined
 
   // Trips-chart controls (per-page URL params)
   const [tripsYAxis, setTripsYAxis] = useUrlState('ty', codeParam<YAxis>('Rides', [['Rides', 'r'], ['Ride minutes', 'm']]))
@@ -831,6 +833,7 @@ function StationDetailPage() {
           <Typography variant="subtitle1" gutterBottom>Monthly trips</Typography>
           <YmrgtbChart
             rows={processedTripsRows}
+            closures={closures}
             style={{ width: '100%', height: 500 }}
             config={{
               yAxis: tripsYAxis,

@@ -26,12 +26,15 @@ export interface YmrgtbChartProps {
    *  preserved UI state (legend toggles). */
   yAxisRevision?: string
   onRelayout?: (e: Readonly<PlotRelayoutEvent>) => void
+  /** Exact closures (`[first, last]` ISO days), banded as "Station inactive";
+   *  whole empty months are inferred from `rows` otherwise. */
+  closures?: readonly [string, string][]
   className?: string
   style?: React.CSSProperties
 }
 
 export default function YmrgtbChart({
-  rows, config, showLegend, uiRevision, yAxisRevision, onRelayout, className, style,
+  rows, config, showLegend, uiRevision, yAxisRevision, onRelayout, closures, className, style,
 }: YmrgtbChartProps) {
   const { actualTheme } = useTheme()
   const isDark = actualTheme === 'dark'
@@ -50,9 +53,9 @@ export default function YmrgtbChart({
   }, [])
 
   const { traces, months, inactive } = useMemo(() => buildTraces(rows, {
-    ...config,
+    ...config, closures,
     isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor,
-  }), [rows, config, isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor])
+  }), [rows, config, closures, isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor])
 
   const showLegendEffective = showLegend ?? config.stackBy !== 'None'
 

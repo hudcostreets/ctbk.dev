@@ -48,3 +48,20 @@ def closures(
             last = system_days[rank[days[i]] - 1]
             out.append(Closure(station, name, first, last, gap))
     return sorted(out, key=lambda c: (-c.days, c.station))
+
+
+def closures_by_id(
+    found: list[Closure],
+    canon: dict[str, str],
+) -> dict[str, list[list[str]]]:
+    """`{id: [[first, last], …]}` (ISO dates, chronological) for the FE: keyed
+    by each closed station's canonical id and every raw id that maps to it, so
+    a page looking up any of a station's ids finds its closures."""
+    by_canon: dict[str, list[list[str]]] = {}
+    for c in sorted(found, key=lambda c: (c.station, c.first)):
+        by_canon.setdefault(c.station, []).append([c.first.isoformat(), c.last.isoformat()])
+    out = {station.removeprefix('c:'): spans for station, spans in by_canon.items()}
+    for raw, station in canon.items():
+        if station in by_canon:
+            out[raw.removeprefix('s:')] = by_canon[station]
+    return dict(sorted(out.items()))

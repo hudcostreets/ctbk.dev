@@ -1019,8 +1019,9 @@ def trailing_zero_audit(dry_run: bool):
 @option('-a', '--min-active', type=int, default=60, help="Observed days required on each side of a gap.")
 @option('-d', '--min-days', type=int, default=14, help="Minimum closure length, in system-active days.")
 @option('-n', '--limit', type=int, help="Print at most this many closures.")
-def gaps(min_active: int, min_days: int, limit: int | None):
-    from ctbk.stations.closures import closures
+@option('-o', '--output', help="Also write them as JSON (`{id: [[first, last], …]}`, keyed by canonical and raw ids) here, e.g. `www/public/assets/station-closures.json` (the station page's \"Station inactive\" bands).")
+def gaps(min_active: int, min_days: int, limit: int | None, output: str | None):
+    from ctbk.stations.closures import closures, closures_by_id
 
     sh = StationHarmonize()
     stations_dir = dirname(sh.id_map_url)
@@ -1031,3 +1032,9 @@ def gaps(min_active: int, min_days: int, limit: int | None):
     err(f"{len(found)} closures ≥ {min_days}d")
     for c in found[:limit]:
         print(f"{c.station}\t{c.name}\t{c.first}\t{c.last}\t{c.days}")
+    if output:
+        by_id = closures_by_id(found, canon)
+        with open(output, 'w') as f:
+            json.dump(by_id, f, separators=(',', ':'))
+            f.write('\n')
+        err(f"Wrote {output} ({len(by_id)} ids)")

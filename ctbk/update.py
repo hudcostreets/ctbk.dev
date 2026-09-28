@@ -46,6 +46,8 @@ def update(
     if not no_station_harmonize:
         err(f"--- Station harmonize ---")
         ctbk_run('station-harmonize', 'create')
+        if not no_www:
+            ctbk_run('station-harmonize', 'gaps', '-n', '0', '-o', 'www/public/assets/station-closures.json')
 
     err(f"--- Aggregations ---")
     ctbk_run('agg', 'create', '-ge', '-ac', ym)

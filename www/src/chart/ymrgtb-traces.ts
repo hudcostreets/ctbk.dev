@@ -20,10 +20,10 @@ import {
   NormalizeRideableType,
   UnknownRideableCutoff,
   UserTypeDisplayNames,
-  rollingAvg,
   stackKeyDict,
   yAxisLabelDict,
 } from '../data'
+import { activeFractions, activeRollingAvg, inactiveSpans, spanDays, spanLabel, type InactiveSpan } from './inactive'
 
 // Augmented row after lightweight preprocessing
 export type ProcessedRow = Row & {
@@ -99,14 +99,16 @@ export interface BuildTracesConfig {
   lineDarkenFactor: number
   /** Optional: additional filter (e.g. to restrict by Docking for station detail). */
   extraFilter?: (row: ProcessedRow) => boolean
+  /** Exact closures (`[first, last]` ISO days; see `inactiveSpans`). */
+  closures?: readonly (readonly [string, string])[]
 }
 
 export interface BuildTracesResult {
   traces: Data[]
   months: string[]
   allMonths: string[]
-  /** Interior months with no rides at all (see `inactiveRuns`). */
-  inactive: [string, string][]
+  /** Stretches with no rides at all: `closures`, plus inferred empty months. */
+  inactive: InactiveSpan[]
 }
 
 /** Darken a hex color by a factor in [0, 1]. */
@@ -128,7 +130,7 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
     regions, userTypes, genders, rideableTypes,
     start, end, rollingAvgs,
     isDark, rollingAvgColor, lineOutlineColor, lineDarkenFactor,
-    extraFilter,
+    extraFilter, closures = [],
   } = cfg
   const isStacked = stackBy !== 'None'
   const { hoverLabel: yHoverLabel } = yAxisLabelDict[yAxis]
@@ -159,10 +161,14 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
     allGrouped[m][stackVal] = (allGrouped[m][stackVal] || 0) + val
   }
 
-  // Interior months with no rows count as zero (not skipped), so rolling
-  // averages dip through an inactive stretch instead of bridging it.
+  // Rolling averages skip months a station was closed (and weight partly-
+  // closed ones by their open fraction), resuming after an outage where they
+  // left off; other interior months with no rows count as zero.
   const seenMonths = Object.keys(allGrouped).sort()
   const allMonths = seenMonths.length ? monthSpan(seenMonths[0], seenMonths[seenMonths.length - 1]) : []
+  const inactive = inactiveSpans(closures, inactiveRuns(data))
+  const weights = activeFractions(allMonths, inactive)
+  const open = weights.map((w) => (w > 0 ? 1 : 0))
   const months = allMonths.filter((m) => m >= start && m < end)
   const grouped = allGrouped
 
@@ -227,7 +233,7 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
       const allTotals = allMonths.map((m) =>
         Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
       )
-      const allAvgY = rollingAvg(allTotals, 12)
+      const allAvgY = activeRollingAvg(allTotals, weights, 12)
       const visibleAvgY = allAvgY.slice(visibleStartIdx, visibleEndIdx)
 
       rollingTraces.push({
@@ -265,8 +271,8 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
             const total = Object.values(grouped[m] || {}).reduce((a, b) => a + b, 0)
             return total ? val / total : 0
           })
-          const avgRaw = rollingAvg(rawValues, 12)
-          const avgPct = rollingAvg(pctValues, 12)
+          const avgRaw = activeRollingAvg(rawValues, weights, 12)
+          const avgPct = activeRollingAvg(pctValues, open, 12)
 
           const firstDataIdx = rawValues.findIndex((v) => v > 0)
           let lastDataIdx = -1
@@ -316,5 +322,19 @@ export function buildTraces(data: ProcessedRow[] | null, cfg: BuildTracesConfig)
     }
   }
 
-  return { traces: [...barTraces, ...rollingTraces] as Data[], months, allMonths, inactive: inactiveRuns(data) }
+  // Hover-only note on months touched by an outage: a line in the unified
+  // hoverbox, since closed months have no bars to hover.
+  const noted = months.flatMap((m, i) => {
+    const s = inactive.find((s) => s.from.slice(0, 7) <= m && m <= s.to.slice(0, 7))
+    return s ? [{ x: monthDates[i], text: `ⓘ Station inactive: no rides ${spanLabel(s)}${s.exact ? ` (${spanDays(s).toLocaleString()} days)` : ''}` }] : []
+  })
+  const noteTrace: Data[] = noted.length ? [{
+    uid: 'inactive-note',
+    x: noted.map((n) => n.x), y: noted.map(() => 0), text: noted.map((n) => n.text),
+    type: 'scatter', mode: 'markers', marker: { opacity: 0 },
+    name: 'inactive', showlegend: false,
+    hovertemplate: '%{text}<extra></extra>',
+  }] : []
+
+  return { traces: [...barTraces, ...rollingTraces, ...noteTrace] as Data[], months, allMonths, inactive }
 }

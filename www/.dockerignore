@@ -29,6 +29,7 @@
 !public/assets/neighborhoods.json
 !public/assets/s3.png
 !public/assets/station-births.json
+!public/assets/station-closures.json
 !public/assets/station-luc.json
 !public/assets/station-merges.json
 !public/assets/station-urls.json
@@ -93,6 +94,8 @@
 !scripts/push-screenshots.py
 !scrns.config.json
 !src/chart/YmrgtbChart.tsx
+!src/chart/inactive.test.ts
+!src/chart/inactive.ts
 !src/chart/ymrgtb-layout.ts
 !src/chart/ymrgtb-traces.test.ts
 !src/chart/ymrgtb-traces.ts

@@ -280,6 +280,22 @@ export function useStationLuc(): UseQueryResult<StationLuc> {
   })
 }
 
+/** Mid-life closures (`[first, last]` days with no rides, ISO), by station
+ *  id: `ctbk station-harmonize gaps -o …`. ~90 KB. */
+export type StationClosures = Record<string, [string, string][]>
+
+export function useStationClosures(): UseQueryResult<StationClosures> {
+  return useQuery<StationClosures>({
+    queryKey: ['station-closures'],
+    staleTime: Infinity,
+    queryFn: async () => {
+      const res = await fetch('/assets/station-closures.json')
+      if (!res.ok) throw new Error(`station-closures: HTTP ${res.status}`)
+      return res.json()
+    },
+  })
+}
+
 /** Look up a station's LUC entry from its GBFS UUID. Returns null if the
  *  station isn't in the denorm (rare — usually means the station was
  *  decommissioned before the window-union snapshot range, or the LUC
