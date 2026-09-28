@@ -92,10 +92,30 @@ def aligned_range(dur: str, n: int, genesis: datetime = AVAIL_GENESIS) -> tuple[
 
 
 def _rides_anchor(config_name: str) -> str | None:
-    """`rides-start` → 'start', `rides-end` → 'end'; None for avail
-    configs (`specs/rides-v5.md`)."""
-    m = re.fullmatch(r'rides-(start|end)', config_name)
+    """`rides-start` → 'start', `rides-end` → 'end' (likewise the
+    `rides-tl-*` time-first variants, `specs/timelapse-map.md`); None for
+    avail configs (`specs/rides-v5.md`)."""
+    m = re.fullmatch(r'rides-(?:tl-)?(start|end)', config_name)
     return m.group(1) if m else None
+
+
+def _rides_tl(config_name: str) -> bool:
+    """`rides-tl-{start,end}`: the identity-only, `cell`-dim-only,
+    time-first transposes of the rides pyramids (`specs/timelapse-map.md`)."""
+    return re.fullmatch(r'rides-tl-(start|end)', config_name) is not None
+
+
+def engine_sort_cols(config_name: str) -> list[str]:
+    """The shard sort a build of `config_name` uses (`pyrmts-engine batch
+    submit -s`; also `build_local`'s `sort`). Station-first for the rides
+    pyramids (one station's history is contiguous), time-first for the
+    `rides-tl-*` transposes (one bin's stations are contiguous), the avail
+    default otherwise."""
+    if _rides_tl(config_name):
+        return ['dt', 'cell']
+    if _rides_anchor(config_name):
+        return ['cell', 'dt', 'gender', 'user_type', 'bike_type']
+    return ['s2_cell', 'dt']
 
 
 def run_build(
@@ -117,8 +137,10 @@ def run_build(
     if raw and rides_anchor:
         from .rides_assets import rides_source_kwargs
         from .rides_source import MonthlyRidesSource
-        source = MonthlyRidesSource(src, rides_anchor, **rides_source_kwargs())
-        sort = ['cell', 'dt', 'gender', 'user_type', 'bike_type']
+        source = MonthlyRidesSource(
+            src, rides_anchor, **rides_source_kwargs(), identity_only=_rides_tl(config_name),
+        )
+        sort = engine_sort_cols(config_name)
     elif raw:
         from .lambda_exec import _chains, parse_chains_mode, set_chains_mode
         from .lite import r2_client

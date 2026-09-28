@@ -1,0 +1,72 @@
+# ctbk rides-tl pyramid, `end` anchor (`specs/timelapse-map.md`): the
+# TIME-FIRST transpose of `rides-end` for the timelapse map. Same engine
+# raw-ingest (`MonthlyRidesSource`, identity-only mode), same tier ladder,
+# genesis (2013-06-01), content-hashed keys + `manifest.jsonl`, and the
+# same materialized `c:` canonicalization (`identityRollup`), but only
+# what a frame needs:
+#   - dims: `cell` alone — the rider dims (gender/user_type/bike_type)
+#     are summed away at ingest;
+#   - `cell` values: raw `s:<id>` station leaves + `c:<canonical>` rollups
+#     only. No `geo` block ⇒ no S2 vocab-chain rows (pyrmts rejects an
+#     empty `geo.resolutions`; omitting `geo` is how "no chain" is said,
+#     which is why `identityRollup.col` is explicit here). An UNMAPPED
+#     ride keys one coarsest non-vocab S2 fallback cell, so a bin's
+#     non-`s:`/`c:` rows sum to exactly its unmapped rides;
+#   - metrics: `count` only (`duration` dropped for v1);
+#   - shards sorted `dt,cell` (`_engine_sort`), so one bin is a handful
+#     of adjacent row groups and a run of frames is one range read.
+#
+# Sum monoid: wide columns `count_{n,sum,sumsq}`, value ≡ 1 per ride.
+
+storage:
+  type: s3
+  bucket: ctbk
+  key: "rides-tl/end/{tier}/{shard}/{period}.{hash:12}.parquet"
+
+defaults:
+  rg_size: 2048
+
+axis: time
+binCol: dt
+
+dims:
+  - { name: cell, type: string }
+
+metrics:
+  - { name: count, monoid: sum }
+
+# ≈1k bins per max shard (the rides-v2 sizing rule); powers-of-2 day
+# rungs so monthly extension fills consolidate tip dust the same way the
+# avail ladders do.
+tiers:
+  - { name: 1h,  bin: 1h,  shards: [1d, 2d, 4d, 8d, 16d, 32d] }
+  - { name: 3h,  bin: 3h,  shards: [4d, 8d, 16d, 32d, 64d, 128d] }
+  - { name: 6h,  bin: 6h,  shards: [8d, 16d, 32d, 64d, 128d, 256d] }
+  - { name: 12h, bin: 12h, shards: [16d, 32d, 64d, 128d, 256d, 512d] }
+  - { name: 1d,  bin: 1d,  shards: [32d, 64d, 128d, 256d, 512d, 1024d] }
+  - { name: 3d,  bin: 3d,  shards: [96d, 192d, 384d, 768d, 1536d, 3072d] }
+  - { name: 7d,  bin: 7d,  shards: [224d, 448d, 896d, 1792d, 3584d, 7168d] }
+  - { name: 14d, bin: 14d, shards: [448d, 896d, 1792d, 3584d, 7168d] }
+  # Calendar family (bin-SUFs above 14d: 2.17, 2, 1.5, 2, 2): calendar-
+  # aligned pow-2-year shards, ≲1k bins/shard. Cascade edges: 1mo ← 1d
+  # (exact — only divisors of one day divide months), 2mo ← 1mo,
+  # 3mo ← 1mo, 6mo ← 3mo, 1y ← 6mo. Closed months immutable →
+  # build-once, extend-monthly; the live tip is het-tiled at serve time.
+  - { name: 1mo, bin: 1mo, shards: [1mo, 1y, 2y, 4y, 8y, 16y] }
+  - { name: 2mo, bin: 2mo, shards: [1y, 2y, 4y, 16y, 32y] }
+  - { name: 3mo, bin: 3mo, shards: [1y, 4y, 16y, 64y] }
+  - { name: 6mo, bin: 6mo, shards: [2y, 8y, 32y, 128y] }
+  - { name: 1y,  bin: 1y,  shards: [4y, 16y, 128y] }
+
+
+# Materialized station canonicalization (specs/materialized-canonicalization.md).
+# Raw ingest keys the `cell` column by `s:<raw reported id>` (id-map-
+# independent); this rollup materializes one `c:<canonical>` row per merged
+# station cluster, summed from its raw `s:` leaves per the declared id-map
+# (`{s:<raw>: c:<canonical>}`, merged clusters only — `ctbk rides-canonicalize-map`).
+# A map fix re-derives only the `c:` rows in-place (`pyrmts-engine canonicalize`),
+# no source re-pull. Serve selects `c:` by default, `s:` under `?raw=1`.
+identityRollup:
+  col: cell
+  map: stations/station-canonicalize-map.json
+  canonicalPrefix: "c:"

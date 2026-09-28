@@ -3,12 +3,19 @@
 One tile per calendar month: `normalized/<YYYYMM>.parquet` (rides that
 **end** in the month, on the public S3 `ctbk` bucket — NOT the R2 bucket
 the pyramid writes to, hence the injectable `fetch_fn`). Emits long-form
-rows for two `sum`-monoid metrics (`count`, `duration`) over dims
-`(cell, gender, user_type, bike_type)`, keyed by station identity:
-canonical short_name → frozen-vocab chain (coarse cells + `s:<short_name>`),
-with a per-ride S2 coordinate fallback (vocab cells excluded) for the
-rare unmapped station ids — station-identity keying re-based onto the
-vocab graph.
+rows for the pyramid's `sum`-monoid metrics (`count`, and `duration` when
+declared) over the pyramid's dims (`cell` + any of `gender`, `user_type`,
+`bike_type`; undeclared rider dims are summed away at ingest), keyed by
+station identity: canonical short_name → frozen-vocab chain (coarse cells
++ `s:<short_name>`), with a per-ride S2 coordinate fallback (vocab cells
+excluded) for the rare unmapped station ids — station-identity keying
+re-based onto the vocab graph.
+
+Identity-only mode (`identity_only=True`; `specs/timelapse-map.md`, set
+by the `rides-tl-*` factories — those configs declare no `geo` block):
+each mapped ride keys ONLY its raw `s:<sid>` leaf, no vocab-chain rows,
+and an unmapped ride keys only its coarsest non-vocab fallback cell, so a
+bin's non-`s:` rows sum to exactly its unmapped rides.
 
 Anchor semantics: `end` tiles align exactly with tile months. `start`
 windows additionally need the NEXT month's tile (a ride starting 23:50 on
@@ -27,7 +34,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from io import BytesIO
-from typing import Callable, Literal
+from typing import Callable, Literal, Sequence
 
 import polars as pl
 
@@ -55,6 +62,29 @@ ANCHOR_COLS: dict[Anchor, dict[str, str]] = {
         'lng': 'End Station Longitude',
     },
 }
+
+CELL_DIM = 'cell'
+IDENTITY_PREFIX = 's:'
+
+# Rider dims → the normalized-parquet column each is typed from. Dim
+# dtypes vary by era (early months dictionary-encode `User Type`/
+# `Rideable Type`/even `Gender` as Categorical; later ones use
+# Int8/Utf8): route everything through Utf8 before typing. Gender's
+# Utf8→Float64→Int64 chain absorbs both '1' and '1.0' renderings.
+RIDER_DIM_COLS: dict[str, str] = {
+    'gender': 'Gender',
+    'user_type': 'User Type',
+    'bike_type': 'Rideable Type',
+}
+RIDER_DIM_EXPRS: dict[str, pl.Expr] = {
+    'gender': pl.col('Gender').cast(pl.Utf8).cast(pl.Float64, strict=False)
+        .fill_null(0).cast(pl.Int64)
+        .replace_strict(GENDER_MAP, default='unknown').alias('gender'),
+    'user_type': pl.col('User Type').cast(pl.Utf8).fill_null('unknown').alias('user_type'),
+    'bike_type': pl.col('Rideable Type').cast(pl.Utf8).fill_null('unknown').alias('bike_type'),
+}
+
+METRICS = ('count', 'duration')
 
 FALLBACK_LEVELS: tuple[int, ...] = (10, 11, 12, 13, 14, 15)
 
@@ -108,7 +138,14 @@ class MonthlyRidesSource(TiledSource):
     `geo` fills null coordinates for the fallback path; `vocab_cells` is the
     fallback-exclusion set; `available_months` (a set of 'YYYYMM' strings)
     gates the start-anchor spillback tile; `fetch_fn` reads a tile key →
-    bytes (S3, not the pyramid's R2)."""
+    bytes (S3, not the pyramid's R2).
+
+    `dims` (default: the pyramid's declared dims) is `cell` followed by
+    any of the rider dims; the group-by is `[*dims, 'dt']`, so rider dims
+    left undeclared are summed away. Metrics likewise follow the pyramid
+    (`count` always; `duration` only when declared). `identity_only`
+    keys mapped rides by their `s:<sid>` leaf alone (no chain cells) — see
+    the module docstring."""
 
     def __init__(
         self,
@@ -120,9 +157,21 @@ class MonthlyRidesSource(TiledSource):
         vocab_cells: frozenset[str],
         available_months: set[str],
         fetch_fn: Callable[[str], bytes | None],
+        dims: Sequence[str] | None = None,
+        identity_only: bool = False,
     ) -> None:
         super().__init__(pyramid)
         self.anchor: Anchor = anchor
+        self._dims = [d.name for d in pyramid.dims] if dims is None else list(dims)
+        if not self._dims or self._dims[0] != CELL_DIM:
+            raise ValueError(f'dims must start with {CELL_DIM!r}, got {self._dims!r}')
+        self._rider_dims = self._dims[1:]
+        if unknown := set(self._rider_dims) - set(RIDER_DIM_COLS):
+            raise ValueError(f'unknown rider dims {sorted(unknown)!r} (want ⊆ {sorted(RIDER_DIM_COLS)!r})')
+        self._metrics = [m.name for m in pyramid.metrics]
+        if unknown := set(self._metrics) - set(METRICS):
+            raise ValueError(f'unknown metrics {sorted(unknown)!r} (want ⊆ {list(METRICS)!r})')
+        self.identity_only = identity_only
         # v3 canonicalization semantics (`canon.get(sid, sid)`): the
         # id-map wins, else the sid ITSELF is the candidate short_name —
         # modern rides carry short_names ('JC149') directly as station
@@ -140,14 +189,26 @@ class MonthlyRidesSource(TiledSource):
         # `identityRollup` pass (`specs/materialized-canonicalization.md`), so
         # an id-map fix never touches these raw leaves. `_canonical` is still
         # used to resolve which station's cells a raw id sits under.
+        # Identity-only mode keeps the frame (membership = "registered
+        # station") but emits none of the cells.
         cells_only = {
-            sn: [c for c in chain if not c.startswith('s:')]
+            sn: [] if identity_only else [c for c in chain if not c.startswith(IDENTITY_PREFIX)]
             for sn, chain in chains.items()
         }
         self._cells = pl.DataFrame(
             {'short_name': list(cells_only), 'cells': list(cells_only.values())},
             schema={'short_name': pl.Utf8, 'cells': pl.List(pl.Utf8)},
         )
+
+    @property
+    def _has_duration(self) -> bool:
+        return 'duration' in self._metrics
+
+    @property
+    def _value_cols(self) -> list[str]:
+        """Per-ride columns carried from parse to the group-by: the rider
+        dims, plus `dur_s` when the pyramid declares `duration`."""
+        return [*self._rider_dims] + (['dur_s'] if self._has_duration else [])
 
     def tile_at(self, at: datetime) -> Tile:
         start = _month_start(at)
@@ -181,29 +242,26 @@ class MonthlyRidesSource(TiledSource):
 
     def parse(self, blob: bytes, tile: Tile) -> pl.DataFrame:
         cols = ANCHOR_COLS[self.anchor]
+        has_dur = self._has_duration
+        time_cols = ['Start Time', 'Stop Time'] if has_dur else [cols['time']]
         df = pl.read_parquet(
             BytesIO(blob),
             columns=[
-                'Start Time', 'Stop Time', cols['sid'], cols['lat'], cols['lng'],
-                'Gender', 'User Type', 'Rideable Type',
+                *time_cols, cols['sid'], cols['lat'], cols['lng'],
+                *(RIDER_DIM_COLS[d] for d in self._rider_dims),
             ],
         )
-        # Dim dtypes vary by era (early months dictionary-encode
-        # `User Type`/`Rideable Type`/even `Gender` as Categorical;
-        # later ones use Int8/Utf8): route everything through Utf8
-        # before typing. Gender's Utf8→Float64→Int64 chain absorbs both
-        # '1' and '1.0' renderings.
-        df = df.with_columns(
+        exprs = [
             pl.col(cols['time']).dt.truncate('1h').dt.epoch('ms').alias('dt'),
-            (pl.col('Stop Time') - pl.col('Start Time'))
-                .dt.total_seconds().cast(pl.Int64).alias('dur_s'),
-            pl.col('Gender').cast(pl.Utf8).cast(pl.Float64, strict=False)
-                .fill_null(0).cast(pl.Int64)
-                .replace_strict(GENDER_MAP, default='unknown').alias('gender'),
-            pl.col('User Type').cast(pl.Utf8).fill_null('unknown').alias('user_type'),
-            pl.col('Rideable Type').cast(pl.Utf8).fill_null('unknown').alias('bike_type'),
             pl.col(cols['sid']).cast(pl.Utf8).alias('sid'),
-        )
+            *(RIDER_DIM_EXPRS[d] for d in self._rider_dims),
+        ]
+        if has_dur:
+            exprs.append(
+                (pl.col('Stop Time') - pl.col('Start Time'))
+                    .dt.total_seconds().cast(pl.Int64).alias('dur_s'),
+            )
+        df = df.with_columns(*exprs)
         df = df.with_columns(
             pl.col('sid').replace_strict(self._canonical, default=None).alias('short_name'),
         )
@@ -211,19 +269,20 @@ class MonthlyRidesSource(TiledSource):
         # cells; a name absent from the registry (drift) falls back to
         # coordinates, exactly like an unmapped sid. The identity leaf is the
         # raw `sid` (not the canonical short_name) — appended to the station's
-        # coarse cells before exploding.
+        # coarse cells (none in identity-only mode) before exploding.
         has_cells = pl.col('short_name').is_in(self._cells['short_name'])
         mapped = df.filter(pl.col('short_name').is_not_null() & has_cells)
         unmapped = df.filter(pl.col('short_name').is_null() | ~has_cells)
 
+        value_cols = self._value_cols
         long = (
             mapped
             .join(self._cells, on='short_name', how='inner')
             .with_columns(
-                pl.concat_list(pl.col('cells'), (pl.lit('s:') + pl.col('sid'))).alias('cell')
+                pl.concat_list(pl.col('cells'), (pl.lit(IDENTITY_PREFIX) + pl.col('sid'))).alias(CELL_DIM)
             )
-            .select('cell', 'dt', 'gender', 'user_type', 'bike_type', 'dur_s')
-            .explode('cell')
+            .select(CELL_DIM, 'dt', *value_cols)
+            .explode(CELL_DIM)
         )
         frames = [long]
         if unmapped.height:
@@ -231,64 +290,57 @@ class MonthlyRidesSource(TiledSource):
             if fb is not None:
                 frames.append(fb)
 
-        grouped = (
-            pl.concat(frames)
-            .group_by(['cell', 'dt', 'gender', 'user_type', 'bike_type'])
-            .agg(
-                pl.len().alias('n'),
+        aggs = [pl.len().alias('n')]
+        if has_dur:
+            aggs += [
                 pl.col('dur_s').sum().alias('dsum'),
                 (pl.col('dur_s') * pl.col('dur_s')).sum().alias('dsumsq'),
-            )
-        )
+            ]
+        grouped = pl.concat(frames).group_by([*self._dims, 'dt']).agg(*aggs)
         # Native sum-monoid long form: `metric` holds the state-column
         # name, `state` is null, `count` the value. `count`'s n/sum/sumsq
-        # are all the ride count (value = 1), kept for v3 schema symmetry.
-        return (
-            grouped
-            .unpivot(
-                index=['cell', 'dt', 'gender', 'user_type', 'bike_type'],
-                on=['n', 'dsum', 'dsumsq'],
-                variable_name='metric',
-                value_name='count',
+        # are all the ride count (value ≡ 1), kept for v3 schema symmetry.
+        # long_schema column order: dims, binCol, metric, state, count
+        # (concat with `empty_long` frames is order-sensitive).
+        # Cast to match `empty_long`'s dtypes (metric Enum): a window
+        # mixing a parsed spillback tile with a missing tile's empty frame
+        # vstacks them before `read_window`'s final cast.
+        keys = grouped.select(*self._dims, 'dt')
+        state = pl.lit(None, dtype=pl.Int32).alias('state')
+        return pl.concat([
+            keys.with_columns(
+                pl.lit(metric).alias('metric'),
+                state,
+                grouped[col].cast(pl.Float64).alias('count'),
             )
-            .with_columns(
-                pl.col('metric').replace_strict({
-                    'n': 'duration_n', 'dsum': 'duration_sum', 'dsumsq': 'duration_sumsq',
-                }),
-                pl.lit(None, dtype=pl.Int32).alias('state'),
-                pl.col('count').cast(pl.Float64),
-            )
-            # long_schema column order: dims, binCol, metric, state, count
-            # (concat with `empty_long` frames is order-sensitive).
-            .select('cell', 'gender', 'user_type', 'bike_type', 'dt', 'metric', 'state', 'count')
-            # count metric: n == sum == sumsq == ride count (value ≡ 1).
-            .pipe(self._with_count_metric)
-            # Match `empty_long`'s dtypes (metric Enum): a window mixing a
-            # parsed spillback tile with a missing tile's empty frame
-            # vstacks them before `read_window`'s final cast.
-            .cast(long_schema(self.pyramid))
-        )
+            for metric, col in self._metric_cols()
+        ]).cast(long_schema(self.pyramid))
 
-    def _with_count_metric(self, dur_long: pl.DataFrame) -> pl.DataFrame:
-        n_rows = dur_long.filter(pl.col('metric') == 'duration_n')
-        frames = [dur_long] + [
-            n_rows.with_columns(pl.lit(m).alias('metric'))
-            for m in ('count_n', 'count_sum', 'count_sumsq')
-        ]
-        return pl.concat(frames)
+    def _metric_cols(self) -> list[tuple[str, str]]:
+        """(long-form metric name, grouped column) pairs, in emission
+        order: `duration_{n,sum,sumsq}` (when declared), then
+        `count_{n,sum,sumsq}` — all three of the latter are the ride
+        count."""
+        out: list[tuple[str, str]] = []
+        if self._has_duration:
+            out += [('duration_n', 'n'), ('duration_sum', 'dsum'), ('duration_sumsq', 'dsumsq')]
+        if 'count' in self._metrics:
+            out += [('count_n', 'n'), ('count_sum', 'n'), ('count_sumsq', 'n')]
+        return out
 
     def _fallback_frame(self, unmapped: pl.DataFrame) -> pl.DataFrame | None:
         """Coordinate-fallback rows for rides whose station id has no
         canonical mapping: S2 tokens at `FALLBACK_LEVELS` from the ride's
         coordinates (geo-lookup fill for null coords), vocab cells
-        excluded so fallback mass never lands in a station's bucket.
-        Rides with neither mapping nor usable coordinates are dropped."""
+        excluded so fallback mass never lands in a station's bucket —
+        only the coarsest such token in identity-only mode (one row per
+        unmapped ride). Rides with neither mapping nor usable coordinates
+        are dropped."""
         import s2cell
 
         cols = ANCHOR_COLS[self.anchor]
-        rows = unmapped.select(
-            'sid', cols['lat'], cols['lng'], 'dt', 'gender', 'user_type', 'bike_type', 'dur_s',
-        ).rows()
+        value_cols = self._value_cols
+        rows = unmapped.select('sid', cols['lat'], cols['lng'], 'dt', *value_cols).rows()
         cells: list[str] = []
         idx: list[int] = []
         chain_cache: dict[tuple[float, float], list[str]] = {}
@@ -305,13 +357,15 @@ class MonthlyRidesSource(TiledSource):
                     t for lvl in FALLBACK_LEVELS
                     if (t := s2cell.lat_lon_to_token(lat, lng, lvl)) not in self._vocab_cells
                 ]
+                if self.identity_only:
+                    chain = chain[:1]
                 chain_cache[key] = chain
             for t in chain:
                 cells.append(t)
                 idx.append(i)
         if not cells:
             return None
-        base = unmapped.select('dt', 'gender', 'user_type', 'bike_type', 'dur_s')[idx]
-        return base.with_columns(pl.Series('cell', cells, dtype=pl.Utf8)).select(
-            'cell', 'dt', 'gender', 'user_type', 'bike_type', 'dur_s',
+        base = unmapped.select('dt', *value_cols)[idx]
+        return base.with_columns(pl.Series(CELL_DIM, cells, dtype=pl.Utf8)).select(
+            CELL_DIM, 'dt', *value_cols,
         )

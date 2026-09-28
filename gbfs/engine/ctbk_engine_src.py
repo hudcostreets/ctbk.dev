@@ -70,14 +70,17 @@ def normalized_io(storage, prefix: str = 'normalized'):
     return available, fetch
 
 
-def _rides(pyramid, filter, anchor: str):
+def _rides(pyramid, filter, anchor: str, identity_only: bool = False):
     """`specs/rides-v5.md`: monthly normalized parquets (`normalized/<YM>.parquet`
     in the pyramid's own R2 bucket — plain-key copies of the DVX blobs,
     `ctbk gbfs normalized-mirror`) → every rung.
     Chains = frozen vocab + `s:<short_name>` (as `avail_daily_status`),
     keyed by canonical short_name (registry ∪ unregistered canonicals at
     their `geo` position, `station_positions`); the id-map + geo fallback
-    assets are baked into the image.
+    assets are baked into the image. Dims + metrics follow the pyramid
+    config; `identity_only` (the `rides-tl-*` transposes,
+    `specs/timelapse-map.md`) emits only each ride's raw `s:<sid>` leaf —
+    no vocab-chain cells.
 
     Candidate builds (`specs/station-id-trailing-zero.md` §Candidate rollout)
     read elsewhere via container env: `CTBK_NORMALIZED_PREFIX` (default
@@ -117,6 +120,7 @@ def _rides(pyramid, filter, anchor: str):
         vocab_cells=frozenset(vocab),
         available_months=available,
         fetch_fn=fetch,
+        identity_only=identity_only,
     )
 
 
@@ -126,3 +130,14 @@ def rides_start(pyramid, filter):
 
 def rides_end(pyramid, filter):
     return _rides(pyramid, filter, 'end')
+
+
+def rides_tl_start(pyramid, filter):
+    """`rides-tl-start` (`specs/timelapse-map.md`): identity-only,
+    `cell`-dim-only, `count`-only time-first transpose of `rides_start`."""
+    return _rides(pyramid, filter, 'start', identity_only=True)
+
+
+def rides_tl_end(pyramid, filter):
+    """`rides-tl-end`: as `rides_tl_start`, for the end anchor."""
+    return _rides(pyramid, filter, 'end', identity_only=True)

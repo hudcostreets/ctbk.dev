@@ -1335,6 +1335,15 @@ RIDES_ANCHOR_SPECS = (
 	('rides-end', 'rides/end', 'ctbk_engine_src:rides_end'),
 )
 
+# Time-first transposes for the timelapse map (`specs/timelapse-map.md`):
+# same (config, R2 prefix, Batch source factory) triple shape. P0 builds
+# these by hand (`engine submit -C rides-tl-<a> -p <scratch> -x <factory>`);
+# folding them into the monthly `rides-extend` cadence is P4.
+RIDES_TL_ANCHOR_SPECS = (
+	('rides-tl-start', 'rides-tl/start', 'ctbk_engine_src:rides_tl_start'),
+	('rides-tl-end', 'rides-tl/end', 'ctbk_engine_src:rides_tl_end'),
+)
+
 
 def _mirror_normalized(r2, bucket: str, ym: str, dry_run: bool, dest_prefix: str = 'normalized') -> None:
 	"""Server-side copy (within R2) of month `ym`'s consolidated parquet from
@@ -1638,9 +1647,11 @@ ENGINE_RG_SIZE = 2048
 
 
 def _engine_sort(config_name: str) -> str:
-	"""The shard sort a Batch build uses (`pyrmts-engine batch submit -s`)."""
-	from ctbk.pyramid_cascade.engine_check import _rides_anchor
-	return 'cell,dt,gender,user_type,bike_type' if _rides_anchor(config_name) else 's2_cell,dt'
+	"""The shard sort a Batch build uses (`pyrmts-engine batch submit -s`):
+	`cell,dt,…` for the rides pyramids, `dt,cell` for the `rides-tl-*`
+	transposes, `s2_cell,dt` otherwise (`engine_check.engine_sort_cols`)."""
+	from ctbk.pyramid_cascade.engine_check import engine_sort_cols
+	return ','.join(engine_sort_cols(config_name))
 
 
 @gbfs_engine.command('canonicalize', help='Materialize a pyramid\'s `c:` identity-rollup rows (`pyrmts-engine canonicalize`) over every built shard in the range — the P3c pass, re-run after an id-map change or a rebuild. Content-hashed keyTemplate: shards resolve through the prefix\'s build manifest, rewrites land at new keys and append there; follow with `ctbk gbfs engine register` (swap D1 rows to them). Hashless: rewrites in place; follow with `ctbk gbfs lambda reconcile -C <config> -f` (bump `written_at`; else RG-manifest fills describe the old bytes). R2 creds from `R2_RW_*` (else `R2_*`); endpoint from `CLOUDFLARE_ACCOUNT_ID`.')
@@ -1940,8 +1951,10 @@ def gbfs_engine_submit(
 		if scratch_prefix is not None:
 			raise click.UsageError('-R and -p are mutually exclusive')
 		scratch_prefix = config_prefix(merged_yaml(config_name))
-		if source_spec is None and (anchor := _rides_anchor(config_name)):
-			source_spec = f'ctbk_engine_src:rides_{anchor}'
+		if source_spec is None and _rides_anchor(config_name):
+			# The anchor's factory from the spec tables — `rides_tl_*` for the
+			# time-first transposes, not the `rides_*` their anchor alone names.
+			source_spec = {c: f for c, _, f in RIDES_ANCHOR_SPECS + RIDES_TL_ANCHOR_SPECS}[config_name]
 	sys.exit(_engine_submit(
 		config_name,
 		aligned=aligned, mem_budget=mem_budget, close_chunk=close_chunk, envs=envs,
