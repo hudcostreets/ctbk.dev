@@ -2037,6 +2037,49 @@ def gbfs_engine_manifest(other: str | None, head_n: int, path: str) -> None:
 			sys.exit(1)
 
 
+@gbfs_engine.command('frame-cost', help='Frame-cost probe of one shard, footer-only (`specs/timelapse-map.md` §Frame cost): rows/RGs/footer bytes/`pyrmts.sort`, then per sampled bin the RGs whose `dt` stats cover it, the bytes a reader fetches for them under the projection (and all columns), the byte range, and whether it is adjacent to the previous bin\'s. With -k, the cost of a K-bin run from the first sampled bin as one read. URL = `https://…` or a bucket key (served via `--base`).')
+@option('-b', '--bins', default=None, help='Explicit bins: comma-separated UTC ISO datetimes (default: -n evenly spaced over the shard).')
+@option('-B', '--base', default='https://data.ctbk.dev/', show_default=True, help='Prefix for a bare key.')
+@option('-c', '--columns', default='cell,dt,count_sum', show_default=True, help='Projection (comma-separated).')
+@option('-k', '--chunk', type=int, default=0, help='Also cost a K-bin run from the first sampled bin.')
+@option('-n', '--num-bins', type=int, default=5, show_default=True, help='Bins to sample.')
+@option('-t', '--tier', default=None, help='Bin duration (default: the `{tier}` path component of the key, e.g. `1h` from `…/1h/32d/…`).')
+@argument('url', metavar='URL')
+def gbfs_engine_frame_cost(bins: str | None, base: str, columns: str, chunk: int, num_bins: int, tier: str | None, url: str) -> None:
+	import fsspec
+	import pyarrow.parquet as pq
+	from ctbk.pyramid_cascade import frame_cost as fc
+	from ctbk.pyramid_cascade.lite import dur_min
+	if not re.match(r'^https?://', url):
+		url = base + url
+	tier = tier or url.rsplit('/', 3)[1]
+	dur_ms = dur_min(tier) * 60_000
+	with fsspec.filesystem('http').open(url, block_size=1 << 20) as f:
+		md = pq.ParquetFile(f).metadata
+	info = fc.shard_info(md)
+	cols = columns.split(',')
+	proj = fc.rg_spans(md, cols)
+	full = fc.rg_spans(md)
+	print(f'{url}')
+	print(f'rows={info.rows:,} rgs={info.row_groups} footer={info.footer_bytes:,}B rg_size={info.rg_size} sort={info.sort} cols={",".join(info.columns)} bin={tier}')
+	fmt = lambda ms: datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M')
+	if bins:
+		sel = [int(datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp() * 1000) for s in bins.split(',')]
+	else:
+		sel = fc.sample_bins(proj, dur_ms, num_bins)
+	print(f'{"bin":<16} {"rgs":<10} {"rows":>6} {"proj_B":>8} {"all_B":>8} {"range":>21} adj')
+	prev = None
+	for b in sel:
+		c = fc.bin_cost(proj, full, b, dur_ms)
+		adj = '' if prev is None else ('y' if fc.adjacent(prev, c) else 'n')
+		rgs = ','.join(map(str, c.rgs))
+		print(f'{fmt(c.bin):<16} {rgs:<10} {c.rows:>6} {c.bytes:>8} {c.all_bytes:>8} {c.lo:>10}-{c.hi:<10} {adj}')
+		prev = c
+	if chunk:
+		c = fc.run_cost(proj, full, sel[0], chunk, dur_ms)
+		print(f'run {chunk}×{tier} from {fmt(c.bin)}: rgs={len(c.rgs)} rows={c.rows:,} proj_B={c.bytes:,} all_B={c.all_bytes:,} range={c.lo}-{c.hi} ({c.hi - c.lo:,}B contiguous)')
+
+
 @gbfs_engine.command('gaps', help='The expected shards a real-prefix `engine submit -R -f` would build: the plan\'s cover minus what is built — the prefix\'s manifest (content-hashed keyTemplate: its rows are the only truth, legacy-keyed rows included) ∪ an R2 LIST (hashless). Slot keys to stdout, a per-rung count to stderr; exit 1 if any.')
 @option('-C', '--config', 'config_name', required=True, help='Pyramid config basename under configs/pyramids/ (e.g. rides-start).')
 @option('-m', '--manifest', 'manifest_name', default='manifest.jsonl', show_default=True, help='Manifest object name under the prefix.')
