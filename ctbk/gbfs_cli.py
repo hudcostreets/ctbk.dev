@@ -1656,7 +1656,7 @@ def _engine_sort(config_name: str) -> str:
 
 @gbfs_engine.command('canonicalize', help='Materialize a pyramid\'s `c:` identity-rollup rows (`pyrmts-engine canonicalize`) over every built shard in the range — the P3c pass, re-run after an id-map change or a rebuild. Content-hashed keyTemplate: shards resolve through the prefix\'s build manifest, rewrites land at new keys and append there; follow with `ctbk gbfs engine register` (swap D1 rows to them). Hashless: rewrites in place; follow with `ctbk gbfs lambda reconcile -C <config> -f` (bump `written_at`; else RG-manifest fills describe the old bytes). R2 creds from `R2_RW_*` (else `R2_*`); endpoint from `CLOUDFLARE_ACCOUNT_ID`.')
 @option('-C', '--config', 'config_name', required=True, help='Pyramid config basename under configs/pyramids/ (e.g. rides-start).')
-@option('-g', '--rg-size', type=int, default=ENGINE_RG_SIZE, show_default=True, help='Rewrite row-group size (the build\'s `engine submit -g`). pyrmts ≥ 40e0cf2 otherwise reads the shard\'s stamped layout, falling back to its first RG\'s size — wrong for shards a pre-40e0cf2 canonicalize collapsed to one RG.')
+@option('-g', '--rg-size', type=int, default=None, help='Rewrite row-group size (the build\'s `engine submit -g`; default: the config\'s `defaults.rg_size`, else 2048). pyrmts ≥ 40e0cf2 otherwise reads the shard\'s stamped layout, falling back to its first RG\'s size — wrong for shards a pre-40e0cf2 canonicalize collapsed to one RG.')
 @option('-i', '--index', 'manifest_name', default='manifest.jsonl', show_default=True, help='Manifest object name under the prefix (a content-hashed template resolves shards through it, and appends rewrites to it).')
 @option('-j', '--workers', type=int, default=16, show_default=True, help='Parallel shard workers.')
 @option('-m', '--map', 'map_path', default='s3/ctbk/stations/station-canonicalize-map.json', show_default=True, help='Local id-map override (else the config\'s declared bucket key).')
@@ -1664,7 +1664,7 @@ def _engine_sort(config_name: str) -> str:
 @option('-r', '--range', 'range_', default=None, help='Half-open `[FROM]/TO` (UTC ISO) [default: genesis → now].')
 def gbfs_engine_canonicalize(
 	config_name: str,
-	rg_size: int,
+	rg_size: int | None,
 	manifest_name: str,
 	workers: int,
 	map_path: str,
@@ -1673,7 +1673,9 @@ def gbfs_engine_canonicalize(
 ) -> None:
 	from pyrmts import parse_pyramid_yaml
 	from pyrmts.keys import template_has_hash
-	from ctbk.pyramid_cascade.engine_check import config_prefix, merged_yaml
+	from ctbk.pyramid_cascade.engine_check import config_prefix, config_rg_size, merged_yaml
+	if rg_size is None:
+		rg_size = config_rg_size(config_name, ENGINE_RG_SIZE)
 	from_, to = _engine_range(None, range_ or f'/{datetime.now(timezone.utc):%Y-%m-%dT%H:%M}', config_name)
 	root = Path(__file__).parents[1]
 	config_yaml = merged_yaml(config_name)
@@ -1929,7 +1931,7 @@ def _engine_submit(
 @option('-c', '--close-chunk', default=None, help='Target combined-long bytes per close chunk, e.g. 1g (build -c).')
 @option('-e', '--env', 'envs', multiple=True, help='Extra container env var NAME=VALUE (repeatable).')
 @option('-f', '--fill', is_flag=True, help='Declarative gap-fill: diff expected min-cover vs actual storage, build only missing (build -f; range optional, defaults genesis→now). See pyrmts specs/engine-fill-mode.md.')
-@option('-g', '--rg-size', type=int, default=ENGINE_RG_SIZE, show_default=True, help='Output-shard parquet row-group size.')
+@option('-g', '--rg-size', type=int, default=None, help='Output-shard parquet row-group size (default: the config\'s `defaults.rg_size`, else 2048).')
 @option('-I', '--ignore-invalidations', is_flag=True, help='With -f: ignore (don\'t consume or prune) the prefix\'s invalidation journal (build -I) — for a candidate build into its own manifest, which must leave the live build\'s pending repairs alone.')
 @option('-j', '--workers', type=int, default=None, help='Window-worker threads (build -j; default: job vCPUs).')
 @option('-K', '--max-inflight', type=int, default=None, help='Max windows in flight past the watermark (build -K).')
@@ -1954,7 +1956,7 @@ def gbfs_engine_submit(
 	close_chunk: str | None,
 	envs: tuple[str, ...],
 	fill: bool,
-	rg_size: int,
+	rg_size: int | None,
 	ignore_invalidations: bool,
 	workers: int | None,
 	max_inflight: int | None,
@@ -1973,6 +1975,9 @@ def gbfs_engine_submit(
 	window: str,
 	source_spec: str | None,
 ) -> None:
+	if rg_size is None:
+		from ctbk.pyramid_cascade.engine_check import config_rg_size
+		rg_size = config_rg_size(config_name, ENGINE_RG_SIZE)
 	if real:
 		from ctbk.pyramid_cascade.engine_check import _rides_anchor, config_prefix, merged_yaml
 		if config_name == 'avail':

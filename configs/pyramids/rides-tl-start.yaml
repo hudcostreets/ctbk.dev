@@ -24,7 +24,11 @@ storage:
   key: "rides-tl/start/{tier}/{shard}/{period}.{hash:12}.parquet"
 
 defaults:
-  rg_size: 2048
+  # dt-major sort puts ~one bin (≈2k distinct stations) per 2048-row group, so
+  # `cell`'s per-RG dictionary never amortizes; 32k rows halves the shards
+  # (`specs/timelapse-map.md` P0 results). Chunked serving never reads a lone
+  # frame, so the larger minimum read costs nothing.
+  rg_size: 32768
 
 axis: time
 binCol: dt

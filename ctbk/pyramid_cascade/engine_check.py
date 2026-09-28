@@ -51,6 +51,13 @@ def merged_yaml(config_name: str) -> str:
     return merge_lambda_shards((CONFIG_DIR / f'{config_name}.yaml').read_text())
 
 
+def config_rg_size(config_name: str, default: int = 2048) -> int:
+    """The config's declared `defaults.rg_size` (a build's `-g`), else `default`."""
+    import yaml
+    cfg = yaml.safe_load(merged_yaml(config_name)) or {}
+    return int((cfg.get('defaults') or {}).get('rg_size', default))
+
+
 def scratch_yaml(config_name: str, scratch_prefix: str) -> str:
     """Merged-ladder YAML re-keyed under `scratch_prefix` — the config a
     scratch build (local `run_build` or a Batch submit) consumes. Refuses

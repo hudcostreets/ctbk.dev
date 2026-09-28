@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from ctbk.gbfs_cli import RIDES_ANCHOR_SPECS, RIDES_TL_ANCHOR_SPECS, _engine_sort
-from ctbk.pyramid_cascade.engine_check import _rides_anchor, _rides_tl, engine_sort_cols
+from ctbk.pyramid_cascade.engine_check import _rides_anchor, _rides_tl, config_rg_size, engine_sort_cols
 
 
 @pytest.mark.parametrize('config_name, expected', [
@@ -46,12 +46,12 @@ def test_anchor_spec_tables():
     )
 
 
-@pytest.mark.parametrize('config_name, prefix, factory, sort', [
-    ('rides-start', 'rides/start', 'rides_start', 'cell,dt,gender,user_type,bike_type'),
-    ('rides-tl-start', 'rides-tl/start', 'rides_tl_start', 'dt,cell'),
-    ('rides-tl-end', 'rides-tl/end', 'rides_tl_end', 'dt,cell'),
+@pytest.mark.parametrize('config_name, prefix, factory, sort, rg', [
+    ('rides-start', 'rides/start', 'rides_start', 'cell,dt,gender,user_type,bike_type', 2048),
+    ('rides-tl-start', 'rides-tl/start', 'rides_tl_start', 'dt,cell', 32768),
+    ('rides-tl-end', 'rides-tl/end', 'rides_tl_end', 'dt,cell', 32768),
 ])
-def test_engine_submit_real_prefix_dry_run(config_name: str, prefix: str, factory: str, sort: str):
+def test_engine_submit_real_prefix_dry_run(config_name: str, prefix: str, factory: str, sort: str, rg: int):
     # `engine submit -R` derives the prefix from the config's keyTemplate
     # and, for rides configs, the source factory from the spec tables —
     # the `rides-tl-*` transposes must get `rides_tl_*`, not the `rides_*`
@@ -64,7 +64,17 @@ def test_engine_submit_real_prefix_dry_run(config_name: str, prefix: str, factor
     )
     assert result.exit_code == 0, result.output
     assert result.output.rstrip('\n').split('\n') == [
-        f'pyrmts-engine batch submit -n {prefix.replace("/", "-")} -w 12h -g 2048 -s {sort} '
+        f'pyrmts-engine batch submit -n {prefix.replace("/", "-")} -w 12h -g {rg} -s {sort} '
         f'-m s3://ctbk/{prefix}/manifest.jsonl -r 2025-06-01T00:00/2025-07-01T00:00 '
         f'-x ctbk_engine_src:{factory} s3://ctbk/{prefix}/config.yaml',
     ]
+
+
+@pytest.mark.parametrize('config_name, expected', [
+    ('rides-tl-start', 32768),
+    ('rides-tl-end', 32768),
+    ('rides-start', 2048),
+    ('smg-v1', 2048),
+])
+def test_config_rg_size(config_name: str, expected: int):
+    assert config_rg_size(config_name) == expected
