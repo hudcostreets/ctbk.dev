@@ -70,6 +70,26 @@ Storage per anchor (estimated): `1h` tier ≈ 115 k hours × ~1.2 k rows × ~4 B
 
 Bins are local wall-clock time (naive NYC time stored as if UTC), as in the existing pyramids; the FE formats `dt` with `timeZone: 'UTC'`. DST quirks (a doubled fall-back hour, an empty spring-forward hour) are inherent.
 
+### P0 results (2025-06 scratch build, `rides-tl-p0/{start,end}`, 2026-09-28)
+
+Built via `engine-image.yml` (25 s) + two Batch jobs (a few minutes each, <$1). 13 shards/anchor, 14.8 MB, all stamped `pyrmts.sort=dt,cell`, `rg_size 2048`; columns `cell, dt, count_{n,sum,sumsq}`; only `s:` rows (2,239 stations; no vocab, no fallback rows: June 2025 fully mapped). **Validation gate passed** both anchors: 5 stations' per-day counts equal `/api/rides?raw=1&cells=s:<id>` on every day; system Σ per day equals `/api/rides?bbox=` on all 30 days (4,836,455 start / 4,836,609 end); `1h` rungs re-aggregated to days equal `1d@32d` on all 35,316 cell-days. Probe tool: `ctbk gbfs engine frame-cost` (footer-only, over HTTP).
+
+| measured | `1h` | `1d` |
+|---|---|---|
+| rows/frame (median) | 1,488 | 2,210 |
+| RGs per frame | 1 (occasionally 2) | 2 |
+| bytes/frame, `cell,dt,count_sum` projection | 11–14 KB alone; **8.1 KB amortized in a 48-frame chunk** (388 KB, one contiguous range) | 34 KB alone; 18 KB amortized in a chunk |
+| bytes/row (projection / all cols) | 6.4 / 8.0 | 8.2 / 11.8 |
+| storage/anchor/month | 7.7 MB | 0.8 MB |
+| footer | ~0.6 KB/RG (≈280 KB for a full `1h@32d` shard) | |
+
+RG pruning on `dt` stats works: consecutive frames are adjacent bytes, and a chunk is one range read. Spec estimates were 1.5–3× low on bytes (storage extrapolates to ~1.2 GB/anchor at `1h`, ~130 MB at `1d`, before historical station growth), for two fixable reasons:
+
+- **`cell` is ~68% of bytes.** With `dt`-major sort and `rg_size 2048` (≈ one bin), every row group holds ~2 k *distinct* cells, so the dictionary never amortizes. Rewriting `1h@32d` locally: `rg_size` 32,768 → 1.98 MB vs 4.06 MB (4.0 B/row all columns, 2.4 B/row projected = the spec's figure); zstd on top → 1.47 MB. Chunked serving never reads a lone frame, so **set `rg_size` 16–32 k for `rides-tl` before P4** (a 48-frame `1h` chunk ≈ 170 KB projected; footers shrink ~16×).
+- **`count_{n,sum,sumsq}` are identical** on every row (`count` ≡ 1 per ride); `sum`/`sumsq` are float64 dead weight (~20%). Serve `count_n` (or drop the extra monoid columns if pyrmts allows a count-only metric).
+
+`duration`: out. Tip-side `1d` frames span the min-cover (`1d@32d` + `6h@8d` + `3h@4d` + `1h@2d`), so `/api/tl` re-aggregates finer rungs for the last days of a month, as `/api/rides` does. Raw leaves include odd ids (`s:JC116`, a trailing-space `s:Shop Morgan `); the FE joins via station-luc / canonicalize.
+
 ## Serving: chunked frames
 
 ### Endpoint
