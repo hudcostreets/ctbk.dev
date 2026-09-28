@@ -91,14 +91,20 @@ const CANON_MAP_TTL_MS = 10 * 60_000;
 /** The declared id-map from R2, cached per isolate with a TTL (same policy
  *  as the station registry); failures aren't cached. */
 export function loadCanonMap(bucket: R2Bucket): Promise<CanonMap> {
+	return loadCanonMapWith(async (key) => {
+		const obj = await bucket.get(key);
+		if (!obj) throw new Error(`${key} not found on R2`);
+		return obj.json<Record<string, string>>();
+	});
+}
+
+/** `loadCanonMap` over any JSON reader (`/api/tl` reads through a pyrmts
+ *  `Storage`, HTTP-backed in local dev). Shares the isolate cache. */
+export function loadCanonMapWith(read: (key: string) => Promise<Record<string, string>>): Promise<CanonMap> {
 	const now = Date.now();
 	const key = canonMapKey();
 	if (_canonMap && _canonMap.key === key && now - _canonMap.ts < CANON_MAP_TTL_MS) return _canonMap.value;
-	const value = (async (): Promise<CanonMap> => {
-		const obj = await bucket.get(key);
-		if (!obj) throw new Error(`${key} not found on R2`);
-		return parseCanonMap(await obj.json<Record<string, string>>());
-	})();
+	const value = (async (): Promise<CanonMap> => parseCanonMap(await read(key)))();
 	_canonMap = { value, ts: now, key };
 	value.catch(() => { _canonMap = null; });
 	return value;

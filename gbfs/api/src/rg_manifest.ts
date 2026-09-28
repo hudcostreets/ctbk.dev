@@ -169,7 +169,7 @@ function normalizeRow(row: Record<string, unknown>): Row {
 }
 
 /** AsyncBuffer over `Storage` byte-range reads (absolute file offsets). */
-function storageBuffer(storage: Storage, key: string, byteLength: number) {
+export function storageBuffer(storage: Storage, key: string, byteLength: number) {
 	return {
 		byteLength,
 		async slice(start: number, end?: number): Promise<ArrayBuffer> {
@@ -289,6 +289,50 @@ function statStr(v: unknown): string | null {
 	return typeof v === 'string' ? v : null;
 }
 
+export interface RgRun {
+	rowStart: number;
+	rowEnd: number;
+}
+
+/** Runs of consecutive row groups whose `cellCol`/`dt` statistics can hold a
+ *  row matching any of `tokens` inside `[fromMs, toMs)`. Empty `tokens` = no
+ *  cell restriction (every RG passes the cell test — the same meaning
+ *  `cellTokenChunks` gives the manifest path); RGs without statistics pass.
+ *  A run reads as one `parquetReadObjects` row range. */
+export function pruneRgRuns(
+	metadata: FileMetaData,
+	{ cellCol, tokens, fromMs, toMs }: { cellCol: string; tokens: readonly string[]; fromMs: number; toMs: number },
+): RgRun[] {
+	const cellIdx = findColIdx(metadata, cellCol);
+	const dtIdx = findColIdx(metadata, 'dt');
+	const sorted = [...tokens].sort();
+	const runs: RgRun[] = [];
+	let cursor = 0;
+	let run: RgRun | null = null;
+	for (const rg of metadata.row_groups) {
+		const nRows = num(rg.num_rows);
+		const rgStart = cursor;
+		cursor += nRows;
+		const cellStats = cellIdx >= 0 ? rg.columns[cellIdx]?.meta_data?.statistics : undefined;
+		const dtStats = dtIdx >= 0 ? rg.columns[dtIdx]?.meta_data?.statistics : undefined;
+		const cMin = statStr(cellStats?.min_value);
+		const cMax = statStr(cellStats?.max_value);
+		const dMin = statNum(dtStats?.min_value);
+		const dMax = statNum(dtStats?.max_value);
+		const cellPass = sorted.length === 0 || cMin === null || cMax === null
+			|| sorted.some((t) => t >= cMin && t <= cMax);
+		const dtPass = dMin === null || dMax === null || !(dMax < fromMs || dMin >= toMs);
+		if (!(cellPass && dtPass)) {
+			if (run) { runs.push(run); run = null; }
+			continue;
+		}
+		if (run === null) run = { rowStart: rgStart, rowEnd: cursor };
+		else run.rowEnd = cursor;
+	}
+	if (run) runs.push(run);
+	return runs;
+}
+
 /** Footer path: parse metadata (guarded — this is the memory-expensive
  *  step), serve matched RGs, and defer a manifest fill built from the
  *  SAME parsed metadata (no second parse). */
@@ -308,35 +352,12 @@ async function fallbackFetch(opts: SegmentFetchOpts): Promise<Row[]> {
 
 		// RG-prune by cell/dt stats (same semantics as pyrmts
 		// `selectRowGroupRuns`), then read matched runs.
-		const cellIdx = findColIdx(metadata, opts.cellCol);
-		const dtIdx = findColIdx(metadata, 'dt');
-		const fromMs = opts.from.getTime();
-		const toMs = opts.to.getTime();
-		const tokens = [...opts.cells].sort();
-		const runs: { rowStart: number; rowEnd: number }[] = [];
-		let cursor = 0;
-		let run: { rowStart: number; rowEnd: number } | null = null;
-		for (const rg of metadata.row_groups) {
-			const nRows = num(rg.num_rows);
-			const rgStart = cursor;
-			cursor += nRows;
-			const cellStats = cellIdx >= 0 ? rg.columns[cellIdx]?.meta_data?.statistics : undefined;
-			const dtStats = dtIdx >= 0 ? rg.columns[dtIdx]?.meta_data?.statistics : undefined;
-			const cMin = statStr(cellStats?.min_value);
-			const cMax = statStr(cellStats?.max_value);
-			const dMin = statNum(dtStats?.min_value);
-			const dMax = statNum(dtStats?.max_value);
-			const cellPass = cMin === null || cMax === null
-				|| tokens.some((t) => t >= cMin && t <= cMax);
-			const dtPass = dMin === null || dMax === null || !(dMax < fromMs || dMin >= toMs);
-			if (!(cellPass && dtPass)) {
-				if (run) { runs.push(run); run = null; }
-				continue;
-			}
-			if (run === null) run = { rowStart: rgStart, rowEnd: cursor };
-			else run.rowEnd = cursor;
-		}
-		if (run) runs.push(run);
+		const runs = pruneRgRuns(metadata, {
+			cellCol: opts.cellCol,
+			tokens: opts.cells,
+			fromMs: opts.from.getTime(),
+			toMs: opts.to.getTime(),
+		});
 		if (runs.length === 0) return [];
 		const perRun = await Promise.all(runs.map(({ rowStart, rowEnd }) =>
 			parquetReadObjects({ file, metadata, rowStart, rowEnd })));
