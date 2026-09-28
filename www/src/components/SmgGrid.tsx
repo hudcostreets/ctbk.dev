@@ -11,7 +11,7 @@ import { useTheme } from '../contexts/ThemeContext'
 import { SMG_STATES, useSmgHist, type SmgSelection } from '../query/smg'
 import { etDayMinute, etDayStartS, smgGrid, type GridRow } from '../query/smgGrid'
 import { brushedState, isShown, useBrush } from './smgBrush'
-import { canvasFill, swatchStyle } from './smgStyle'
+import { canvasFill, inkOn, swatchStyle } from './smgStyle'
 import css from './SmgPanel.module.css'
 
 const SLOT_S = 300
@@ -24,6 +24,9 @@ const MD_X = 60
 const HIST_X = 66
 const HIST_W = 60
 const LABEL_W = HIST_X + HIST_W + 6
+/** Quartile ticks down the day-histogram column, so segment widths read. */
+const HIST_TICKS = [0.25, 0.5, 0.75]
+const HIST_FONT = '10px -apple-system, sans-serif'
 const AXIS_H = 16
 /** Rows shown before the grid scrolls (a month-long window, plus partial end
  *  days), so longer windows scroll inside a box instead of growing the page. */
@@ -143,6 +146,10 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
     hg.textAlign = 'center'
     hg.fillText('whole day', HIST_X + HIST_W / 2, AXIS_H / 2)
     hg.globalAlpha = 1
+    for (const q of HIST_TICKS) {
+      hg.fillStyle = rule
+      hg.fillRect(HIST_X + q * HIST_W, AXIS_H - 3, 1, 3)
+    }
     // Hour ticks every 3h: labels + stubs in the sticky header, rules in the body.
     for (let h = 0; h <= 24; h += 3) {
       const x = LABEL_W + (h * 3600 / binS) * colW
@@ -171,14 +178,36 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
       bg.globalAlpha = 1
       const sum = tot.reduce((a, v) => a + v, 0)
       if (sum) {
+        // Segments first, then each one's % where the text fits inside it
+        // (hatched fills get a halo in the opposite ink).
+        const segs: [number, number, typeof SMG_STATES[number]][] = []
         let x = HIST_X
         for (const st of SMG_STATES) {
           const w = (tot[st.id] / sum) * HIST_W
           if (!w || !isShown(visible, st.id)) continue
           bg.fillStyle = canvasFill(st, dark, fade(st))
           bg.fillRect(x, y0, w, ROW_H)
+          segs.push([x, w, st])
           x += w
         }
+        bg.font = HIST_FONT
+        bg.textAlign = 'center'
+        for (const [sx, w, st] of segs) {
+          const label = pctLabel((100 * tot[st.id]) / sum)
+          if (bg.measureText(label).width + 6 > w) continue
+          const ink = inkOn(st, dark)
+          bg.globalAlpha = fade(st) ? 0.3 : 1
+          if (st.hatch) {
+            bg.strokeStyle = ink === '#000' ? '#fff' : '#000'
+            bg.lineWidth = 2.5
+            bg.lineJoin = 'round'
+            bg.strokeText(label, sx + w / 2, y0 + ROW_H / 2)
+          }
+          bg.fillStyle = ink
+          bg.fillText(label, sx + w / 2, y0 + ROW_H / 2)
+          bg.globalAlpha = 1
+        }
+        bg.font = '11px -apple-system, sans-serif'
       }
       row.cells.forEach((c, col) => {
         if (!c) return
@@ -196,6 +225,8 @@ export default function SmgGrid({ sel, fromS, toS }: { sel: SmgSelection | null;
         }
       })
     })
+    bg.fillStyle = dark ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.2)'
+    for (const q of HIST_TICKS) bg.fillRect(HIST_X + q * HIST_W, 0, 1, bodyH)
   }, [rows, rowTotals, width, bodyH, colW, binS, dark, hl, visible])
 
   const onMove = (e: React.MouseEvent) => {

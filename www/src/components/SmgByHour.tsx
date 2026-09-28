@@ -66,8 +66,8 @@ export default function SmgByHour({ sel, fromS, toS }: { sel: SmgSelection | nul
       texttemplate: '%{y:.0f}%',
       textposition: 'inside' as const,
       insidetextanchor: 'middle' as const,
-      // Dark ink on the light hatched (yellow) states, white on the rest.
-      textfont: { size: 10, color: st.hatch ? '#1a1a1a' : '#fff' },
+      // White ink; a dark halo keeps it legible over the hatched fills.
+      textfont: { size: 10, color: '#fff', shadow: st.hatch ? '0 0 2px #000, 0 0 3px #000' : 'none' },
     }))
   }, [rows, dark, visible])
 

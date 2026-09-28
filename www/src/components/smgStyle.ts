@@ -7,6 +7,14 @@ import type { SmgState } from '../query/smg'
 export const colorOf = (s: SmgState, dark: boolean) => (dark ? s.dark : s.light)
 const hatchInk = (dark: boolean) => (dark ? 'rgba(0,0,0,0.55)' : 'rgba(255,255,255,0.7)')
 
+/** Black or white, whichever contrasts with the state's fill (for text
+ *  drawn on it). */
+export function inkOn(s: SmgState, dark: boolean): string {
+  const c = colorOf(s, dark)
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16))
+  return 0.299 * r + 0.587 * g + 0.114 * b > 150 ? '#000' : '#fff'
+}
+
 /** CSS background for a legend / summary swatch. */
 export function swatchStyle(s: SmgState, dark: boolean): CSSProperties {
   const c = colorOf(s, dark)
