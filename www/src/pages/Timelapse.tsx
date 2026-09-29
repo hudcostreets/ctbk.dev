@@ -75,9 +75,9 @@ function todayMs(): number {
 }
 
 /** Default range: the bin's `DEFAULT_SPAN` (a week at `1h`, a year at
- *  `1d`, …) ending yesterday. */
-function defaultRange(bin: Bin): Range {
-  return spanFrom(DEFAULT_SPAN[bin], todayMs() - DAY_MS)
+ *  `1d`, …) ending on the last published day. */
+function defaultRange(bin: Bin, lastDay: number): Range {
+  return spanFrom(DEFAULT_SPAN[bin], lastDay)
 }
 
 function spanFrom(span: Span, end: number): Range {
@@ -85,8 +85,8 @@ function spanFrom(span: Span, end: number): Range {
 }
 
 /** `?d=YYMMDD-YYMMDD`: inclusive local day range. */
-function rangeParam(bin: Bin): Param<Range> {
-  const def = defaultRange(bin)
+function rangeParam(bin: Bin, lastDay: number): Param<Range> {
+  const def = defaultRange(bin, lastDay)
   return {
     encode: (v) => (v[0] === def[0] && v[1] === def[1] ? undefined : `${formatYmd(v[0])}-${formatYmd(v[1])}`),
     decode: (raw) => {
@@ -153,7 +153,10 @@ const PRESET_LABEL: Record<Preset, string> = { flow: 'net flow', act: 'activity'
 export default function Timelapse() {
   const qc = useQueryClient()
   const [bin, setBin] = useUrlState('b', binParam)
-  const rangeP = useMemo(() => rangeParam(bin), [bin])
+  // Date bounds for the range picker (and the default range's end): the last
+  // published day, falling back to yesterday until `station-urls.json` loads.
+  const lastDay = useTlLastDay() ?? todayMs() - DAY_MS
+  const rangeP = useMemo(() => rangeParam(bin, lastDay), [bin, lastDay])
   const [range, setRange] = useUrlState('d', rangeP)
   const [tUrl, setTUrl] = useUrlState('t', tParam)
   const [sp, setSp] = useUrlState('sp', intParam(8))
@@ -167,9 +170,6 @@ export default function Timelapse() {
   const fpb = max(1, fpbRaw)
   const [cap] = useUrlState('cap', stringParam())
   const [tileBase] = useUrlState('tileBase', stringParam())
-
-  // Date bounds for the range picker: genesis … the last published day.
-  const lastDay = useTlLastDay() ?? todayMs() - DAY_MS
 
   // Inclusive frame range: the frames containing the range's first and last instants.
   const [iStart, iEnd] = rangeFrames(bin, range)

@@ -10,6 +10,7 @@ import { makeParquetViewer } from '@rdub/file-tree/renderers/parquet'
 import { useUrlState } from 'use-prms'
 import type { Param } from 'use-prms'
 import { cellProps, headerProps, RawColsProvider, renderCell, renderHeader } from '../components/parquetCells'
+import { localToPageHost } from '../lib/apiBase'
 
 // Module scope, not inside render: a new component identity each render
 // would remount the viewer (and drop its row-group cache) on every
@@ -28,7 +29,7 @@ const rawColsParam: Param<Set<string>> = {
 
 // Default to prod worker so `pnpm dev` works without a local api.
 // Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev'
+const API_BASE = localToPageHost(import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev')
 
 export default function Files() {
   // `presign: true` → download icon resolves via `/api/files/presign`,

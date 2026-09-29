@@ -184,6 +184,7 @@
 !src/hooks/useStationsKeyboardShortcuts.ts
 !src/hooks/useStationsOmnibarEndpoint.ts
 !src/index.module.css
+!src/lib/apiBase.ts
 !src/lib/dataBase.ts
 !src/lib/dbg.ts
 !src/lib/mergeReview.ts

@@ -14,6 +14,7 @@ import { keepPreviousData, useQuery, type UseQueryResult } from '@tanstack/react
 import { minimalCover, s2Index, type SpatialSet } from 'pyrmts-geo'
 import type { ProcessedRow } from '../chart/ymrgtb-traces'
 import type { Region } from '../data'
+import { localToPageHost } from '../lib/apiBase'
 
 /** bbox covering NYC + JC + HOB + a generous buffer. */
 export const SYSTEM_BBOX = '40.5,-74.2,41.0,-73.7' as const
@@ -30,7 +31,7 @@ export type Pyramid = 'rides'
  *  rides hits — avail, station, totals stay on prod. */
 export type ApiTarget = 'prod' | 'dev'
 const API_BASE_BY_TARGET: Record<ApiTarget, string> = {
-  prod: import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev',
+  prod: localToPageHost(import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev'),
   dev: import.meta.env.VITE_API_BASE_DEV ?? 'https://ctbk-gbfs-api-dev.hccs-ctbk.workers.dev',
 }
 

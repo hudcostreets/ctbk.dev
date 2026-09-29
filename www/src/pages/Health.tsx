@@ -6,10 +6,11 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Tooltip } from '@mui/material'
 import type { CSSProperties } from 'react'
+import { localToPageHost } from '../lib/apiBase'
 
 // Default to prod worker so `pnpm dev` works without a local api.
 // Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev'
+const API_BASE = localToPageHost(import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev')
 
 interface FeedDrift {
   latestS: number

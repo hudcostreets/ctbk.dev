@@ -5,8 +5,9 @@
  * was removed once rides-v5 became the default — Phase E.)
  */
 import { useEffect, useState } from 'react'
+import { localToPageHost } from '../lib/apiBase'
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev'
+const API_BASE = localToPageHost(import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev')
 const STATION_LUC_URL = '/assets/station-luc.json'
 // Rides history starts 2013-06; ~14y × 12mo ≈ 170 monthly bins.
 const V5_FROM = '2013-06-01T00:00:00Z'

@@ -9,9 +9,10 @@
 import { keepPreviousData, type QueryClient, useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { useFlag } from '../contexts/FlagsContext'
 import { dbgFetch } from '../lib/dbg'
+import { localToPageHost } from '../lib/apiBase'
 
 // Override at build/dev time with `VITE_API_BASE=http://localhost:51896 pnpm dev`.
-export const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev'
+export const API_BASE = localToPageHost(import.meta.env.VITE_API_BASE ?? 'https://ctbk-gbfs-api.hccs-ctbk.workers.dev')
 
 export interface StationInfo {
   short_name: string
