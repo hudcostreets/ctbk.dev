@@ -18,14 +18,14 @@ describe('frame grid', () => {
 		expect(originMs('3d')).toBe(D(2013, 5, 15));
 		expect(originMs('7d')).toBe(D(2012, 12, 6));
 		expect(originMs('14d')).toBe(D(2012, 12, 6));
-		expect(originMs('1mo')).toBe(D(2013, 5, 1));
+		expect(originMs('1mo')).toBe(D(2012, 1, 1));
 	});
 	it('genesis frame indexes', () => {
 		expect(frameOf('1h', TL_GENESIS_MS)).toBe(24);
 		expect(frameOf('1d', TL_GENESIS_MS)).toBe(17);
 		expect(frameOf('3d', TL_GENESIS_MS)).toBe(5);
 		expect(frameOf('7d', TL_GENESIS_MS)).toBe(25);
-		expect(frameOf('1mo', TL_GENESIS_MS)).toBe(1);
+		expect(frameOf('1mo', TL_GENESIS_MS)).toBe(17);
 	});
 	it('frameOf / frameStartMs / chunkRange land on the shard grid', () => {
 		expect(frameOf('1d', D(2025, 6, 10))).toBe(4409);
@@ -36,10 +36,11 @@ describe('frame grid', () => {
 		expect(frameOf('1h', D(2025, 6, 10, 8))).toBe(105440);
 		expect(chunkRange('1h', 2196)).toEqual([D(2025, 6, 9), D(2025, 6, 11)]);
 		expect(chunkRange('1h', 2206)).toEqual([D(2025, 6, 29), D(2025, 7, 1)]);
-		expect(frameOf('1mo', D(2025, 6, 1))).toBe(145);
-		expect(frameOf('1mo', D(2025, 6, 30, 23))).toBe(145);
-		expect(frameStartMs('1mo', 145)).toBe(D(2025, 6, 1));
-		expect(chunkRange('1mo', 4)).toEqual([D(2024, 1, 1), D(2026, 9, 1)]);
+		expect(frameOf('1mo', D(2025, 6, 1))).toBe(161);
+		expect(frameOf('1mo', D(2025, 6, 30, 23))).toBe(161);
+		expect(frameStartMs('1mo', 161)).toBe(D(2025, 6, 1));
+		expect(chunkRange('1mo', 6)).toEqual([D(2024, 1, 1), D(2026, 1, 1)]);
+		expect(chunkRange('1mo', 0)).toEqual([D(2012, 1, 1), D(2014, 1, 1)]);
 	});
 	it('finerTiers: dividing fixed tiers, coarsest first; whole-day-nesting tiers for 1mo', () => {
 		expect(finerTiers('1h')).toEqual([]);
@@ -125,13 +126,13 @@ describe('planCover', () => {
 			gaps: [],
 		});
 	});
-	it('1mo chunk 4: the month shard, finer rungs only where the month tier is absent', () => {
-		expect(planCover(P0B, '1mo', ...chunkRange('1mo', 4))).toEqual({
+	it('1mo chunk 6 (= the 2024–25 `1mo@2y` rung): the month shard, finer rungs only where the month tier is absent', () => {
+		expect(planCover(P0B, '1mo', ...chunkRange('1mo', 6))).toEqual({
 			reads: [
 				{ shard: shard('1d/32d'), from: D(2025, 5, 16), to: D(2025, 6, 1) },
 				{ shard: shard('1mo/1mo'), from: D(2025, 6, 1), to: D(2025, 7, 1) },
 			],
-			gaps: [[D(2024, 1, 1), D(2025, 5, 16)], [D(2025, 7, 1), D(2026, 9, 1)]],
+			gaps: [[D(2024, 1, 1), D(2025, 5, 16)], [D(2025, 7, 1), D(2026, 1, 1)]],
 		});
 	});
 	it('nothing covers → one gap', () => {
@@ -142,7 +143,7 @@ describe('planCover', () => {
 describe('coveredFrames', () => {
 	it('merges adjacent reads into frame spans relative to the chunk', () => {
 		expect(coveredFrames(planCover(P0B, '1d', ...chunkRange('1d', 138)), '1d', 138)).toEqual([[0, 14]]);
-		expect(coveredFrames(planCover(P0B, '1mo', ...chunkRange('1mo', 4)), '1mo', 4)).toEqual([[16, 18]]);
+		expect(coveredFrames(planCover(P0B, '1mo', ...chunkRange('1mo', 6)), '1mo', 6)).toEqual([[16, 18]]);
 		expect(coveredFrames(planCover(P0B, '1d', ...chunkRange('1d', 100)), '1d', 100)).toEqual([]);
 	});
 });

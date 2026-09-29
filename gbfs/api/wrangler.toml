@@ -93,6 +93,10 @@ R2_PUBLIC_BASE_URL = "https://pub-4b6c7e01aa2349b8b8d6ed788df2a9d1.r2.dev"
 # CANON_MAP_KEY = "stations/station-canonicalize-map.<hash12>.json"
 # EXTRA_STATIONS_KEY = "stations/rides-extra-stations.<hash12>.json"
 # RIDES_CACHE_GEN = "<label>"  # folded into the `/api/rides*` edge-cache key
+# `/api/tl` (`src/tl.ts`): same knobs as prod's — the prefix is part of the
+# edge-cache key; `TL_CANONICALIZED = "1"` only once `canonicalize` has run
+# on it; `TL_HTTP_BASE = "https://data.ctbk.dev"` reads shards over HTTP
+# instead of the R2 binding (unset = R2).
 TL_PREFIX = "rides-tl"
 
 [[env.dev.d1_databases]]

@@ -12,7 +12,8 @@
  * `K·bin` grid, so chunk `k` = frames `[k·K, (k+1)·K)` sits exactly on the
  * pyramid's own shard grid (fixed spans align to the unix epoch, months to
  * year 0) — a `1d` chunk (K=32) is one `1d@32d` shard, a `1h` chunk (K=48)
- * one `1h@2d`. For hour-multiples and `1d` the origin IS genesis.
+ * one `1h@2d`, a `1mo` chunk (K=24) one `1mo@2y`. For hour-multiples and
+ * `1d` the origin IS genesis. The FE mirrors `TL_K` (`timelapseFrames.ts`).
  *
  * Shards are resolved from the pyramid's `manifest.jsonl` (latest
  * `written_at` per `(tier, shard_dur, period_start)`; R2 keeps superseded
@@ -50,9 +51,9 @@ const FIXED_MS: Record<FixedBin, number> = {
 };
 /** Frames per chunk. `1h` → 2 days; every other tier's `K·bin` is one of its
  *  shard rungs (`3h`→4d, `6h`→8d, `12h`→16d, `1d`→32d, `3d`→96d, `7d`→224d,
- *  `14d`→448d) except `1mo` (32 months). */
+ *  `14d`→448d, `1mo`→2y). */
 export const TL_K: Record<TlBin, number> = {
-	'1h': 48, '3h': 32, '6h': 32, '12h': 32, '1d': 32, '3d': 32, '7d': 32, '14d': 32, '1mo': 32,
+	'1h': 48, '3h': 32, '6h': 32, '12h': 32, '1d': 32, '3d': 32, '7d': 32, '14d': 32, '1mo': 24,
 };
 const TL_COLUMNS = ['cell', 'dt', 'count_n'];
 const MANIFEST_TTL_MS = 60_000;
