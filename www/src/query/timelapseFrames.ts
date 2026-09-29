@@ -20,40 +20,60 @@ import { rampRgb } from '../components/flowLens'
 
 export type Anchor = 'start' | 'end'
 export const ANCHORS: readonly Anchor[] = ['start', 'end']
-/** Every tier `/api/tl` serves (`TL_BINS` in `gbfs/api/src/tl.ts`). */
+/** Every tier `/api/tl` serves (`TL_BINS` in `gbfs/api/src/tl.ts`); all of
+ *  them are exposed (the selector + `b=`). */
 export type TlBin = '1h' | '3h' | '6h' | '12h' | '1d' | '3d' | '7d' | '14d' | '1mo'
-/** Exposed bins (the selector + `b=`); the others are served but need
- *  their own frame math (`1mo` is calendar-sized) before they're offered. */
-export type Bin = '1h' | '1d'
-export const BINS: readonly Bin[] = ['1h', '1d']
+export type Bin = TlBin
+export const BINS: readonly Bin[] = ['1h', '3h', '6h', '12h', '1d', '3d', '7d', '14d', '1mo']
 export type Source = 'api' | 'shard' | 'synth'
 
 export const GENESIS_MS = Date.UTC(2013, 5, 1)
 export const HOUR_MS = 3_600_000
 export const DAY_MS = 86_400_000
-export const BIN_MS: Record<Bin, number> = { '1h': HOUR_MS, '1d': DAY_MS }
+type FixedBin = Exclude<Bin, '1mo'>
+/** Fixed bin widths; `1mo` is calendar-sized (see `binMs`). */
+export const FIXED_MS: Record<FixedBin, number> = {
+  '1h': HOUR_MS, '3h': 3 * HOUR_MS, '6h': 6 * HOUR_MS, '12h': 12 * HOUR_MS,
+  '1d': DAY_MS, '3d': 3 * DAY_MS, '7d': 7 * DAY_MS, '14d': 14 * DAY_MS,
+}
+/** Nominal bin width (`1mo` ≈ 30.44 days), for estimates (frame counts,
+ *  synthetic per-bin rates), never for frame math. */
+export function binMs(bin: Bin): number {
+  return bin === '1mo' ? 30.436875 * DAY_MS : FIXED_MS[bin]
+}
 /** Frames per chunk per tier, mirroring the worker's `TL_K`: `1h` → 2 days;
  *  every other fixed tier's `K·bin` is one of its shard rungs (`3h`→4d …
  *  `14d`→448d); `1mo` → 24 months, rung-aligned to the `2y` shards. */
 export const TL_K: Record<TlBin, number> = {
   '1h': 48, '3h': 32, '6h': 32, '12h': 32, '1d': 32, '3d': 32, '7d': 32, '14d': 32, '1mo': 24,
 }
-export const CHUNK_K: Record<Bin, number> = { '1h': TL_K['1h'], '1d': TL_K['1d'] }
+export const CHUNK_K: Record<Bin, number> = TL_K
 
-/** Frame 0's start: genesis floored to the `K·bin` grid (see module doc). */
+const monthIdx = (ms: number): number => {
+  const d = new Date(ms)
+  return d.getUTCFullYear() * 12 + d.getUTCMonth()
+}
+const monthMs = (idx: number): number => Date.UTC(Math.floor(idx / 12), ((idx % 12) + 12) % 12)
+
+/** Frame 0's start: genesis floored to the `K·bin` grid (see module doc);
+ *  months floor on a year-0 month grid, as the worker's `originMs`. */
 export function originMs(bin: Bin): number {
-  const grid = CHUNK_K[bin] * BIN_MS[bin]
+  const K = CHUNK_K[bin]
+  if (bin === '1mo') return monthMs(Math.floor(monthIdx(GENESIS_MS) / K) * K)
+  const grid = K * FIXED_MS[bin]
   return Math.floor(GENESIS_MS / grid) * grid
 }
 
 /** Frame index containing `ms` (a local-as-UTC instant). */
 export function frameIndex(bin: Bin, ms: number): number {
-  return Math.floor((ms - originMs(bin)) / BIN_MS[bin])
+  if (bin === '1mo') return monthIdx(ms) - monthIdx(originMs(bin))
+  return Math.floor((ms - originMs(bin)) / FIXED_MS[bin])
 }
 
 /** Start instant (local-as-UTC ms) of frame `i`. */
 export function frameStartMs(bin: Bin, i: number): number {
-  return originMs(bin) + i * BIN_MS[bin]
+  if (bin === '1mo') return monthMs(monthIdx(originMs(bin)) + i)
+  return originMs(bin) + i * FIXED_MS[bin]
 }
 
 export function chunkOf(bin: Bin, i: number): number {
@@ -414,7 +434,7 @@ export function synthChunk(
     const month = monthEnds[ymOf(ms)]
     if (!month) continue
     const dim = daysInMonth(ms)
-    const wf = weekdayFactor(new Date(ms).getUTCDay()) * (BIN_MS[bin] / DAY_MS)
+    const wf = weekdayFactor(new Date(ms).getUTCDay()) * ((frameStartMs(bin, i + 1) - ms) / DAY_MS)
     for (const [id, ends] of Object.entries(month)) {
       const b = (hash01(id) - 0.5) * 0.5
       const count = Math.round((ends / dim) * wf * (anchor === 'start' ? 1 + b : 1 - b))
@@ -491,7 +511,9 @@ export function accumulateFrame(
  *  spec's `tl-scale.json` sidecar (builder-computed p99 per tier) doesn't
  *  exist yet, so the session derives its scale client-side
  *  (`scaleFromChunks`) and freezes it. */
-export const DEFAULT_SCALE: Record<Bin, number> = { '1h': 80, '1d': 1000 }
+export const DEFAULT_SCALE: Record<Bin, number> = {
+  '1h': 80, '3h': 200, '6h': 350, '12h': 600, '1d': 1000, '3d': 2800, '7d': 6000, '14d': 11000, '1mo': 22000,
+}
 
 /** Quantile `q` (default p99) of the per-station-frame `starts + ends`
  *  totals (> 0) over the covered frames of the given chunk pairs, or null

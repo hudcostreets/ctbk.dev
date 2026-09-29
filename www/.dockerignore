@@ -215,6 +215,8 @@
 !src/query/smgStats.ts
 !src/query/stations.ts
 !src/query/timelapse.ts
+!src/query/timelapseControls.test.ts
+!src/query/timelapseControls.ts
 !src/query/timelapseFrames.test.ts
 !src/query/timelapseFrames.ts
 !src/query/timelapsePrefetch.test.ts

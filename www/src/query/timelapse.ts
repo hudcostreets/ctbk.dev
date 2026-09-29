@@ -36,7 +36,7 @@
  * (`timelapsePrefetch.ts`) behind it, one request at a time.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { useQueryClient, type QueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { asyncBufferFromUrl, parquetMetadataAsync, parquetRead, type AsyncBuffer, type FileMetaData } from 'hyparquet'
 import { API_BASE } from './stations'
 import { dbgFetch } from '../lib/dbg'
@@ -45,6 +45,7 @@ import {
   pairReady, pickShards, pivotBlock, prefetchOrder, stationSeries, synthChunk, TlUnavailable, ymOf,
   type Anchor, type ApiChunk, type Bin, type Block, type Chunk, type ManifestRow, type Triple,
 } from './timelapseFrames'
+import { lastDataDay } from './timelapseControls'
 import { fanOutOrder, PrefetchQueue } from './timelapsePrefetch'
 
 export { TlUnavailable }
@@ -105,6 +106,14 @@ type StationUrls = { stations: Record<string, string>; latestMonth: string }
 
 function stationUrls(qc: QueryClient): Promise<StationUrls> {
   return qc.ensureQueryData({ queryKey: ['tl-station-urls'], staleTime: Infinity, queryFn: () => fetchJson<StationUrls>(STATION_URLS) })
+}
+
+/** The data's last day: the end of `station-urls.json`'s `latestMonth`
+ *  (the last month the pipeline published; `rides-tl` is built to the same
+ *  cap), or null while loading. Shares `stationUrls`' cache entry. */
+export function useTlLastDay(): number | null {
+  const q = useQuery({ queryKey: ['tl-station-urls'], staleTime: Infinity, queryFn: () => fetchJson<StationUrls>(STATION_URLS) })
+  return q.data ? lastDataDay(q.data.latestMonth) : null
 }
 
 type MonthStations = Record<string, { ends: number }>

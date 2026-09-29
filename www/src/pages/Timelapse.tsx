@@ -1,6 +1,6 @@
 /**
  * `/timelapse` (`specs/timelapse-map.md`, P1–P3): every station, one bin
- * (`1d` or `1h`) per frame, on the shared `GLMap`. `ScatterplotLayer`s with
+ * (any `/api/tl` tier, `1h` … `1mo`) per frame, on the shared `GLMap`. `ScatterplotLayer`s with
  * binary per-frame attributes in one of three presets (`st=`: `flow` =
  * diverging color on damped net share, `act` = single-hue glow, `split` =
  * disk/ring for starts/ends), all sized against one per-bin scale frozen for
@@ -8,6 +8,9 @@
  * index + φ) driven by one rAF loop that stalls (badge) while the next chunk
  * isn't cached; an idle fan-out prefetches the rest of the range behind it.
  * Click pins a station (`sel=`, ring + sparkline drawer; `esc` clears).
+ * Control bar: range (`d=`: date inputs + per-bin presets, capped by a
+ * frame-count guard), bin, speed, style, loop, and a scrubber whose totals
+ * sparkline previews a frame on hover (click commits `t`).
  * Movie mode (`mv=1`): chrome and interaction off, `window.__tl.seek(i)` for
  * frame-by-frame capture (`scrns.timelapse.json`).
  *
@@ -18,6 +21,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { FloatingPortal, offset, shift, useFloating } from '@floating-ui/react'
 import { ScatterplotLayer } from '@deck.gl/layers'
 import type { Layer, PickingInfo } from '@deck.gl/core'
 import type { Map as MaplibreMapInstance } from 'maplibre-gl'
@@ -25,14 +29,20 @@ import { useAction } from 'use-kbd'
 import { boolParam, codeParam, intParam, llzParam, stringParam, useUrlState, type LLZ, type Param } from 'use-prms'
 import GLMap from '../components/GLMap'
 import { rampRgb } from '../components/flowLens'
+import { Tip } from '../components/Tip'
 import {
-  cachedChunks, ensureChunk, useTlFrames, useTlPrefetch, useTlStationSeries, useTlTotals, type SourceMode,
+  cachedChunks, ensureChunk, useTlFrames, useTlLastDay, useTlPrefetch, useTlStationSeries, useTlTotals, type SourceMode,
 } from '../query/timelapse'
+import {
+  BIG_STEP, BIN_LABEL, capRange, clockLabel, DEFAULT_SPAN, dayOf, editRange, fitRangeToBin, frameCount, isoDay,
+  parseIsoDay, RANGE_PRESETS, rangeFrames, shortLabel, SOFT_FRAMES, spanEnding, spanRange, SPEEDS, speedLabel, stepSpeed,
+  suggestBin, UNIT, type Range, type Span,
+} from '../query/timelapseControls'
 import {
   accumulateFrame, actAttributes, buildStationTable, chunkIndexMap, chunkOf, chunksCovering, flowAttributes, formatT,
   formatYmd, frameIndex, frameStartMs, parseT, parseYmd, scaleFromChunks, snapToCached, splitAttributes,
   type Bin, type Chunk, type Preset, type StationTable,
-  ACT, ANCHORS, BINS, COOL, DAY_MS, DEFAULT_SCALE, NEUTRAL, PRESETS, SIZE, SPLIT, WARM,
+  ACT, ANCHORS, BINS, binMs, COOL, DAY_MS, DEFAULT_SCALE, GENESIS_MS, NEUTRAL, PRESETS, SIZE, SPLIT, WARM,
 } from '../query/timelapseFrames'
 import css from '../timelapse.module.css'
 
@@ -46,8 +56,7 @@ declare global {
   }
 }
 
-const binParam = codeParam<Bin>('1d', [['1d', '1d'], ['1h', '1h']])
-const SPEEDS = [1, 2, 4, 8, 16, 32]
+const binParam = codeParam<Bin>('1d', BINS.map((b) => [b, b]))
 const SYSTEM_LLZ: LLZ = { lat: 40.735, lng: -73.975, zoom: 11 }
 const viewParam = llzParam({ default: SYSTEM_LLZ, latLngDecimals: 3 })
 const presetParam = codeParam<Preset>('flow', [['flow', 'flow'], ['act', 'act'], ['split', 'split']])
@@ -65,14 +74,18 @@ function todayMs(): number {
   return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())
 }
 
-/** Default range: the trailing full year (`1d`) or full week (`1h`) ending yesterday. */
-function defaultRange(bin: Bin): [number, number] {
-  const days = bin === '1h' ? 7 : 365
-  return [todayMs() - days * DAY_MS, todayMs() - DAY_MS]
+/** Default range: the bin's `DEFAULT_SPAN` (a week at `1h`, a year at
+ *  `1d`, …) ending yesterday. */
+function defaultRange(bin: Bin): Range {
+  return spanFrom(DEFAULT_SPAN[bin], todayMs() - DAY_MS)
+}
+
+function spanFrom(span: Span, end: number): Range {
+  return span === 'all' ? [GENESIS_MS, end] : spanEnding(span, end, GENESIS_MS)
 }
 
 /** `?d=YYMMDD-YYMMDD`: inclusive local day range. */
-function rangeParam(bin: Bin): Param<[number, number]> {
+function rangeParam(bin: Bin): Param<Range> {
   const def = defaultRange(bin)
   return {
     encode: (v) => (v[0] === def[0] && v[1] === def[1] ? undefined : `${formatYmd(v[0])}-${formatYmd(v[1])}`),
@@ -122,12 +135,6 @@ function useStationTable(): StationTable | null {
   return q.data ?? null
 }
 
-const DATE_FMT = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
-const HOUR_FMT = new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' })
-const UNIT: Record<Bin, string> = { '1h': 'hour', '1d': 'day' }
-/** shift+←/→: a day (`1h`) or a week (`1d`), in frames. */
-const BIG_STEP: Record<Bin, number> = { '1h': 24, '1d': 7 }
-
 /** Additive blending (`act`): overlapping glows sum toward white. */
 const ADDITIVE = {
   blend: true,
@@ -147,7 +154,7 @@ export default function Timelapse() {
   const qc = useQueryClient()
   const [bin, setBin] = useUrlState('b', binParam)
   const rangeP = useMemo(() => rangeParam(bin), [bin])
-  const [range] = useUrlState('d', rangeP)
+  const [range, setRange] = useUrlState('d', rangeP)
   const [tUrl, setTUrl] = useUrlState('t', tParam)
   const [sp, setSp] = useUrlState('sp', intParam(8))
   const [view, setView] = useUrlState('ll', viewParam)
@@ -161,9 +168,11 @@ export default function Timelapse() {
   const [cap] = useUrlState('cap', stringParam())
   const [tileBase] = useUrlState('tileBase', stringParam())
 
-  const iStart = frameIndex(bin, range[0])
-  // Inclusive last frame: the last day, or its last hour.
-  const iEnd = bin === '1h' ? frameIndex(bin, range[1] + DAY_MS) - 1 : frameIndex(bin, range[1])
+  // Date bounds for the range picker: genesis … the last published day.
+  const lastDay = useTlLastDay() ?? todayMs() - DAY_MS
+
+  // Inclusive frame range: the frames containing the range's first and last instants.
+  const [iStart, iEnd] = rangeFrames(bin, range)
   const clampI = useCallback((i: number) => max(iStart, min(iEnd, i)), [iStart, iEnd])
   const tToI = useCallback((ms: number | undefined) => clampI(ms === undefined ? iStart : frameIndex(bin, ms)), [bin, clampI, iStart])
 
@@ -183,22 +192,79 @@ export default function Timelapse() {
 
   // On mount and on a bin switch: re-derive the frame under the URL's
   // instant (`t` is bin-independent) and normalize it (clamped to the
-  // range, floored to the bin).
+  // range, floored to the bin). On a range change: clamp the playhead into
+  // the new range. On mount, a hand-written `d` too long for the bin is
+  // trimmed (`capRange`).
+  const prevGrid = useRef<{ bin: Bin; iStart: number; iEnd: number } | null>(null)
   useEffect(() => {
-    setPlaying(false)
-    const i = tToI(tUrl)
-    tRef.current = i
-    setT(i)
-    if (!mv && tUrl !== undefined && frameStartMs(bin, i) !== tUrl) commitT(i)
+    const p = prevGrid.current
+    prevGrid.current = { bin, iStart, iEnd }
+    if (!p && !mv) {
+      const c = capRange(bin, range, 'end')
+      if (c.capped) setRange(c.range)
+    }
+    if (!p || p.bin !== bin) {
+      setPlaying(false)
+      const i = tToI(tUrl)
+      tRef.current = i
+      setT(i)
+      if (!mv && tUrl !== undefined && frameStartMs(bin, i) !== tUrl) commitT(i)
+    } else if (p.iStart !== iStart || p.iEnd !== iEnd) {
+      if (!mv) commitT(floor(tRef.current))
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bin])
+  }, [bin, iStart, iEnd])
+
+  /** The playhead's day, for range presets / re-fits. */
+  const tDay = useCallback(() => dayOf(frameStartMs(bin, floor(tRef.current))), [bin])
+  // Set by a range edit the frame-count guard trimmed; cleared by the next edit.
+  const [capNote, setCapNote] = useState<string | null>(null)
+  const setRangeEdit = useCallback((r: Range, keep: 'start' | 'end') => {
+    const c = capRange(bin, r, keep)
+    setCapNote(c.capped ? `capped to ${frameCount(bin, c.range).toLocaleString('en-US')} frames at ${BIN_LABEL[bin]}` : null)
+    setRange(c.range)
+  }, [bin, setRange])
+  const applySpan = useCallback((span: Span) => {
+    setCapNote(null)
+    setRange(spanRange(span, range, tDay(), GENESIS_MS, lastDay))
+  }, [range, tDay, lastDay, setRange])
+  // Switching bins keeps `d`, unless it's too many frames at a finer bin or
+  // too few at a coarser one (`fitRangeToBin`). The URL `t` is written first
+  // (it isn't while playing), since the bin effect re-derives from it.
+  const changeBin = useCallback((nb: Bin) => {
+    if (nb === bin) return
+    const td = tDay()
+    if (!mv) setTUrl(frameStartMs(bin, floor(tRef.current)))
+    const r = fitRangeToBin(bin, nb, range, td, GENESIS_MS, lastDay)
+    setCapNote(null)
+    setBin(nb)
+    if (r[0] !== range[0] || r[1] !== range[1]) setRange(r)
+  }, [bin, mv, range, lastDay, tDay, setBin, setRange, setTUrl])
+
+  // Scrubber hover preview (`peek`): a frame shown on the map + clock
+  // without moving the playhead or touching the URL. Hovering pauses
+  // playback; leaving resumes it if hovering paused it.
+  const [peek, setPeek] = useState<number | null>(null)
+  const resumeRef = useRef(false)
+  const onPeek = useCallback((i: number | null) => {
+    if (i !== null && playing) {
+      resumeRef.current = true
+      setPlaying(false)
+    }
+    if (i === null && resumeRef.current) {
+      resumeRef.current = false
+      setPlaying(true)
+    }
+    setPeek(i)
+  }, [playing])
+  const tView = peek ?? t
 
   const table = useStationTable()
-  const frames = useTlFrames(src, bin, t, 1)
+  const frames = useTlFrames(src, bin, tView, 1)
   const readyRef = useRef(frames.ready)
   readyRef.current = frames.ready
   const rangeChunks = useMemo(() => chunksCovering(bin, iStart, iEnd), [bin, iStart, iEnd])
-  useTlPrefetch(src, bin, chunkOf(bin, floor(t)), rangeChunks[0], rangeChunks[rangeChunks.length - 1])
+  useTlPrefetch(src, bin, chunkOf(bin, floor(tView)), rangeChunks[0], rangeChunks[rangeChunks.length - 1])
 
   // Global scale, frozen per bin for the session: p99 of per-station-frame
   // starts + ends over the first chunk pair the playhead lands on (the
@@ -215,10 +281,12 @@ export default function Timelapse() {
   const scaleFrozen = scales[bin] !== undefined
 
   const play = useCallback(() => {
+    resumeRef.current = false
     if (floor(tRef.current) >= iEnd) commitT(iStart)
     setPlaying(true)
   }, [iEnd, iStart, commitT])
   const pause = useCallback(() => {
+    resumeRef.current = false
     setPlaying(false)
     commitT(floor(tRef.current))
   }, [commitT])
@@ -263,18 +331,19 @@ export default function Timelapse() {
   // Keyboard (`use-kbd`): all show up in the ShortcutsModal / Omnibar. Off in
   // movie mode (interaction disabled).
   const unit = UNIT[bin]
-  const bigUnit = bin === '1h' ? 'day' : 'week'
+  const big = BIG_STEP[bin]
   const on = !mv
   useAction('tl:play', { label: 'Play / pause', group: 'Timelapse', defaultBindings: ['space'], handler: toggle, enabled: on })
   useAction('tl:prev', { label: `Previous ${unit}`, group: 'Timelapse', defaultBindings: ['arrowleft'], handler: () => step(-1), enabled: on })
   useAction('tl:next', { label: `Next ${unit}`, group: 'Timelapse', defaultBindings: ['arrowright'], handler: () => step(1), enabled: on })
-  useAction('tl:prev-week', { label: `Back one ${bigUnit}`, group: 'Timelapse', defaultBindings: ['shift+arrowleft'], handler: () => step(-BIG_STEP[bin]), enabled: on })
-  useAction('tl:next-week', { label: `Forward one ${bigUnit}`, group: 'Timelapse', defaultBindings: ['shift+arrowright'], handler: () => step(BIG_STEP[bin]), enabled: on })
-  useAction('tl:slower', { label: 'Slower', group: 'Timelapse', defaultBindings: ['['], handler: () => setSp(SPEEDS[max(0, SPEEDS.indexOf(sp) - 1)] ?? SPEEDS[0]), enabled: on })
-  useAction('tl:faster', { label: 'Faster', group: 'Timelapse', defaultBindings: [']'], handler: () => setSp(SPEEDS[min(SPEEDS.length - 1, SPEEDS.indexOf(sp) + 1)] ?? SPEEDS[SPEEDS.length - 1]), enabled: on })
+  useAction('tl:prev-week', { label: `Back one ${big.label}`, group: 'Timelapse', defaultBindings: ['shift+arrowleft'], handler: () => step(-big.n), enabled: on })
+  useAction('tl:next-week', { label: `Forward one ${big.label}`, group: 'Timelapse', defaultBindings: ['shift+arrowright'], handler: () => step(big.n), enabled: on })
+  useAction('tl:slower', { label: 'Slower', group: 'Timelapse', defaultBindings: ['['], handler: () => setSp(stepSpeed(sp, -1)), enabled: on })
+  useAction('tl:faster', { label: 'Faster', group: 'Timelapse', defaultBindings: [']'], handler: () => setSp(stepSpeed(sp, 1)), enabled: on })
   useAction('tl:home', { label: 'Jump to range start', group: 'Timelapse', defaultBindings: ['home'], handler: () => { setPlaying(false); commitT(iStart) }, enabled: on })
   useAction('tl:end', { label: 'Jump to range end', group: 'Timelapse', defaultBindings: ['end'], handler: () => { setPlaying(false); commitT(iEnd) }, enabled: on })
-  useAction('tl:bin', { label: 'Cycle bin (hour / day)', group: 'Timelapse', defaultBindings: ['b'], handler: () => setBin(BINS[(BINS.indexOf(bin) + 1) % BINS.length]), enabled: on })
+  useAction('tl:bin', { label: 'Coarser bin', group: 'Timelapse', defaultBindings: ['b'], handler: () => changeBin(BINS[min(BINS.length - 1, BINS.indexOf(bin) + 1)]), enabled: on })
+  useAction('tl:bin-finer', { label: 'Finer bin', group: 'Timelapse', defaultBindings: ['shift+b'], handler: () => changeBin(BINS[max(0, BINS.indexOf(bin) - 1)]), enabled: on })
   useAction('tl:style', { label: 'Cycle style (flow / activity / split)', group: 'Timelapse', defaultBindings: ['s'], handler: () => setPreset(PRESETS[(PRESETS.indexOf(preset) + 1) % PRESETS.length]), enabled: on })
   useAction('tl:loop', { label: 'Toggle loop', group: 'Timelapse', defaultBindings: ['l'], handler: () => setLoop(!loop), enabled: on })
   useAction('tl:unpin', { label: 'Clear pinned stations', group: 'Timelapse', defaultBindings: ['escape'], handler: () => setPins([]), enabled: on && pins.length > 0 })
@@ -282,11 +351,11 @@ export default function Timelapse() {
   // Jumps land on the nearest cached frame while the real chunk loads (the
   // prefetch queue has already re-targeted to the new chunk).
   const shown = useMemo(() => {
-    if (frames.ready) return t
+    if (frames.ready) return tView
     const cached = cachedChunks(qc, src, bin, rangeChunks)
-    return snapToCached(cached, bin, floor(t), 1) ?? t
+    return snapToCached(cached, bin, floor(tView), 1) ?? tView
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frames, t, qc, src, bin, rangeChunks])
+  }, [frames, tView, qc, src, bin, rangeChunks])
   const shownFrames = useTlFrames(src, bin, shown, 0)
 
   // Per-frame attributes: lerp starts/ends between frames ⌊t⌋ and ⌊t⌋+1
@@ -468,7 +537,10 @@ export default function Timelapse() {
   const i = floor(shown)
   const stalled = playing && !frames.ready
   const iMs = frameStartMs(bin, i)
-  const dateStr = bin === '1h' ? `${DATE_FMT.format(new Date(iMs))} · ${HOUR_FMT.format(new Date(iMs))}` : DATE_FMT.format(new Date(iMs))
+  const dateStr = clockLabel(bin, iMs)
+  const nFramesRange = iEnd - iStart + 1
+  // Sub-day bins only: `1d` over all of history (~4,850 frames) is a preset.
+  const suggested = nFramesRange > SOFT_FRAMES && binMs(bin) < DAY_MS ? suggestBin(range) : null
   const fmt = (n: number) => round(n).toLocaleString('en-US')
   const scaleNote = `size = √(rides ÷ ${fmt(scale)}), ${scaleFrozen ? 'p99 of the first loaded chunk, fixed for the session' : 'provisional'}`
 
@@ -493,7 +565,8 @@ export default function Timelapse() {
             {mv
               ? <>{frame && !frame.missing && <>{fmt(frame.starts.reduce((a, b) => a + b, 0))} rides started</>}</>
               : <>
-                {formatYmd(range[0])} – {formatYmd(range[1])} · {unit} {i - iStart + 1} of {iEnd - iStart + 1}
+                {formatYmd(range[0])} – {formatYmd(range[1])} · {bin} bins · frame {i - iStart + 1} of {nFramesRange}
+                {peek !== null && <> · preview</>}
                 {frame && !frame.missing && <> · {fmt(frame.starts.reduce((a, b) => a + b, 0))} starts</>}
               </>}
           </span>
@@ -529,26 +602,82 @@ export default function Timelapse() {
         {!table && <div className={css.loading}>Loading stations…</div>}
         {!mv && (
           <div className={css.controls}>
-            <button type="button" className={css.btn} onClick={toggle} aria-label={playing ? 'Pause' : 'Play'} title="Space">
-              {playing ? '❚❚' : '▶'}
-            </button>
-            <button type="button" className={css.btn} onClick={() => step(-1)} aria-label={`Previous ${unit}`} title="←">◀</button>
-            <button type="button" className={css.btn} onClick={() => step(1)} aria-label={`Next ${unit}`} title="→">▶</button>
-            <select className={css.select} value={bin} onChange={(e) => setBin(e.target.value as Bin)} aria-label="Bin" title="b">
-              <option value="1h">hourly</option>
-              <option value="1d">daily</option>
-            </select>
-            <select className={css.select} value={preset} onChange={(e) => setPreset(e.target.value as Preset)} aria-label="Style" title="s">
-              {PRESETS.map((p) => <option key={p} value={p}>{PRESET_LABEL[p]}</option>)}
-            </select>
-            <select className={css.select} value={sp} onChange={(e) => setSp(Number(e.target.value))} aria-label="Speed" title="[ / ]">
-              {SPEEDS.map((s) => <option key={s} value={s}>{s} {bin === '1h' ? 'h' : 'd'}/s</option>)}
-            </select>
-            <label className={css.check}>
-              <input type="checkbox" checked={loop} onChange={(e) => setLoop(e.target.checked)} /> loop
-            </label>
-            <Scrubber iStart={iStart} iEnd={iEnd} i={floor(t)} totals={totals} onScrub={(v) => { tRef.current = v; setT(v) }} onCommit={commitT} />
-            <span className={css.rangeLabel}>{formatT(iMs)}</span>
+            <div className={css.row}>
+              <div className={css.group}>
+                <Tip content="Play / pause (space)">
+                  <button type="button" className={css.btn} onClick={toggle} aria-label={playing ? 'Pause' : 'Play'}>
+                    {playing ? '❚❚' : '▶'}
+                  </button>
+                </Tip>
+                <Tip content={`Previous ${unit} (←; shift+← = ${big.label})`}>
+                  <button type="button" className={css.btn} onClick={() => step(-1)} aria-label={`Previous ${unit}`}>◀</button>
+                </Tip>
+                <Tip content={`Next ${unit} (→; shift+→ = ${big.label})`}>
+                  <button type="button" className={css.btn} onClick={() => step(1)} aria-label={`Next ${unit}`}>▶</button>
+                </Tip>
+              </div>
+              <RangePicker
+                bin={bin}
+                range={range}
+                lastDay={lastDay}
+                tDay={dayOf(frameStartMs(bin, floor(t)))}
+                onEdit={setRangeEdit}
+                onSpan={applySpan}
+              />
+              <Tip content="Bin: time per frame (b = coarser, shift+b = finer)">
+                <label className={css.field}>
+                  <span className={css.fieldLabel}>bin</span>
+                  <select className={css.select} value={bin} onChange={(e) => changeBin(e.target.value as Bin)} aria-label="Bin">
+                    {BINS.map((b) => <option key={b} value={b}>{BIN_LABEL[b]}</option>)}
+                  </select>
+                </label>
+              </Tip>
+              <Tip content={`Playback speed: ${sp} frame${sp === 1 ? '' : 's'}/s ([ slower, ] faster)`}>
+                <label className={css.field}>
+                  <span className={css.fieldLabel}>speed</span>
+                  <select className={css.select} value={sp} onChange={(e) => setSp(Number(e.target.value))} aria-label="Speed">
+                    {(SPEEDS.includes(sp) ? SPEEDS : [...SPEEDS, sp].sort((a, b) => a - b)).map((v) => (
+                      <option key={v} value={v}>{speedLabel(bin, v)}</option>
+                    ))}
+                  </select>
+                </label>
+              </Tip>
+              <Tip content="Style preset (s)">
+                <label className={css.field}>
+                  <span className={css.fieldLabel}>style</span>
+                  <select className={css.select} value={preset} onChange={(e) => setPreset(e.target.value as Preset)} aria-label="Style">
+                    {PRESETS.map((p) => <option key={p} value={p}>{PRESET_LABEL[p]}</option>)}
+                  </select>
+                </label>
+              </Tip>
+              <Tip content="Loop at the end of the range (l)">
+                <label className={css.check}>
+                  <input type="checkbox" checked={loop} onChange={(e) => setLoop(e.target.checked)} /> loop
+                </label>
+              </Tip>
+              {suggested && suggested !== bin && (
+                <Tip content={`${fmt(nFramesRange)} frames at ${BIN_LABEL[bin]}: long to load and play. Switch to ${BIN_LABEL[suggested]} bins?`}>
+                  <button type="button" className={`${css.btn} ${css.hint}`} onClick={() => changeBin(suggested)} data-testid="tl-suggest-bin">
+                    {fmt(nFramesRange)} frames · use {suggested}
+                  </button>
+                </Tip>
+              )}
+              {capNote && <span className={css.note} data-testid="tl-cap-note">{capNote}</span>}
+            </div>
+            <div className={css.row}>
+              <Scrubber
+                bin={bin}
+                iStart={iStart}
+                iEnd={iEnd}
+                i={floor(t)}
+                peek={peek}
+                totals={totals}
+                onScrub={(v) => { tRef.current = v; setT(v) }}
+                onCommit={commitT}
+                onPeek={onPeek}
+              />
+              <span className={css.rangeLabel}>{formatT(iMs)}</span>
+            </div>
           </div>
         )}
       </GLMap>
@@ -623,8 +752,10 @@ function PinCard({ src, bin, id, name, starts, ends, iStart, iEnd, i, onUnpin }:
   )
 }
 
-/** SVG path over `values` (NaN = gap), scaled to its own peak. */
-function sparkPath(values: Float64Array, W: number, H: number): string {
+/** SVG path over `values` (NaN = gap), scaled to its own peak. Point `f`
+ *  sits at its slot's center (`center`), or at `f / (n − 1)` of the width
+ *  (`edge`: where a range input's thumb sits for value `f`). */
+function sparkPath(values: Float64Array, W: number, H: number, align: 'center' | 'edge' = 'center'): string {
   const n = values.length
   if (!n) return ''
   let peak = 0
@@ -635,7 +766,7 @@ function sparkPath(values: Float64Array, W: number, H: number): string {
   for (let f = 0; f < n; f++) {
     const v = values[f]
     if (v !== v) { pen = false; continue }
-    const x = ((f + 0.5) / n) * W
+    const x = align === 'edge' ? edgeX(f, n) * W : ((f + 0.5) / n) * W
     const y = H - 2 - (v / peak) * (H - 6)
     parts.push(`${pen ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`)
     pen = true
@@ -643,30 +774,113 @@ function sparkPath(values: Float64Array, W: number, H: number): string {
   return parts.join(' ')
 }
 
-/** Range input over the frame range with the totals strip behind it. */
+/** Fraction of the width at which frame `f` of `n` sits under a range input. */
+function edgeX(f: number, n: number): number {
+  return n > 1 ? f / (n - 1) : 0.5
+}
+
+/** Range picker for `d=`: two native date inputs (genesis … the last
+ *  published day) and the bin's quick presets (`RANGE_PRESETS`). */
+function RangePicker({ bin, range, lastDay, tDay, onEdit, onSpan }: {
+  bin: Bin
+  range: Range
+  lastDay: number
+  tDay: number
+  onEdit: (r: Range, keep: 'start' | 'end') => void
+  onSpan: (span: Span) => void
+}) {
+  const lo = isoDay(GENESIS_MS)
+  const hi = isoDay(lastDay)
+  const edit = (side: 'start' | 'end', v: string) => {
+    const ms = parseIsoDay(v)
+    if (ms !== null) onEdit(editRange(range, side, ms, GENESIS_MS, lastDay), side)
+  }
+  return (
+    <div className={css.group} role="group" aria-label="Range">
+      <input type="date" className={css.date} value={isoDay(range[0])} min={lo} max={hi} aria-label="Range start" onChange={(e) => edit('start', e.target.value)} />
+      <span className={css.dash}>–</span>
+      <input type="date" className={css.date} value={isoDay(range[1])} min={lo} max={hi} aria-label="Range end" onChange={(e) => edit('end', e.target.value)} />
+      {RANGE_PRESETS[bin].map(({ label, span }) => {
+        const r = spanRange(span, range, tDay, GENESIS_MS, lastDay)
+        // A day span clamped at genesis / the last day doesn't count as picked.
+        const active = r[0] === range[0] && r[1] === range[1] && (span === 'all' || span.u === 'mo' || r[1] - r[0] === (span.n - 1) * DAY_MS)
+        const desc = span === 'all' ? 'all of history' : `${span.n} ${span.u === 'd' ? 'day' : 'month'}${span.n === 1 ? '' : 's'}`
+        return (
+          <Tip key={label} content={`Range: ${desc} (${formatYmd(r[0])}–${formatYmd(r[1])})`}>
+            <button type="button" className={`${css.btn} ${css.preset}`} aria-pressed={active} onClick={() => onSpan(span)}>{label}</button>
+          </Tip>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * Range input over the frame range with the totals strip behind it.
+ * Hovering (mouse) previews the frame under the pointer (`onPeek`: map +
+ * clock, a hover line and a tip with the frame's Σ starts); click commits
+ * it. Touch keeps the native behavior (tap/drag → commit on release).
+ */
 function Scrubber({
+  bin,
   iStart,
   iEnd,
   i,
+  peek,
   totals,
   onScrub,
   onCommit,
+  onPeek,
 }: {
+  bin: Bin
   iStart: number
   iEnd: number
   i: number
+  peek: number | null
   totals: Float64Array
   onScrub: (i: number) => void
   onCommit: (i: number) => void
+  onPeek: (i: number | null) => void
 }) {
   const W = 1000
   const H = 34
-  const path = useMemo(() => sparkPath(totals, W, H), [totals])
+  const n = iEnd - iStart + 1
+  const path = useMemo(() => sparkPath(totals, W, H, 'edge'), [totals])
+  const boxRef = useRef<HTMLDivElement>(null)
+  const frameAt = (clientX: number) => {
+    const r = boxRef.current!.getBoundingClientRect()
+    const f = n > 1 ? round(((clientX - r.left) / r.width) * (n - 1)) : 0
+    return iStart + max(0, min(n - 1, f))
+  }
+  const px = peek === null ? null : edgeX(peek - iStart, n)
+  const { refs, floatingStyles } = useFloating({
+    open: peek !== null,
+    placement: 'top',
+    middleware: [offset(8), shift({ padding: 8 })],
+  })
+  useLayoutEffect(() => {
+    const box = boxRef.current
+    if (px === null || !box) return
+    refs.setPositionReference({
+      getBoundingClientRect: () => {
+        const r = box.getBoundingClientRect()
+        const x = r.left + px * r.width
+        return new DOMRect(x, r.top, 0, r.height)
+      },
+    })
+  }, [px, refs])
+  const rides = peek === null ? NaN : totals[peek - iStart]
   return (
-    <div className={css.scrub}>
+    <div
+      ref={boxRef}
+      className={css.scrub}
+      onPointerMove={(e) => { if (e.pointerType === 'mouse') onPeek(frameAt(e.clientX)) }}
+      onPointerLeave={(e) => { if (e.pointerType === 'mouse') onPeek(null) }}
+    >
       <svg className={css.strip} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
         <rect x={0} y={0} width={W} height={H} fill="rgba(255,255,255,0.06)" />
         {path && <path d={path} fill="none" stroke="#7fb3ff" strokeWidth={2} vectorEffect="non-scaling-stroke" />}
+        {px !== null && <line x1={px * W} x2={px * W} y1={0} y2={H} stroke="rgba(255,255,255,0.85)" strokeWidth={1} vectorEffect="non-scaling-stroke" data-testid="tl-hover-line" />}
       </svg>
       <input
         type="range"
@@ -677,9 +891,16 @@ function Scrubber({
         value={i}
         aria-label="Scrub"
         onChange={(e) => onScrub(Number(e.target.value))}
-        onPointerUp={(e) => onCommit(Number((e.target as HTMLInputElement).value))}
+        onPointerUp={(e) => onCommit(e.pointerType === 'mouse' && peek !== null ? peek : Number((e.target as HTMLInputElement).value))}
         onKeyUp={(e) => onCommit(Number((e.target as HTMLInputElement).value))}
       />
+      {peek !== null && (
+        <FloatingPortal>
+          <div ref={refs.setFloating} style={floatingStyles} className={css.scrubTip} data-testid="tl-scrub-tip">
+            {shortLabel(bin, frameStartMs(bin, peek))} · {rides === rides ? `${round(rides).toLocaleString('en-US')} rides` : 'loading…'}
+          </div>
+        </FloatingPortal>
+      )}
     </div>
   )
 }

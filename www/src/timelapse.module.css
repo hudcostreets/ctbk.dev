@@ -102,6 +102,8 @@
     opacity: 0.8;
 }
 
+/* Control bar: a row of controls (wraps on narrow screens) over a
+ * full-width scrubber row. */
 .controls {
     position: absolute;
     left: 12px;
@@ -109,8 +111,8 @@
     bottom: 12px;
     z-index: 1000;
     display: flex;
-    align-items: center;
-    gap: 10px;
+    flex-direction: column;
+    gap: 8px;
     padding: 8px 12px;
     border-radius: 8px;
     background: rgba(0, 0, 0, 0.72);
@@ -136,6 +138,92 @@
     background: rgba(255, 255, 255, 0.18);
 }
 
+.btn:focus-visible,
+.select:focus-visible,
+.date:focus-visible,
+.range:focus-visible {
+    outline: 2px solid #ffd24a;
+    outline-offset: 1px;
+}
+
+.row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 14px;
+}
+
+.group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.field {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.fieldLabel {
+    opacity: 0.65;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.date {
+    height: 30px;
+    padding: 0 4px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 5px;
+    background: rgba(0, 0, 0, 0.4);
+    color: #fff;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color-scheme: dark;
+}
+
+.dash {
+    opacity: 0.6;
+}
+
+.preset {
+    min-width: 0;
+    padding: 0 7px;
+    font-size: 12px;
+}
+
+.preset[aria-pressed="true"] {
+    border-color: #ffd24a;
+    background: rgba(255, 210, 74, 0.2);
+}
+
+.hint {
+    font-size: 12px;
+    border-color: #b8860b;
+    background: rgba(184, 134, 11, 0.35);
+}
+
+.note {
+    font-size: 12px;
+    color: #ffd24a;
+}
+
+/* Hover tip over the scrubber's totals strip (portaled to <body>). */
+.scrubTip {
+    z-index: 3000;
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.88);
+    color: #fff;
+    font-size: 12px;
+    white-space: nowrap;
+    pointer-events: none;
+    font-variant-numeric: tabular-nums;
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
+}
+
 .select {
     height: 30px;
     padding: 0 4px;
@@ -144,6 +232,7 @@
     background: rgba(0, 0, 0, 0.4);
     color: #fff;
     font-size: 12px;
+    color-scheme: dark;
 }
 
 .check {
@@ -158,6 +247,7 @@
 .scrub {
     position: relative;
     flex: 1;
+    min-width: 0;
     height: 34px;
 }
 
