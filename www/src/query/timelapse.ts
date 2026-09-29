@@ -10,9 +10,11 @@
  *
  * - `api` (P2, the real one): `GET ${API_BASE}/api/tl?anchor=&bin=&chunk=`
  *   (`gbfs/api/src/tl.ts`) over the time-first `rides-tl` pyramids — one
- *   edge-cacheable JSON block per chunk. A `partial` chunk (frames the
- *   pyramid doesn't cover yet: the full-history build is in flight) is
- *   `TlUnavailable`, so `auto` falls through to the interim sources below.
+ *   edge-cacheable JSON block per chunk. A `partial` chunk (the tip: frames
+ *   past the last published month) keeps its `covered` frames; the rest are
+ *   known-missing (`frameMissing`), badged "no data" rather than drawn as
+ *   zeros. Only a chunk with no coverage at all is `TlUnavailable`, so
+ *   `auto` falls through to the interim sources below.
  * - `shard`: read the existing station-first rides pyramid straight from
  *   `data.ctbk.dev` (public, range-readable, CORS-open) with hyparquet —
  *   resolve the covering `1d` shard(s) through `manifest.jsonl`, project
@@ -28,6 +30,10 @@
  *
  * `auto` (the default) tries `api`, then `shard`, then `synth`, per chunk.
  * Delete the interim two once `rides-tl` covers all of history.
+ *
+ * Prefetch: `useTlFrames` kicks the chunk under the playhead (+ its ±1
+ * neighbours) directly; `useTlPrefetch` runs the idle fan-out
+ * (`timelapsePrefetch.ts`) behind it, one request at a time.
  */
 import { useEffect, useMemo, useState } from 'react'
 import { useQueryClient, type QueryClient } from '@tanstack/react-query'
@@ -35,10 +41,11 @@ import { asyncBufferFromUrl, parquetMetadataAsync, parquetRead, type AsyncBuffer
 import { API_BASE } from './stations'
 import { dbgFetch } from '../lib/dbg'
 import {
-  chunkFromApi, chunkFromBlocks, chunkMs, chunkOf, chunksCovering, frameIndex, frameSlice, pickShards, pivotBlock,
-  prefetchOrder, synthChunk, TlUnavailable, ymOf,
+  ANCHORS, chunkFromApi, chunkFromBlocks, chunkMs, chunkOf, chunksCovering, frameIndex, frameMissing, frameSlice,
+  pairReady, pickShards, pivotBlock, prefetchOrder, stationSeries, synthChunk, TlUnavailable, ymOf,
   type Anchor, type ApiChunk, type Bin, type Block, type Chunk, type ManifestRow, type Triple,
 } from './timelapseFrames'
+import { fanOutOrder, PrefetchQueue } from './timelapsePrefetch'
 
 export { TlUnavailable }
 export type SourceMode = 'auto' | 'api' | 'shard' | 'synth'
@@ -326,6 +333,12 @@ export interface FramePair {
   endB: Uint32Array | null
   chunkA: { start: Chunk | undefined; end: Chunk | undefined }
   chunkB: { start: Chunk | undefined; end: Chunk | undefined }
+  /** Frame `a`'s chunk is in but has no data for it (past the pyramid's tip). */
+  aMissing: boolean
+  /** Frame `b` is known-missing: render `a` alone (no lerp) instead of stalling. */
+  bMissing: boolean
+  /** Each of `a`, `b` is drawable or known-missing (`pairReady`): a tip
+   *  frame past the pyramid shows the "no data" badge instead of stalling. */
   ready: boolean
   error: Error | null
 }
@@ -351,10 +364,42 @@ export function useTlFrames(src: SourceMode, bin: Bin, t: number, radius: number
     const endA = sl(chunkA.end, a)
     const startB = sl(chunkB.start, b)
     const endB = sl(chunkB.end, b)
+    const missing = (c: { start: Chunk | undefined; end: Chunk | undefined }, i: number) =>
+      !!(c.start && c.end) && (frameMissing(c.start, i) || frameMissing(c.end, i))
+    const aMissing = missing(chunkA, a)
+    const bMissing = missing(chunkB, b)
     const error = chunkError(qc, src, 'start', bin, ka) ?? chunkError(qc, src, 'end', bin, ka)
-    return { a, b, startA, startB, endA, endB, chunkA, chunkB, ready: !!(startA && endA && startB && endB), error }
+    const ready = pairReady(!!(startA && endA), aMissing, !!(startB && endB), bMissing)
+    return { a, b, startA, startB, endA, endB, chunkA, chunkB, aMissing, bMissing, ready, error }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qc, src, bin, a, b, ka, kb, version])
+}
+
+/** Idle fan-out (`PrefetchQueue`) around chunk `k` over `[kMin, kMax]`: one
+ *  request in flight, re-prioritized whenever `k` (the playhead's chunk)
+ *  moves. Both anchors of a chunk count as one fetch. */
+export function useTlPrefetch(src: SourceMode, bin: Bin, k: number, kMin: number, kMax: number): void {
+  const qc = useQueryClient()
+  const queue = useMemo(() => {
+    const fetch = (c: number) => Promise.all(ANCHORS.map((anchor) => ensureChunk(qc, src, anchor, bin, c)))
+    const isCached = (c: number) => ANCHORS.every((anchor) => !!getChunk(qc, src, anchor, bin, c))
+    return new PrefetchQueue(fetch, isCached)
+  }, [qc, src, bin])
+  useEffect(() => () => queue.dispose(), [queue])
+  useEffect(() => queue.retarget(fanOutOrder(k, kMin, kMax)), [queue, k, kMin, kMax])
+}
+
+/** `starts + ends` per frame for one station over `[iA, iB]` from cached
+ *  chunks (NaN where not cached) — the pinned-station sparkline. */
+export function useTlStationSeries(src: SourceMode, bin: Bin, id: string | null, iA: number, iB: number): Float64Array {
+  const qc = useQueryClient()
+  const version = useTlCacheVersion()
+  return useMemo(() => {
+    if (id === null) return new Float64Array(0)
+    const pairs = chunksCovering(bin, iA, iB).map((k) => ({ start: getChunk(qc, src, 'start', bin, k), end: getChunk(qc, src, 'end', bin, k) }))
+    return stationSeries(pairs, id, iA, iB)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qc, src, bin, id, iA, iB, version])
 }
 
 /** Σ starts per frame over the inclusive frame range `[iA, iB]` from cached
@@ -369,7 +414,7 @@ export function useTlTotals(src: SourceMode, bin: Bin, iA: number, iB: number): 
       if (!c) continue
       for (let f = 0; f < c.n; f++) {
         const i = c.i0 + f
-        if (i >= iA && i <= iB) out[i - iA] = c.totals[f]
+        if (i >= iA && i <= iB && frameSlice(c, i)) out[i - iA] = c.totals[f]
       }
     }
     return out

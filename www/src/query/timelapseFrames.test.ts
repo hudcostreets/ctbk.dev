@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'vitest'
 import {
-  accumulateFrame, buildStationTable, chunkFrames, chunkFromApi, chunkFromBlocks, chunkIndexMap, chunkMs, chunkOf,
-  chunksCovering, daysInMonth, divergingRgb, flowAttributes, flowRadius, formatT, formatYmd, frameIndex, frameSlice,
-  frameStartMs, hash01, netShare, originMs, parseT, parseYmd, pickShards, pivotBlock, pivotRows, prefetchOrder,
-  snapToCached, synthChunk, TlUnavailable, weekdayFactor, ymOf,
+  accumulateFrame, actAttributes, buildStationTable, chunkFrames, chunkFromApi, chunkFromBlocks, chunkIndexMap, chunkMs,
+  chunkOf, chunksCovering, coveredRuns, daysInMonth, divergingRgb, flowAttributes, formatT, formatYmd, frameIndex,
+  frameMissing, frameSlice, frameStartMs, hash01, isCovered, netShare, originMs, pairReady, parseT, parseYmd, pickShards, pivotBlock,
+  pivotRows, prefetchOrder, scaledRadius, scaleFromChunks, snapToCached, splitAttributes, stationSeries, synthChunk,
+  TlUnavailable, TL_K, weekdayFactor, ymOf,
   type ApiChunk, type ManifestRow,
 } from './timelapseFrames'
 
@@ -37,6 +38,19 @@ describe('frame / chunk index math (origin = genesis floored to the K·bin grid)
     expect(chunksCovering('1d', 31, 64)).toEqual([0, 1, 2])
     expect(prefetchOrder(5, 2)).toEqual([5, 6, 4, 7, 3])
   })
+  test('TL_K mirrors the worker: 1h → 48, fixed tiers → 32, 1mo → 24 (rung-aligned to 2y)', () => {
+    expect(TL_K).toEqual({ '1h': 48, '3h': 32, '6h': 32, '12h': 32, '1d': 32, '3d': 32, '7d': 32, '14d': 32, '1mo': 24 })
+  })
+})
+
+describe('coverage runs', () => {
+  test('coveredRuns merges adjacent frames', () => {
+    expect(coveredRuns([])).toEqual([])
+    expect(coveredRuns([true, true, false, true, false, false, true])).toEqual([[0, 2], [3, 4], [6, 7]])
+  })
+  test('isCovered', () => {
+    expect([0, 1, 2, 3].map((f) => isCovered([[0, 2], [3, 4]], f))).toEqual([true, true, false, true])
+  })
 })
 
 describe('pivotRows', () => {
@@ -58,13 +72,19 @@ describe('pivotRows', () => {
     totals[1] = 3
     expect(chunk).toEqual({
       anchor: 'start', bin: '1d', chunk: 1, k: 32, i0: 32, n: 32, t0: D(2013, 6, 16),
-      ids: ['a', 'b'], counts, totals, source: 'shard',
+      ids: ['a', 'b'], counts, totals, source: 'shard', covered: [[0, 32]],
     })
   })
   test('frameSlice', () => {
     expect(frameSlice(chunk, 33)).toEqual(new Uint32Array([3, 0]))
     expect(frameSlice(chunk, 64)).toBeNull()
     expect(frameSlice(chunk, 31)).toBeNull()
+  })
+  test('frameSlice / frameMissing honor `covered` (tip chunks)', () => {
+    const tip = { ...chunk, covered: [[0, 2]] as [number, number][] }
+    expect(frameSlice(tip, 33)).toEqual(new Uint32Array([3, 0]))
+    expect(frameSlice(tip, 34)).toBeNull()
+    expect([31, 33, 34, 63, 64].map((i) => frameMissing(tip, i))).toEqual([false, false, true, true, false])
   })
 })
 
@@ -86,7 +106,7 @@ describe('chunkFromBlocks', () => {
     totals[2] = 30
     expect(chunkFromBlocks('start', '1d', 1, [x, y])).toEqual({
       anchor: 'start', bin: '1d', chunk: 1, k: 32, i0: 32, n: 32, t0: D(2013, 6, 16),
-      ids: ['a'], counts, totals, source: 'shard',
+      ids: ['a'], counts, totals, source: 'shard', covered: [[0, 4]],
     })
   })
 })
@@ -109,16 +129,38 @@ describe('chunkFromApi', () => {
     totals[33] = 1
     expect(c).toEqual({
       anchor: 'start', bin: '1h', chunk: 2196, k: 48, i0: 2196 * 48, n: 48, t0: D(2025, 6, 9),
-      ids: ['a', 'b'], counts: Uint32Array.from(counts), totals, source: 'api',
+      ids: ['a', 'b'], counts: Uint32Array.from(counts), totals, source: 'api', covered: [[0, 48]],
     })
     expect(frameSlice(c, 105440)).toEqual(new Uint32Array([5, 7]))
   })
-  test('partial → TlUnavailable; mismatched identity or shape → Error', () => {
-    expect(() => chunkFromApi('start', '1h', 2196, body({ partial: true, covered: [[0, 14]] })))
-      .toThrow(TlUnavailable)
+  test('partial keeps its covered frames; the rest are known-missing', () => {
+    const c = chunkFromApi('start', '1h', 2196, body({ partial: true, covered: [[0, 14]] }))
+    expect(c.covered).toEqual([[0, 14]])
+    expect(frameSlice(c, 2196 * 48 + 13)).toEqual(new Uint32Array([0, 0]))
+    expect(frameSlice(c, 2196 * 48 + 14)).toBeNull()
+    expect(frameMissing(c, 2196 * 48 + 14)).toBe(true)
+  })
+  test('partial with no coverage → TlUnavailable; mismatched identity or shape → Error', () => {
+    expect(() => chunkFromApi('start', '1h', 2196, body({ partial: true, covered: [] }))).toThrow(TlUnavailable)
     expect(() => chunkFromApi('start', '1h', 2197, body())).toThrow('/api/tl returned 1h/2196/48, wanted 1h/2197/48')
     expect(() => chunkFromApi('start', '1d', 2196, body())).toThrow('/api/tl returned 1h/2196/48, wanted 1d/2196/32')
     expect(() => chunkFromApi('start', '1h', 2196, body({ counts: [1] }))).toThrow('/api/tl 1h chunk 2196: 1 counts for 48×2')
+  })
+})
+
+describe('pairReady', () => {
+  test('each frame drawable or known-missing', () => {
+    // [aIn, aMissing, bIn, bMissing] → ready
+    const cases: [boolean, boolean, boolean, boolean][] = [
+      [true, false, true, false],
+      [true, false, false, true],
+      [false, true, false, true],
+      [false, true, true, false],
+      [true, false, false, false],
+      [false, false, true, false],
+      [false, false, false, false],
+    ]
+    expect(cases.map((c) => pairReady(...c))).toEqual([true, true, true, true, false, false, false])
   })
 })
 
@@ -199,23 +241,60 @@ describe('station table + frame assembly', () => {
   })
 })
 
-describe('flow preset styling', () => {
-  test('divergingRgb / netShare / flowRadius', () => {
+describe('presets', () => {
+  test('divergingRgb / netShare / scaledRadius', () => {
     expect(divergingRgb(0)).toEqual([150, 150, 150])
     expect(divergingRgb(1)).toEqual([235, 80, 30])
     expect(divergingRgb(-1)).toEqual([56, 120, 220])
     expect(divergingRgb(0.5)).toEqual([193, 115, 90])
     expect(netShare(1, 0)).toBe(0.25)
     expect(netShare(10, 10)).toBe(0)
-    expect(flowRadius(0, '1d')).toBe(1.5)
-    expect(flowRadius(1000, '1d')).toBe(11)
-    expect(flowRadius(250, '1d')).toBe(6.5)
+    expect(scaledRadius(0, 1000)).toBe(1.5)
+    expect(scaledRadius(1000, 1000)).toBe(11)
+    expect(scaledRadius(250, 1000)).toBe(6.5)
+    expect(scaledRadius(4000, 1000)).toBe(11)
   })
   test('flowAttributes', () => {
-    expect(flowAttributes(new Float32Array([1000, 0]), new Float32Array([0, 0]), '1d')).toEqual({
+    expect(flowAttributes(new Float32Array([1000, 0]), new Float32Array([0, 0]), 1000)).toEqual({
       radius: new Float32Array([11, 1.5]),
       color: new Uint8Array([235, 80, 30, 190, 150, 150, 150, 70]),
     })
+  })
+  test('actAttributes: cool→hot ramp by √(total / scale)', () => {
+    expect(actAttributes(new Float32Array([1000, 0, 250]), new Float32Array([0, 0, 0]), 1000)).toEqual({
+      radius: new Float32Array([11, 1.5, 6.5]),
+      color: new Uint8Array([209, 24, 11, 110, 150, 150, 150, 70, 197, 188, 138, 110]),
+    })
+  })
+  test('splitAttributes: disk = starts, ring = ends; idle keeps the disk dot', () => {
+    expect(splitAttributes(new Float32Array([1000, 0, 0]), new Float32Array([250, 250, 0]), 1000)).toEqual({
+      rStart: new Float32Array([11, 0, 1.5]),
+      rEnd: new Float32Array([6.5, 6.5, 0]),
+    })
+  })
+})
+
+describe('global scale + sparkline', () => {
+  const start = pivotRows('start', '1d', 0, [
+    { id: 'a', frame: 0, count: 10 }, { id: 'b', frame: 0, count: 1 }, { id: 'a', frame: 1, count: 3 },
+  ], 'api')
+  const end = pivotRows('end', '1d', 0, [
+    { id: 'a', frame: 0, count: 5 }, { id: 'c', frame: 0, count: 2 }, { id: 'c', frame: 1, count: 40 },
+  ], 'api')
+  test('scaleFromChunks: quantile of per-station-frame starts + ends over covered frames', () => {
+    // Totals: f0 → a 15, b 1, c 2; f1 → a 3, c 40. Sorted: 1, 2, 3, 15, 40 (nearest-rank quantile).
+    expect(scaleFromChunks([{ start, end }], 0.99)).toBe(40)
+    expect(scaleFromChunks([{ start, end }], 0.5)).toBe(3)
+    expect(scaleFromChunks([{ start, end }], 0)).toBe(1)
+    expect(scaleFromChunks([], 0.99)).toBeNull()
+    expect(scaleFromChunks([{ start: { ...start, covered: [[1, 2]] }, end }], 0.99)).toBe(40)
+    expect(scaleFromChunks([{ start: { ...start, covered: [[1, 2]] }, end }], 0)).toBe(3)
+  })
+  test('stationSeries: NaN outside cached/covered frames, 0 where the station is quiet', () => {
+    const s = stationSeries([{ start, end }, { start: undefined, end: undefined }], 'c', -1, 2)
+    expect(Array.from(s)).toEqual([NaN, 2, 40, 0])
+    const tip = stationSeries([{ start: { ...start, covered: [[0, 1]] }, end }], 'a', 0, 1)
+    expect(Array.from(tip)).toEqual([15, NaN])
   })
 })
 

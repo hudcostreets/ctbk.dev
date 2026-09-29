@@ -16,8 +16,14 @@
  * (`gbfs/api/src/tl.ts`), which is what the `api` source relies on.
  */
 
+import { rampRgb } from '../components/flowLens'
+
 export type Anchor = 'start' | 'end'
-/** Exposed bins. */
+export const ANCHORS: readonly Anchor[] = ['start', 'end']
+/** Every tier `/api/tl` serves (`TL_BINS` in `gbfs/api/src/tl.ts`). */
+export type TlBin = '1h' | '3h' | '6h' | '12h' | '1d' | '3d' | '7d' | '14d' | '1mo'
+/** Exposed bins (the selector + `b=`); the others are served but need
+ *  their own frame math (`1mo` is calendar-sized) before they're offered. */
 export type Bin = '1h' | '1d'
 export const BINS: readonly Bin[] = ['1h', '1d']
 export type Source = 'api' | 'shard' | 'synth'
@@ -26,8 +32,13 @@ export const GENESIS_MS = Date.UTC(2013, 5, 1)
 export const HOUR_MS = 3_600_000
 export const DAY_MS = 86_400_000
 export const BIN_MS: Record<Bin, number> = { '1h': HOUR_MS, '1d': DAY_MS }
-/** Frames per chunk (`1h` → 2 days, `1d` → 32 days). */
-export const CHUNK_K: Record<Bin, number> = { '1h': 48, '1d': 32 }
+/** Frames per chunk per tier, mirroring the worker's `TL_K`: `1h` → 2 days;
+ *  every other fixed tier's `K·bin` is one of its shard rungs (`3h`→4d …
+ *  `14d`→448d); `1mo` → 24 months, rung-aligned to the `2y` shards. */
+export const TL_K: Record<TlBin, number> = {
+  '1h': 48, '3h': 32, '6h': 32, '12h': 32, '1d': 32, '3d': 32, '7d': 32, '14d': 32, '1mo': 24,
+}
+export const CHUNK_K: Record<Bin, number> = { '1h': TL_K['1h'], '1d': TL_K['1d'] }
 
 /** Frame 0's start: genesis floored to the `K·bin` grid (see module doc). */
 export function originMs(bin: Bin): number {
@@ -81,6 +92,10 @@ export interface Block {
   counts: Uint32Array
   totals: Float64Array
   source: Source
+  /** Block-relative frame ranges `[f0, f1)` that carry data (a full block is
+   *  `[[0, n]]`); frames outside them are *unknown*, not zero — a tip chunk
+   *  the pyramid hasn't reached yet (`/api/tl` `partial` + `covered`). */
+  covered: [number, number][]
 }
 
 /** One chunk: a `Block` of exactly `k = K` frames aligned to `chunk · K`. */
@@ -133,7 +148,24 @@ export function pivotBlock(
       totals[f] += c
     }
   })
-  return { anchor, bin, i0, n, t0: frameStartMs(bin, i0), ids, counts, totals, source }
+  return { anchor, bin, i0, n, t0: frameStartMs(bin, i0), ids, counts, totals, source, covered: [[0, n]] }
+}
+
+/** Merge a per-frame coverage mask into `[f0, f1)` runs. */
+export function coveredRuns(mask: readonly boolean[]): [number, number][] {
+  const out: [number, number][] = []
+  for (let f = 0; f < mask.length; f++) {
+    if (!mask[f]) continue
+    const last = out[out.length - 1]
+    if (last && last[1] === f) last[1] = f + 1
+    else out.push([f, f + 1])
+  }
+  return out
+}
+
+/** Whether block-relative frame `f` lies in one of `covered`'s runs. */
+export function isCovered(covered: readonly (readonly [number, number])[], f: number): boolean {
+  return covered.some(([a, b]) => f >= a && f < b)
 }
 
 /** `pivotBlock` for chunk `chunk` (frames `[chunk·K, (chunk+1)·K)`). */
@@ -165,26 +197,43 @@ export function* blockTriples(block: Block, iA: number, iB: number): Generator<T
 /**
  * Assemble chunk `chunk` from decoded shard blocks. Each frame is taken from
  * the FIRST block (in the given priority order) covering it, so overlapping
- * rungs never double-count. Frames no block covers stay empty.
+ * rungs never double-count. Frames no block covers are left uncovered.
  */
 export function chunkFromBlocks(anchor: Anchor, bin: Bin, chunk: number, blocks: readonly Block[]): Chunk {
   const [i0, i1] = chunkFrames(bin, chunk)
   const triples: Triple[] = []
+  const mask: boolean[] = []
   for (let i = i0; i < i1; i++) {
-    const b = blocks.find((blk) => i >= blk.i0 && i < blk.i0 + blk.n)
+    const b = blocks.find((blk) => i >= blk.i0 && i < blk.i0 + blk.n && isCovered(blk.covered, i - blk.i0))
+    mask.push(!!b)
     if (b) for (const t of blockTriples(b, i, i + 1)) triples.push(t)
   }
   const source: Source = blocks[0]?.source ?? 'shard'
-  return pivotRows(anchor, bin, chunk, triples, source)
+  return { ...pivotRows(anchor, bin, chunk, triples, source), covered: coveredRuns(mask) }
 }
 
 /** Frame `i`'s slice of `block` (one `Uint32Array` entry per station in
- *  `ids` order), or null when `i` isn't in the block. */
+ *  `ids` order), or null when `i` isn't in the block or isn't covered. */
 export function frameSlice(block: Block, i: number): Uint32Array | null {
   const f = i - block.i0
-  if (f < 0 || f >= block.n) return null
+  if (f < 0 || f >= block.n || !isCovered(block.covered, f)) return null
   const S = block.ids.length
   return block.counts.subarray(f * S, (f + 1) * S)
+}
+
+/** Whether `block` holds frame `i` but has no data for it (a tip frame the
+ *  pyramid hasn't reached): known-missing, as opposed to not-yet-fetched. */
+export function frameMissing(block: Block, i: number): boolean {
+  const f = i - block.i0
+  return f >= 0 && f < block.n && !isCovered(block.covered, f)
+}
+
+/** Whether the playhead's frame pair can render: each of `a`, `b` is either
+ *  drawable (both anchors' slices in) or known-missing (its chunk is in but
+ *  doesn't cover it). A missing `b` draws `a` alone; a missing `a` draws the
+ *  idle skeleton under a "no data" badge. */
+export function pairReady(aIn: boolean, aMissing: boolean, bIn: boolean, bMissing: boolean): boolean {
+  return (aIn || aMissing) && (bIn || bMissing)
 }
 
 /**
@@ -253,15 +302,16 @@ export class TlUnavailable extends Error {
 }
 
 /** An `/api/tl` body as a `Chunk`. Throws on a body for another
- *  (bin, chunk, K) than requested (a proxy/cache mix-up), and
- *  `TlUnavailable` on `partial` (the caller falls back to another source
- *  rather than rendering empty frames as zeros). */
+ *  (bin, chunk, K) than requested (a proxy/cache mix-up). A `partial` body
+ *  keeps its `covered` frames (the tip chunk renders as far as the pyramid
+ *  reaches; the rest is known-missing), unless it covers nothing at all, in
+ *  which case `TlUnavailable` lets `auto` try another source. */
 export function chunkFromApi(anchor: Anchor, bin: Bin, k: number, body: ApiChunk): Chunk {
   const K = CHUNK_K[bin]
   if (body.bin !== bin || body.chunk !== k || body.k !== K) {
     throw new Error(`/api/tl returned ${body.bin}/${body.chunk}/${body.k}, wanted ${bin}/${k}/${K}`)
   }
-  if (body.partial) throw new TlUnavailable(`/api/tl ${bin} chunk ${k}: partial coverage ${JSON.stringify(body.covered)}`)
+  if (body.partial && !body.covered.length) throw new TlUnavailable(`/api/tl ${bin} chunk ${k}: no coverage`)
   const S = body.ids.length
   if (body.counts.length !== K * S) throw new Error(`/api/tl ${bin} chunk ${k}: ${body.counts.length} counts for ${K}×${S}`)
   const counts = Uint32Array.from(body.counts)
@@ -272,7 +322,8 @@ export function chunkFromApi(anchor: Anchor, bin: Bin, k: number, body: ApiChunk
     totals[f] = sum
   }
   const i0 = k * K
-  return { anchor, bin, chunk: k, k: K, i0, n: K, t0: frameStartMs(bin, i0), ids: body.ids, counts, totals, source: 'api' }
+  const covered: [number, number][] = body.partial ? body.covered.map(([a, b]) => [a, b]) : [[0, K]]
+  return { anchor, bin, chunk: k, k: K, i0, n: K, t0: frameStartMs(bin, i0), ids: body.ids, counts, totals, source: 'api', covered }
 }
 
 // ---------------------------------------------------------------------------
@@ -430,14 +481,67 @@ export function accumulateFrame(
   return unmapped
 }
 
-/** `flow` preset constants. Radius is normalized to a fixed per-bin scale
- *  (P1: a constant; the spec's `tl-scale.json` sidecar replaces it), never
- *  the per-frame max, so the map "breathes" with the system. */
-export const FLOW = {
-  /** starts + ends at which the radius saturates, per bin. */
-  scaleMax: { '1h': 80, '1d': 1000 } as Record<Bin, number>,
+// ---------------------------------------------------------------------------
+// Global scale: every preset sizes stations against one per-tier number
+// (starts + ends at which the radius saturates), never the per-frame max, so
+// the map "breathes" with the system.
+// ---------------------------------------------------------------------------
+
+/** Fallback scale per bin, used until the first chunk pair lands. The
+ *  spec's `tl-scale.json` sidecar (builder-computed p99 per tier) doesn't
+ *  exist yet, so the session derives its scale client-side
+ *  (`scaleFromChunks`) and freezes it. */
+export const DEFAULT_SCALE: Record<Bin, number> = { '1h': 80, '1d': 1000 }
+
+/** Quantile `q` (default p99) of the per-station-frame `starts + ends`
+ *  totals (> 0) over the covered frames of the given chunk pairs, or null
+ *  when there's nothing to measure. */
+export function scaleFromChunks(pairs: readonly { start: Chunk; end: Chunk }[], q: number = 0.99): number | null {
+  const values: number[] = []
+  for (const { start, end } of pairs) {
+    const endIdx = new Map<string, number>()
+    end.ids.forEach((id, s) => endIdx.set(id, s))
+    const S = start.ids.length
+    const E = end.ids.length
+    for (let f = 0; f < start.n; f++) {
+      if (!isCovered(start.covered, f) || !isCovered(end.covered, f)) continue
+      const seen = new Set<number>()
+      for (let s = 0; s < S; s++) {
+        const e = endIdx.get(start.ids[s])
+        if (e !== undefined) seen.add(e)
+        const total = start.counts[f * S + s] + (e === undefined ? 0 : end.counts[f * E + e])
+        if (total > 0) values.push(total)
+      }
+      for (let e = 0; e < E; e++) {
+        if (seen.has(e)) continue
+        const total = end.counts[f * E + e]
+        if (total > 0) values.push(total)
+      }
+    }
+  }
+  if (!values.length) return null
+  values.sort((a, b) => a - b)
+  // Nearest-rank quantile.
+  return values[Math.max(0, Math.min(values.length - 1, Math.ceil(q * values.length) - 1))]
+}
+
+// ---------------------------------------------------------------------------
+// Presets.
+// ---------------------------------------------------------------------------
+
+export type Preset = 'flow' | 'act' | 'split'
+export const PRESETS: readonly Preset[] = ['flow', 'act', 'split']
+
+/** Shared sizing: radius (px) ∝ √(count / scale), saturating at `rMax`. */
+export const SIZE = {
   rMin: 2,
   rMax: 11,
+  /** Radius (px) of an alive-but-idle station (the network's skeleton). */
+  rIdle: 1.5,
+} as const
+
+/** `flow` preset constants. */
+export const FLOW = {
   /** Pseudo-counts damping net share: 1 start / 0 ends shouldn't max the ramp. */
   damp: 3,
   /** Ramp gain on the damped share: daily net shares are small (a busy
@@ -445,14 +549,30 @@ export const FLOW = {
    *  saturates the ramp. */
   gain: 4,
   alpha: 190,
-  /** Radius (px) of an alive-but-idle station (the network's skeleton). */
-  rIdle: 1.5,
+} as const
+
+/** `act` preset: single-hue ramp by total, drawn with additive blending. */
+export const ACT = {
+  alpha: 110,
+} as const
+
+/** `split` preset: filled disk = starts, ring = ends. */
+export const SPLIT = {
+  alpha: 170,
+  ringWidth: 1.5,
 } as const
 
 /** Diverging ramp: net sink (cool) ← neutral grey → net source (warm). */
-const COOL: [number, number, number] = [56, 120, 220]
-const NEUTRAL: [number, number, number] = [150, 150, 150]
-const WARM: [number, number, number] = [235, 80, 30]
+export const COOL: [number, number, number] = [56, 120, 220]
+export const NEUTRAL: [number, number, number] = [150, 150, 150]
+export const WARM: [number, number, number] = [235, 80, 30]
+
+function putRgba(color: Uint8Array, i: number, rgb: readonly [number, number, number], a: number): void {
+  color[4 * i] = rgb[0]
+  color[4 * i + 1] = rgb[1]
+  color[4 * i + 2] = rgb[2]
+  color[4 * i + 3] = a
+}
 
 /** `f` ∈ [−1, 1] → `[r, g, b]`. */
 export function divergingRgb(f: number): [number, number, number] {
@@ -470,44 +590,106 @@ export function netShare(starts: number, ends: number, damp: number = FLOW.damp)
   return (starts - ends) / (starts + ends + damp)
 }
 
-/** `flow` radius (px) for a station's starts + ends. */
-export function flowRadius(total: number, bin: Bin): number {
-  if (!(total > 0)) return FLOW.rIdle
-  const t = Math.min(1, Math.sqrt(total / FLOW.scaleMax[bin]))
-  return FLOW.rMin + (FLOW.rMax - FLOW.rMin) * t
+/** Radius (px) for `count` rides against the global `scale`; the idle dot
+ *  when there are none. */
+export function scaledRadius(count: number, scale: number): number {
+  if (!(count > 0)) return SIZE.rIdle
+  const t = Math.min(1, Math.sqrt(count / scale))
+  return SIZE.rMin + (SIZE.rMax - SIZE.rMin) * t
 }
 
 /** Per-station binary attributes for one rendered frame of the `flow`
- *  preset. `starts`/`ends` are per-table-index (already interpolated).
+ *  preset: radius by `starts + ends`, diverging color on the damped net
+ *  share. `starts`/`ends` are per-table-index (already interpolated).
  *  Stations with no activity draw as a faint idle dot. */
 export function flowAttributes(
   starts: Float32Array,
   ends: Float32Array,
-  bin: Bin,
-  out?: { radius: Float32Array; color: Uint8Array },
+  scale: number,
 ): { radius: Float32Array; color: Uint8Array } {
   const n = starts.length
-  const radius = out?.radius ?? new Float32Array(n)
-  const color = out?.color ?? new Uint8Array(n * 4)
+  const radius = new Float32Array(n)
+  const color = new Uint8Array(n * 4)
   for (let i = 0; i < n; i++) {
     const s = starts[i]
     const e = ends[i]
     const total = s + e
-    radius[i] = flowRadius(total, bin)
-    if (total > 0) {
-      const [r, g, b] = divergingRgb(netShare(s, e) * FLOW.gain)
-      color[4 * i] = r
-      color[4 * i + 1] = g
-      color[4 * i + 2] = b
-      color[4 * i + 3] = FLOW.alpha
-    } else {
-      color[4 * i] = NEUTRAL[0]
-      color[4 * i + 1] = NEUTRAL[1]
-      color[4 * i + 2] = NEUTRAL[2]
-      color[4 * i + 3] = 70
-    }
+    radius[i] = scaledRadius(total, scale)
+    if (total > 0) putRgba(color, i, divergingRgb(netShare(s, e) * FLOW.gain), FLOW.alpha)
+    else putRgba(color, i, NEUTRAL, 70)
   }
   return { radius, color }
+}
+
+/** `act` preset: radius AND color (the `flowLens` cool→hot ramp) by
+ *  `√(total / scale)`; idle stations are a faint dot. Meant to be drawn with
+ *  additive blending so dense clusters glow. */
+export function actAttributes(
+  starts: Float32Array,
+  ends: Float32Array,
+  scale: number,
+): { radius: Float32Array; color: Uint8Array } {
+  const n = starts.length
+  const radius = new Float32Array(n)
+  const color = new Uint8Array(n * 4)
+  for (let i = 0; i < n; i++) {
+    const total = starts[i] + ends[i]
+    radius[i] = scaledRadius(total, scale)
+    if (total > 0) putRgba(color, i, rampRgb(Math.min(1, Math.sqrt(total / scale))), ACT.alpha)
+    else putRgba(color, i, NEUTRAL, 70)
+  }
+  return { radius, color }
+}
+
+/** `split` preset: two radii per station on the same scale — the filled
+ *  disk (starts) and the ring (ends). A glyph with no rides has radius 0
+ *  (hidden), except that a fully idle station keeps the idle dot as its
+ *  disk so the skeleton still shows. */
+export function splitAttributes(
+  starts: Float32Array,
+  ends: Float32Array,
+  scale: number,
+): { rStart: Float32Array; rEnd: Float32Array } {
+  const n = starts.length
+  const rStart = new Float32Array(n)
+  const rEnd = new Float32Array(n)
+  for (let i = 0; i < n; i++) {
+    const s = starts[i]
+    const e = ends[i]
+    rStart[i] = s > 0 ? scaledRadius(s, scale) : e > 0 ? 0 : SIZE.rIdle
+    rEnd[i] = e > 0 ? scaledRadius(e, scale) : 0
+  }
+  return { rStart, rEnd }
+}
+
+// ---------------------------------------------------------------------------
+// Pinned-station sparkline.
+// ---------------------------------------------------------------------------
+
+/** `starts + ends` per frame for station `id` over the inclusive frame range
+ *  `[iA, iB]`, from whatever chunk pairs are cached: NaN where the frame's
+ *  chunk isn't in (or isn't covered), 0 where it is but the station had no
+ *  rides. Nothing is fetched for this — it's the drawer's sparkline. */
+export function stationSeries(
+  pairs: readonly { start: Chunk | undefined; end: Chunk | undefined }[],
+  id: string,
+  iA: number,
+  iB: number,
+): Float64Array {
+  const out = new Float64Array(Math.max(0, iB - iA + 1)).fill(NaN)
+  for (const { start, end } of pairs) {
+    if (!start || !end) continue
+    const s = start.ids.indexOf(id)
+    const e = end.ids.indexOf(id)
+    const S = start.ids.length
+    const E = end.ids.length
+    for (let f = 0; f < start.n; f++) {
+      const i = start.i0 + f
+      if (i < iA || i > iB || !isCovered(start.covered, f) || !isCovered(end.covered, f)) continue
+      out[i - iA] = (s < 0 ? 0 : start.counts[f * S + s]) + (e < 0 ? 0 : end.counts[f * E + e])
+    }
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------

@@ -1,39 +1,65 @@
 /**
- * `/timelapse` (`specs/timelapse-map.md`, P1–P2): every station, one bin
- * (`1d` or `1h`) per frame, on the shared `GLMap`. One `ScatterplotLayer`
- * with binary per-frame attributes (`flow` preset: radius ∝ √(starts + ends),
- * diverging color on damped net share), frames lerped in JS from a continuous
- * playhead `t` (frame index + φ) driven by one rAF loop that stalls (badge)
- * while the next chunk isn't cached. Chunks come from `query/timelapse.ts`
- * (`/api/tl` first, interim sources where it has no coverage yet); station
- * positions/names from the static assets (`stations-regional.json` +
- * `station-luc.json`) until the `tl-stations.json` sidecar exists.
+ * `/timelapse` (`specs/timelapse-map.md`, P1–P3): every station, one bin
+ * (`1d` or `1h`) per frame, on the shared `GLMap`. `ScatterplotLayer`s with
+ * binary per-frame attributes in one of three presets (`st=`: `flow` =
+ * diverging color on damped net share, `act` = single-hue glow, `split` =
+ * disk/ring for starts/ends), all sized against one per-bin scale frozen for
+ * the session. Frames are lerped in JS from a continuous playhead `t` (frame
+ * index + φ) driven by one rAF loop that stalls (badge) while the next chunk
+ * isn't cached; an idle fan-out prefetches the rest of the range behind it.
+ * Click pins a station (`sel=`, ring + sparkline drawer; `esc` clears).
+ * Movie mode (`mv=1`): chrome and interaction off, `window.__tl.seek(i)` for
+ * frame-by-frame capture (`scrns.timelapse.json`).
+ *
+ * Chunks come from `query/timelapse.ts` (`/api/tl` first, interim sources
+ * where it has no coverage yet); station positions/names from the static
+ * assets (`stations-regional.json` + `station-luc.json`) until the
+ * `tl-stations.json` sidecar exists.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ScatterplotLayer } from '@deck.gl/layers'
 import type { Layer, PickingInfo } from '@deck.gl/core'
+import type { Map as MaplibreMapInstance } from 'maplibre-gl'
 import { useAction } from 'use-kbd'
-import { boolParam, codeParam, intParam, llzParam, useUrlState, type LLZ, type Param } from 'use-prms'
+import { boolParam, codeParam, intParam, llzParam, stringParam, useUrlState, type LLZ, type Param } from 'use-prms'
 import GLMap from '../components/GLMap'
-import { cachedChunks, useTlFrames, useTlTotals, type SourceMode } from '../query/timelapse'
+import { rampRgb } from '../components/flowLens'
 import {
-  accumulateFrame, buildStationTable, chunkIndexMap, chunksCovering, flowAttributes, formatT, formatYmd, frameIndex,
-  frameStartMs, parseT, parseYmd, snapToCached, type Bin, type Chunk, type StationTable, BINS, DAY_MS, FLOW,
+  cachedChunks, ensureChunk, useTlFrames, useTlPrefetch, useTlStationSeries, useTlTotals, type SourceMode,
+} from '../query/timelapse'
+import {
+  accumulateFrame, actAttributes, buildStationTable, chunkIndexMap, chunkOf, chunksCovering, flowAttributes, formatT,
+  formatYmd, frameIndex, frameStartMs, parseT, parseYmd, scaleFromChunks, snapToCached, splitAttributes,
+  type Bin, type Chunk, type Preset, type StationTable,
+  ACT, ANCHORS, BINS, COOL, DAY_MS, DEFAULT_SCALE, NEUTRAL, PRESETS, SIZE, SPLIT, WARM,
 } from '../query/timelapseFrames'
-import stationsCss from '../stations.module.css'
 import css from '../timelapse.module.css'
 
-const { floor, max, min } = Math
+const { floor, max, min, round } = Math
+
+declare global {
+  interface Window {
+    /** Movie-mode seek API (`?mv=1`): `frames = nBins × fpb`; `seek(i)`
+     *  resolves once frame `i` is on screen (chunks in, deck drawn, map idle). */
+    __tl?: { frames: number; seek: (i: number) => Promise<void> }
+  }
+}
 
 const binParam = codeParam<Bin>('1d', [['1d', '1d'], ['1h', '1h']])
 const SPEEDS = [1, 2, 4, 8, 16, 32]
 const SYSTEM_LLZ: LLZ = { lat: 40.735, lng: -73.975, zoom: 11 }
 const viewParam = llzParam({ default: SYSTEM_LLZ, latLngDecimals: 3 })
-const styleParam = codeParam<'flow'>('flow', [['flow', 'f']])
+const presetParam = codeParam<Preset>('flow', [['flow', 'flow'], ['act', 'act'], ['split', 'split']])
+/** `?sel=`: pinned station ids, comma-joined (as on `/stations`). */
+const selParam: Param<string[]> = {
+  encode: (v) => (v.length ? v.join(',') : undefined),
+  decode: (raw) => (raw ? raw.split(',').filter(Boolean) : []),
+}
 const srcParam = codeParam<SourceMode>('auto', [['auto', 'a'], ['api', 'api'], ['shard', 'sh'], ['synth', 'sy']])
 
-/** Today's local calendar date as a local-as-UTC midnight. */
+/** Today's local calendar date as a local-as-UTC midnight. The only
+ *  wall-clock read, and only for the default `d` (movies pass `d`). */
 function todayMs(): number {
   const d = new Date()
   return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())
@@ -102,6 +128,21 @@ const UNIT: Record<Bin, string> = { '1h': 'hour', '1d': 'day' }
 /** shift+←/→: a day (`1h`) or a week (`1d`), in frames. */
 const BIG_STEP: Record<Bin, number> = { '1h': 24, '1d': 7 }
 
+/** Additive blending (`act`): overlapping glows sum toward white. */
+const ADDITIVE = {
+  blend: true,
+  blendColorOperation: 'add',
+  blendColorSrcFactor: 'src-alpha',
+  blendColorDstFactor: 'one',
+  blendAlphaOperation: 'add',
+  blendAlphaSrcFactor: 'one',
+  blendAlphaDstFactor: 'one-minus-src-alpha',
+} as const
+const PIN_RGB: [number, number, number] = [255, 210, 74]
+const rgbCss = ([r, g, b]: readonly [number, number, number], a = 1) => `rgba(${r}, ${g}, ${b}, ${a})`
+const ACT_GRADIENT = `linear-gradient(to right, ${[0, 0.25, 0.5, 0.75, 1].map((f) => rgbCss(rampRgb(f))).join(', ')})`
+const PRESET_LABEL: Record<Preset, string> = { flow: 'net flow', act: 'activity', split: 'starts / ends' }
+
 export default function Timelapse() {
   const qc = useQueryClient()
   const [bin, setBin] = useUrlState('b', binParam)
@@ -110,9 +151,15 @@ export default function Timelapse() {
   const [tUrl, setTUrl] = useUrlState('t', tParam)
   const [sp, setSp] = useUrlState('sp', intParam(8))
   const [view, setView] = useUrlState('ll', viewParam)
-  useUrlState('st', styleParam)  // registered (URL round-trip) but fixed until the other presets land
+  const [preset, setPreset] = useUrlState('st', presetParam)
   const [loop, setLoop] = useUrlState('lp', boolParam)
   const [src] = useUrlState('src', srcParam)
+  const [pins, setPins] = useUrlState('sel', selParam)
+  const [mv] = useUrlState('mv', boolParam)
+  const [fpbRaw] = useUrlState('fpb', intParam(1))
+  const fpb = max(1, fpbRaw)
+  const [cap] = useUrlState('cap', stringParam())
+  const [tileBase] = useUrlState('tileBase', stringParam())
 
   const iStart = frameIndex(bin, range[0])
   // Inclusive last frame: the last day, or its last hour.
@@ -142,7 +189,7 @@ export default function Timelapse() {
     const i = tToI(tUrl)
     tRef.current = i
     setT(i)
-    if (tUrl !== undefined && frameStartMs(bin, i) !== tUrl) commitT(i)
+    if (!mv && tUrl !== undefined && frameStartMs(bin, i) !== tUrl) commitT(i)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bin])
 
@@ -150,6 +197,22 @@ export default function Timelapse() {
   const frames = useTlFrames(src, bin, t, 1)
   const readyRef = useRef(frames.ready)
   readyRef.current = frames.ready
+  const rangeChunks = useMemo(() => chunksCovering(bin, iStart, iEnd), [bin, iStart, iEnd])
+  useTlPrefetch(src, bin, chunkOf(bin, floor(t)), rangeChunks[0], rangeChunks[rangeChunks.length - 1])
+
+  // Global scale, frozen per bin for the session: p99 of per-station-frame
+  // starts + ends over the first chunk pair the playhead lands on (the
+  // spec's builder-computed `tl-scale.json` doesn't exist yet). Taken from
+  // exactly that chunk, so a movie URL always gets the same scale.
+  const [scales, setScales] = useState<Partial<Record<Bin, number>>>({})
+  useEffect(() => {
+    if (scales[bin] !== undefined) return
+    const { start, end } = frames.chunkA
+    if (!start || !end) return
+    setScales((s) => ({ ...s, [bin]: scaleFromChunks([{ start, end }]) ?? DEFAULT_SCALE[bin] }))
+  }, [frames.chunkA, bin, scales])
+  const scale = scales[bin] ?? DEFAULT_SCALE[bin]
+  const scaleFrozen = scales[bin] !== undefined
 
   const play = useCallback(() => {
     if (floor(tRef.current) >= iEnd) commitT(iStart)
@@ -195,23 +258,29 @@ export default function Timelapse() {
     return () => cancelAnimationFrame(raf)
   }, [playing, sp, iStart, iEnd, loop, setTUrl, bin])
 
-  // Keyboard (`use-kbd`): all show up in the ShortcutsModal / Omnibar.
+  const togglePin = useCallback((id: string) => setPins(pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id]), [pins, setPins])
+
+  // Keyboard (`use-kbd`): all show up in the ShortcutsModal / Omnibar. Off in
+  // movie mode (interaction disabled).
   const unit = UNIT[bin]
   const bigUnit = bin === '1h' ? 'day' : 'week'
-  useAction('tl:play', { label: 'Play / pause', group: 'Timelapse', defaultBindings: ['space'], handler: toggle })
-  useAction('tl:prev', { label: `Previous ${unit}`, group: 'Timelapse', defaultBindings: ['arrowleft'], handler: () => step(-1) })
-  useAction('tl:next', { label: `Next ${unit}`, group: 'Timelapse', defaultBindings: ['arrowright'], handler: () => step(1) })
-  useAction('tl:prev-week', { label: `Back one ${bigUnit}`, group: 'Timelapse', defaultBindings: ['shift+arrowleft'], handler: () => step(-BIG_STEP[bin]) })
-  useAction('tl:next-week', { label: `Forward one ${bigUnit}`, group: 'Timelapse', defaultBindings: ['shift+arrowright'], handler: () => step(BIG_STEP[bin]) })
-  useAction('tl:slower', { label: 'Slower', group: 'Timelapse', defaultBindings: ['['], handler: () => setSp(SPEEDS[max(0, SPEEDS.indexOf(sp) - 1)] ?? SPEEDS[0]) })
-  useAction('tl:faster', { label: 'Faster', group: 'Timelapse', defaultBindings: [']'], handler: () => setSp(SPEEDS[min(SPEEDS.length - 1, SPEEDS.indexOf(sp) + 1)] ?? SPEEDS[SPEEDS.length - 1]) })
-  useAction('tl:home', { label: 'Jump to range start', group: 'Timelapse', defaultBindings: ['home'], handler: () => { setPlaying(false); commitT(iStart) } })
-  useAction('tl:end', { label: 'Jump to range end', group: 'Timelapse', defaultBindings: ['end'], handler: () => { setPlaying(false); commitT(iEnd) } })
-  useAction('tl:bin', { label: 'Cycle bin (hour / day)', group: 'Timelapse', defaultBindings: ['b'], handler: () => setBin(BINS[(BINS.indexOf(bin) + 1) % BINS.length]) })
-  useAction('tl:loop', { label: 'Toggle loop', group: 'Timelapse', defaultBindings: ['l'], handler: () => setLoop(!loop) })
+  const on = !mv
+  useAction('tl:play', { label: 'Play / pause', group: 'Timelapse', defaultBindings: ['space'], handler: toggle, enabled: on })
+  useAction('tl:prev', { label: `Previous ${unit}`, group: 'Timelapse', defaultBindings: ['arrowleft'], handler: () => step(-1), enabled: on })
+  useAction('tl:next', { label: `Next ${unit}`, group: 'Timelapse', defaultBindings: ['arrowright'], handler: () => step(1), enabled: on })
+  useAction('tl:prev-week', { label: `Back one ${bigUnit}`, group: 'Timelapse', defaultBindings: ['shift+arrowleft'], handler: () => step(-BIG_STEP[bin]), enabled: on })
+  useAction('tl:next-week', { label: `Forward one ${bigUnit}`, group: 'Timelapse', defaultBindings: ['shift+arrowright'], handler: () => step(BIG_STEP[bin]), enabled: on })
+  useAction('tl:slower', { label: 'Slower', group: 'Timelapse', defaultBindings: ['['], handler: () => setSp(SPEEDS[max(0, SPEEDS.indexOf(sp) - 1)] ?? SPEEDS[0]), enabled: on })
+  useAction('tl:faster', { label: 'Faster', group: 'Timelapse', defaultBindings: [']'], handler: () => setSp(SPEEDS[min(SPEEDS.length - 1, SPEEDS.indexOf(sp) + 1)] ?? SPEEDS[SPEEDS.length - 1]), enabled: on })
+  useAction('tl:home', { label: 'Jump to range start', group: 'Timelapse', defaultBindings: ['home'], handler: () => { setPlaying(false); commitT(iStart) }, enabled: on })
+  useAction('tl:end', { label: 'Jump to range end', group: 'Timelapse', defaultBindings: ['end'], handler: () => { setPlaying(false); commitT(iEnd) }, enabled: on })
+  useAction('tl:bin', { label: 'Cycle bin (hour / day)', group: 'Timelapse', defaultBindings: ['b'], handler: () => setBin(BINS[(BINS.indexOf(bin) + 1) % BINS.length]), enabled: on })
+  useAction('tl:style', { label: 'Cycle style (flow / activity / split)', group: 'Timelapse', defaultBindings: ['s'], handler: () => setPreset(PRESETS[(PRESETS.indexOf(preset) + 1) % PRESETS.length]), enabled: on })
+  useAction('tl:loop', { label: 'Toggle loop', group: 'Timelapse', defaultBindings: ['l'], handler: () => setLoop(!loop), enabled: on })
+  useAction('tl:unpin', { label: 'Clear pinned stations', group: 'Timelapse', defaultBindings: ['escape'], handler: () => setPins([]), enabled: on && pins.length > 0 })
 
-  // Jumps land on the nearest cached frame while the real chunk loads.
-  const rangeChunks = useMemo(() => chunksCovering(bin, iStart, iEnd), [bin, iStart, iEnd])
+  // Jumps land on the nearest cached frame while the real chunk loads (the
+  // prefetch queue has already re-targeted to the new chunk).
   const shown = useMemo(() => {
     if (frames.ready) return t
     const cached = cachedChunks(qc, src, bin, rangeChunks)
@@ -220,9 +289,10 @@ export default function Timelapse() {
   }, [frames, t, qc, src, bin, rangeChunks])
   const shownFrames = useTlFrames(src, bin, shown, 0)
 
-  // Per-frame attributes: lerp starts/ends between frames ⌊t⌋ and ⌊t⌋+1,
-  // then the `flow` preset's radius/color. Fresh typed arrays per frame so
-  // deck re-uploads them (same-instance binary values are skipped).
+  // Per-frame attributes: lerp starts/ends between frames ⌊t⌋ and ⌊t⌋+1
+  // (frame ⌊t⌋ alone when ⌊t⌋+1 is past the pyramid's tip), then the
+  // preset's radius/color. Fresh typed arrays per frame so deck re-uploads
+  // them (same-instance binary values are skipped).
   const mapCache = useRef(new WeakMap<Chunk, Int32Array>())
   const frame = useMemo(() => {
     if (!table) return null
@@ -240,112 +310,337 @@ export default function Timelapse() {
       if (c && slice && w > 0) unmapped += accumulateFrame(out, slice, map(c), w)
     }
     const f = shownFrames
-    add(starts, f.chunkA.start, f.startA, 1 - phi)
-    add(ends, f.chunkA.end, f.endA, 1 - phi)
-    if (phi > 0) {
+    const wA = f.bMissing ? 1 : 1 - phi
+    add(starts, f.chunkA.start, f.startA, wA)
+    add(ends, f.chunkA.end, f.endA, wA)
+    if (phi > 0 && !f.bMissing) {
       add(starts, f.chunkB.start, f.startB, phi)
       add(ends, f.chunkB.end, f.endB, phi)
     }
-    const { radius, color } = flowAttributes(starts, ends, bin)
-    return { starts, ends, radius, color, unmapped, source: f.chunkA.start?.source }
-  }, [table, shown, shownFrames, bin])
+    const flow = preset === 'flow' ? flowAttributes(starts, ends, scale) : null
+    const act = preset === 'act' ? actAttributes(starts, ends, scale) : null
+    const split = preset === 'split' ? splitAttributes(starts, ends, scale) : null
+    return { starts, ends, flow, act, split, unmapped, source: f.chunkA.start?.source, missing: f.aMissing }
+  }, [table, shown, shownFrames, preset, scale])
+
+  const pinIdx = useMemo(() => {
+    if (!table) return []
+    const byId = new Map(table.ids.map((id, i) => [id, i]))
+    return pins.map((id) => byId.get(id)).filter((i): i is number => i !== undefined)
+  }, [table, pins])
 
   const [hover, setHover] = useState<number | null>(null)
   const layers = useMemo<Layer[]>(() => {
     if (!table || !frame) return []
-    return [
-      new ScatterplotLayer({
-        id: 'tl-stations',
-        data: {
-          length: table.ids.length,
-          attributes: {
-            getPosition: { value: table.positions, size: 2 },
-            getRadius: { value: frame.radius, size: 1 },
-            getFillColor: { value: frame.color, size: 4 },
-          },
-        },
+    const n = table.ids.length
+    const pickable = !mv
+    const pick = {
+      pickable,
+      onHover: (info: PickingInfo) => setHover(info.index >= 0 ? info.index : null),
+      onClick: (info: PickingInfo) => { if (info.index >= 0) togglePin(table.ids[info.index]) },
+    }
+    const position = { value: table.positions, size: 2 }
+    const out: Layer[] = []
+    if (frame.flow || frame.act) {
+      const { radius, color } = (frame.flow ?? frame.act)!
+      out.push(new ScatterplotLayer({
+        id: `tl-${preset}`,
+        data: { length: n, attributes: { getPosition: position, getRadius: { value: radius, size: 1 }, getFillColor: { value: color, size: 4 } } },
         radiusUnits: 'pixels',
         radiusMinPixels: 1,
-        radiusMaxPixels: FLOW.rMax,
-        pickable: true,
-        onHover: (info: PickingInfo) => setHover(info.index >= 0 ? info.index : null),
-      }),
-    ]
-  }, [table, frame])
+        radiusMaxPixels: SIZE.rMax,
+        parameters: frame.act ? ADDITIVE : undefined,
+        ...pick,
+      }))
+    }
+    if (frame.split) {
+      const { rStart, rEnd } = frame.split
+      // Idle stations keep a grey disk (the skeleton); active ones warm.
+      const disk = new Uint8Array(n * 4)
+      for (let i = 0; i < n; i++) {
+        const idle = !(frame.starts[i] + frame.ends[i] > 0)
+        const [r, g, b] = idle ? NEUTRAL : WARM
+        disk.set([r, g, b, idle ? 70 : SPLIT.alpha], 4 * i)
+      }
+      out.push(
+        new ScatterplotLayer({
+          id: 'tl-split-starts',
+          data: { length: n, attributes: { getPosition: position, getRadius: { value: rStart, size: 1 }, getFillColor: { value: disk, size: 4 } } },
+          radiusUnits: 'pixels',
+          radiusMaxPixels: SIZE.rMax,
+          ...pick,
+        }),
+        new ScatterplotLayer({
+          id: 'tl-split-ends',
+          data: { length: n, attributes: { getPosition: position, getRadius: { value: rEnd, size: 1 } } },
+          radiusUnits: 'pixels',
+          radiusMaxPixels: SIZE.rMax,
+          filled: false,
+          stroked: true,
+          lineWidthUnits: 'pixels',
+          getLineWidth: SPLIT.ringWidth,
+          getLineColor: [...COOL, 230],
+          pickable: false,
+        }),
+      )
+    }
+    if (pinIdx.length) {
+      const r = (i: number) => {
+        if (frame.flow) return frame.flow.radius[i]
+        if (frame.act) return frame.act.radius[i]
+        return max(frame.split!.rStart[i], frame.split!.rEnd[i], SIZE.rIdle)
+      }
+      out.push(new ScatterplotLayer<number>({
+        id: 'tl-pins',
+        data: pinIdx,
+        getPosition: (i) => [table.positions[2 * i], table.positions[2 * i + 1]],
+        getRadius: (i) => r(i) + 3,
+        radiusUnits: 'pixels',
+        filled: false,
+        stroked: true,
+        lineWidthUnits: 'pixels',
+        getLineWidth: 2,
+        getLineColor: [...PIN_RGB, 255],
+        updateTriggers: { getRadius: frame },
+        pickable: false,
+      }))
+    }
+    return out
+  }, [table, frame, preset, pinIdx, mv, togglePin])
+
+  // ---- Movie mode: `window.__tl.seek(i)` -----------------------------------
+  // Each seek: fetch the chunk(s) under `t = iStart + i / fpb`, set `t`, then
+  // wait for (1) a committed render showing exactly that `t` with its frame
+  // pair ready and the scale frozen, (2) a deck redraw of those layers
+  // (`onAfterRender`), (3) MapLibre idle; then set `data-tl-frame`.
+  const pageRef = useRef<HTMLDivElement>(null)
+  const mapRef = useRef<MaplibreMapInstance | null>(null)
+  const waiters = useRef(new Set<() => void>())
+  const notify = useCallback(() => { for (const w of Array.from(waiters.current)) w() }, [])
+  const waitFor = useCallback((pred: () => boolean) => new Promise<void>((resolve) => {
+    if (pred()) return resolve()
+    const w = () => { if (pred()) { waiters.current.delete(w); resolve() } }
+    waiters.current.add(w)
+  }), [])
+  const rendered = useRef({ t: NaN, ready: false, layers: [] as Layer[] })
+  const drawn = useRef<Layer[] | null>(null)
+  const layersRef = useRef(layers)
+  layersRef.current = layers
+  useLayoutEffect(() => {
+    rendered.current = { t: shown, ready: shownFrames.ready && scaleFrozen && layers.length > 0, layers }
+    notify()
+  })
+  const onAfterRender = useCallback(() => {
+    drawn.current = layersRef.current
+    notify()
+  }, [notify])
+  const nFrames = (iEnd - iStart + 1) * fpb
+  const seekChain = useRef<Promise<void>>(Promise.resolve())
+  useEffect(() => {
+    if (!mv) return
+    const doSeek = async (i: number) => {
+      const tt = iStart + i / fpb
+      const a = floor(tt)
+      const ks = Array.from(new Set([chunkOf(bin, a), chunkOf(bin, a + 1)]))
+      await Promise.all(ks.flatMap((k) => ANCHORS.map((anchor) => ensureChunk(qc, src, anchor, bin, k))))
+      tRef.current = tt
+      setT(tt)
+      await waitFor(() => rendered.current.t === tt && rendered.current.ready)
+      await waitFor(() => drawn.current === rendered.current.layers)
+      await waitFor(() => !!mapRef.current)
+      const m = mapRef.current!
+      if (!m.loaded() || !m.areTilesLoaded()) await new Promise((r) => m.once('idle', r))
+      pageRef.current?.setAttribute('data-tl-frame', String(i))
+    }
+    const seek = (i: number) => {
+      const p = seekChain.current.then(() => doSeek(i))
+      seekChain.current = p.catch(() => {})
+      return p
+    }
+    window.__tl = { frames: nFrames, seek }
+    // Land on the URL's `t` so `[data-tl-frame]` appears without a caller.
+    seek(round((tToI(tUrl) - iStart) * fpb)).catch((e) => console.error('__tl.seek', e))
+    return () => { delete window.__tl }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mv, bin, iStart, fpb, nFrames, src])
 
   const totals = useTlTotals(src, bin, iStart, iEnd)
   const i = floor(shown)
   const stalled = playing && !frames.ready
   const iMs = frameStartMs(bin, i)
   const dateStr = bin === '1h' ? `${DATE_FMT.format(new Date(iMs))} · ${HOUR_FMT.format(new Date(iMs))}` : DATE_FMT.format(new Date(iMs))
-  const fmt = (n: number) => Math.round(n).toLocaleString()
+  const fmt = (n: number) => round(n).toLocaleString('en-US')
+  const scaleNote = `size = √(rides ÷ ${fmt(scale)}), ${scaleFrozen ? 'p99 of the first loaded chunk, fixed for the session' : 'provisional'}`
 
   return (
-    <div className={css.page} data-tl-frame={i} onMouseLeave={() => setHover(null)}>
+    <div ref={pageRef} className={css.page} data-tl-frame={mv ? undefined : i} onMouseLeave={() => setHover(null)}>
       <GLMap
         layers={layers}
         center={[view.lat, view.lng]}
         zoom={view.zoom}
-        onMove={(la, ln, z) => setView({ lat: la, lng: ln, zoom: z })}
+        onMove={mv ? undefined : (la, ln, z) => setView({ lat: la, lng: ln, zoom: z })}
+        onReady={(m) => { mapRef.current = m; notify() }}
+        onAfterRender={mv ? onAfterRender : undefined}
+        interactive={!mv}
+        preserveDrawingBuffer={mv}
+        tileBase={tileBase}
         cursor={hover !== null ? 'pointer' : 'grab'}
         className={css.map}
       >
         <div className={css.clock}>
           <span className={css.clockDate} data-testid="tl-clock">{dateStr}</span>
           <span className={css.clockSub}>
-            {formatYmd(range[0])} – {formatYmd(range[1])} · {unit} {i - iStart + 1} of {iEnd - iStart + 1}
-            {frame && <> · {fmt(frame.starts.reduce((a, b) => a + b, 0))} starts</>}
+            {mv
+              ? <>{frame && !frame.missing && <>{fmt(frame.starts.reduce((a, b) => a + b, 0))} rides started</>}</>
+              : <>
+                {formatYmd(range[0])} – {formatYmd(range[1])} · {unit} {i - iStart + 1} of {iEnd - iStart + 1}
+                {frame && !frame.missing && <> · {fmt(frame.starts.reduce((a, b) => a + b, 0))} starts</>}
+              </>}
           </span>
           <div className={css.badges}>
-            {stalled && <span className={`${css.badge} ${css.badgeWarn}`}>buffering…</span>}
-            {!frames.ready && !playing && !frames.error && <span className={css.badge}>loading…</span>}
-            {frames.error && <span className={`${css.badge} ${css.badgeError}`} title={frames.error.message}>error: {frames.error.message}</span>}
-            {frame?.source === 'api' && <span className={css.badge} title="Frames from /api/tl over the time-first rides-tl pyramid">rides-tl</span>}
-            {frame?.source === 'synth' && <span className={`${css.badge} ${css.badgeWarn}`} title="rides-tl doesn't cover this range yet and no small-enough rides shard does either; frames are synthesized from monthly station totals (interim)">synthetic</span>}
-            {frame?.source === 'shard' && <span className={css.badge} title="rides-tl doesn't cover this range yet; read from the live rides pyramid shards (interim tail-read)">live shard</span>}
-            {frame && frame.unmapped > 0 && <span className={css.badge} title="Rides at station ids with no known position">{fmt(frame.unmapped)} unmapped</span>}
+            {frame?.missing && <span className={`${css.badge} ${css.badgeWarn}`} data-testid="tl-no-data" title="Past the last published month: the pyramid has no rides for this frame yet">no data</span>}
+            {!mv && <>
+              {stalled && <span className={`${css.badge} ${css.badgeWarn}`}>buffering…</span>}
+              {!frames.ready && !playing && !frames.error && <span className={css.badge}>loading…</span>}
+              {frames.error && <span className={`${css.badge} ${css.badgeError}`} title={frames.error.message}>error: {frames.error.message}</span>}
+              {frame?.source === 'api' && <span className={css.badge} title="Frames from /api/tl over the time-first rides-tl pyramid">rides-tl</span>}
+              {frame?.source === 'synth' && <span className={`${css.badge} ${css.badgeWarn}`} title="rides-tl doesn't cover this range yet and no small-enough rides shard does either; frames are synthesized from monthly station totals (interim)">synthetic</span>}
+              {frame?.source === 'shard' && <span className={css.badge} title="rides-tl doesn't cover this range yet; read from the live rides pyramid shards (interim tail-read)">live shard</span>}
+              {frame && frame.unmapped > 0 && <span className={css.badge} title="Rides at station ids with no known position">{fmt(frame.unmapped)} unmapped</span>}
+            </>}
           </div>
         </div>
-        <div className={css.legend}>
-          <div className={css.legendTitle}>Rides per {unit}, by station</div>
-          <div className={css.legendBar} />
-          <div className={css.legendLabels}>
-            <span>net arrivals</span>
-            <span>balanced</span>
-            <span>net departures</span>
-          </div>
-          <div className={css.legendNote}>size = √(starts + ends), fixed scale (max {FLOW.scaleMax[bin]}); faint dot = no rides that {unit}</div>
-        </div>
-        {hover !== null && table && frame && (
-          <div className={stationsCss.hoverDrawer} style={{ top: 120 }}>
-            <span className={stationsCss.hoverDrawerName}>{table.names[hover]}</span>
-            <span className={stationsCss.hoverDrawerStat}>{fmt(frame.starts[hover])} starts · {fmt(frame.ends[hover])} ends</span>
-            <span className={stationsCss.hoverDrawerFlow}>net {frame.starts[hover] - frame.ends[hover] >= 0 ? '+' : ''}{fmt(frame.starts[hover] - frame.ends[hover])}</span>
+        <Legend preset={preset} unit={unit} note={scaleNote} />
+        {cap && <div className={css.caption}>{cap}</div>}
+        {!mv && table && frame && (
+          <div className={css.drawers}>
+            {pinIdx.map((s) => (
+              <PinCard key={table.ids[s]} src={src} bin={bin} id={table.ids[s]} name={table.names[s]} starts={frame.starts[s]} ends={frame.ends[s]} iStart={iStart} iEnd={iEnd} i={i} onUnpin={() => togglePin(table.ids[s])} />
+            ))}
+            {hover !== null && !pinIdx.includes(hover) && (
+              <div className={css.card}>
+                <span className={css.cardName}>{table.names[hover] ?? table.ids[hover]}</span>
+                <span className={css.cardStat}>{fmt(frame.starts[hover])} starts · {fmt(frame.ends[hover])} ends · net {frame.starts[hover] - frame.ends[hover] >= 0 ? '+' : ''}{fmt(frame.starts[hover] - frame.ends[hover])}</span>
+                <span className={css.cardHint}>click to pin</span>
+              </div>
+            )}
           </div>
         )}
         {!table && <div className={css.loading}>Loading stations…</div>}
-        <div className={css.controls}>
-          <button type="button" className={css.btn} onClick={toggle} aria-label={playing ? 'Pause' : 'Play'} title="Space">
-            {playing ? '❚❚' : '▶'}
-          </button>
-          <button type="button" className={css.btn} onClick={() => step(-1)} aria-label={`Previous ${unit}`} title="←">◀</button>
-          <button type="button" className={css.btn} onClick={() => step(1)} aria-label={`Next ${unit}`} title="→">▶</button>
-          <select className={css.select} value={bin} onChange={(e) => setBin(e.target.value as Bin)} aria-label="Bin" title="b">
-            <option value="1h">hourly</option>
-            <option value="1d">daily</option>
-          </select>
-          <select className={css.select} value={sp} onChange={(e) => setSp(Number(e.target.value))} aria-label="Speed" title="[ / ]">
-            {SPEEDS.map((s) => <option key={s} value={s}>{s} {bin === '1h' ? 'h' : 'd'}/s</option>)}
-          </select>
-          <label className={css.check}>
-            <input type="checkbox" checked={loop} onChange={(e) => setLoop(e.target.checked)} /> loop
-          </label>
-          <Scrubber iStart={iStart} iEnd={iEnd} i={floor(t)} totals={totals} onScrub={(v) => { tRef.current = v; setT(v) }} onCommit={commitT} />
-          <span className={css.rangeLabel}>{formatT(iMs)}</span>
-        </div>
+        {!mv && (
+          <div className={css.controls}>
+            <button type="button" className={css.btn} onClick={toggle} aria-label={playing ? 'Pause' : 'Play'} title="Space">
+              {playing ? '❚❚' : '▶'}
+            </button>
+            <button type="button" className={css.btn} onClick={() => step(-1)} aria-label={`Previous ${unit}`} title="←">◀</button>
+            <button type="button" className={css.btn} onClick={() => step(1)} aria-label={`Next ${unit}`} title="→">▶</button>
+            <select className={css.select} value={bin} onChange={(e) => setBin(e.target.value as Bin)} aria-label="Bin" title="b">
+              <option value="1h">hourly</option>
+              <option value="1d">daily</option>
+            </select>
+            <select className={css.select} value={preset} onChange={(e) => setPreset(e.target.value as Preset)} aria-label="Style" title="s">
+              {PRESETS.map((p) => <option key={p} value={p}>{PRESET_LABEL[p]}</option>)}
+            </select>
+            <select className={css.select} value={sp} onChange={(e) => setSp(Number(e.target.value))} aria-label="Speed" title="[ / ]">
+              {SPEEDS.map((s) => <option key={s} value={s}>{s} {bin === '1h' ? 'h' : 'd'}/s</option>)}
+            </select>
+            <label className={css.check}>
+              <input type="checkbox" checked={loop} onChange={(e) => setLoop(e.target.checked)} /> loop
+            </label>
+            <Scrubber iStart={iStart} iEnd={iEnd} i={floor(t)} totals={totals} onScrub={(v) => { tRef.current = v; setT(v) }} onCommit={commitT} />
+            <span className={css.rangeLabel}>{formatT(iMs)}</span>
+          </div>
+        )}
       </GLMap>
     </div>
   )
+}
+
+/** The preset's color key + the shared size note. */
+function Legend({ preset, unit, note }: { preset: Preset; unit: string; note: string }) {
+  return (
+    <div className={css.legend} data-testid="tl-legend">
+      <div className={css.legendTitle}>Rides per {unit}, by station · {PRESET_LABEL[preset]}</div>
+      {preset === 'flow' && <>
+        <div className={css.legendBar} style={{ background: `linear-gradient(to right, ${rgbCss(COOL)}, ${rgbCss(NEUTRAL)}, ${rgbCss(WARM)})` }} />
+        <div className={css.legendLabels}>
+          <span>net arrivals</span>
+          <span>balanced</span>
+          <span>net departures</span>
+        </div>
+      </>}
+      {preset === 'act' && <>
+        <div className={css.legendBar} style={{ background: ACT_GRADIENT, opacity: ACT.alpha / 255 + 0.2 }} />
+        <div className={css.legendLabels}>
+          <span>quiet</span>
+          <span>busy (overlaps glow)</span>
+        </div>
+      </>}
+      {preset === 'split' && (
+        <div className={css.legendGlyphs}>
+          <span><svg width={14} height={14}><circle cx={7} cy={7} r={6} fill={rgbCss(WARM, SPLIT.alpha / 255)} /></svg> starts (disk)</span>
+          <span><svg width={14} height={14}><circle cx={7} cy={7} r={5.5} fill="none" stroke={rgbCss(COOL)} strokeWidth={SPLIT.ringWidth} /></svg> ends (ring)</span>
+        </div>
+      )}
+      <div className={css.legendNote}>{note}; faint dot = no rides that {unit}</div>
+    </div>
+  )
+}
+
+/** A pinned station: current-frame stats + a sparkline of starts + ends over
+ *  the range from whatever chunks are cached (gaps where they aren't). */
+function PinCard({ src, bin, id, name, starts, ends, iStart, iEnd, i, onUnpin }: {
+  src: SourceMode
+  bin: Bin
+  id: string
+  name: string | undefined
+  starts: number
+  ends: number
+  iStart: number
+  iEnd: number
+  i: number
+  onUnpin: () => void
+}) {
+  const series = useTlStationSeries(src, bin, id, iStart, iEnd)
+  const W = 240
+  const H = 36
+  const path = useMemo(() => sparkPath(series, W, H), [series])
+  const n = series.length
+  const x = n ? ((i - iStart + 0.5) / n) * W : 0
+  const fmt = (v: number) => round(v).toLocaleString('en-US')
+  return (
+    <div className={`${css.card} ${css.cardPinned}`} data-testid="tl-pin">
+      <span className={css.cardName}>
+        {name ?? id}
+        <button type="button" className={css.unpin} onClick={onUnpin} aria-label={`Unpin ${name ?? id}`} title="Unpin (esc clears all)">×</button>
+      </span>
+      <span className={css.cardStat}>{fmt(starts)} starts · {fmt(ends)} ends · net {starts - ends >= 0 ? '+' : ''}{fmt(starts - ends)}</span>
+      <svg className={css.spark} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+        {path && <path d={path} fill="none" stroke={rgbCss(PIN_RGB)} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />}
+        <line x1={x} x2={x} y1={0} y2={H} stroke="rgba(255,255,255,0.6)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+      </svg>
+    </div>
+  )
+}
+
+/** SVG path over `values` (NaN = gap), scaled to its own peak. */
+function sparkPath(values: Float64Array, W: number, H: number): string {
+  const n = values.length
+  if (!n) return ''
+  let peak = 0
+  for (const v of values) if (v === v && v > peak) peak = v
+  if (!peak) return ''
+  const parts: string[] = []
+  let pen = false
+  for (let f = 0; f < n; f++) {
+    const v = values[f]
+    if (v !== v) { pen = false; continue }
+    const x = ((f + 0.5) / n) * W
+    const y = H - 2 - (v / peak) * (H - 6)
+    parts.push(`${pen ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`)
+    pen = true
+  }
+  return parts.join(' ')
 }
 
 /** Range input over the frame range with the totals strip behind it. */
@@ -366,24 +661,7 @@ function Scrubber({
 }) {
   const W = 1000
   const H = 34
-  const path = useMemo(() => {
-    const n = totals.length
-    if (!n) return ''
-    let peak = 0
-    for (const v of totals) if (v === v && v > peak) peak = v
-    if (!peak) return ''
-    const parts: string[] = []
-    let pen = false
-    for (let f = 0; f < n; f++) {
-      const v = totals[f]
-      if (v !== v) { pen = false; continue }
-      const x = ((f + 0.5) / n) * W
-      const y = H - 2 - (v / peak) * (H - 6)
-      parts.push(`${pen ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`)
-      pen = true
-    }
-    return parts.join(' ')
-  }, [totals])
+  const path = useMemo(() => sparkPath(totals, W, H), [totals])
   return (
     <div className={css.scrub}>
       <svg className={css.strip} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">

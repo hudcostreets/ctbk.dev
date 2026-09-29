@@ -216,6 +216,8 @@
 !src/query/timelapse.ts
 !src/query/timelapseFrames.test.ts
 !src/query/timelapseFrames.ts
+!src/query/timelapsePrefetch.test.ts
+!src/query/timelapsePrefetch.ts
 !src/stations.module.css
 !src/theme.ts
 !src/time-range.test.ts
