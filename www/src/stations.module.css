@@ -397,3 +397,124 @@ a.subtitle:hover {
     width: max-content;
     max-width: 260px;
 }
+
+/* Lens legend keys: reference circles (size + color) and arc strokes
+ * (width), each labeled with trip counts. */
+.keyTitle {
+    font-size: 0.72rem;
+    opacity: 0.75;
+    margin: 0.35em 0 0.15em;
+}
+
+.sizeKey,
+.widthKey {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.2em 0.7em;
+    font-size: 0.75rem;
+}
+
+.keyItem {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3em;
+}
+
+/* Phones: title + lens legend in one compact strip across the top (the
+ * `/timelapse` header pattern); the legend is a one-line summary that
+ * expands on tap. */
+.phoneHeader {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    right: 8px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 5px 10px 6px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.88);
+    color: #222;
+    backdrop-filter: blur(4px);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+
+:global([data-theme="dark"]) .phoneHeader {
+    background: rgba(30, 30, 30, 0.88);
+    color: #eee;
+}
+
+.phoneHeader .title {
+    display: block;
+    font-size: 1.05rem;
+    letter-spacing: 0;
+    padding: 0;
+    color: inherit;
+    background: none;
+    backdrop-filter: none;
+    border-radius: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.phoneHeader .monthSelect :global(.MuiInput-root) {
+    font-size: 1.05rem;
+    top: 0;
+}
+
+.phoneHeader .subtitle {
+    margin: 0;
+    padding: 0;
+    font-size: 0.85rem;
+    background: none;
+    backdrop-filter: none;
+}
+
+.lensLegendCompact {
+    border-top: 1px solid rgba(127, 127, 127, 0.3);
+    padding-top: 3px;
+}
+
+.lensSummaryBtn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.lensLegendCompact .lensSource {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    font-size: 0.8rem;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.lensLegendCompact .lensTotal {
+    display: inline;
+    margin-left: 0.5em;
+}
+
+.lensLegendCompact .lensDirBtn {
+    margin: 4px 0 2px;
+}
+
+.chevron {
+    flex: none;
+    font-size: 0.9rem;
+    opacity: 0.8;
+}
+

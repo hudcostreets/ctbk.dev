@@ -17,3 +17,8 @@ export function useMediaQuery(query: string): boolean {
 
 /** A pointer that can hover (mouse / trackpad): hover tooltips make sense. */
 export const useCanHover = () => useMediaQuery('(hover: hover)')
+
+/** Wide enough for docked / always-expanded map chrome (vs. phone layouts
+ *  that collapse it). Shared by `/timelapse` and `/stations`. */
+export const WIDE = '(min-width: 768px)'
+export const useWide = () => useMediaQuery(WIDE)

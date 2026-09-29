@@ -109,6 +109,7 @@
 !src/components/Checklist.tsx
 !src/components/DbgPanel.tsx
 !src/components/FlagsPanel.tsx
+!src/components/FlowLensLegend.tsx
 !src/components/Footer.module.css
 !src/components/Footer.tsx
 !src/components/GLMap.tsx
@@ -155,6 +156,7 @@
 !src/components/TimeAgo.tsx
 !src/components/Tip.module.css
 !src/components/Tip.tsx
+!src/components/flowLens.test.ts
 !src/components/flowLens.ts
 !src/components/icons/Bluesky.tsx
 !src/components/icons/Command.tsx

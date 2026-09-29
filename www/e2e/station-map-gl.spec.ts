@@ -98,6 +98,25 @@ test.describe('Station map (GL default)', () => {
     expect(errors).toEqual([])
   })
 
+  test('lens keys: size/color circles (descending counts + "no trips"), arc widths when `fan=1`', async ({ page }) => {
+    await page.goto('/stations?fan=1&sel=6450.12')
+    const labels = (key: string) => page.getByTestId(key).locator(':scope > span > span').allTextContents()
+    await expect(page.getByTestId('lens-size-key')).toBeVisible({ timeout: 15_000 })
+    const size = await labels('lens-size-key')
+    expect(size.at(-1)).toBe('no trips')
+    const counts = size.slice(0, -1).map((t) => Number(t.replace(/,/g, '')))
+    expect(counts.length).toBeGreaterThanOrEqual(2)
+    expect(counts).toEqual([...counts].sort((a, b) => b - a))
+    const widths = (await labels('lens-width-key')).map((t) => Number(t.replace(/,/g, '')))
+    expect(widths.length).toBeGreaterThanOrEqual(2)
+    expect(widths).toEqual([...widths].sort((a, b) => b - a))
+
+    // No fan → no width key.
+    await page.goto('/stations?sel=6450.12')
+    await expect(page.getByTestId('lens-size-key')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('lens-width-key')).toHaveCount(0)
+  })
+
   test('tap selects one, ⌘-click toggles, empty tap clears, back undoes', async ({ page }) => {
     await openStations(page)
     const all = await placedStations(page)
@@ -167,3 +186,43 @@ test.describe('Station map (GL default)', () => {
     await expect(page.getByTestId('multi-mode')).toHaveCount(0)
   })
 })
+
+test.describe('Station map, phone layout', () => {
+  test.use({ viewport: { width: 400, height: 820 }, hasTouch: true })
+
+  type Box = { x: number; y: number; width: number; height: number }
+  const overlaps = (a: Box, b: Box) =>
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+
+  test('header strip + legend collapse; rides panel collapses; nothing overlaps', async ({ page }) => {
+    await page.goto('/stations?fan=1&sel=6551.11,6464.08,6593.14,6450.12')
+    const header = page.getByTestId('stations-header')
+    const legend = page.getByTestId('lens-legend')
+    await expect(legend.locator('strong')).toHaveText('E 43 St & Madison Ave +3 more', { timeout: 15_000 })
+    // Legend starts collapsed to its summary line, inside the header strip.
+    await expect(page.getByTestId('lens-size-key')).toHaveCount(0)
+    await legend.getByRole('button', { name: 'Show legend' }).click()
+    await expect(page.getByTestId('lens-size-key')).toBeVisible()
+    await legend.getByRole('button', { name: 'Hide legend' }).click()
+    await expect(page.getByTestId('lens-size-key')).toHaveCount(0)
+
+    const panel = page.getByTestId('rides-panel')
+    const dial = page.locator('.kbd-speed-dial')
+    // Controls behind ⚙; collapse leaves just the bar.
+    await expect(page.getByTestId('rides-controls')).toHaveCount(0)
+    await page.getByTestId('rides-gear').click()
+    await expect(page.getByTestId('rides-controls')).toBeVisible()
+    const expandedH = (await panel.boundingBox())!.height
+    await page.getByTestId('rides-collapse').click()
+    await expect(page.getByTestId('rides-controls')).toHaveCount(0)
+    await expect.poll(async () => (await panel.boundingBox())!.height).toBeLessThan(expandedH)
+
+    for (const open of [false, true]) {
+      if (open) await page.getByTestId('rides-collapse').click()
+      await page.waitForTimeout(200)
+      const [h, p, d] = await Promise.all([header.boundingBox(), panel.boundingBox(), dial.boundingBox()])
+      expect([overlaps(h!, p!), overlaps(d!, p!), overlaps(d!, h!)]).toEqual([false, false, false])
+    }
+  })
+})
+

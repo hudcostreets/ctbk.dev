@@ -1,18 +1,23 @@
 /**
  * Flow lens: when one or more stations are "selected" (the set), restyle every
- * other station by how much trip flow connects it to the set — either
- * *outbound* ("where riders from the set go") or *inbound* ("where riders to
- * the set come from"). Reads the same `pairCounts` (src → { dst: count }) the
+ * other station by how many trips connect it to the set — either *outbound*
+ * ("where riders from the set go") or *inbound* ("where riders to the set
+ * come from"). Reads the same `pairCounts` (src → { dst: count }) the
  * destination-line fan uses.
  *
- * Drives up to two visual channels:
- *   - `colors`: connected stations on a cool→hot ramp (by rank, see below),
- *     everything else dim grey (so non-connected stations recede).
- *   - `radii`: connected stations sized by flow (pixel radius), the rest a dot.
+ * Encoding (both channels encode the same quantity, trips, redundantly):
+ *   - `radii`: connected stations (≥ 1 trip) get a pixel radius ∝ sqrt(trips)
+ *     (`lensRadiusPx`, area ∝ trips, clamped to `R_MIN..R_MAX`); stations with
+ *     no trips shrink to an `R_DIM` dot. The GL map scales these by zoom
+ *     (`lensZoomScale`).
+ *   - `colors`: connected stations on the cool→hot ramp by **log** trips
+ *     (`lensColorT`), stations with no trips grey.
  * Source-set stations are omitted from both. Also returns legend metadata
- * (`total`/`topCount`/`floorCount`) so the caller can label the ramp.
+ * (`total`/`topCount`) so the caller can draw a size/color key.
  */
 import type { StationPairCounts, Stations } from './StationMap'
+
+const { floor, log, log10, max, min, pow, round, sqrt } = Math
 
 /** Which channel(s) the lens drives. `n` = off. */
 export type LensChannel = 'c' | 'r' | 'cr' | 'n'
@@ -24,29 +29,25 @@ export type FlowDirection = 'out' | 'in'
 export type LensStyle = {
   /** Per-station fill color (every non-source station when color is on), else null. */
   colors: Record<string, string> | null
-  /** Per-station radius override in **pixels** (non-source stations when radius
-   *  is on), else null. */
+  /** Per-station radius override in **pixels** at the base zoom (non-source
+   *  stations when radius is on), else null. */
   radii: Record<string, number> | null
   /** Sum of all directed trips between the set and other stations (excludes
    *  within-set trips) — the set's total in/out flow, for the legend. */
   total: number
-  /** Trip count of the single most-connected station (ramp's hot end). */
+  /** Trip count of the single most-connected station (size/color max). */
   topCount: number
-  /** Trip count of the least-connected station still shown (ramp's cool end). */
-  floorCount: number
 }
 
-/** Destinations receiving less than this fraction of the top destination's
- *  flow are treated as non-destinations (grey). Over a month a busy source
- *  sends *at least one* rider almost everywhere, so without a floor the whole
- *  map reads as a "destination" and the long tail of 1–3-trip stations swamps
- *  the ramp. The floor collapses that noise into grey so the ramp spends its
- *  range on where riders actually go. */
-const FLOOR_FRAC = 0.04
+/** Arc fan only: pairs carrying less than this fraction of the heaviest
+ *  pair's trips are dropped. Over a month a busy source sends *at least one*
+ *  rider almost everywhere; drawn, that 1–3-trip tail piles into a blob at
+ *  the origin. (The circles don't need the cut: sub-`R_MIN` flows all draw at
+ *  `R_MIN`, so the tail stays small without being hidden.) */
+export const FLOOR_FRAC = 0.04
 
 /** Sequential ramp stops, low→high flow. Cool→hot reads on both light and
- *  dark tiles; positions in [0, 1]. Kept in sync with the CSS gradient in the
- *  `FlowLensLegend` (`Stations.tsx`). */
+ *  dark tiles; positions in [0, 1]. Also the `/timelapse` `act` ramp. */
 type Stop = { at: number; rgb: [number, number, number] }
 const RAMP: readonly Stop[] = [
   { at: 0.0, rgb: [59, 76, 192] },   // indigo
@@ -56,14 +57,95 @@ const RAMP: readonly Stop[] = [
   { at: 1.0, rgb: [209, 24, 11] },   // red
 ]
 
-/** Fill for stations not (meaningfully) connected to the set. */
-const NON_DST_COLOR = '#888'
+/** Fill for stations with no trips to/from the set. */
+export const NON_DST_COLOR = '#888'
 
-/** Radius channel (pixels): unconnected stations shrink to a dot; connected
- *  ones grow with flow so the ranking reads by size. */
-const R_DIM = 2
-const R_MIN = 4
-const R_MAX = 22
+/** Radius channel (pixels, at `LENS_BASE_ZOOM`): no-trip stations shrink to a
+ *  dot; connected ones get area ∝ trips, from `R_MIN` up to `R_MAX` at the
+ *  top station. */
+export const R_DIM = 1.5
+export const R_MIN = 2.5
+export const R_MAX = 14
+
+/** Zoom at which `R_*` apply as-is; `lensZoomScale` grows/shrinks them by
+ *  √2 per zoom level from here, within `[ZOOM_SCALE_MIN, ZOOM_SCALE_MAX]`. */
+export const LENS_BASE_ZOOM = 12
+const ZOOM_SCALE_MIN = 0.5
+const ZOOM_SCALE_MAX = 2.5
+
+/** Arc width (pixels): linear in trips, `ARC_W_MAX` at the heaviest pair,
+ *  never thinner than `ARC_W_MIN`. */
+export const ARC_W_MIN = 1
+export const ARC_W_MAX = 12
+/** Arc opacity at the destination end (0–255): `ARC_A_MIN` for the lightest
+ *  pair up to `ARC_A_MAX` for the heaviest (sqrt-scaled). The origin end
+ *  takes `ARC_SRC_FRAC` of that, so direction reads as a fade-in. */
+export const ARC_A_MIN = 110
+export const ARC_A_MAX = 235
+export const ARC_SRC_FRAC = 0.15
+
+/** Station radius in pixels (at the base zoom) for `count` trips when the
+ *  top station has `maxCount`: 0 trips → `R_DIM`; else area ∝ trips,
+ *  `R_MAX · sqrt(count / maxCount)`, floored at `R_MIN`. */
+export function lensRadiusPx(count: number, maxCount: number): number {
+  if (!(count > 0) || !(maxCount > 0)) return R_DIM
+  return max(R_MIN, R_MAX * sqrt(min(1, count / maxCount)))
+}
+
+/** Ramp position for `count` trips: log-scaled so the long tail spreads out
+ *  (1 trip → 0, `maxCount` → 1). A lone max of 1 trip is 1. */
+export function lensColorT(count: number, maxCount: number): number {
+  if (!(count > 0)) return 0
+  if (maxCount <= 1) return 1
+  return min(1, log(count) / log(maxCount))
+}
+
+/** Multiplier for the lens's pixel radii at `zoom`: √2 per zoom level from
+ *  `LENS_BASE_ZOOM` (half the map's own 2×/level, so marks grow as stations
+ *  spread apart zooming in, without swallowing their neighbors), clamped to
+ *  `[0.5, 2.5]`. */
+export function lensZoomScale(zoom: number): number {
+  return min(ZOOM_SCALE_MAX, max(ZOOM_SCALE_MIN, pow(2, (zoom - LENS_BASE_ZOOM) / 2)))
+}
+
+/** Arc width in pixels: `ARC_W_MAX · count / maxCount`, at least `ARC_W_MIN`. */
+export function arcWidthPx(count: number, maxCount: number): number {
+  if (!(maxCount > 0)) return ARC_W_MIN
+  return max(ARC_W_MIN, ARC_W_MAX * min(1, count / maxCount))
+}
+
+/** Arc alpha (0–255, integer) at the destination end. */
+export function arcAlpha(count: number, maxCount: number): number {
+  const f = maxCount > 0 ? sqrt(min(1, max(0, count / maxCount))) : 1
+  return round(ARC_A_MIN + (ARC_A_MAX - ARC_A_MIN) * f)
+}
+
+/** Largest "1-2-5" number (1, 2, 5, 10, 20, 50, …) ≤ `x` (`x` ≥ 1). */
+export function niceFloor(x: number): number {
+  const e = pow(10, floor(log10(x)))
+  const m = x / e
+  return (m >= 5 ? 5 : m >= 2 ? 2 : 1) * e
+}
+
+/** Legend reference values for a key topping out at `maxCount`: `maxCount`
+ *  itself, then a "nice" (1-2-5) value at or below each `fracs[i] ·
+ *  maxCount`, descending, deduped, all ≥ 1. */
+export function legendTicks(maxCount: number, fracs: readonly number[]): number[] {
+  if (!(maxCount >= 1)) return []
+  const out = [maxCount]
+  for (const f of fracs) {
+    const x = maxCount * f
+    if (x < 1) continue
+    const v = niceFloor(x)
+    if (v < out[out.length - 1]) out.push(v)
+  }
+  return out
+}
+
+/** Size-key fractions (the circles' key): top, ~1/5, ~1/25 of it. */
+export const SIZE_KEY_FRACS = [0.2, 0.04] as const
+/** Width-key fractions (the arcs' key): top, ~1/2, ~1/6. */
+export const WIDTH_KEY_FRACS = [0.5, 0.17] as const
 
 /** Ramp position `t` ∈ [0, 1] → `[r, g, b]`. */
 export function rampRgb(t: number): [number, number, number] {
@@ -79,11 +161,12 @@ export function rampRgb(t: number): [number, number, number] {
   }
   const span = hi.at - lo.at || 1
   const f = (clamped - lo.at) / span
-  const c = (a: number, b: number) => Math.round(a + (b - a) * f)
+  const c = (a: number, b: number) => round(a + (b - a) * f)
   return [c(lo.rgb[0], hi.rgb[0]), c(lo.rgb[1], hi.rgb[1]), c(lo.rgb[2], hi.rgb[2])]
 }
 
-function rampColor(t: number): string {
+/** `rampRgb` as `#rrggbb`. */
+export function rampColor(t: number): string {
   return `#${rampRgb(t).map((v) => v.toString(16).padStart(2, '0')).join('')}`
 }
 
@@ -151,20 +234,17 @@ export function flowFractions(
 ): Record<string, number> | null {
   const totals = flowTotals(stations, pairCounts, selIds, direction)
   if (!totals) return null
-  const maxCount = Math.max(...Object.values(totals))
+  const maxCount = max(...Object.values(totals))
   const fracs: Record<string, number> = {}
   for (const [id, count] of Object.entries(totals)) fracs[id] = count / maxCount
   return fracs
 }
 
 /**
- * Compute the lens style for a source set + channel + direction.
- *
- * Position on the ramp is by **rank**, not raw fraction: one dominant sink
- * would otherwise compress every other station into the ramp's cool end (a
- * wall of blue). Ranking the above-floor stations spreads the hues evenly from
- * the most-connected (hot) to the least (cool). Sub-floor / unconnected go
- * grey. Returns null when there's nothing to show.
+ * Compute the lens style for a source set + channel + direction: every
+ * non-source station with ≥ 1 trip to/from the set is sized
+ * (`lensRadiusPx`) and colored (`lensColorT`) by its trip count; the rest are
+ * grey `R_DIM` dots. Returns null when there's nothing to show.
  */
 export function flowLens(
   stations: Stations,
@@ -179,34 +259,24 @@ export function flowLens(
   const wantColor = channel === 'c' || channel === 'cr'
   const wantRadius = channel === 'r' || channel === 'cr'
 
-  const entries = Object.entries(totals)
-  const maxCount = Math.max(...entries.map(([, c]) => c))
-  const grandTotal = entries.reduce((s, [, c]) => s + c, 0)
-
-  // Above-floor stations, ranked high→low; ramp position = rank fraction.
-  const survivors = entries
-    .filter(([, c]) => c >= maxCount * FLOOR_FRAC)
-    .sort((a, b) => b[1] - a[1])
-  const n = survivors.length
-  const rankT: Record<string, number> = {}
-  survivors.forEach(([id], i) => { rankT[id] = n <= 1 ? 1 : 1 - i / (n - 1) })
+  const counts = Object.values(totals)
+  const maxCount = max(...counts)
+  const grandTotal = counts.reduce((s, c) => s + c, 0)
 
   const set = new Set(selIds)
   const colors: Record<string, string> = {}
   const radii: Record<string, number> = {}
   for (const id of Object.keys(stations)) {
     if (set.has(id)) continue
-    const t = rankT[id]
-    const connected = t !== undefined
-    if (wantColor) colors[id] = connected ? rampColor(t) : NON_DST_COLOR
-    if (wantRadius) radii[id] = connected ? R_MIN + (R_MAX - R_MIN) * t : R_DIM
+    const count = totals[id] ?? 0
+    if (wantColor) colors[id] = count > 0 ? rampColor(lensColorT(count, maxCount)) : NON_DST_COLOR
+    if (wantRadius) radii[id] = lensRadiusPx(count, maxCount)
   }
   return {
     colors: wantColor ? colors : null,
     radii: wantRadius ? radii : null,
     total: grandTotal,
     topCount: maxCount,
-    floorCount: n ? survivors[n - 1][1] : 0,
   }
 }
 
@@ -218,8 +288,6 @@ export type FlowArc = {
   source: [number, number]
   target: [number, number]
   count: number
-  /** Rank position on the lens ramp (1 = heaviest pair, 0 = lightest shown). */
-  t: number
 }
 
 /**
@@ -227,9 +295,9 @@ export type FlowArc = {
  * in riding direction (`out`: set → other; `in`: other → set). Same data as
  * the Leaflet destination fan (`pairCounts`), but with the lens's
  * `FLOOR_FRAC` cut (pairs below 4% of the heaviest pair are dropped — the
- * long 1–3-trip tail is what stacked into the SVG fan's red blob) and ranked
- * so each arc can take its ramp color. Sorted light→heavy, so heavy arcs draw
- * on top.
+ * long 1–3-trip tail is what stacked into the SVG fan's red blob). Sorted
+ * light→heavy, so heavy arcs draw on top; width/alpha come from
+ * `arcWidthPx`/`arcAlpha` against the last (heaviest) arc's count.
  */
 export function flowArcs(
   stations: Stations,
@@ -239,10 +307,9 @@ export function flowArcs(
 ): FlowArc[] {
   const pairs = directedPairs(stations, pairCounts, selIds, direction)
   if (!pairs.length) return []
-  const maxCount = Math.max(...pairs.map((p) => p.count))
+  const maxCount = max(...pairs.map((p) => p.count))
   const kept = pairs.filter((p) => p.count >= maxCount * FLOOR_FRAC).sort((a, b) => a.count - b.count)
-  const n = kept.length
-  return kept.map(({ from, to, count }, i) => {
+  return kept.map(({ from, to, count }) => {
     const a = stations[from]
     const b = stations[to]
     return {
@@ -251,7 +318,6 @@ export function flowArcs(
       source: [a.lng, a.lat],
       target: [b.lng, b.lat],
       count,
-      t: n <= 1 ? 1 : i / (n - 1),
     }
   })
 }

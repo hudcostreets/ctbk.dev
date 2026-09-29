@@ -168,3 +168,60 @@
     background: #e91e63;
     color: #fff;
 }
+
+/* Phone layout (`compact`): one bar (chevron · chips · clear · ⚙) over the
+ * chart; the controls row only when ⚙ is on (as on `/timelapse`). */
+.panelCompact {
+    padding: 0.35em 0.5em 0.4em;
+}
+
+.panelCompact .controls {
+    margin: 0.35em 0 0.2em;
+    gap: 0.5em 0.8em;
+    font-size: 0.9em;
+}
+
+.bar {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    min-width: 0;
+}
+
+.chipsScroll {
+    display: flex;
+    align-items: center;
+    gap: 0.35em;
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.chipsScroll::-webkit-scrollbar {
+    display: none;
+}
+
+.roundBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid rgba(127, 127, 127, 0.45);
+    border-radius: 50%;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+}
+
+.gearOn {
+    border-color: #e91e63;
+    color: #e91e63;
+}
+
+.panelCompact .chips {
+    margin-top: 0.3em;
+}

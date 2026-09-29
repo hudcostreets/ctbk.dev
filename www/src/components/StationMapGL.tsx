@@ -20,8 +20,8 @@
  * Home embed.
  */
 import { ArcLayer, ScatterplotLayer } from '@deck.gl/layers'
-import { useMemo, useRef, useState, type ReactNode } from 'react'
-import { rampRgb, type FlowArc } from './flowLens'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { ARC_SRC_FRAC, arcAlpha, arcWidthPx, lensZoomScale, type FlowArc } from './flowLens'
 import GLMap from './GLMap'
 import { useTheme } from '../contexts/ThemeContext'
 import { stationsInRect, useSelectionGestures, type SelAction } from '../lib/mapSelection'
@@ -32,7 +32,7 @@ import type { Layer, PickingInfo } from '@deck.gl/core'
 import type { MapboxOverlay } from '@deck.gl/mapbox'
 import type { Map as MaplibreMapInstance } from 'maplibre-gl'
 
-const { sqrt, max } = Math
+const { max, round, sqrt } = Math
 
 type RGBA = [number, number, number, number]
 
@@ -54,7 +54,17 @@ type StationDatum = {
   ends: number
   position: [number, number]
   color: RGBA
+  /** Lens radius (px, base zoom) when the radius channel is on. */
+  r?: number
 }
+
+/** Lens circles' outline: a thin contrasting edge so overlapping circles
+ *  stay distinct (dark edge on the dark basemap, light on the light one). */
+const LENS_EDGE_DARK: RGBA = [0, 0, 0, 170]
+const LENS_EDGE_LIGHT: RGBA = [255, 255, 255, 210]
+/** Neutral arc hue per theme: light arcs on the dark basemap, dark on light. */
+const ARC_RGB_DARK: [number, number, number] = [255, 255, 255]
+const ARC_RGB_LIGHT: [number, number, number] = [40, 40, 48]
 
 export interface StationMapGLProps {
   stations: Stations
@@ -118,16 +128,30 @@ export default function StationMapGL({
 
   const defaultColor: RGBA = dark ? [230, 126, 34, 180] : [211, 84, 0, 170]
 
+  // Live zoom (¼-level steps) for the lens's zoom-aware pixel radii; the
+  // `zoom` prop is only the initial / URL-rounded camera.
+  const [liveZoom, setLiveZoom] = useState(zoom)
+  useEffect(() => {
+    if (!map) return
+    const on = () => setLiveZoom(round(map.getZoom() * 4) / 4)
+    on()
+    map.on('zoom', on)
+    return () => { map.off('zoom', on) }
+  }, [map])
+
   const data = useMemo<StationDatum[]>(() => {
     const out: StationDatum[] = []
     for (const [id, s] of Object.entries(stations)) {
       if (typeof s.lat !== 'number' || typeof s.lng !== 'number') continue
       const hex = stationColors?.[id]
       const color: RGBA = hex ? [...hexToRgb(hex), 210] : defaultColor
-      out.push({ id, name: s.name, ends: s.ends, position: [s.lng, s.lat], color })
+      out.push({ id, name: s.name, ends: s.ends, position: [s.lng, s.lat], color, r: stationRadii?.[id] })
     }
+    // Radius lens: draw big circles first, small ones over them (so the
+    // tail stays visible inside heavy destinations' disks).
+    if (stationRadii) out.sort((a, b) => (b.r ?? 0) - (a.r ?? 0))
     return out
-  }, [stations, stationColors, dark])
+  }, [stations, stationColors, stationRadii, dark])
 
   // `[lng, lat]` pairs, `data`-indexed, for rectangle hit-testing.
   const positions = useMemo(() => {
@@ -169,27 +193,33 @@ export default function StationMapGL({
   // meters (radiusUnits is per-layer, so the whole layer switches units).
   const radiusUnits = stationRadii ? 'pixels' : 'meters'
   const radiusTrigger = stationRadii ? `px:${Object.keys(stationRadii).length}` : 'm'
+  // Uniform zoom multiplier on the lens radii: a layer prop, so zooming
+  // never re-runs `getRadius`.
+  const radiusScale = stationRadii ? lensZoomScale(liveZoom) : 1
+  const lensEdge = dark ? LENS_EDGE_DARK : LENS_EDGE_LIGHT
 
   // Arc fan: under the station dots, non-pickable (pure decoration, like the
-  // Leaflet fan's `interactive={false}` edges). Each arc runs origin →
-  // destination in riding direction and fades in along its length (faint at
-  // the origin, full ramp color at the destination), so direction reads
-  // without arrowheads and the origin doesn't pile up into a solid blob.
-  // Width + color both by rank/volume; tilted so arcs curve visibly even in
-  // the top-down (pitch 0) view.
+  // Leaflet fan's `interactive={false}` edges). Flow is carried by **width**
+  // (linear in trips, `arcWidthPx`) in one neutral hue per theme, opacity
+  // rising mildly with flow (`arcAlpha`). Each arc fades in from origin to
+  // destination (riding direction), so direction reads without arrowheads and
+  // the origin doesn't pile up into a blob. `arcs` is sorted light→heavy, so
+  // heavy arcs draw on top. Tilted so arcs curve visibly at pitch 0.
   const arcMax = arcs?.length ? arcs[arcs.length - 1].count : 1
+  const arcRgb = dark ? ARC_RGB_DARK : ARC_RGB_LIGHT
   const arcLayer = arcs?.length ? new ArcLayer<FlowArc>({
     id: 'flow-arcs',
     data: arcs as FlowArc[],
     getSourcePosition: (d) => d.source,
     getTargetPosition: (d) => d.target,
-    getSourceColor: (d) => [...rampRgb(d.t), 40],
-    getTargetColor: (d) => [...rampRgb(d.t), 230],
-    getWidth: (d) => 1 + 5 * sqrt(d.count / arcMax),
+    getSourceColor: (d) => [...arcRgb, round(arcAlpha(d.count, arcMax) * ARC_SRC_FRAC)],
+    getTargetColor: (d) => [...arcRgb, arcAlpha(d.count, arcMax)],
+    getWidth: (d) => arcWidthPx(d.count, arcMax),
     widthUnits: 'pixels',
     getHeight: 0.35,
     getTilt: ARC_TILT,
     pickable: false,
+    updateTriggers: { getSourceColor: [dark, arcMax], getTargetColor: [dark, arcMax], getWidth: arcMax },
   }) : null
 
   const layers: Layer[] = [
@@ -198,16 +228,21 @@ export default function StationMapGL({
       id: 'stations',
       data,
       getPosition: (d) => d.position,
-      getRadius: (d) => (stationRadii ? (stationRadii[d.id] ?? 8) : sqrt(max(d.ends, 1))),
+      getRadius: (d) => (stationRadii ? (d.r ?? 8) : sqrt(max(d.ends, 1))),
       radiusUnits,
-      radiusMinPixels: 3,
+      radiusScale,
+      // The lens's own px range (incl. the no-trip dots) wins over the
+      // default floor; otherwise meters, floored at 3px.
+      radiusMinPixels: stationRadii ? 1 : 3,
       radiusMaxPixels: 40,
       getFillColor: (d) => d.color,
-      getLineColor: (d) => d.color,
+      // Ring mark: the ring is the station color. Radius lens: a thin
+      // contrasting edge on connected (> dot-size) circles only.
+      getLineColor: (d) => (ring ? d.color : lensEdge),
       filled: !ring,
-      stroked: ring,
+      stroked: ring || !!stationRadii,
       lineWidthUnits: 'pixels',
-      getLineWidth: ring ? 1.5 : 0,
+      getLineWidth: (d) => (ring ? 1.5 : stationRadii && (d.r ?? 0) > 2 ? 0.75 : 0),
       pickable: true,
       autoHighlight: true,
       highlightColor: [255, 255, 255, 90],
@@ -217,7 +252,12 @@ export default function StationMapGL({
         onHoverStation?.(id)
         if (id) setSelectedId?.(id)
       } : undefined,
-      updateTriggers: { getFillColor: colorTrigger, getLineColor: colorTrigger, getRadius: radiusTrigger },
+      updateTriggers: {
+        getFillColor: colorTrigger,
+        getLineColor: `${colorTrigger}:${ring}`,
+        getLineWidth: `${radiusTrigger}:${ring}`,
+        getRadius: radiusTrigger,
+      },
     }),
     new ScatterplotLayer<StationDatum>({
       id: 'pins-halo',

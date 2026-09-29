@@ -95,12 +95,12 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
   const selectedStation = selectedId && stations ? stations[selectedId] : null
   const monthLabel = manifest ? formatMonth(manifest.latestMonth) : null
 
-  // Flow lens: once stations are selected, color every other station by the
-  // share of the set's outbound trips ending there, with the arc fan on top.
-  // Keyed on the selection (not the transient hover), so recoloring commits
-  // on tap. The embed uses the color channel only (no URL config here).
+  // Flow lens: once stations are selected, size + color every other station
+  // by the set's outbound trips ending there (the `/stations` default; no URL
+  // config here), with the arc fan on top. Keyed on the selection (not the
+  // transient hover), so restyling commits on tap.
   const lens = useMemo(
-    () => flowLens(stations ?? {}, pairCounts, selIds, 'c'),
+    () => flowLens(stations ?? {}, pairCounts, selIds, 'cr'),
     [stations, pairCounts, selIds],
   )
   const arcs = useMemo(
@@ -121,6 +121,7 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
           multi={multi}
           pairCounts={pairCounts}
           stationColors={lens?.colors ?? null}
+          stationRadii={lens?.radii ?? null}
           arcs={arcs}
           setSelectedId={setHoveredId}
           onHoverStation={(id) => { if (!id) setHoveredId(undefined) }}

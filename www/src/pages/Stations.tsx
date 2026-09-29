@@ -8,13 +8,14 @@ import {
   type Stations, type StationPairCounts, TILE_COLORS, resolveTileStyle,
 } from '../components/stationMapCommon'
 import { flowArcs, flowLens, type LensChannel, type FlowDirection } from '../components/flowLens'
+import FlowLensLegend from '../components/FlowLensLegend'
 import StationRidesPanel from '../components/StationRidesPanel'
 import { RangeWidthControl } from '../components/RangeWidthControl'
 import { useTheme } from '../contexts/ThemeContext'
 import { useStationsKeyboardShortcuts } from '../hooks/useStationsKeyboardShortcuts'
 import { useStationsOmnibarEndpoint } from '../hooks/useStationsOmnibarEndpoint'
 import { selParam, useSelection, type SelAction } from '../lib/mapSelection'
-import { useCanHover } from '../lib/useMediaQuery'
+import { useCanHover, useWide } from '../lib/useMediaQuery'
 import { useTotalsQuery, type Side } from '../query/rollups'
 import { timeRangeParam } from '../time-range'
 import css from "../stations.module.css"
@@ -45,12 +46,13 @@ const glParam: Param<boolean> = {
   decode: (raw) => raw !== '0' && raw !== 'false',
 }
 
-/** URL codec for the flow-lens channel (`?lens=`): `c` (color, default), `r`
- *  (radius), `cr` (both), or `n` (off). The lens only activates once a source
- *  set is selected (`?sel=`), so the default stays invisible until then. */
+/** URL codec for the flow-lens channel (`?lens=`): `cr` (size + color,
+ *  default), `c` (color only), `r` (size only), or `n` (off). The lens only
+ *  activates once a source set is selected (`?sel=`), so the default stays
+ *  invisible until then. */
 const lensParam: Param<LensChannel> = {
-  encode: (v) => (v === 'c' ? undefined : v),
-  decode: (raw) => (raw === 'r' || raw === 'cr' || raw === 'n' ? raw : 'c'),
+  encode: (v) => (v === 'cr' ? undefined : v),
+  decode: (raw) => (raw === 'c' || raw === 'r' || raw === 'n' ? raw : 'cr'),
 }
 
 const MANIFEST_URL = '/assets/station-urls.json'
@@ -152,6 +154,12 @@ export default function Stations() {
   // and to hover-capable pointers (a tap is a selection, not a preview).
   const canHover = useCanHover()
   const [hoverPreviewId, setHoverPreviewId] = useState<string | null>(null)
+  // Phones (`!wide`): title + lens legend fold into one compact header strip
+  // (legend expands on tap), and the rides panel collapses to a bar (as on
+  // `/timelapse`). `panelH` lifts the SpeedDial clear of the rides panel.
+  const wide = useWide()
+  const [legendOpen, setLegendOpen] = useState(false)
+  const [panelH, setPanelH] = useState(0)
   // Selection (`lib/mapSelection`, shared with `/timelapse`): tap selects one,
   // tap on empty map / Esc clears, long-press enters multi-select (taps
   // toggle; Done / Clear), long-press- or shift-drag box-selects,
@@ -384,6 +392,21 @@ export default function Stations() {
 
   const subtitle = selectedId && stations?.[selectedId] ? stations[selectedId].name : null
 
+  const lensLegend = (compact: boolean) => flowStyle && (
+    <FlowLensLegend
+      sourceNames={lensSourceIds.map((id) => stations?.[id]?.name ?? id)}
+      channel={lens}
+      direction={dir}
+      onToggleDirection={() => setDir(dir === 'out' ? 'in' : 'out')}
+      total={flowStyle.total}
+      topCount={flowStyle.topCount}
+      arcMax={arcs?.length ? arcs[arcs.length - 1].count : null}
+      compact={compact}
+      open={legendOpen}
+      onToggleOpen={() => setLegendOpen(!legendOpen)}
+    />
+  )
+
   if (error) {
     return (
       <div className={css.container}>
@@ -443,17 +466,7 @@ export default function Stations() {
         {(loading || (api && apiTotals.isPending && !apiTotals.data)) && (
           <div className={css.loading}>Loading...</div>
         )}
-        {flowStyle && (
-          <FlowLensLegend
-            sourceNames={lensSourceIds.map((id) => stations?.[id]?.name ?? id)}
-            channel={lens}
-            direction={dir}
-            onToggleDirection={() => setDir(dir === 'out' ? 'in' : 'out')}
-            total={flowStyle.total}
-            topCount={flowStyle.topCount}
-            floorCount={flowStyle.floorCount}
-          />
-        )}
+        {flowStyle && wide && lensLegend(false)}
         {colorByAge && births && !flowStyle && <ColorLegend births={births} actualTheme={actualTheme} />}
         {(pies || api) && (
           <div className={css.piesControl}>
@@ -481,7 +494,7 @@ export default function Stations() {
             )}
           </div>
         )}
-        <div className={css.titleContainer} style={{ color: currentColors.title }}>
+        <div className={wide ? css.titleContainer : css.phoneHeader} style={wide ? { color: currentColors.title } : undefined} data-testid="stations-header">
           <div className={css.title}>
             <Link to="/" className={css.homeLink}>Citi Bike</Link> rides by station,{' '}
             {effectiveMonth && availableMonths.length > 0 ? (
@@ -511,6 +524,7 @@ export default function Stations() {
               {subtitle}
             </Link>
           )}
+          {!wide && lensLegend(true)}
         </div>
       </main>
       {sel.length > 0 && stations && (
@@ -521,68 +535,16 @@ export default function Stations() {
           onClear={() => applySel({ t: 'clear' })}
           multi={multi}
           onDone={() => applySel({ t: 'done' })}
+          compact={!wide}
+          onHeight={setPanelH}
         />
       )}
-      {stations && <SpeedDial ariaLabel="Search stations" />}
-    </div>
-  )
-}
-
-/** Legend for the flow lens: names the selected source(s), reports the set's
- *  total flow, labels the ramp with real trip counts, and offers a direction
- *  toggle — so the map's coloring is self-describing, with numbers. */
-function FlowLensLegend({
-  sourceNames,
-  channel,
-  direction,
-  onToggleDirection,
-  total,
-  topCount,
-  floorCount,
-}: {
-  sourceNames: string[]
-  channel: LensChannel
-  direction: FlowDirection
-  onToggleDirection: () => void
-  total: number
-  topCount: number
-  floorCount: number
-}) {
-  const source = sourceNames.length === 0
-    ? '—'
-    : sourceNames.length === 1
-      ? sourceNames[0]
-      : `${sourceNames[0]} +${sourceNames.length - 1} more`
-  const hasColor = channel === 'c' || channel === 'cr'
-  const hasRadius = channel === 'r' || channel === 'cr'
-  const out = direction === 'out'
-  // Matches `flowLens.ts` RAMP (indigo→sky→amber→orange→red).
-  const gradient = 'linear-gradient(to right, #3b4cc0, #7b9ff9, #f7d040, #f4772e, #d1180b)'
-  const fmt = (n: number) => n.toLocaleString()
-  return (
-    <div className={`${css.legend} ${css.lensLegend}`}>
-      <div className={css.lensSource}>
-        Trips {out ? 'from' : 'to'} <strong>{source}</strong>
-        <span className={css.lensTotal}>{fmt(total)} total</span>
-      </div>
-      <button type="button" className={css.lensDirBtn} onClick={onToggleDirection}>
-        ⇄ {out ? 'where riders go' : 'where riders come from'}
-      </button>
-      {hasColor && (
-        <>
-          <div className={css.legendBar} style={{ background: gradient }} />
-          <div className={css.legendLabels}>
-            <span>{fmt(floorCount)}</span>
-            <span>trips per station</span>
-            <span>{fmt(topCount)}</span>
-          </div>
-        </>
+      {stations && (
+        <SpeedDial
+          ariaLabel="Search stations"
+          position={sel.length > 0 && panelH ? { bottom: panelH + 12, right: wide ? 20 : 12 } : undefined}
+        />
       )}
-      <div className={css.lensNote}>
-        <span className={css.piesSwatch} style={{ background: '#888' }} />
-        {out ? 'no trips there' : 'no trips from there'}
-        {hasRadius && <> · size = trips</>}
-      </div>
     </div>
   )
 }

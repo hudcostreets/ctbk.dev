@@ -10,8 +10,14 @@
  * Range/bin controls mirror the StationDetail avail chart
  * (`RangeWidthControl` + `BinSelect` + drag-pan). Calendar bins (1mo+) are
  * greyed out until pyrmts #122 lands (`specs/rides-v5.md`).
+ *
+ * `compact` (phones, as on `/timelapse`): one bar — chevron (collapse the
+ * whole sheet to just the bar), the station chips (one scrolling line),
+ * clear, and ⚙ (the view / range / bin controls, hidden by default) — over
+ * the chart. `onHeight` reports the sheet's height (so the page can lift the
+ * SpeedDial clear of it).
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { codeParam, intParam, useUrlState } from 'use-prms'
 import { BIN_PRESETS, BinSelect } from './BinSelect'
 import { RangeWidthControl, type DurationPreset } from './RangeWidthControl'
@@ -61,6 +67,10 @@ interface Props {
    *  Done button (keep the set, leave the mode). */
   multi?: boolean
   onDone?: () => void
+  /** Phone layout: collapsible bar + ⚙-gated controls. */
+  compact?: boolean
+  /** The sheet's rendered height (px), on every resize; 0 on unmount. */
+  onHeight?: (px: number) => void
 }
 
 /** Which series the sheet shows for the set: rides (starts/ends) or the
@@ -69,12 +79,27 @@ interface Props {
 type PanelView = 'rides' | 'states'
 const PANEL_VIEWS: [PanelView, string][] = [['rides', 'r'], ['states', 's']]
 
-export default function StationRidesPanel({ shortNames, stations, onRemove, onClear, multi = false, onDone }: Props) {
+export default function StationRidesPanel({ shortNames, stations, onRemove, onClear, multi = false, onDone, compact = false, onHeight }: Props) {
   const canHover = useCanHover()
   const [range, setRange] = useUrlState('rr', timeRangeParam(YEAR_MS))
   const [binMs, setBinMs] = useUrlState('rb', intParam(0))
   const [view, setView] = useUrlState('rv', codeParam<PanelView>('rides', PANEL_VIEWS))
   const showStates = view === 'states'
+  const [collapsed, setCollapsed] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+
+  const panelRef = useRef<HTMLDivElement>(null)
+  const onHeightRef = useRef(onHeight)
+  onHeightRef.current = onHeight
+  useLayoutEffect(() => {
+    const el = panelRef.current
+    if (!el) return
+    const report = () => onHeightRef.current?.(el.offsetHeight)
+    const ro = new ResizeObserver(report)
+    ro.observe(el)
+    report()
+    return () => { ro.disconnect(); onHeightRef.current?.(0) }
+  }, [])
 
   // Chart viewport width → auto bin + bin_budget.
   const chartWrapRef = useRef<HTMLDivElement>(null)
@@ -82,9 +107,12 @@ export default function StationRidesPanel({ shortNames, stations, onRemove, onCl
   useEffect(() => {
     const el = chartWrapRef.current
     if (!el) return
-    const ro = new ResizeObserver(() => setViewportPx(el.clientWidth))
+    // Skip 0 (the sheet collapsed / chart hidden): keeps the last width, so
+    // collapsing doesn't change the query key.
+    const on = () => { if (el.clientWidth > 0) setViewportPx(el.clientWidth) }
+    const ro = new ResizeObserver(on)
     ro.observe(el)
-    setViewportPx(el.clientWidth)
+    on()
     return () => ro.disconnect()
   }, [])
 
@@ -126,71 +154,111 @@ export default function StationRidesPanel({ shortNames, stations, onRemove, onCl
   const binS = rides.data?.binS
   const rows = rides.data?.rows ?? []
 
+  const chipEls = chips.map(({ id, label }) => (
+    <span key={id} className={css.chip}>
+      {label}
+      <button
+        type="button"
+        className={css.chipX}
+        onClick={() => onRemove(id)}
+        title={`Remove ${label}`}
+        aria-label={`Remove ${label}`}
+      >
+        ×
+      </button>
+    </span>
+  ))
+  const clearBtn = <button type="button" className={css.clearBtn} onClick={onClear}>clear</button>
+  const modeEls = multi && (
+    <>
+      <span className={css.modeTag} data-testid="multi-mode">multi-select: {canHover ? 'click' : 'tap'} stations to add / remove</span>
+      {onDone && <button type="button" className={css.doneBtn} onClick={onDone} data-testid="multi-done">Done</button>}
+    </>
+  )
+  const controls = (
+    <div className={css.controls} data-testid="rides-controls">
+      <span className={css.viewToggle} role="group" aria-label="Panel view">
+        {PANEL_VIEWS.map(([v]) => (
+          <button
+            key={v}
+            type="button"
+            className={`${css.viewBtn} ${view === v ? css.viewBtnActive : ''}`}
+            onClick={() => setView(v)}
+          >
+            {v}
+          </button>
+        ))}
+      </span>
+      {!showStates && (
+        <span className={css.legend}>
+          <span className={css.swatch} style={{ background: STARTS_COLOR }} />
+          starts
+          <span className={css.swatch} style={{ background: ENDS_COLOR }} />
+          ends
+        </span>
+      )}
+      <RangeWidthControl value={range} onChange={setRange} presets={RANGE_PRESETS} />
+      {!showStates && (
+        <>
+          <BinSelect
+            value={binMs > 0 ? binMs : undefined}
+            onChange={(ms) => setBinMs(ms ?? 0)}
+            presets={RIDES_BIN_PRESETS}
+            disabledMs={CALENDAR_BIN_MS}
+            disabledTitle="Calendar bins pending (pyrmts #122)"
+          />
+          {binS != null && <span className={css.binLabel}>served: {formatDuration(binS * 1000)}</span>}
+          {rides.isFetching && <span className={css.status}>loading…</span>}
+          {rides.isError && <span className={css.error}>rides fetch failed</span>}
+        </>
+      )}
+    </div>
+  )
+  // Phone: the chart body hides (stays mounted) while collapsed.
+  const bodyHidden = compact && collapsed
+
   return (
-    <div className={css.panel}>
-      <div className={css.header}>
-        <div className={css.chips}>
-          {chips.map(({ id, label }) => (
-            <span key={id} className={css.chip}>
-              {label}
-              <button
-                type="button"
-                className={css.chipX}
-                onClick={() => onRemove(id)}
-                title={`Remove ${label}`}
-                aria-label={`Remove ${label}`}
-              >
-                ×
-              </button>
-            </span>
-          ))}
-          <button type="button" className={css.clearBtn} onClick={onClear}>clear</button>
-          {multi && (
-            <>
-              <span className={css.modeTag} data-testid="multi-mode">multi-select: {canHover ? 'click' : 'tap'} stations to add / remove</span>
-              {onDone && <button type="button" className={css.doneBtn} onClick={onDone} data-testid="multi-done">Done</button>}
-            </>
-          )}
+    <div ref={panelRef} className={`${css.panel} ${compact ? css.panelCompact : ''}`} data-testid="rides-panel">
+      {compact ? (
+        <>
+          <div className={css.bar}>
+            <button
+              type="button"
+              className={css.roundBtn}
+              onClick={() => setCollapsed(!collapsed)}
+              aria-expanded={!collapsed}
+              aria-label={collapsed ? 'Expand rides panel' : 'Collapse rides panel'}
+              data-testid="rides-collapse"
+            >
+              <Chevron dir={collapsed ? 'up' : 'down'} />
+            </button>
+            <div className={css.chipsScroll}>{chipEls}</div>
+            {clearBtn}
+            <button
+              type="button"
+              className={`${css.roundBtn} ${settingsOpen && !collapsed ? css.gearOn : ''}`}
+              onClick={() => { setSettingsOpen(!settingsOpen); setCollapsed(false) }}
+              aria-expanded={settingsOpen && !collapsed}
+              aria-label="Chart settings"
+              data-testid="rides-gear"
+            >
+              <GearIcon />
+            </button>
+          </div>
+          {multi && <div className={css.chips}>{modeEls}</div>}
+          {settingsOpen && !collapsed && controls}
+        </>
+      ) : (
+        <div className={css.header}>
+          <div className={css.chips}>
+            {chipEls}
+            {clearBtn}
+            {modeEls}
+          </div>
+          {controls}
         </div>
-        <div className={css.controls}>
-          <span className={css.viewToggle} role="group" aria-label="Panel view">
-            {PANEL_VIEWS.map(([v]) => (
-              <button
-                key={v}
-                type="button"
-                className={`${css.viewBtn} ${view === v ? css.viewBtnActive : ''}`}
-                onClick={() => setView(v)}
-              >
-                {v}
-              </button>
-            ))}
-          </span>
-          {!showStates && (
-            <span className={css.legend}>
-              <span className={css.swatch} style={{ background: STARTS_COLOR }} />
-              starts
-              <span className={css.swatch} style={{ background: ENDS_COLOR }} />
-              ends
-            </span>
-          )}
-          <RangeWidthControl value={range} onChange={setRange} presets={RANGE_PRESETS} />
-          {!showStates && (
-            <>
-              <BinSelect
-                value={binMs > 0 ? binMs : undefined}
-                onChange={(ms) => setBinMs(ms ?? 0)}
-                presets={RIDES_BIN_PRESETS}
-                disabledMs={CALENDAR_BIN_MS}
-                disabledTitle="Calendar bins pending (pyrmts #122)"
-              />
-              {binS != null && <span className={css.binLabel}>served: {formatDuration(binS * 1000)}</span>}
-              {rides.isFetching && <span className={css.status}>loading…</span>}
-              {rides.isError && <span className={css.error}>rides fetch failed</span>}
-            </>
-          )}
-        </div>
-      </div>
-      {showStates && (
+      )}
+      {showStates && !bodyHidden && (
         <BrushProvider>
           <SmgPanel
             sel={smgSel}
@@ -199,11 +267,11 @@ export default function StationRidesPanel({ shortNames, stations, onRemove, onCl
             onPan={onPan}
             clampMinS={SMG_GENESIS_S}
             clampMaxS={nowS}
-            height={200}
+            height={compact ? 160 : 200}
           />
         </BrushProvider>
       )}
-      <div ref={chartWrapRef} hidden={showStates}>
+      <div ref={chartWrapRef} hidden={showStates || bodyHidden}>
         {rows.length > 0 && binS != null && (
           <StationRidesChart
             rows={rows}
@@ -213,6 +281,7 @@ export default function StationRidesPanel({ shortNames, stations, onRemove, onCl
             onPan={onPan}
             clampMinS={RIDES_GENESIS_S}
             clampMaxS={nowS}
+            height={compact ? 140 : undefined}
           />
         )}
         {rows.length === 0 && !rides.isFetching && !rides.isError && (
@@ -220,5 +289,25 @@ export default function StationRidesPanel({ shortNames, stations, onRemove, onCl
         )}
       </div>
     </div>
+  )
+}
+
+function Chevron({ dir }: { dir: 'up' | 'down' }) {
+  return (
+    <svg width={14} height={14} viewBox="0 0 14 14" aria-hidden>
+      <path d={dir === 'up' ? 'M2 9 L7 4 L12 9' : 'M2 5 L7 10 L12 5'} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function GearIcon() {
+  return (
+    <svg width={15} height={15} viewBox="0 0 24 24" aria-hidden>
+      <path
+        fill="currentColor"
+        d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.8 1.7 1L11 21h4l.4-2.9c.6-.2 1.2-.6 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"
+        transform="translate(-1 0)"
+      />
+    </svg>
   )
 }

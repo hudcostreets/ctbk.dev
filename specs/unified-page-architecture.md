@@ -117,7 +117,7 @@ Built and **functionally working**: deck.gl `9.4.0` + `maplibre-gl 5.24` + `reac
 **Shipped.** `flowLens.ts::flowArcs(stations, pairCounts, selIds, dir)` → one arc per directed (set ↔ other) pair, in riding direction (`?dir=out`: set → other; `in`: other → set). Same `pairCounts` the Leaflet fan reads, and the lens and the arcs now share one pair walk (`directedPairs`; `flowTotals` = its per-station sum). Arcs take the lens's `FLOOR_FRAC` cut (pairs < 4% of the heaviest are dropped — the 1–3-trip tail is what piled into the SVG fan's red blob), are ranked for ramp color (`rampRgb(t)`, exported from `flowLens.ts`), and are sorted light→heavy so heavy arcs draw on top. Rendering (`StationMapGL.tsx`): an `ArcLayer` *under* the station `ScatterplotLayer`, `pickable: false` (decoration, like the Leaflet fan's `interactive={false}` edges); width `1 + 5·sqrt(count/max)` px; color fades along the arc from 40α at the origin to 230α at the destination, so direction reads without arrowheads and the origin stays legible; `getTilt: 90` + `getHeight: 0.35` lay each arc's plane flat so it reads as a curve from straight above (a 0-tilt arc is a straight line at pitch 0). Sources = the lens sources: the `?sel=` set, or (nothing pinned) the hover-preview station — so sweeping the cursor previews each station's fan live. Multi-source sets draw every source's pairs (per-pair rank, so arc color can differ slightly from the per-station lens color of the same destination). e2e: `e2e/station-map-gl.spec.ts` (GL surface mounts in place of Leaflet, legend names the source, ⇄ flips `?dir=`; no WebGL-pixel assertions).
 
 Open (Stage 3):
-- **Fan default on GL.** Still opt-in via `?fan=` (same param as the Leaflet fan, off by default). With the floor + fade the GL fan no longer blobs, so defaulting it on under `gl` is reasonable; left for the user's pick.
+- **Fan default on GL.** Still opt-in via `?fan=` (same param as the Leaflet fan, off by default). Arcs are now width-encoded and neutral (see "Flow encoding v2" below). They read well for one source but form a hairball for multi-station sets, so the fan stays opt-in.
 - **Tilt/curvature.** All arcs bow the same way (`getTilt` constant). A per-arc sign (e.g. by bearing) would spread the bundle symmetrically; a pitched camera (Stage 4) would show the arcs' real height instead.
 - **Ribbons vs arcs.** `ArcLayer` covers the "radiating" case well; geo-sankey ribbons (bundled trunks) remain a separate, heavier design.
 
@@ -150,8 +150,26 @@ Left:
 - **Parity gaps vs Leaflet:**
   - `?pies=1` / the `?api=1` pie overlay and the `t=` tile-style picker exist only on Leaflet. GL follows the theme (light / dark raster).
   - `/s/:id` still uses Leaflet.
-- **Narrow layout.** At ~400px the title bar overlaps the lens legend. This is pre-existing, not GL-specific.
 - Fan default on GL, tilt, and ribbons (see Stage 3 "Open").
+
+#### Flow encoding v2 + phone layout (2026-09-29)
+
+**Shipped** on `wip-deckgl`, after user feedback that the rainbow fan "seems gimmicky" and the phone layout overlapped:
+
+- **Circles (the lens).** Size and color now encode the same quantity (trips to/from the set), redundantly. Default `?lens=` is now `cr` (size + color); `c` / `r` / `n` still select one channel or none. The Home embed uses `cr` too.
+  - 0 trips: a grey (`#888`) dot of `R_DIM` = 1.5px.
+  - ≥ 1 trip: radius `max(R_MIN, R_MAX·sqrt(count/max))`, so area ∝ trips, with `R_MIN` = 2.5px and `R_MAX` = 14px at the top station (`lensRadiusPx`). Circles no longer take a `FLOOR_FRAC` cut: the tail draws at `R_MIN`, small but not hidden.
+  - Color keeps the existing cool→hot ramp (shared with `/timelapse`'s `act` preset), now positioned by **log** trips, `ln(count)/ln(max)` (`lensColorT`), instead of by rank. Color is then a true function of the count, so one legend keys both size and color.
+  - Radii are px at z12 and scale √2 per zoom level, clamped to ×0.5–×2.5 (`lensZoomScale`, applied as the layer's `radiusScale`, so zooming doesn't re-run `getRadius`). Big circles draw first and small ones on top. Connected circles get a 0.75px contrasting edge (dark on the dark basemap, light on the light one).
+- **Arcs (`?fan=1`).** Width is the primary channel: linear in trips, `max(1, 12·count/max)` px (`arcWidthPx`). They use one neutral hue per theme (white on dark, `#282830` on light), with no ramp. Alpha at the destination is `110 + 125·sqrt(count/max)` (`arcAlpha`); the origin end gets 15% of that, so direction reads as a fade-in. The `FLOOR_FRAC` (4%) cut is kept, and the sort is still light→heavy, so heavy arcs draw on top. Bundling by direction isn't needed: `dir=out` / `in` already makes the fan one-directional.
+- **Legend** (`components/FlowLensLegend.tsx`): the source, the total, the ⇄ toggle, and a "trips per station" key (the top count plus 1-2-5 values near 1/5 and 1/25 of it, as sized and colored circles, then "● no trips"). With the fan on, it adds a "trips per arc" key (the top count, ~½ and ~⅙, as strokes). The values come from `legendTicks`.
+- **Phone layout** (`< 768px`, `useWide`, following `/timelapse`):
+  - The title and lens legend share one compact header strip across the top. The title is 1.05rem, and the legend collapses to a single summary line ("Trips from X +3 more · N total ▾") that expands to the keys on tap.
+  - The rides panel becomes one bar: a chevron (collapse the sheet to just the bar), the station chips on one scrolling line, clear, and ⚙ (the rides/states tabs, starts/ends legend, and Range/Latest/Bin row, hidden by default). The chart is shorter (140px).
+  - The panel reports its height (`onHeight`), and the SpeedDial is lifted above it at every width (on desktop it used to sit over the Bin controls).
+- Tests: vitest `flowLens.test.ts` covers the scale functions, ticks, `flowLens` and `flowArcs`. e2e (`station-map-gl.spec.ts`) checks the key labels, and at 400px that the legend and panel collapse and that header, panel and SpeedDial don't overlap.
+
+Open: multi-source fans (e.g. 4 Midtown stations) are still a hairball of 1–2px arcs at z12. Options: a stronger floor when there are many sources, or aggregating per destination. Fan stays opt-in.
 
 ## Examples, reconceived
 
