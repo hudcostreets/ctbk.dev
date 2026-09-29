@@ -189,6 +189,9 @@
 !src/lib/dbg.ts
 !src/lib/mergeReview.ts
 !src/lib/s2geo.ts
+!src/lib/tlGesture.test.ts
+!src/lib/tlGesture.ts
+!src/lib/useMediaQuery.ts
 !src/main.tsx
 !src/mdx.d.ts
 !src/pages/CellsDebug.tsx
@@ -222,6 +225,8 @@
 !src/query/timelapseFrames.ts
 !src/query/timelapsePrefetch.test.ts
 !src/query/timelapsePrefetch.ts
+!src/query/timelapseSelection.test.ts
+!src/query/timelapseSelection.ts
 !src/stations.module.css
 !src/theme.ts
 !src/time-range.test.ts

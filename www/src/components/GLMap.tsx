@@ -9,7 +9,7 @@
  * layers, cursor and any overlays are the caller's; this only owns the map.
  */
 import { useEffect, useMemo, useRef, type ReactNode } from 'react'
-import { Map as MaplibreMap, useControl, type MapLayerMouseEvent } from 'react-map-gl/maplibre'
+import { Map as MaplibreMap, useControl, useMap, type MapLayerMouseEvent } from 'react-map-gl/maplibre'
 import { MapboxOverlay } from '@deck.gl/mapbox'
 import type { Layer } from '@deck.gl/core'
 import type { Map as MaplibreMapInstance, StyleSpecification } from 'maplibre-gl'
@@ -40,7 +40,11 @@ export function rasterStyle(dark: boolean, tileBase?: string): StyleSpecificatio
 }
 
 /** deck.gl layers as a MapLibre control, updated in place each render. */
-function DeckOverlay({ layers, onAfterRender }: { layers: Layer[]; onAfterRender?: () => void }) {
+function DeckOverlay({ layers, onAfterRender, onOverlay }: {
+  layers: Layer[]
+  onAfterRender?: () => void
+  onOverlay?: (o: MapboxOverlay, map: MaplibreMapInstance) => void
+}) {
   // Overlaid (not interleaved): deck renders in its own canvas ABOVE maplibre's
   // basemap canvas. Interleaved mode (deck drawing into maplibre's GL context)
   // left the basemap unpainted here — tiles fetched 200 but never composited.
@@ -49,6 +53,10 @@ function DeckOverlay({ layers, onAfterRender }: { layers: Layer[]; onAfterRender
   // deck calls `props.onAfterRender` unconditionally: an explicit
   // `undefined` would replace its no-op default and throw on every draw.
   overlay.setProps(onAfterRender ? { layers, onAfterRender } : { layers })
+  const onOverlayRef = useRef(onOverlay)
+  onOverlayRef.current = onOverlay
+  const { current: mapRef } = useMap()
+  useEffect(() => { if (mapRef) onOverlayRef.current?.(overlay, mapRef.getMap()) }, [overlay, mapRef])
   return null
 }
 
@@ -83,6 +91,10 @@ export interface GLMapProps {
   children?: ReactNode
   /** Wrapper element ref (e.g. for capture-phase mouse listeners). */
   containerRef?: React.RefObject<HTMLDivElement>
+  /** Called once with the deck overlay (imperative `pickObject`) and the
+   *  maplibre instance, as soon as they exist: unlike `onReady`, without
+   *  waiting for `load` (which waits on basemap tiles). */
+  onOverlay?: (overlay: MapboxOverlay, map: MaplibreMapInstance) => void
 }
 
 export default function GLMap({
@@ -100,6 +112,7 @@ export default function GLMap({
   className,
   children,
   containerRef,
+  onOverlay,
 }: GLMapProps) {
   const { actualTheme } = useTheme()
   const dark = actualTheme === 'dark'
@@ -132,7 +145,7 @@ export default function GLMap({
         }}
         style={{ width: '100%', height: '100%' }}
       >
-        <DeckOverlay layers={layers} onAfterRender={onAfterRender} />
+        <DeckOverlay layers={layers} onAfterRender={onAfterRender} onOverlay={onOverlay} />
       </MaplibreMap>
       {children}
     </div>

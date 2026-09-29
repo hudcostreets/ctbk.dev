@@ -6,10 +6,16 @@
  * disk/ring for starts/ends), all sized against one per-bin scale frozen for
  * the session. Frames are lerped in JS from a continuous playhead `t` (frame
  * index + φ) driven by one rAF loop that stalls (badge) while the next chunk
- * isn't cached; an idle fan-out prefetches the rest of the range behind it.
- * Click pins a station (`sel=`, ring + sparkline drawer; `esc` clears).
- * Control bar: range (`d=`: date inputs + per-bin presets, capped by a
- * frame-count guard), bin, speed, style, loop, and a scrubber whose totals
+ * isn't cached; an idle fill prefetches the rest of the range behind it.
+ * Selection (`sel=`; `timelapseSelection.ts`): tap selects one station,
+ * long-press enters multi-select mode, shift/⌘-click toggles, and a
+ * long-press- or shift-drag rectangle adds (`lib/tlGesture.ts`, fed native
+ * pointer events from the map's canvas container); selected stations get a
+ * ring and a row in the selection panel (docked right on desktop, a bottom
+ * sheet on phones). Mobile-first chrome: a header strip (date + color bar,
+ * tap to expand the legend) and a control bar (prev / play / next +
+ * scrubber, with a ⚙ panel for range, bin, speed, style, loop and circle
+ * size `sz=`; always expanded on wide screens). The scrubber's totals
  * sparkline previews a frame on hover (click commits `t`).
  * Movie mode (`mv=1`): chrome and interaction off, `window.__tl.seek(i)` for
  * frame-by-frame capture (`scrns.timelapse.json`).
@@ -22,14 +28,18 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FloatingPortal, offset, shift, useFloating } from '@floating-ui/react'
+import { Link } from 'react-router-dom'
 import { ScatterplotLayer } from '@deck.gl/layers'
 import type { Layer, PickingInfo } from '@deck.gl/core'
+import type { MapboxOverlay } from '@deck.gl/mapbox'
 import type { Map as MaplibreMapInstance } from 'maplibre-gl'
 import { useAction } from 'use-kbd'
 import { boolParam, codeParam, intParam, llzParam, stringParam, useUrlState, type LLZ, type Param } from 'use-prms'
 import GLMap from '../components/GLMap'
 import { rampRgb } from '../components/flowLens'
-import { Tip } from '../components/Tip'
+import { Tip, type TipProps } from '../components/Tip'
+import { IDLE, LONG_PRESS_MS, step as gestureStep, type GestureEvent, type GestureState, type Pt, type Rect } from '../lib/tlGesture'
+import { useCanHover, useMediaQuery } from '../lib/useMediaQuery'
 import {
   cachedChunks, ensureChunk, useTlFrames, useTlLastDay, useTlPrefetch, useTlStationSeries, useTlTotals, type SourceMode,
 } from '../query/timelapse'
@@ -44,6 +54,9 @@ import {
   type Bin, type Chunk, type Preset, type StationTable,
   ACT, ANCHORS, BINS, binMs, COOL, DAY_MS, DEFAULT_SCALE, GENESIS_MS, NEUTRAL, PRESETS, SIZE, SPLIT, WARM,
 } from '../query/timelapseFrames'
+import {
+  factorLabel, parseSize, radiusFactor, reduceSel, SIZES, stationsInRect, zoomFactor, type SelAction,
+} from '../query/timelapseSelection'
 import css from '../timelapse.module.css'
 
 const { floor, max, min, round } = Math
@@ -149,6 +162,34 @@ const PIN_RGB: [number, number, number] = [255, 210, 74]
 const rgbCss = ([r, g, b]: readonly [number, number, number], a = 1) => `rgba(${r}, ${g}, ${b}, ${a})`
 const ACT_GRADIENT = `linear-gradient(to right, ${[0, 0.25, 0.5, 0.75, 1].map((f) => rgbCss(rampRgb(f))).join(', ')})`
 const PRESET_LABEL: Record<Preset, string> = { flow: 'net flow', act: 'activity', split: 'starts / ends' }
+const FLOW_GRADIENT = `linear-gradient(to right, ${rgbCss(COOL)}, ${rgbCss(NEUTRAL)}, ${rgbCss(WARM)})`
+/** Wide enough for the docked panel + always-expanded controls. */
+const WIDE = '(min-width: 768px)'
+
+/** `Tip` on hover-capable devices only: on touch, a tap would open it and
+ *  leave it stuck on screen. */
+function HTip(props: TipProps) {
+  const canHover = useCanHover()
+  return canHover ? <Tip {...props} /> : props.children
+}
+
+function Chevron({ dir }: { dir: 'left' | 'right' }) {
+  return (
+    <svg width={14} height={14} viewBox="0 0 14 14" aria-hidden>
+      <path d={dir === 'left' ? 'M9 2 L4 7 L9 12' : 'M5 2 L10 7 L5 12'} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function PlayIcon({ playing }: { playing: boolean }) {
+  return (
+    <svg width={18} height={18} viewBox="0 0 18 18" aria-hidden>
+      {playing
+        ? <><rect x={4} y={3} width={3.5} height={12} rx={1} fill="currentColor" /><rect x={10.5} y={3} width={3.5} height={12} rx={1} fill="currentColor" /></>
+        : <path d="M5 2.5 L15 9 L5 15.5 Z" fill="currentColor" strokeLinejoin="round" />}
+    </svg>
+  )
+}
 
 export default function Timelapse() {
   const qc = useQueryClient()
@@ -170,6 +211,11 @@ export default function Timelapse() {
   const fpb = max(1, fpbRaw)
   const [cap] = useUrlState('cap', stringParam())
   const [tileBase] = useUrlState('tileBase', stringParam())
+  const [szRaw, setSzRaw] = useUrlState('sz', stringParam())
+  const sz = parseSize(szRaw)
+  const setSz = useCallback((v: number) => setSzRaw(v === 1 ? undefined : String(v)), [setSzRaw])
+  const wide = useMediaQuery(WIDE)
+  const canHover = useCanHover()
 
   // Inclusive frame range: the frames containing the range's first and last instants.
   const [iStart, iEnd] = rangeFrames(bin, range)
@@ -326,7 +372,20 @@ export default function Timelapse() {
     return () => cancelAnimationFrame(raf)
   }, [playing, sp, iStart, iEnd, loop, setTUrl, bin])
 
-  const togglePin = useCallback((id: string) => setPins(pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id]), [pins, setPins])
+  // Selection: `sel=` (URL) + multi-select mode (session-local).
+  const [multi, setMulti] = useState(false)
+  const selRef = useRef({ ids: pins, multi })
+  selRef.current = { ids: pins, multi }
+  const applySel = useCallback((a: SelAction) => {
+    const s = selRef.current
+    const n = reduceSel(s, a)
+    if (n.ids.length !== s.ids.length || n.ids.some((x, j) => x !== s.ids[j])) setPins(n.ids)
+    if (n.multi !== s.multi) setMulti(n.multi)
+    selRef.current = n
+  }, [setPins])
+  const applySelRef = useRef(applySel)
+  applySelRef.current = applySel
+  useEffect(() => { if (!pins.length && multi) setMulti(false) }, [pins, multi])
 
   // Keyboard (`use-kbd`): all show up in the ShortcutsModal / Omnibar. Off in
   // movie mode (interaction disabled).
@@ -346,7 +405,7 @@ export default function Timelapse() {
   useAction('tl:bin-finer', { label: 'Finer bin', group: 'Timelapse', defaultBindings: ['shift+b'], handler: () => changeBin(BINS[max(0, BINS.indexOf(bin) - 1)]), enabled: on })
   useAction('tl:style', { label: 'Cycle style (flow / activity / split)', group: 'Timelapse', defaultBindings: ['s'], handler: () => setPreset(PRESETS[(PRESETS.indexOf(preset) + 1) % PRESETS.length]), enabled: on })
   useAction('tl:loop', { label: 'Toggle loop', group: 'Timelapse', defaultBindings: ['l'], handler: () => setLoop(!loop), enabled: on })
-  useAction('tl:unpin', { label: 'Clear pinned stations', group: 'Timelapse', defaultBindings: ['escape'], handler: () => setPins([]), enabled: on && pins.length > 0 })
+  useAction('tl:unpin', { label: 'Clear selection', group: 'Timelapse', defaultBindings: ['escape'], handler: () => applySel({ t: 'clear' }), enabled: on && (pins.length > 0 || multi) })
 
   // Jumps land on the nearest cached frame while the real chunk loads (the
   // prefetch queue has already re-targeted to the new chunk).
@@ -398,16 +457,19 @@ export default function Timelapse() {
     return pins.map((id) => byId.get(id)).filter((i): i is number => i !== undefined)
   }, [table, pins])
 
-  const [hover, setHover] = useState<number | null>(null)
+  // Hovered station (mouse only) + where, for the floating hover card.
+  const [hover, setHover] = useState<{ i: number; x: number; y: number } | null>(null)
+  // Circle size: `sz` × a zoomed-out shrink, on top of the presets' radii.
+  const rf = radiusFactor(sz, view.zoom)
   const layers = useMemo<Layer[]>(() => {
     if (!table || !frame) return []
     const n = table.ids.length
-    const pickable = !mv
+    // Picking only; selection is `onPointerDown` → `tlGesture` → `pickObject`.
     const pick = {
-      pickable,
-      onHover: (info: PickingInfo) => setHover(info.index >= 0 ? info.index : null),
-      onClick: (info: PickingInfo) => { if (info.index >= 0) togglePin(table.ids[info.index]) },
+      pickable: !mv,
+      onHover: canHover ? (info: PickingInfo) => setHover(info.index >= 0 ? { i: info.index, x: info.x, y: info.y } : null) : undefined,
     }
+    const sized = { radiusScale: rf, radiusMaxPixels: SIZE.rMax * rf }
     const position = { value: table.positions, size: 2 }
     const out: Layer[] = []
     if (frame.flow || frame.act) {
@@ -417,7 +479,7 @@ export default function Timelapse() {
         data: { length: n, attributes: { getPosition: position, getRadius: { value: radius, size: 1 }, getFillColor: { value: color, size: 4 } } },
         radiusUnits: 'pixels',
         radiusMinPixels: 1,
-        radiusMaxPixels: SIZE.rMax,
+        ...sized,
         parameters: frame.act ? ADDITIVE : undefined,
         ...pick,
       }))
@@ -436,14 +498,14 @@ export default function Timelapse() {
           id: 'tl-split-starts',
           data: { length: n, attributes: { getPosition: position, getRadius: { value: rStart, size: 1 }, getFillColor: { value: disk, size: 4 } } },
           radiusUnits: 'pixels',
-          radiusMaxPixels: SIZE.rMax,
+          ...sized,
           ...pick,
         }),
         new ScatterplotLayer({
           id: 'tl-split-ends',
           data: { length: n, attributes: { getPosition: position, getRadius: { value: rEnd, size: 1 } } },
           radiusUnits: 'pixels',
-          radiusMaxPixels: SIZE.rMax,
+          ...sized,
           filled: false,
           stroked: true,
           lineWidthUnits: 'pixels',
@@ -463,19 +525,19 @@ export default function Timelapse() {
         id: 'tl-pins',
         data: pinIdx,
         getPosition: (i) => [table.positions[2 * i], table.positions[2 * i + 1]],
-        getRadius: (i) => r(i) + 3,
+        getRadius: (i) => r(i) * rf + 3,
         radiusUnits: 'pixels',
         filled: false,
         stroked: true,
         lineWidthUnits: 'pixels',
         getLineWidth: 2,
         getLineColor: [...PIN_RGB, 255],
-        updateTriggers: { getRadius: frame },
+        updateTriggers: { getRadius: [frame, rf] },
         pickable: false,
       }))
     }
     return out
-  }, [table, frame, preset, pinIdx, mv, togglePin])
+  }, [table, frame, preset, pinIdx, mv, canHover, rf])
 
   // ---- Movie mode: `window.__tl.seek(i)` -----------------------------------
   // Each seek: fetch the chunk(s) under `t = iStart + i / fpb`, set `t`, then
@@ -533,16 +595,135 @@ export default function Timelapse() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mv, bin, iStart, fpb, nFrames, src])
 
+  // ---- Selection gestures (`lib/tlGesture.ts`) -----------------------------
+  // Native pointer listeners on the map's canvas container, so overlays
+  // (siblings of the map, not inside it) never start a gesture. Taps pick
+  // with deck's `pickObject` (a wider radius for fingers); rectangles test
+  // projected station positions (`stationsInRect`).
+  const overlayRef = useRef<MapboxOverlay | null>(null)
+  const [gestureMap, setGestureMap] = useState<MaplibreMapInstance | null>(null)
+  const [dragRect, setDragRect] = useState<Rect | null>(null)
+  const pickAt = useRef<(at: Pt, touch: boolean) => string | null>(() => null)
+  pickAt.current = (at, touch) => {
+    const o = overlayRef.current
+    if (!o || !table) return null
+    const info = o.pickObject({ x: at.x, y: at.y, radius: touch ? 12 : 3 })
+    return info && info.index >= 0 ? table.ids[info.index] : null
+  }
+  const pickRect = useRef<(r: Rect) => string[]>(() => [])
+  pickRect.current = (r) => {
+    const m = gestureMap
+    if (!m || !table || !frame) return []
+    // Current (named) stations, plus any retired one active this frame.
+    const keep = (j: number) => table.names[j] !== table.ids[j] || frame.starts[j] + frame.ends[j] > 0
+    const project = (lng: number, lat: number): [number, number] => {
+      const p = m.project([lng, lat])
+      return [p.x, p.y]
+    }
+    return stationsInRect(table.positions, project, r, keep).map((j) => table.ids[j])
+  }
+  useEffect(() => {
+    const m = gestureMap
+    if (!m || mv) return
+    // Shift+drag is ours (rectangle select), not MapLibre's box zoom.
+    m.boxZoom.disable()
+    const el = m.getCanvasContainer()
+    let s: GestureState = IDLE
+    let timer = 0
+    let touch = false
+    let fromLongPress = false
+    const rel = (e: PointerEvent): Pt => {
+      const r = el.getBoundingClientRect()
+      return { x: e.clientX - r.left, y: e.clientY - r.top }
+    }
+    const handle = (ev: GestureEvent) => {
+      const r = gestureStep(s, ev)
+      s = r.s
+      if (s.k !== 'press') clearTimeout(timer)
+      for (const o of r.out) {
+        switch (o.t) {
+          case 'hold': m.dragPan.disable(); break
+          case 'release': m.dragPan.enable(); break
+          case 'tap': applySelRef.current({ t: 'tap', id: pickAt.current(o.at, touch), toggle: o.mod }); break
+          case 'longpress': {
+            fromLongPress = true
+            navigator.vibrate?.(15)
+            applySelRef.current({ t: 'longpress', id: pickAt.current(o.at, touch) })
+            break
+          }
+          case 'rect': setDragRect(o.rect); break
+          case 'rectEnd': {
+            setDragRect(null)
+            applySelRef.current({ t: 'add', ids: pickRect.current(o.rect), multi: fromLongPress })
+            break
+          }
+          case 'rectCancel': setDragRect(null); break
+        }
+      }
+    }
+    const onDown = (e: PointerEvent) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return
+      const first = s.k === 'idle'
+      if (first) {
+        touch = e.pointerType !== 'mouse'
+        fromLongPress = false
+      }
+      handle({ t: 'down', id: e.pointerId, at: rel(e), time: performance.now(), touch, shift: e.shiftKey, mod: e.shiftKey || e.metaKey || e.ctrlKey })
+      if (first && s.k === 'press') timer = window.setTimeout(() => handle({ t: 'timer', time: performance.now() }), LONG_PRESS_MS)
+    }
+    const onMove = (e: PointerEvent) => { if (s.k !== 'idle') handle({ t: 'move', id: e.pointerId, at: rel(e) }) }
+    const onUp = (e: PointerEvent) => { if (s.k !== 'idle') handle({ t: 'up', id: e.pointerId, at: rel(e) }) }
+    const onCancel = () => { if (s.k !== 'idle') handle({ t: 'cancel' }) }
+    // A long-press would otherwise open the context menu / callout.
+    const onContext = (e: Event) => e.preventDefault()
+    el.addEventListener('pointerdown', onDown)
+    el.addEventListener('contextmenu', onContext)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onCancel)
+    window.addEventListener('blur', onCancel)
+    return () => {
+      clearTimeout(timer)
+      el.removeEventListener('pointerdown', onDown)
+      el.removeEventListener('contextmenu', onContext)
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+      window.removeEventListener('blur', onCancel)
+      m.dragPan.enable()
+    }
+  }, [gestureMap, mv])
+
+  // Control-bar height → `--tl-controls-h`, so the selection panel / bottom
+  // sheet sits just above it.
+  const controlsRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const c = controlsRef.current
+    const page = pageRef.current
+    if (!c || !page) return
+    const set = () => page.style.setProperty('--tl-controls-h', `${c.offsetHeight}px`)
+    set()
+    const ro = new ResizeObserver(set)
+    ro.observe(c)
+    return () => ro.disconnect()
+  }, [mv])
+
+  const [legendOpen, setLegendOpen] = useState(() => mv || window.matchMedia(WIDE).matches)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+
   const totals = useTlTotals(src, bin, iStart, iEnd)
   const i = floor(shown)
   const stalled = playing && !frames.ready
   const iMs = frameStartMs(bin, i)
-  const dateStr = clockLabel(bin, iMs)
+  const dateStr = wide || mv ? clockLabel(bin, iMs) : shortLabel(bin, iMs)
   const nFramesRange = iEnd - iStart + 1
   // Sub-day bins only: `1d` over all of history (~4,850 frames) is a preset.
   const suggested = nFramesRange > SOFT_FRAMES && binMs(bin) < DAY_MS ? suggestBin(range) : null
   const fmt = (n: number) => round(n).toLocaleString('en-US')
-  const scaleNote = `size = √(rides ÷ ${fmt(scale)}), ${scaleFrozen ? 'p99 of the first loaded chunk, fixed for the session' : 'provisional'}`
+  const zf = zoomFactor(view.zoom)
+  const sizeTerms = [sz !== 1 && `${factorLabel(sz)} (size)`, zf < 1 && `${factorLabel(zf)} (zoomed out)`].filter(Boolean).join(' ')
+  const scaleNote = `size = √(rides ÷ ${fmt(scale)})${sizeTerms ? ` ${sizeTerms}` : ''}, ${scaleFrozen ? 'p99 of the first loaded chunk, fixed for the session' : 'provisional'}`
+  const showSettings = wide || settingsOpen
 
   return (
     <div ref={pageRef} className={css.page} data-tl-frame={mv ? undefined : i} onMouseLeave={() => setHover(null)}>
@@ -552,6 +733,7 @@ export default function Timelapse() {
         zoom={view.zoom}
         onMove={mv ? undefined : (la, ln, z) => setView({ lat: la, lng: ln, zoom: z })}
         onReady={(m) => { mapRef.current = m; notify() }}
+        onOverlay={(o, m) => { overlayRef.current = o; setGestureMap(m) }}
         onAfterRender={mv ? onAfterRender : undefined}
         interactive={!mv}
         preserveDrawingBuffer={mv}
@@ -559,112 +741,169 @@ export default function Timelapse() {
         cursor={hover !== null ? 'pointer' : 'grab'}
         className={css.map}
       >
-        <div className={css.clock}>
-          <span className={css.clockDate} data-testid="tl-clock">{dateStr}</span>
-          <span className={css.clockSub}>
-            {mv
-              ? <>{frame && !frame.missing && <>{fmt(frame.starts.reduce((a, b) => a + b, 0))} rides started</>}</>
-              : <>
-                {formatYmd(range[0])} – {formatYmd(range[1])} · {bin} bins · frame {i - iStart + 1} of {nFramesRange}
-                {peek !== null && <> · preview</>}
-                {frame && !frame.missing && <> · {fmt(frame.starts.reduce((a, b) => a + b, 0))} starts</>}
+        <div className={css.header} data-testid="tl-header">
+          <div className={css.headRow}>
+            <span className={css.clockDate} data-testid="tl-clock">{dateStr}</span>
+            <div className={css.badges}>
+              {frame?.missing && <span className={`${css.badge} ${css.badgeWarn}`} data-testid="tl-no-data">no data</span>}
+              {!mv && <>
+                {stalled && <span className={`${css.badge} ${css.badgeWarn}`}>buffering…</span>}
+                {!frames.ready && !playing && !frames.error && <span className={css.badge}>loading…</span>}
+                {frames.error && <span className={`${css.badge} ${css.badgeError}`}>error: {frames.error.message}</span>}
+                {frame?.source === 'synth' && <span className={`${css.badge} ${css.badgeWarn}`}>synthetic</span>}
               </>}
-          </span>
-          <div className={css.badges}>
-            {frame?.missing && <span className={`${css.badge} ${css.badgeWarn}`} data-testid="tl-no-data" title="Past the last published month: the pyramid has no rides for this frame yet">no data</span>}
-            {!mv && <>
-              {stalled && <span className={`${css.badge} ${css.badgeWarn}`}>buffering…</span>}
-              {!frames.ready && !playing && !frames.error && <span className={css.badge}>loading…</span>}
-              {frames.error && <span className={`${css.badge} ${css.badgeError}`} title={frames.error.message}>error: {frames.error.message}</span>}
-              {frame?.source === 'api' && <span className={css.badge} title="Frames from /api/tl over the time-first rides-tl pyramid">rides-tl</span>}
-              {frame?.source === 'synth' && <span className={`${css.badge} ${css.badgeWarn}`} title="rides-tl doesn't cover this range yet and no small-enough rides shard does either; frames are synthesized from monthly station totals (interim)">synthetic</span>}
-              {frame?.source === 'shard' && <span className={css.badge} title="rides-tl doesn't cover this range yet; read from the live rides pyramid shards (interim tail-read)">live shard</span>}
-              {frame && frame.unmapped > 0 && <span className={css.badge} title="Rides at station ids with no known position">{fmt(frame.unmapped)} unmapped</span>}
-            </>}
-          </div>
-        </div>
-        <Legend preset={preset} unit={unit} note={scaleNote} />
-        {cap && <div className={css.caption}>{cap}</div>}
-        {!mv && table && frame && (
-          <div className={css.drawers}>
-            {pinIdx.map((s) => (
-              <PinCard key={table.ids[s]} src={src} bin={bin} id={table.ids[s]} name={table.names[s]} starts={frame.starts[s]} ends={frame.ends[s]} iStart={iStart} iEnd={iEnd} i={i} onUnpin={() => togglePin(table.ids[s])} />
-            ))}
-            {hover !== null && !pinIdx.includes(hover) && (
-              <div className={css.card}>
-                <span className={css.cardName}>{table.names[hover] ?? table.ids[hover]}</span>
-                <span className={css.cardStat}>{fmt(frame.starts[hover])} starts · {fmt(frame.ends[hover])} ends · net {frame.starts[hover] - frame.ends[hover] >= 0 ? '+' : ''}{fmt(frame.starts[hover] - frame.ends[hover])}</span>
-                <span className={css.cardHint}>click to pin</span>
-              </div>
+            </div>
+            {!mv && (
+              <button type="button" className={css.info} onClick={() => setLegendOpen(!legendOpen)} aria-expanded={legendOpen} aria-label={legendOpen ? 'Hide legend' : 'Show legend'}>
+                {legendOpen ? '×' : 'i'}
+              </button>
             )}
           </div>
+          <button type="button" className={css.barBtn} onClick={() => setLegendOpen(!legendOpen)} aria-label="Toggle legend" disabled={mv}>
+            <LegendBar preset={preset} />
+          </button>
+          {legendOpen && (
+            <div className={css.legendBody} data-testid="tl-legend">
+              <Legend preset={preset} unit={unit} note={scaleNote} />
+              <div className={css.clockSub}>
+                {mv
+                  ? <>{frame && !frame.missing && <>{fmt(frame.starts.reduce((a, b) => a + b, 0))} rides started</>}</>
+                  : <>
+                    {formatYmd(range[0])} – {formatYmd(range[1])} · {bin} bins · frame {i - iStart + 1} of {nFramesRange}
+                    {peek !== null && <> · preview</>}
+                    {frame && !frame.missing && <> · {fmt(frame.starts.reduce((a, b) => a + b, 0))} starts</>}
+                  </>}
+              </div>
+              {!mv && frame && (
+                <div className={css.chips}>
+                  {frame.missing && <span className={css.chip}>no data: past the last published month</span>}
+                  {frame.source === 'api' && <span className={css.chip}>source: rides-tl (/api/tl)</span>}
+                  {frame.source === 'shard' && <span className={css.chip}>source: live pyramid shard (interim)</span>}
+                  {frame.source === 'synth' && <span className={css.chip}>synthesized from monthly station totals (interim)</span>}
+                  {frame.unmapped > 0 && <span className={css.chip}>{fmt(frame.unmapped)} rides at unmapped stations</span>}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        {cap && <div className={css.caption}>{cap}</div>}
+        {dragRect && (
+          <div className={css.dragRect} style={{ left: dragRect.x0, top: dragRect.y0, width: dragRect.x1 - dragRect.x0, height: dragRect.y1 - dragRect.y0 }} />
+        )}
+        {!mv && canHover && table && frame && hover !== null && !dragRect && (
+          <HoverCard
+            x={hover.x}
+            y={hover.y}
+            w={pageRef.current?.clientWidth ?? 0}
+            name={table.names[hover.i]}
+            starts={frame.starts[hover.i]}
+            ends={frame.ends[hover.i]}
+            selected={pinIdx.includes(hover.i)}
+            multi={multi}
+          />
+        )}
+        {!mv && table && frame && (pinIdx.length > 0 || multi) && (
+          <SelPanel
+            src={src}
+            bin={bin}
+            table={table}
+            idx={pinIdx}
+            starts={frame.starts}
+            ends={frame.ends}
+            iStart={iStart}
+            iEnd={iEnd}
+            i={i}
+            multi={multi}
+            wide={wide}
+            onRemove={(id) => applySel({ t: 'remove', id })}
+            onClear={() => applySel({ t: 'clear' })}
+            onDone={() => applySel({ t: 'done' })}
+          />
         )}
         {!table && <div className={css.loading}>Loading stations…</div>}
         {!mv && (
-          <div className={css.controls}>
-            <div className={css.row}>
-              <div className={css.group}>
-                <Tip content="Play / pause (space)">
-                  <button type="button" className={css.btn} onClick={toggle} aria-label={playing ? 'Pause' : 'Play'}>
-                    {playing ? '❚❚' : '▶'}
-                  </button>
-                </Tip>
-                <Tip content={`Previous ${unit} (←; shift+← = ${big.label})`}>
-                  <button type="button" className={css.btn} onClick={() => step(-1)} aria-label={`Previous ${unit}`}>◀</button>
-                </Tip>
-                <Tip content={`Next ${unit} (→; shift+→ = ${big.label})`}>
-                  <button type="button" className={css.btn} onClick={() => step(1)} aria-label={`Next ${unit}`}>▶</button>
-                </Tip>
+          <div className={css.controls} ref={controlsRef} data-testid="tl-controls">
+            {showSettings && (
+              <div className={css.row} data-testid="tl-settings">
+                <RangePicker
+                  bin={bin}
+                  range={range}
+                  lastDay={lastDay}
+                  tDay={dayOf(frameStartMs(bin, floor(t)))}
+                  onEdit={setRangeEdit}
+                  onSpan={applySpan}
+                />
+                <HTip content="Bin: time per frame (b = coarser, shift+b = finer)">
+                  <label className={css.field}>
+                    <span className={css.fieldLabel}>bin</span>
+                    <select className={css.select} value={bin} onChange={(e) => changeBin(e.target.value as Bin)} aria-label="Bin">
+                      {BINS.map((b) => <option key={b} value={b}>{BIN_LABEL[b]}</option>)}
+                    </select>
+                  </label>
+                </HTip>
+                <HTip content={`Playback speed: ${sp} frame${sp === 1 ? '' : 's'}/s ([ slower, ] faster)`}>
+                  <label className={css.field}>
+                    <span className={css.fieldLabel}>speed</span>
+                    <select className={css.select} value={sp} onChange={(e) => setSp(Number(e.target.value))} aria-label="Speed">
+                      {(SPEEDS.includes(sp) ? SPEEDS : [...SPEEDS, sp].sort((a, b) => a - b)).map((v) => (
+                        <option key={v} value={v}>{speedLabel(bin, v)}</option>
+                      ))}
+                    </select>
+                  </label>
+                </HTip>
+                <HTip content="Style preset (s)">
+                  <label className={css.field}>
+                    <span className={css.fieldLabel}>style</span>
+                    <select className={css.select} value={preset} onChange={(e) => setPreset(e.target.value as Preset)} aria-label="Style">
+                      {PRESETS.map((p) => <option key={p} value={p}>{PRESET_LABEL[p]}</option>)}
+                    </select>
+                  </label>
+                </HTip>
+                <HTip content="Circle size (multiplies every radius; circles also shrink when zoomed out)">
+                  <label className={css.field}>
+                    <span className={css.fieldLabel}>size</span>
+                    <select className={css.select} value={sz} onChange={(e) => setSz(Number(e.target.value))} aria-label="Circle size" data-testid="tl-size">
+                      {(SIZES.includes(sz as typeof SIZES[number]) ? [...SIZES] : [...SIZES, sz].sort((a, b) => a - b)).map((v) => (
+                        <option key={v} value={v}>{factorLabel(v)}</option>
+                      ))}
+                    </select>
+                  </label>
+                </HTip>
+                <HTip content="Loop at the end of the range (l)">
+                  <label className={css.check}>
+                    <input type="checkbox" checked={loop} onChange={(e) => setLoop(e.target.checked)} /> loop
+                  </label>
+                </HTip>
+                {suggested && suggested !== bin && (
+                  <HTip content={`${fmt(nFramesRange)} frames at ${BIN_LABEL[bin]}: long to load and play. Switch to ${BIN_LABEL[suggested]} bins?`}>
+                    <button type="button" className={`${css.btn} ${css.hint}`} onClick={() => changeBin(suggested)} data-testid="tl-suggest-bin">
+                      {fmt(nFramesRange)} frames · use {suggested}
+                    </button>
+                  </HTip>
+                )}
+                {capNote && <span className={css.note} data-testid="tl-cap-note">{capNote}</span>}
+                {!canHover && (
+                  <div className={css.keys}>
+                    Keys: space play · ←/→ {unit} · shift+←/→ {big.label} · [ ] speed · b / shift+b bin · s style · l loop · esc clear selection.
+                    {' '}Long-press a station to multi-select; long-press + drag to box-select.
+                  </div>
+                )}
               </div>
-              <RangePicker
-                bin={bin}
-                range={range}
-                lastDay={lastDay}
-                tDay={dayOf(frameStartMs(bin, floor(t)))}
-                onEdit={setRangeEdit}
-                onSpan={applySpan}
-              />
-              <Tip content="Bin: time per frame (b = coarser, shift+b = finer)">
-                <label className={css.field}>
-                  <span className={css.fieldLabel}>bin</span>
-                  <select className={css.select} value={bin} onChange={(e) => changeBin(e.target.value as Bin)} aria-label="Bin">
-                    {BINS.map((b) => <option key={b} value={b}>{BIN_LABEL[b]}</option>)}
-                  </select>
-                </label>
-              </Tip>
-              <Tip content={`Playback speed: ${sp} frame${sp === 1 ? '' : 's'}/s ([ slower, ] faster)`}>
-                <label className={css.field}>
-                  <span className={css.fieldLabel}>speed</span>
-                  <select className={css.select} value={sp} onChange={(e) => setSp(Number(e.target.value))} aria-label="Speed">
-                    {(SPEEDS.includes(sp) ? SPEEDS : [...SPEEDS, sp].sort((a, b) => a - b)).map((v) => (
-                      <option key={v} value={v}>{speedLabel(bin, v)}</option>
-                    ))}
-                  </select>
-                </label>
-              </Tip>
-              <Tip content="Style preset (s)">
-                <label className={css.field}>
-                  <span className={css.fieldLabel}>style</span>
-                  <select className={css.select} value={preset} onChange={(e) => setPreset(e.target.value as Preset)} aria-label="Style">
-                    {PRESETS.map((p) => <option key={p} value={p}>{PRESET_LABEL[p]}</option>)}
-                  </select>
-                </label>
-              </Tip>
-              <Tip content="Loop at the end of the range (l)">
-                <label className={css.check}>
-                  <input type="checkbox" checked={loop} onChange={(e) => setLoop(e.target.checked)} /> loop
-                </label>
-              </Tip>
-              {suggested && suggested !== bin && (
-                <Tip content={`${fmt(nFramesRange)} frames at ${BIN_LABEL[bin]}: long to load and play. Switch to ${BIN_LABEL[suggested]} bins?`}>
-                  <button type="button" className={`${css.btn} ${css.hint}`} onClick={() => changeBin(suggested)} data-testid="tl-suggest-bin">
-                    {fmt(nFramesRange)} frames · use {suggested}
+            )}
+            <div className={css.transportRow}>
+              <div className={css.transport}>
+                <HTip content={`Previous ${unit} (←; shift+← = ${big.label})`}>
+                  <button type="button" className={css.chev} onClick={() => step(-1)} aria-label={`Previous ${unit}`}><Chevron dir="left" /></button>
+                </HTip>
+                <HTip content="Play / pause (space)">
+                  <button type="button" className={css.play} onClick={toggle} aria-label={playing ? 'Pause' : 'Play'} data-testid="tl-play">
+                    <PlayIcon playing={playing} />
                   </button>
-                </Tip>
-              )}
-              {capNote && <span className={css.note} data-testid="tl-cap-note">{capNote}</span>}
-            </div>
-            <div className={css.row}>
+                </HTip>
+                <HTip content={`Next ${unit} (→; shift+→ = ${big.label})`}>
+                  <button type="button" className={css.chev} onClick={() => step(1)} aria-label={`Next ${unit}`}><Chevron dir="right" /></button>
+                </HTip>
+              </div>
               <Scrubber
                 bin={bin}
                 iStart={iStart}
@@ -677,6 +916,11 @@ export default function Timelapse() {
                 onPeek={onPeek}
               />
               <span className={css.rangeLabel}>{formatT(iMs)}</span>
+              {!wide && (
+                <button type="button" className={css.gear} onClick={() => setSettingsOpen(!settingsOpen)} aria-expanded={settingsOpen} aria-label="Settings" data-testid="tl-gear">
+                  <GearIcon />
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -685,69 +929,188 @@ export default function Timelapse() {
   )
 }
 
-/** The preset's color key + the shared size note. */
+function GearIcon() {
+  return (
+    <svg width={16} height={16} viewBox="0 0 24 24" aria-hidden>
+      <path
+        fill="currentColor"
+        d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.8 1.7 1L11 21h4l.4-2.9c.6-.2 1.2-.6 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"
+        transform="translate(-1 0)"
+      />
+    </svg>
+  )
+}
+
+/** The preset's color key as one thin bar (split: two glyphs). */
+function LegendBar({ preset }: { preset: Preset }) {
+  if (preset === 'split') {
+    return (
+      <span className={css.legendGlyphs}>
+        <span><svg width={12} height={12}><circle cx={6} cy={6} r={5} fill={rgbCss(WARM, SPLIT.alpha / 255)} /></svg> starts</span>
+        <span><svg width={12} height={12}><circle cx={6} cy={6} r={4.5} fill="none" stroke={rgbCss(COOL)} strokeWidth={SPLIT.ringWidth} /></svg> ends</span>
+      </span>
+    )
+  }
+  return <span className={css.legendBar} style={preset === 'flow' ? { background: FLOW_GRADIENT } : { background: ACT_GRADIENT, opacity: ACT.alpha / 255 + 0.2 }} />
+}
+
+/** The expanded legend: title, bar labels, and the shared size note. */
 function Legend({ preset, unit, note }: { preset: Preset; unit: string; note: string }) {
   return (
-    <div className={css.legend} data-testid="tl-legend">
+    <>
       <div className={css.legendTitle}>Rides per {unit}, by station · {PRESET_LABEL[preset]}</div>
-      {preset === 'flow' && <>
-        <div className={css.legendBar} style={{ background: `linear-gradient(to right, ${rgbCss(COOL)}, ${rgbCss(NEUTRAL)}, ${rgbCss(WARM)})` }} />
+      {preset === 'flow' && (
         <div className={css.legendLabels}>
           <span>net arrivals</span>
           <span>balanced</span>
           <span>net departures</span>
         </div>
-      </>}
-      {preset === 'act' && <>
-        <div className={css.legendBar} style={{ background: ACT_GRADIENT, opacity: ACT.alpha / 255 + 0.2 }} />
+      )}
+      {preset === 'act' && (
         <div className={css.legendLabels}>
           <span>quiet</span>
           <span>busy (overlaps glow)</span>
         </div>
-      </>}
-      {preset === 'split' && (
-        <div className={css.legendGlyphs}>
-          <span><svg width={14} height={14}><circle cx={7} cy={7} r={6} fill={rgbCss(WARM, SPLIT.alpha / 255)} /></svg> starts (disk)</span>
-          <span><svg width={14} height={14}><circle cx={7} cy={7} r={5.5} fill="none" stroke={rgbCss(COOL)} strokeWidth={SPLIT.ringWidth} /></svg> ends (ring)</span>
-        </div>
       )}
+      {preset === 'split' && <div className={css.legendLabels}><span>disk = starts, ring = ends</span></div>}
       <div className={css.legendNote}>{note}; faint dot = no rides that {unit}</div>
+    </>
+  )
+}
+
+const HOVER_W = 260
+
+/** Mouse-only: the hovered station's current-frame stats, by the cursor. */
+function HoverCard({ x, y, w, name, starts, ends, selected, multi }: {
+  x: number
+  y: number
+  /** Page width: the card flips to the cursor's left near the right edge. */
+  w: number
+  name: string
+  starts: number
+  ends: number
+  selected: boolean
+  multi: boolean
+}) {
+  const hint = multi ? 'click to toggle' : selected ? 'shift/⌘-click to remove' : 'click to select · shift/⌘-click to add'
+  return (
+    <div className={css.hoverCard} style={{ left: x + 14 + HOVER_W > w ? max(8, x - 14 - HOVER_W) : x + 14, top: y + 14, width: HOVER_W }}>
+      <span className={css.cardName}>{name}</span>
+      <span className={css.cardStat}><Stats starts={starts} ends={ends} /></span>
+      <span className={css.cardHint}>{hint}</span>
     </div>
   )
 }
 
-/** A pinned station: current-frame stats + a sparkline of starts + ends over
- *  the range from whatever chunks are cached (gaps where they aren't). */
-function PinCard({ src, bin, id, name, starts, ends, iStart, iEnd, i, onUnpin }: {
+function Stats({ starts, ends }: { starts: number; ends: number }) {
+  const fmt = (v: number) => round(v).toLocaleString('en-US')
+  const net = starts - ends
+  return <>{fmt(starts)} starts · {fmt(ends)} ends · net {net >= 0 ? '+' : ''}{fmt(net)}</>
+}
+
+/** Selected stations: docked right (desktop) or a collapsible bottom sheet
+ *  (phone), with a count, Clear, and Done while in multi-select mode. */
+function SelPanel({ src, bin, table, idx, starts, ends, iStart, iEnd, i, multi, wide, onRemove, onClear, onDone }: {
+  src: SourceMode
+  bin: Bin
+  table: StationTable
+  idx: number[]
+  starts: Float32Array
+  ends: Float32Array
+  iStart: number
+  iEnd: number
+  i: number
+  multi: boolean
+  wide: boolean
+  onRemove: (id: string) => void
+  onClear: () => void
+  onDone: () => void
+}) {
+  const [collapsed, setCollapsed] = useState(false)
+  const n = idx.length
+  const single = n === 1 && !multi
+  return (
+    <div className={`${css.panel} ${collapsed && !wide ? css.panelCollapsed : ''}`} data-testid="tl-sel-panel">
+      <div className={css.panelHead}>
+        {!wide && (
+          <button type="button" className={css.collapse} onClick={() => setCollapsed(!collapsed)} aria-expanded={!collapsed} aria-label={collapsed ? 'Expand selection' : 'Collapse selection'}>
+            <Chevron dir={collapsed ? 'right' : 'left'} />
+          </button>
+        )}
+        <span className={css.panelCount} data-testid="tl-sel-count">
+          {n} selected
+          {multi && <span className={css.modeTag}>multi-select</span>}
+        </span>
+        <span className={css.panelBtns}>
+          {multi && <button type="button" className={`${css.btn} ${css.done}`} onClick={onDone} data-testid="tl-sel-done">Done</button>}
+          {n > 0 && <button type="button" className={css.btn} onClick={onClear} data-testid="tl-sel-clear">Clear</button>}
+        </span>
+      </div>
+      {multi && !collapsed && <div className={css.panelHint}>Tap stations to add / remove; long-press + drag to box-select.</div>}
+      {!(collapsed && !wide) && (
+        <div className={css.rows}>
+          {idx.map((s) => (
+            <SelRow
+              key={table.ids[s]}
+              src={src}
+              bin={bin}
+              id={table.ids[s]}
+              name={table.names[s]}
+              linkable={table.names[s] !== table.ids[s]}
+              starts={starts[s]}
+              ends={ends[s]}
+              iStart={iStart}
+              iEnd={iEnd}
+              i={i}
+              big={single}
+              onRemove={() => onRemove(table.ids[s])}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** One selected station: current-frame stats + a sparkline of starts + ends
+ *  over the range from whatever chunks are cached (gaps where they aren't);
+ *  `big` (a lone selection): a taller sparkline and a station-page link. */
+function SelRow({ src, bin, id, name, linkable, starts, ends, iStart, iEnd, i, big, onRemove }: {
   src: SourceMode
   bin: Bin
   id: string
-  name: string | undefined
+  name: string
+  linkable: boolean
   starts: number
   ends: number
   iStart: number
   iEnd: number
   i: number
-  onUnpin: () => void
+  big: boolean
+  onRemove: () => void
 }) {
   const series = useTlStationSeries(src, bin, id, iStart, iEnd)
-  const W = 240
-  const H = 36
-  const path = useMemo(() => sparkPath(series, W, H), [series])
+  const W = big ? 280 : 90
+  const H = big ? 48 : 22
+  const path = useMemo(() => sparkPath(series, W, H), [series, W, H])
   const n = series.length
   const x = n ? ((i - iStart + 0.5) / n) * W : 0
-  const fmt = (v: number) => round(v).toLocaleString('en-US')
+  const spark = (
+    <svg className={big ? css.sparkBig : css.sparkMini} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+      {path && <path d={path} fill="none" stroke={rgbCss(PIN_RGB)} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />}
+      <line x1={x} x2={x} y1={0} y2={H} stroke="rgba(255,255,255,0.6)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+    </svg>
+  )
   return (
-    <div className={`${css.card} ${css.cardPinned}`} data-testid="tl-pin">
-      <span className={css.cardName}>
-        {name ?? id}
-        <button type="button" className={css.unpin} onClick={onUnpin} aria-label={`Unpin ${name ?? id}`} title="Unpin (esc clears all)">×</button>
-      </span>
-      <span className={css.cardStat}>{fmt(starts)} starts · {fmt(ends)} ends · net {starts - ends >= 0 ? '+' : ''}{fmt(starts - ends)}</span>
-      <svg className={css.spark} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
-        {path && <path d={path} fill="none" stroke={rgbCss(PIN_RGB)} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />}
-        <line x1={x} x2={x} y1={0} y2={H} stroke="rgba(255,255,255,0.6)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-      </svg>
+    <div className={`${css.selRow} ${big ? css.selRowBig : ''}`} data-testid="tl-pin">
+      <div className={css.selMain}>
+        <span className={css.selName}>{name}</span>
+        <span className={css.cardStat}><Stats starts={starts} ends={ends} /></span>
+      </div>
+      {!big && spark}
+      <button type="button" className={css.unpin} onClick={onRemove} aria-label={`Remove ${name}`}>×</button>
+      {big && spark}
+      {big && linkable && <Link className={css.stationLink} to={`/s/${id}`}>Station page →</Link>}
     </div>
   )
 }

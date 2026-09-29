@@ -32,10 +32,11 @@
  * Delete the interim two once `rides-tl` covers all of history.
  *
  * Prefetch: `useTlFrames` kicks the chunk under the playhead (+ its ±1
- * neighbours) directly; `useTlPrefetch` runs the idle fan-out
- * (`timelapsePrefetch.ts`) behind it, one request at a time.
+ * neighbours) directly; `useTlPrefetch` runs the idle fill
+ * (`timelapsePrefetch.ts`) behind it — the fan-out near the playhead, then
+ * the rest of the range — two chunks at a time.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { asyncBufferFromUrl, parquetMetadataAsync, parquetRead, type AsyncBuffer, type FileMetaData } from 'hyparquet'
 import { API_BASE } from './stations'
@@ -46,7 +47,7 @@ import {
   type Anchor, type ApiChunk, type Bin, type Block, type Chunk, type ManifestRow, type Triple,
 } from './timelapseFrames'
 import { lastDataDay } from './timelapseControls'
-import { fanOutOrder, PrefetchQueue } from './timelapsePrefetch'
+import { fillOrder, PrefetchQueue } from './timelapsePrefetch'
 
 export { TlUnavailable }
 export type SourceMode = 'auto' | 'api' | 'shard' | 'synth'
@@ -384,18 +385,31 @@ export function useTlFrames(src: SourceMode, bin: Bin, t: number, radius: number
   }, [qc, src, bin, a, b, ka, kb, version])
 }
 
-/** Idle fan-out (`PrefetchQueue`) around chunk `k` over `[kMin, kMax]`: one
- *  request in flight, re-prioritized whenever `k` (the playhead's chunk)
- *  moves. Both anchors of a chunk count as one fetch. */
+/** Chunk fetches the idle fill keeps in flight (each = both anchors): low,
+ *  so the playhead's own chunks (`useTlFrames`) never queue behind it. */
+const PREFETCH_CONCURRENCY = 2
+
+/** Idle fill (`PrefetchQueue`) around chunk `k` over `[kMin, kMax]`: the
+ *  fan-out near the playhead first, then every other chunk in the range
+ *  (`fillOrder`), so the range's sparklines fill completely. Re-prioritized
+ *  whenever `k` (the playhead's chunk) or the range moves; a bin / source
+ *  change drops the queue. Both anchors of a chunk count as one fetch. */
 export function useTlPrefetch(src: SourceMode, bin: Bin, k: number, kMin: number, kMax: number): void {
   const qc = useQueryClient()
-  const queue = useMemo(() => {
+  // Created in an effect (not a memo) so StrictMode's mount → unmount →
+  // mount gets a live queue, not the one the first cleanup disposed.
+  const queueRef = useRef<PrefetchQueue | null>(null)
+  useEffect(() => {
     const fetch = (c: number) => Promise.all(ANCHORS.map((anchor) => ensureChunk(qc, src, anchor, bin, c)))
     const isCached = (c: number) => ANCHORS.every((anchor) => !!getChunk(qc, src, anchor, bin, c))
-    return new PrefetchQueue(fetch, isCached)
+    const q = new PrefetchQueue(fetch, isCached, PREFETCH_CONCURRENCY)
+    queueRef.current = q
+    return () => {
+      q.dispose()
+      queueRef.current = null
+    }
   }, [qc, src, bin])
-  useEffect(() => () => queue.dispose(), [queue])
-  useEffect(() => queue.retarget(fanOutOrder(k, kMin, kMax)), [queue, k, kMin, kMax])
+  useEffect(() => queueRef.current?.retarget(fillOrder(k, kMin, kMax)), [qc, src, bin, k, kMin, kMax])
 }
 
 /** `starts + ends` per frame for one station over `[iA, iB]` from cached

@@ -91,14 +91,18 @@ function AppContent() {
           <Route path="*" element={<NotFound />} />
         </Routes>
       </Suspense>
-      <ThemeToggle onOpenShortcuts={openModal} hideThemeButton={isStationsPage}>
-        {isStationsPage && (
-          <>
-            <HomeButton />
-            <ThemeTileToggle />
-          </>
-        )}
-      </ThemeToggle>
+      {/* `/timelapse` owns the bottom edge (control bar + bottom sheet); its
+          corner widget would sit on top of the ⚙ / scrubber. */}
+      {pathname !== '/timelapse' && (
+        <ThemeToggle onOpenShortcuts={openModal} hideThemeButton={isStationsPage}>
+          {isStationsPage && (
+            <>
+              <HomeButton />
+              <ThemeTileToggle />
+            </>
+          )}
+        </ThemeToggle>
+      )}
       <ShortcutsModal
         isOpen={isModalOpen}
         onClose={closeModal}

@@ -1,10 +1,112 @@
 /* `/timelapse` (`specs/timelapse-map.md` "UX"): full-bleed GL map with a
- * clock (top-left), legend (top-right), and a control bar (bottom). Dark
- * chrome reads on both light and dark basemaps. */
+ * header strip (date + legend, top), a control bar (bottom), and the
+ * selection panel (docked right on wide screens, a bottom sheet above the
+ * controls on phones). Mobile-first; dark chrome reads on both light and
+ * dark basemaps. Every overlay takes pointer events (they're siblings of
+ * the map's canvas container, so nothing falls through to deck). */
 .page {
     position: fixed;
     inset: 0;
     overflow: hidden;
+    --tl-controls-h: 60px;
+    --tl-gap: 8px;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+}
+
+.page input,
+.page select {
+    -webkit-user-select: auto;
+    user-select: auto;
+}
+
+@media (min-width: 768px) {
+    .page {
+        --tl-gap: 12px;
+    }
+}
+
+.header {
+    position: absolute;
+    top: var(--tl-gap);
+    left: var(--tl-gap);
+    right: var(--tl-gap);
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 10px 7px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font-size: 11px;
+    backdrop-filter: blur(4px);
+}
+
+@media (min-width: 768px) {
+    .header {
+        right: auto;
+        width: 400px;
+        padding: 8px 14px 9px;
+    }
+}
+
+.headRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.info {
+    flex: none;
+    width: 24px;
+    height: 24px;
+    margin-left: auto;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 50%;
+    background: transparent;
+    color: #fff;
+    font: italic 700 13px/1 Georgia, serif;
+    cursor: pointer;
+}
+
+.barBtn {
+    display: block;
+    width: 100%;
+    padding: 3px 0;
+    border: 0;
+    background: transparent;
+    color: #fff;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.barBtn:disabled {
+    cursor: default;
+}
+
+.legendBody {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 2px;
+}
+
+.chip {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.12);
+    opacity: 0.85;
 }
 
 .map {
@@ -12,24 +114,11 @@
     height: 100%;
 }
 
-.clock {
-    position: absolute;
-    top: 12px;
-    left: 12px;
-    z-index: 1000;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 8px 14px;
-    border-radius: 8px;
-    background: rgba(0, 0, 0, 0.72);
-    color: #fff;
-    pointer-events: none;
-    backdrop-filter: blur(4px);
-}
-
 .clockDate {
-    font-size: 26px;
+    font-size: 17px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     font-weight: 700;
     line-height: 1.1;
     letter-spacing: 0.01em;
@@ -42,9 +131,14 @@
 
 .badges {
     display: flex;
-    gap: 6px;
-    margin-top: 4px;
+    gap: 4px;
     flex-wrap: wrap;
+}
+
+@media (min-width: 768px) {
+    .clockDate {
+        font-size: 22px;
+    }
 }
 
 .badge {
@@ -65,30 +159,15 @@
     color: #fff;
 }
 
-.legend {
-    position: absolute;
-    top: 12px;
-    right: 12px;
-    z-index: 1000;
-    width: 220px;
-    padding: 8px 12px;
-    border-radius: 8px;
-    background: rgba(0, 0, 0, 0.72);
-    color: #fff;
-    font-size: 11px;
-    pointer-events: none;
-    backdrop-filter: blur(4px);
-}
-
 .legendTitle {
     font-weight: 700;
     margin-bottom: 4px;
 }
 
 .legendBar {
-    height: 10px;
+    display: block;
+    height: 6px;
     border-radius: 3px;
-    margin: 4px 0 2px;
 }
 
 .legendLabels {
@@ -102,18 +181,18 @@
     opacity: 0.8;
 }
 
-/* Control bar: a row of controls (wraps on narrow screens) over a
- * full-width scrubber row. */
+/* Control bar: the settings row (always on wide screens; behind ⚙ on
+ * phones) over the transport + scrubber row. */
 .controls {
     position: absolute;
-    left: 12px;
-    right: 12px;
-    bottom: 12px;
+    left: var(--tl-gap);
+    right: var(--tl-gap);
+    bottom: var(--tl-gap);
     z-index: 1000;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding: 8px 12px;
+    padding: 8px 10px;
     border-radius: 8px;
     background: rgba(0, 0, 0, 0.72);
     color: #fff;
@@ -134,11 +213,85 @@
     cursor: pointer;
 }
 
-.btn:hover {
-    background: rgba(255, 255, 255, 0.18);
+@media (hover: hover) {
+    .btn:hover {
+        background: rgba(255, 255, 255, 0.18);
+    }
+}
+
+.transportRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.transport {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+}
+
+.chev,
+.gear,
+.collapse {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 50%;
+    background: transparent;
+    color: #fff;
+    cursor: pointer;
+}
+
+.gear[aria-expanded="true"] {
+    border-color: #ffd24a;
+    color: #ffd24a;
+}
+
+.play {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 42px;
+    height: 42px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: #ffd24a;
+    color: #111;
+    cursor: pointer;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+
+@media (hover: hover) {
+    .chev:hover,
+    .gear:hover,
+    .collapse:hover {
+        background: rgba(255, 255, 255, 0.15);
+    }
+
+    .play:hover {
+        background: #ffdf73;
+    }
+}
+
+.keys {
+    flex-basis: 100%;
+    font-size: 11px;
+    opacity: 0.7;
 }
 
 .btn:focus-visible,
+.chev:focus-visible,
+.play:focus-visible,
+.gear:focus-visible,
 .select:focus-visible,
 .date:focus-visible,
 .range:focus-visible {
@@ -155,6 +308,7 @@
 
 .group {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 4px;
 }
@@ -300,6 +454,7 @@
 }
 
 .rangeLabel {
+    flex: none;
     white-space: nowrap;
     opacity: 0.8;
     font-variant-numeric: tabular-nums;
@@ -322,7 +477,6 @@
 .legendGlyphs {
     display: flex;
     gap: 12px;
-    margin: 4px 0 2px;
 }
 
 .legendGlyphs span {
@@ -349,35 +503,168 @@
     pointer-events: none;
 }
 
-/* Pinned-station cards (+ the hover card) under the clock. */
-.drawers {
+/* Mouse-only hover card, next to the cursor. */
+.hoverCard {
     position: absolute;
-    left: 12px;
-    top: 120px;
-    z-index: 1000;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    max-height: calc(100% - 200px);
-    overflow-y: auto;
-}
-
-.card {
+    z-index: 1100;
     display: flex;
     flex-direction: column;
     gap: 2px;
-    width: 260px;
+    box-sizing: border-box;
     padding: 6px 10px;
     border-radius: 6px;
-    background: rgba(0, 0, 0, 0.72);
+    background: rgba(0, 0, 0, 0.82);
     color: #fff;
     font-size: 12px;
     line-height: 1.3;
+    pointer-events: none;
+}
+
+/* Drag-select rectangle. */
+.dragRect {
+    position: absolute;
+    z-index: 900;
+    border: 1.5px solid #ffd24a;
+    background: rgba(255, 210, 74, 0.15);
+    pointer-events: none;
+}
+
+/* Selection panel: a bottom sheet above the controls (phone), docked
+ * right (wide). */
+.panel {
+    position: absolute;
+    left: var(--tl-gap);
+    right: var(--tl-gap);
+    bottom: calc(var(--tl-controls-h) + 2 * var(--tl-gap));
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    max-height: 38vh;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.8);
+    color: #fff;
+    font-size: 12px;
     backdrop-filter: blur(4px);
 }
 
-.cardPinned {
-    box-shadow: inset 3px 0 0 #ffd24a;
+@media (min-width: 768px) {
+    .panel {
+        left: auto;
+        top: var(--tl-gap);
+        bottom: auto;
+        width: 320px;
+        max-height: calc(100% - var(--tl-controls-h) - 3 * var(--tl-gap));
+    }
+}
+
+.panelHead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px 6px 10px;
+}
+
+.collapse {
+    width: 24px;
+    height: 24px;
+    transform: rotate(-90deg);
+}
+
+.collapse[aria-expanded="false"] {
+    transform: rotate(-90deg) scaleX(-1);
+}
+
+.panelCount {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.modeTag {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(255, 210, 74, 0.25);
+    color: #ffd24a;
+}
+
+.panelBtns {
+    display: flex;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.panelBtns .btn {
+    height: 26px;
+    font-size: 12px;
+}
+
+.done {
+    border-color: #ffd24a;
+    background: #ffd24a;
+    color: #111;
+    font-weight: 700;
+}
+
+.panelHint {
+    padding: 0 10px 6px;
+    font-size: 11px;
+    opacity: 0.7;
+}
+
+.rows {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.selRow {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 2px 8px;
+    padding: 5px 6px 5px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.selRowBig {
+    grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.selMain {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.selName {
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sparkMini {
+    width: 90px;
+    height: 22px;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.sparkBig {
+    grid-column: 1 / -1;
+    width: 100%;
+    height: 48px;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.stationLink {
+    grid-column: 1 / -1;
+    color: #ffd24a;
+    font-size: 12px;
 }
 
 .cardName {
@@ -397,7 +684,8 @@
 }
 
 .unpin {
-    padding: 0 4px;
+    align-self: start;
+    padding: 2px 6px;
     border: 0;
     background: transparent;
     color: #fff;
@@ -407,13 +695,9 @@
     opacity: 0.7;
 }
 
-.unpin:hover {
-    opacity: 1;
+@media (hover: hover) {
+    .unpin:hover {
+        opacity: 1;
+    }
 }
 
-.spark {
-    width: 100%;
-    height: 36px;
-    margin-top: 2px;
-    background: rgba(255, 255, 255, 0.06);
-}
