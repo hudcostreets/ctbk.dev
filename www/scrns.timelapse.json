@@ -1,0 +1,20 @@
+{
+  "tl-2025-summer-week": {
+    "query": "timelapse?mv=1&b=1h&d=250609-250615&fpb=4&theme=dark&cap=A%20summer%20week%2C%20hourly",
+    "width": 1080,
+    "height": 1080,
+    "selector": "[data-tl-frame='0']",
+    "path": "tl-2025-summer-week.mp4",
+    "fps": 30,
+    "actions": [{ "type": "animate", "frames": 672, "eval": "(i) => window.__tl.seek(i)" }]
+  },
+  "tl-2024-year": {
+    "query": "timelapse?mv=1&b=1d&d=240101-241231&fpb=4&theme=dark&cap=2024%2C%20daily",
+    "width": 1080,
+    "height": 1080,
+    "selector": "[data-tl-frame='0']",
+    "path": "tl-2024-year.mp4",
+    "fps": 30,
+    "actions": [{ "type": "animate", "frames": 1464, "eval": "(i) => window.__tl.seek(i)" }]
+  }
+}

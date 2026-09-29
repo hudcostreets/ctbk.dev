@@ -95,6 +95,7 @@
 !scripts/gen-version.js
 !scripts/push-screenshots.py
 !scrns.config.json
+!scrns.timelapse.json
 !src/chart/YmrgtbChart.tsx
 !src/chart/inactive.test.ts
 !src/chart/inactive.ts
