@@ -1,5 +1,7 @@
 /**
- * `/timelapse` station selection (`sel=`) and circle sizing: the pure half.
+ * Station selection on the GL maps (`/stations`, `/timelapse`, the Home
+ * embed): the pure half. `useSelection` holds it; `useSelectionGestures`
+ * feeds it from pointer gestures (`gesture.ts`).
  *
  * Selection model (Google-Photos-like):
  * - tap a station: select just it; tap empty map: clear
@@ -11,7 +13,8 @@
  * - Done keeps the set and leaves the mode; Clear / Esc empty it; emptying
  *   the set any way leaves the mode
  */
-import type { Rect } from '../lib/tlGesture'
+import type { GestureOut, Pt, Rect } from './gesture'
+import type { Param } from 'use-prms'
 
 export interface SelState {
   ids: string[]
@@ -64,6 +67,24 @@ export function reduceSel(s: SelState, a: SelAction): SelState {
   }
 }
 
+/** The selection action a gesture output means (`null`: not a selection
+ *  event). `pickAt` / `pickRect` resolve screen points / rectangles to
+ *  station ids; `fromLongPress`: the gesture began with a long-press (so its
+ *  rectangle enters multi-select mode). */
+export function gestureSelAction(
+  o: GestureOut,
+  pickAt: (at: Pt) => string | null,
+  pickRect: (rect: Rect) => string[],
+  fromLongPress: boolean,
+): SelAction | null {
+  switch (o.t) {
+    case 'tap': return { t: 'tap', id: pickAt(o.at), toggle: o.mod }
+    case 'longpress': return { t: 'longpress', id: pickAt(o.at) }
+    case 'rectEnd': return { t: 'add', ids: pickRect(o.rect), multi: fromLongPress }
+    default: return null
+  }
+}
+
 /** Table indices of the stations whose projected position (`project`:
  *  `[lng, lat]` → screen px) falls in `rect`, among those `keep` accepts.
  *  `positions` are `[lng, lat]` pairs (`StationTable.positions`). */
@@ -83,38 +104,9 @@ export function stationsInRect(
   return out
 }
 
-// ---------------------------------------------------------------------------
-// Circle size (`sz=`).
-// ---------------------------------------------------------------------------
-
-/** The size control's steps (radius multipliers). */
-export const SIZES = [0.25, 0.35, 0.5, 0.7, 1, 1.4, 2] as const
-export const SIZE_MIN = SIZES[0]
-export const SIZE_MAX = SIZES[SIZES.length - 1]
-
-/** `sz` URL value → multiplier (absent / malformed → 1; clamped). */
-export function parseSize(raw: string | undefined): number {
-  const v = raw === undefined ? NaN : Number(raw)
-  return v === v && v > 0 ? Math.min(SIZE_MAX, Math.max(SIZE_MIN, v)) : 1
-}
-
-/** Zoom at and above which circles draw at full size. */
-export const ZOOM_FULL = 11
-/** Floor of the zoomed-out shrink. */
-export const ZOOM_MIN_FACTOR = 0.35
-
-/** Zoomed-out shrink: radius halves every 2 zoom levels below `ZOOM_FULL`
- *  (area tracks the map's), floored at `ZOOM_MIN_FACTOR`. */
-export function zoomFactor(zoom: number): number {
-  return Math.min(1, Math.max(ZOOM_MIN_FACTOR, 2 ** ((zoom - ZOOM_FULL) / 2)))
-}
-
-/** Radius multiplier on the presets' `√(rides ÷ scale)` radii. */
-export function radiusFactor(sz: number, zoom: number): number {
-  return sz * zoomFactor(zoom)
-}
-
-/** `×0.5` / `×1.4` (two significant digits, no trailing zeros). */
-export function factorLabel(f: number): string {
-  return `×${Number(f.toPrecision(2))}`
+/** URL codec for a station set (`?sel=`): comma-joined ids (short_names),
+ *  order-preserving (selection order = chip / panel order). */
+export const selParam: Param<string[]> = {
+  encode: (v) => (v.length ? v.join(',') : undefined),
+  decode: (raw) => (raw ? raw.split(',').filter(Boolean) : []),
 }

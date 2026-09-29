@@ -7,10 +7,11 @@
  * the session. Frames are lerped in JS from a continuous playhead `t` (frame
  * index + φ) driven by one rAF loop that stalls (badge) while the next chunk
  * isn't cached; an idle fill prefetches the rest of the range behind it.
- * Selection (`sel=`; `timelapseSelection.ts`): tap selects one station,
- * long-press enters multi-select mode, shift/⌘-click toggles, and a
- * long-press- or shift-drag rectangle adds (`lib/tlGesture.ts`, fed native
- * pointer events from the map's canvas container); selected stations get a
+ * Selection (`sel=`; the shared `lib/mapSelection` model, as on
+ * `/stations`): tap selects one station, long-press enters multi-select
+ * mode, shift/⌘-click toggles, and a long-press- or shift-drag rectangle
+ * adds (fed native pointer events from the map's canvas container, so
+ * overlays never start a gesture); selected stations get a
  * ring and a row in the selection panel (docked right on desktop, a bottom
  * sheet on phones). Mobile-first chrome: a header strip (date + color bar,
  * tap to expand the legend) and a control bar (prev / play / next +
@@ -38,7 +39,7 @@ import { boolParam, codeParam, intParam, llzParam, stringParam, useUrlState, typ
 import GLMap from '../components/GLMap'
 import { rampRgb } from '../components/flowLens'
 import { Tip, type TipProps } from '../components/Tip'
-import { IDLE, LONG_PRESS_MS, step as gestureStep, type GestureEvent, type GestureState, type Pt, type Rect } from '../lib/tlGesture'
+import { selParam, stationsInRect, useSelection, useSelectionGestures, type Pt, type Rect } from '../lib/mapSelection'
 import { useCanHover, useMediaQuery } from '../lib/useMediaQuery'
 import {
   cachedChunks, ensureChunk, useTlFrames, useTlLastDay, useTlPrefetch, useTlStationSeries, useTlTotals, type SourceMode,
@@ -54,9 +55,7 @@ import {
   type Bin, type Chunk, type Preset, type StationTable,
   ACT, ANCHORS, BINS, binMs, COOL, DAY_MS, DEFAULT_SCALE, GENESIS_MS, NEUTRAL, PRESETS, SIZE, SPLIT, WARM,
 } from '../query/timelapseFrames'
-import {
-  factorLabel, parseSize, radiusFactor, reduceSel, SIZES, stationsInRect, zoomFactor, type SelAction,
-} from '../query/timelapseSelection'
+import { factorLabel, parseSize, radiusFactor, SIZES, zoomFactor } from '../query/timelapseSize'
 import css from '../timelapse.module.css'
 
 const { floor, max, min, round } = Math
@@ -74,10 +73,6 @@ const SYSTEM_LLZ: LLZ = { lat: 40.735, lng: -73.975, zoom: 11 }
 const viewParam = llzParam({ default: SYSTEM_LLZ, latLngDecimals: 3 })
 const presetParam = codeParam<Preset>('flow', [['flow', 'flow'], ['act', 'act'], ['split', 'split']])
 /** `?sel=`: pinned station ids, comma-joined (as on `/stations`). */
-const selParam: Param<string[]> = {
-  encode: (v) => (v.length ? v.join(',') : undefined),
-  decode: (raw) => (raw ? raw.split(',').filter(Boolean) : []),
-}
 const srcParam = codeParam<SourceMode>('auto', [['auto', 'a'], ['api', 'api'], ['shard', 'sh'], ['synth', 'sy']])
 
 /** Today's local calendar date as a local-as-UTC midnight. The only
@@ -373,19 +368,7 @@ export default function Timelapse() {
   }, [playing, sp, iStart, iEnd, loop, setTUrl, bin])
 
   // Selection: `sel=` (URL) + multi-select mode (session-local).
-  const [multi, setMulti] = useState(false)
-  const selRef = useRef({ ids: pins, multi })
-  selRef.current = { ids: pins, multi }
-  const applySel = useCallback((a: SelAction) => {
-    const s = selRef.current
-    const n = reduceSel(s, a)
-    if (n.ids.length !== s.ids.length || n.ids.some((x, j) => x !== s.ids[j])) setPins(n.ids)
-    if (n.multi !== s.multi) setMulti(n.multi)
-    selRef.current = n
-  }, [setPins])
-  const applySelRef = useRef(applySel)
-  applySelRef.current = applySel
-  useEffect(() => { if (!pins.length && multi) setMulti(false) }, [pins, multi])
+  const { multi, apply: applySel } = useSelection(pins, setPins)
 
   // Keyboard (`use-kbd`): all show up in the ShortcutsModal / Omnibar. Off in
   // movie mode (interaction disabled).
@@ -464,7 +447,7 @@ export default function Timelapse() {
   const layers = useMemo<Layer[]>(() => {
     if (!table || !frame) return []
     const n = table.ids.length
-    // Picking only; selection is `onPointerDown` → `tlGesture` → `pickObject`.
+    // Picking only; selection is `useSelectionGestures` → `pickObject`.
     const pick = {
       pickable: !mv,
       onHover: canHover ? (info: PickingInfo) => setHover(info.index >= 0 ? { i: info.index, x: info.x, y: info.y } : null) : undefined,
@@ -595,104 +578,31 @@ export default function Timelapse() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mv, bin, iStart, fpb, nFrames, src])
 
-  // ---- Selection gestures (`lib/tlGesture.ts`) -----------------------------
-  // Native pointer listeners on the map's canvas container, so overlays
-  // (siblings of the map, not inside it) never start a gesture. Taps pick
-  // with deck's `pickObject` (a wider radius for fingers); rectangles test
-  // projected station positions (`stationsInRect`).
+  // ---- Selection gestures (`lib/mapSelection`) -----------------------------
+  // Taps pick with deck's `pickObject` (a wider radius for fingers);
+  // rectangles test projected station positions (`stationsInRect`).
   const overlayRef = useRef<MapboxOverlay | null>(null)
   const [gestureMap, setGestureMap] = useState<MaplibreMapInstance | null>(null)
-  const [dragRect, setDragRect] = useState<Rect | null>(null)
-  const pickAt = useRef<(at: Pt, touch: boolean) => string | null>(() => null)
-  pickAt.current = (at, touch) => {
-    const o = overlayRef.current
-    if (!o || !table) return null
-    const info = o.pickObject({ x: at.x, y: at.y, radius: touch ? 12 : 3 })
-    return info && info.index >= 0 ? table.ids[info.index] : null
-  }
-  const pickRect = useRef<(r: Rect) => string[]>(() => [])
-  pickRect.current = (r) => {
-    const m = gestureMap
-    if (!m || !table || !frame) return []
-    // Current (named) stations, plus any retired one active this frame.
-    const keep = (j: number) => table.names[j] !== table.ids[j] || frame.starts[j] + frame.ends[j] > 0
-    const project = (lng: number, lat: number): [number, number] => {
-      const p = m.project([lng, lat])
-      return [p.x, p.y]
-    }
-    return stationsInRect(table.positions, project, r, keep).map((j) => table.ids[j])
-  }
-  useEffect(() => {
-    const m = gestureMap
-    if (!m || mv) return
-    // Shift+drag is ours (rectangle select), not MapLibre's box zoom.
-    m.boxZoom.disable()
-    const el = m.getCanvasContainer()
-    let s: GestureState = IDLE
-    let timer = 0
-    let touch = false
-    let fromLongPress = false
-    const rel = (e: PointerEvent): Pt => {
-      const r = el.getBoundingClientRect()
-      return { x: e.clientX - r.left, y: e.clientY - r.top }
-    }
-    const handle = (ev: GestureEvent) => {
-      const r = gestureStep(s, ev)
-      s = r.s
-      if (s.k !== 'press') clearTimeout(timer)
-      for (const o of r.out) {
-        switch (o.t) {
-          case 'hold': m.dragPan.disable(); break
-          case 'release': m.dragPan.enable(); break
-          case 'tap': applySelRef.current({ t: 'tap', id: pickAt.current(o.at, touch), toggle: o.mod }); break
-          case 'longpress': {
-            fromLongPress = true
-            navigator.vibrate?.(15)
-            applySelRef.current({ t: 'longpress', id: pickAt.current(o.at, touch) })
-            break
-          }
-          case 'rect': setDragRect(o.rect); break
-          case 'rectEnd': {
-            setDragRect(null)
-            applySelRef.current({ t: 'add', ids: pickRect.current(o.rect), multi: fromLongPress })
-            break
-          }
-          case 'rectCancel': setDragRect(null); break
-        }
+  const dragRect = useSelectionGestures(gestureMap, {
+    pickAt: (at: Pt, touch: boolean) => {
+      const o = overlayRef.current
+      if (!o || !table) return null
+      const info = o.pickObject({ x: at.x, y: at.y, radius: touch ? 12 : 3 })
+      return info && info.index >= 0 ? table.ids[info.index] : null
+    },
+    pickRect: (r: Rect) => {
+      const m = gestureMap
+      if (!m || !table || !frame) return []
+      // Current (named) stations, plus any retired one active this frame.
+      const keep = (j: number) => table.names[j] !== table.ids[j] || frame.starts[j] + frame.ends[j] > 0
+      const project = (lng: number, lat: number): [number, number] => {
+        const p = m.project([lng, lat])
+        return [p.x, p.y]
       }
-    }
-    const onDown = (e: PointerEvent) => {
-      if (e.pointerType === 'mouse' && e.button !== 0) return
-      const first = s.k === 'idle'
-      if (first) {
-        touch = e.pointerType !== 'mouse'
-        fromLongPress = false
-      }
-      handle({ t: 'down', id: e.pointerId, at: rel(e), time: performance.now(), touch, shift: e.shiftKey, mod: e.shiftKey || e.metaKey || e.ctrlKey })
-      if (first && s.k === 'press') timer = window.setTimeout(() => handle({ t: 'timer', time: performance.now() }), LONG_PRESS_MS)
-    }
-    const onMove = (e: PointerEvent) => { if (s.k !== 'idle') handle({ t: 'move', id: e.pointerId, at: rel(e) }) }
-    const onUp = (e: PointerEvent) => { if (s.k !== 'idle') handle({ t: 'up', id: e.pointerId, at: rel(e) }) }
-    const onCancel = () => { if (s.k !== 'idle') handle({ t: 'cancel' }) }
-    // A long-press would otherwise open the context menu / callout.
-    const onContext = (e: Event) => e.preventDefault()
-    el.addEventListener('pointerdown', onDown)
-    el.addEventListener('contextmenu', onContext)
-    window.addEventListener('pointermove', onMove)
-    window.addEventListener('pointerup', onUp)
-    window.addEventListener('pointercancel', onCancel)
-    window.addEventListener('blur', onCancel)
-    return () => {
-      clearTimeout(timer)
-      el.removeEventListener('pointerdown', onDown)
-      el.removeEventListener('contextmenu', onContext)
-      window.removeEventListener('pointermove', onMove)
-      window.removeEventListener('pointerup', onUp)
-      window.removeEventListener('pointercancel', onCancel)
-      window.removeEventListener('blur', onCancel)
-      m.dragPan.enable()
-    }
-  }, [gestureMap, mv])
+      return stationsInRect(table.positions, project, r, keep).map((j) => table.ids[j])
+    },
+    apply: applySel,
+  }, !mv)
 
   // Control-bar height → `--tl-controls-h`, so the selection panel / bottom
   // sheet sits just above it.

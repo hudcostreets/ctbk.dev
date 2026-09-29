@@ -1,9 +1,10 @@
 /**
- * Map selection gestures for `/timelapse` (`specs/timelapse-map.md` "UX" →
- * selection), as a pure state machine over pointer events; the page feeds it
- * native pointer events from the map's canvas container, a long-press timer
- * tick, and acts on its outputs (pick + select, suppress map panning, draw
- * the drag rectangle).
+ * Map selection gestures (shared by `/stations` and `/timelapse`;
+ * `specs/timelapse-map.md` "Selection gestures"), as a pure state machine
+ * over pointer events. `useSelectionGestures` feeds it native pointer events
+ * from the map's canvas container and a long-press timer tick, and acts on
+ * its outputs (pick + select, suppress map panning, draw the drag
+ * rectangle).
  *
  * - press + release within `MOVE_TOL` (before `LONG_PRESS_MS`) → `tap`
  * - press + move past `MOVE_TOL` → `pan` (the map's own drag-pan handles it)

@@ -143,7 +143,7 @@ As built after the mobile pass (2026-09-29); the original sketch is kept below i
 - **Overlays consume pointer events**; selection gestures listen on the map canvas container only, so taps on overlays never reach stations.
 - **Tooltips** (floating-ui) only when `(hover: hover)`; the hover card follows the cursor, clamped to the viewport. The site's bottom-right `ThemeToggle` widget is hidden on `/timelapse` (it covered ⚙ and the scrubber end); `?` still opens the shortcuts modal.
 
-#### Selection gestures (pure state machine: `tlGesture`, `timelapseSelection`, with tests)
+#### Selection gestures (shared `www/src/lib/mapSelection`: `gesture.ts` state machine + `selection.ts` reducer, with tests; also used by `/stations` and the Home embed)
 
 - **Tap** a station: select only it. Tap empty map / `esc`: clear.
 - **Long-press** (~500 ms; < 10 px movement on touch, < 5 px mouse) on a station: enter **multi-select** and add it (short vibration where supported). In the mode, taps toggle; an empty-map tap does nothing (so a stray tap can't wipe a hand-built set); Done / Clear / `esc` / removing the last station exits.

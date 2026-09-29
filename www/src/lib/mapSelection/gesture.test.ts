@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { IDLE, LONG_PRESS_MS, step, type GestureEvent, type GestureOut, type GestureState } from './tlGesture'
+import { IDLE, LONG_PRESS_MS, step, type GestureEvent, type GestureOut, type GestureState } from './gesture'
 
 /** Run `events` from idle; the final state's kind + every output, in order. */
 function run(events: GestureEvent[]): { k: GestureState['k']; out: GestureOut[] } {
@@ -21,7 +21,7 @@ const move = (x: number, y: number, id = 1): GestureEvent => ({ t: 'move', id, a
 const up = (x: number, y: number, id = 1): GestureEvent => ({ t: 'up', id, at: at(x, y) })
 const timer = (time: number): GestureEvent => ({ t: 'timer', time })
 
-describe('tlGesture', () => {
+describe('gesture', () => {
   test('tap: press + release within tolerance', () => {
     expect(run([down(10, 10), move(13, 12), up(13, 12)])).toEqual({ k: 'idle', out: [{ t: 'tap', at: at(10, 10), mod: false }] })
   })
