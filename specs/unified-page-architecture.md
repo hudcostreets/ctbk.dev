@@ -1,6 +1,6 @@
 # Unified page architecture: (station-set × time-range) → {rides, map, avail, states}
 
-Status: in progress on `wip-deckgl` (rebased onto `main` 2026-09-27): map mechanics + lens shipped on the Leaflet map; GL map at Stage 3 (arc fan) behind `?gl=1`
+Status: in progress on `wip-deckgl` (rebased onto `main` 2026-09-29): map mechanics + lens shipped; the GL map (deck.gl + MapLibre) is now the **default** on `/stations` and the Home embed, with the shared `lib/mapSelection` selection model (Leaflet via `?gl=0`)
 Author: Ryan + Claude
 Date: 2026-09-08
 
@@ -120,6 +120,38 @@ Open (Stage 3):
 - **Fan default on GL.** Still opt-in via `?fan=` (same param as the Leaflet fan, off by default). With the floor + fade the GL fan no longer blobs, so defaulting it on under `gl` is reasonable; left for the user's pick.
 - **Tilt/curvature.** All arcs bow the same way (`getTilt` constant). A per-arc sign (e.g. by bearing) would spread the bundle symmetrically; a pitched camera (Stage 4) would show the arcs' real height instead.
 - **Ribbons vs arcs.** `ArcLayer` covers the "radiating" case well; geo-sankey ribbons (bundled trunks) remain a separate, heavier design.
+
+#### GL default + shared selection model (2026-09-29)
+
+**Shipped** on `wip-deckgl`:
+
+- **GL is the default map.** `/stations` renders `StationMapGL` unless `?gl=0` (Leaflet `StationMap` fallback). The `gl` codec encodes GL as absent, so old `?gl=1` (and bare `?gl`) links still decode to GL. Both renderers are `React.lazy`, so each page load fetches only the one in use. Station types + tile styles moved to `stationMapCommon.ts`, so importing them no longer pulls in leaflet.
+- **Home embed is GL too.** `StationMapEmbed` renders `StationMapGL` with local selection state: color lens + arc fan for the set, and a caption with the station's details link (or, for several, a `/stations?sel=…` compare link). The embed was already `lazy`, but its in-view margin (400px) meant it loaded with the first viewport on desktop (the map starts ~850px down). The margin is now 100px, so deck.gl + MapLibre (~0.5 MB gz) load only on scroll. `bundle.spec.ts` (all three tests) passes. Before this change, its two "map chunk only after scroll" tests failed against leaflet too.
+- **Shared selection model** (`www/src/lib/mapSelection/`), factored out of `/timelapse`:
+  - `gesture.ts`: the pure pointer state machine (was `lib/tlGesture.ts`).
+  - `selection.ts`: `reduceSel`, `stationsInRect`, `gestureSelAction` (gesture output → `SelAction`) and the `selParam` codec.
+  - `hooks.ts`: `useSelection(ids, setIds)` (the ids plus session-local multi mode) and `useSelectionGestures(map, {pickAt, pickRect, apply})`, which listens on the MapLibre canvas container so overlays never start a gesture.
+
+  The model is the same on `/stations`, `/timelapse` and the embed:
+  - tap selects one; a tap on empty map, or `esc`, clears;
+  - long-press enters multi-select (taps toggle, empty taps are ignored, Done / Clear);
+  - long-press-drag and shift-drag draw a rectangle that adds the stations inside it;
+  - shift/⌘-click toggles.
+
+  `/stations` keeps `push` history for `?sel=`, so browser back / forward undoes and redoes selection edits. The Leaflet fallback routes its clicks through the same reducer. The hover-preview lens and hover drawer are gated to `(hover: hover)` pointers. Selection panels stay page-specific: `/stations` shows the multi-select tag and Done in the `StationRidesPanel` header (a floating bar would sit under the fixed panel), and the embed uses a small `MultiSelectBar`.
+- Tests:
+  - vitest covers `gesture` and `selection`, including end-to-end sequences from gesture events to selection state.
+  - e2e: `station-map-gl.spec.ts` covers the default map, `?gl=0` / `?gl=1`, tap / ⌘-click / empty-tap / back, long-press multi-select / Done / Esc, and shift-drag rectangles. `map-embed.spec.ts` covers the GL embed. The helper `e2e/glMap.ts` projects station coordinates from the known camera, because WebGL pixels can't be read.
+
+Left:
+
+- **Vector basemap.** Still raster Stadia tiles: the CARTO vector style didn't render under Vite (the worker issue in `GLMap.tsx`).
+- **Home embed weight.** After scroll, the embed costs ~0.5 MB gz for deck.gl + MapLibre, versus ~50 KB for leaflet. Options: trim deck imports, or share the chunk with `/stations` prefetch.
+- **Parity gaps vs Leaflet:**
+  - `?pies=1` / the `?api=1` pie overlay and the `t=` tile-style picker exist only on Leaflet. GL follows the theme (light / dark raster).
+  - `/s/:id` still uses Leaflet.
+- **Narrow layout.** At ~400px the title bar overlaps the lens legend. This is pre-existing, not GL-specific.
+- Fan default on GL, tilt, and ribbons (see Stage 3 "Open").
 
 ## Examples, reconceived
 
