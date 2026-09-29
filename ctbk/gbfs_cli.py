@@ -1336,9 +1336,10 @@ RIDES_ANCHOR_SPECS = (
 )
 
 # Time-first transposes for the timelapse map (`specs/timelapse-map.md`):
-# same (config, R2 prefix, Batch source factory) triple shape. P0 builds
-# these by hand (`engine submit -C rides-tl-<a> -p <scratch> -x <factory>`);
-# folding them into the monthly `rides-extend` cadence is P4.
+# same (config, R2 prefix, Batch source factory) triple shape. Built at
+# their own prefixes by `engine submit -C rides-tl-<a> -R`; extended
+# monthly by `rides-tl-extend` (a sibling of `rides-extend`, so a `rides-tl`
+# failure can't block the month's `rides` fills or the site deploy).
 RIDES_TL_ANCHOR_SPECS = (
 	('rides-tl-start', 'rides-tl/start', 'ctbk_engine_src:rides_tl_start'),
 	('rides-tl-end', 'rides-tl/end', 'ctbk_engine_src:rides_tl_end'),
@@ -1388,16 +1389,21 @@ def normalized_mirror(dest_prefix: str, dry_run: bool, yms: tuple[str, ...]) -> 
 		_mirror_normalized(r2, bucket, ym.replace('-', ''), dry_run, dest_prefix)
 
 
+def _ym_month(ym: str) -> tuple[str, datetime]:
+	"""`YYYYMM` / `YYYY-MM` → (`YYYYMM`, the month's first instant, UTC)."""
+	ym = ym.replace('-', '')
+	if len(ym) != 6 or not ym.isdigit():
+		raise click.BadParameter(f'YM must be YYYYMM or YYYY-MM; got {ym!r}')
+	return ym, datetime(int(ym[:4]), int(ym[4:]), 1, tzinfo=timezone.utc)
+
+
 @gbfs.command('rides-extend', help='Monthly `rides` cadence for one freshly-ingested month: (1) mirror `normalized/<YM>.parquet` from the DVX cache to its plain key, within R2 (the Batch factory lists that prefix); (2) journal the previous month on `rides-start` (spillback refold); (3) `engine submit -f` both anchors on HCCS Batch, uncapped (open periods defer); (4) canonicalize [prev month, now) through each manifest (new hashed keys); (5) `engine register` each manifest into D1; (6) RG-manifest backfill + prune of superseded keys\' rows. Station-map/vocab/canonicalize-map regen for new stations is NOT covered — a canonicalize-map change needs a full-range `engine canonicalize`. Needs HCCS AWS creds (Batch), R2 RW creds, CLOUDFLARE_ACCOUNT_ID, and CTBK_REGISTRY_SECRET (+ a D1-write CLOUDFLARE_API_TOKEN for the prune).')
 @option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='prod', show_default=True, help='api worker whose registry proxy registers + backfills + prunes (shared D1).')
 @option('-n', '--dry-run', is_flag=True, help='Print planned actions (and engine commands); no writes or submits.')
 @argument('ym', metavar='YM')
 @click.pass_context
 def rides_extend(ctx: click.Context, env_name: str, dry_run: bool, ym: str) -> None:
-	ym = ym.replace('-', '')
-	if len(ym) != 6 or not ym.isdigit():
-		raise click.BadParameter(f'YM must be YYYYMM or YYYY-MM; got {ym!r}')
-	m0 = datetime(int(ym[:4]), int(ym[4:]), 1, tzinfo=timezone.utc)
+	ym, m0 = _ym_month(ym)
 	p0 = datetime(m0.year - 1, 12, 1, tzinfo=timezone.utc) if m0.month == 1 else m0.replace(month=m0.month - 1)
 	os.environ.setdefault('CTBK_REGISTRY_URL', API_URLS[env_name])
 	_use_r2_rw_env()
@@ -1449,6 +1455,37 @@ def rides_extend(ctx: click.Context, env_name: str, dry_run: bool, ym: str) -> N
 	ctx.invoke(gbfs_manifest_prune, pyramids=pyramids, env_name=env_name, dry_run=dry_run)
 
 	err(f'rides extended through {ym}. Not covered: station-map/vocab/canonicalize-map regen for new stations.')
+
+
+@gbfs.command('rides-tl-extend', help='Monthly `rides-tl` cadence (`specs/timelapse-map.md` P4) for one freshly-ingested month: `engine submit -R -f` both time-first anchors on HCCS Batch, capped at the first of the month after YM (fill mode builds only the missing shards; the cap keeps the tip closed — an uncapped fill would reach "now" and build open periods), then `engine watch` the two jobs together. No canonicalize pass (`/api/tl` folds merged `s:` leaves at serve time until `TL_CANONICALIZED=1`) and no D1 registration (`/api/tl` resolves shards from `manifest.jsonl`). Runs after `rides-extend`, which mirrors `normalized/<YM>.parquet` to the plain key the factory lists. Needs HCCS AWS creds (Batch); R2 creds come from the job def.')
+@option('-n', '--dry-run', is_flag=True, help='Print the two submit commands; no submits.')
+@option('-t', '--timeout', type=float, default=3600, show_default=True, help='`engine watch` deadline, seconds (both anchors run concurrently).')
+@argument('ym', metavar='YM')
+@click.pass_context
+def rides_tl_extend(ctx: click.Context, dry_run: bool, timeout: float, ym: str) -> None:
+	from ctbk.pyramid_cascade.engine_check import config_rg_size
+	from ctbk.pyramid_cascade.lite import RIDES_GENESIS
+	ym, m0 = _ym_month(ym)
+	m1 = datetime(m0.year + 1, 1, 1, tzinfo=timezone.utc) if m0.month == 12 else m0.replace(month=m0.month + 1)
+	if not Path(f's3/ctbk/normalized/{ym}.parquet.dvc').exists():
+		raise click.ClickException(f's3/ctbk/normalized/{ym}.parquet.dvc not found — has {ym} been consolidated?')
+	range_ = f'{RIDES_GENESIS:%Y-%m-%d}/{m1:%Y-%m-%d}'
+	job_ids = []
+	for config_name, prefix, factory in RIDES_TL_ANCHOR_SPECS:
+		cmd = _engine_submit_cmd(
+			config_name,
+			scratch_prefix=prefix, fill=True, range_=range_, source_spec=factory,
+			rg_size=config_rg_size(config_name, ENGINE_RG_SIZE),
+		)
+		if dry_run:
+			print(' '.join(_redact_cmd(cmd)))
+		else:
+			job_ids.append(_engine_submit_job(cmd))
+	if dry_run:
+		err('watch: would poll both jobs to completion (`ctbk gbfs engine watch`)')
+		return
+	ctx.invoke(gbfs_engine_watch, interval=20, timeout=timeout, job_ids=tuple(job_ids))
+	err(f'rides-tl extended through {ym}.')
 
 
 # ─── pyrmts-engine validation (specs/pyrmts-engine-validation.md) ──────
@@ -1829,7 +1866,7 @@ def gbfs_engine_jobdef(dry_run: bool, r2_secrets: bool, image: str) -> None:
 	err(f"registered rev {out['revision']}: {image}")
 
 
-def _engine_submit(
+def _engine_submit_cmd(
 	config_name: str,
 	*,
 	aligned: str | None = None,
@@ -1844,7 +1881,6 @@ def _engine_submit(
 	memory: int | None = None,
 	manifest_name: str = 'manifest.jsonl',
 	max_missing: float | None = None,
-	dry_run: bool = False,
 	scratch_prefix: str | None = None,
 	range_: str | None = None,
 	source_rung: str = '1m',
@@ -1854,9 +1890,8 @@ def _engine_submit(
 	window: str = '12h',
 	source_spec: str | None = None,
 	ignore_invalidations: bool = False,
-) -> int:
-	"""Build + run the `pyrmts-engine batch submit` command; returns its
-	exit code (0 for dry-run)."""
+) -> list[str]:
+	"""The `pyrmts-engine batch submit` command for one build."""
 	prefix = scratch_prefix or f'{config_name}-engine-check'
 	bucket = os.environ.get('R2_BUCKET', 'ctbk')
 	from ctbk.pyramid_cascade.engine_check import _rides_anchor
@@ -1914,14 +1949,35 @@ def _engine_submit(
 	if watch:
 		cmd += ['-W']
 	cmd += [f's3://{bucket}/{prefix}/config.yaml']
+	return cmd
+
+
+def _redact_cmd(cmd: list[str]) -> list[str]:
+	"""`-e NAME=VALUE` args with KEY/SECRET names shown as `NAME=<redacted>`."""
+	return [re.sub(r'^([A-Z0-9_]*(?:KEY|SECRET)[A-Z0-9_]*)=.+', r'\1=<redacted>', a) for a in cmd]
+
+
+def _engine_submit(config_name: str, *, dry_run: bool = False, **kwargs) -> int:
+	"""Build + run the `pyrmts-engine batch submit` command; returns its
+	exit code (0 for dry-run, which prints the command instead)."""
+	cmd = _engine_submit_cmd(config_name, **kwargs)
 	if dry_run:
-		shown = [
-			re.sub(r'^([A-Z0-9_]*(?:KEY|SECRET)[A-Z0-9_]*)=.+', r'\1=<redacted>', a)
-			for a in cmd
-		]
-		print(' '.join(shown))
+		print(' '.join(_redact_cmd(cmd)))
 		return 0
 	return subprocess.run(cmd).returncode
+
+
+def _engine_submit_job(cmd: list[str]) -> str:
+	"""Run a `pyrmts-engine batch submit` (without `-W`) and return the Batch
+	job id it prints on stdout; its progress lines pass through on stderr."""
+	proc = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+	name = cmd[cmd.index('-n') + 1]
+	if proc.returncode:
+		raise click.ClickException(f'{name}: pyrmts-engine batch submit failed (rc={proc.returncode})')
+	lines = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
+	if not lines:
+		raise click.ClickException(f'{name}: pyrmts-engine batch submit printed no job id')
+	return lines[-1]
 
 
 @gbfs_engine.command('submit', help='Submit an engine build of the scratch prefix to AWS Batch (`pyrmts-engine batch submit` passthrough with the standard ctbk args).')

@@ -70,6 +70,28 @@ def test_engine_submit_real_prefix_dry_run(config_name: str, prefix: str, factor
     ]
 
 
+def test_rides_tl_extend_dry_run(monkeypatch: pytest.MonkeyPatch):
+    # The monthly `rides-tl` step: fill both time-first anchors at their real
+    # prefixes, capped at the first of the month after YM (never "now": the
+    # cap keeps the tip closed), then watch both jobs. Wired into CI after
+    # `rides-extend` (`.github/workflows/ci.yml` "Extend rides-tl").
+    from click.testing import CliRunner
+    from ctbk import gbfs_cli
+    # `utz.err` holds the stderr object it was imported with, so neither
+    # CliRunner nor capsys sees its output; collect the log lines directly.
+    logged: list[str] = []
+    monkeypatch.setattr(gbfs_cli, 'err', lambda *a: logged.append(' '.join(map(str, a))))
+    result = CliRunner().invoke(gbfs_cli.gbfs, ['rides-tl-extend', '-n', '2025-06'], env={'R2_BUCKET': 'ctbk'})
+    assert result.exit_code == 0, result.output
+    assert result.stdout.rstrip('\n').split('\n') == [
+        f'pyrmts-engine batch submit -n rides-tl-{a} -w 12h -g 32768 -s dt,cell '
+        f'-m s3://ctbk/rides-tl/{a}/manifest.jsonl -r 2013-06-01T00:00/2025-07-01T00:00 -f '
+        f'-x ctbk_engine_src:rides_tl_{a} s3://ctbk/rides-tl/{a}/config.yaml'
+        for a in ('start', 'end')
+    ]
+    assert logged == ['watch: would poll both jobs to completion (`ctbk gbfs engine watch`)']
+
+
 @pytest.mark.parametrize('config_name, expected', [
     ('rides-tl-start', 32768),
     ('rides-tl-end', 32768),

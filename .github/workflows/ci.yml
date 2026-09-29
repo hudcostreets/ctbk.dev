@@ -296,6 +296,43 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: .github/scripts/hccs-aws.sh ctbk gbfs rides-extend ${{ steps.args.outputs.ym }}
 
+      # ─── `rides-tl` monthly cadence (specs/timelapse-map.md, P4) ─────
+      # The time-first transposes behind `/api/tl`: fill both anchors on
+      # HCCS Batch, capped at the first of the next month (fill mode builds
+      # only what's missing; the cap keeps the tip closed), then watch both
+      # jobs. Best-effort — nothing on prod serves `rides-tl` yet, so a
+      # failure warns in Slack but blocks neither the month nor the deploy.
+      # After "Extend rides", which mirrors the month's `normalized/` key.
+      - name: Extend rides-tl
+        id: rides_tl
+        if: steps.args.outputs.args && steps.args.outputs.ym
+        continue-on-error: true
+        env:
+          HCCS_AWS_DURATION: '14400'
+        run: .github/scripts/hccs-aws.sh ctbk gbfs rides-tl-extend ${{ steps.args.outputs.ym }}
+
+      - name: Notify Slack — rides-tl extend failed
+        if: steps.rides_tl.outcome == 'failure' && inputs.quiet != true
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          YM: ${{ steps.args.outputs.ym }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          uv run --no-project --with 'thrds==0.4.0' --python 3.12 python - <<'PY'
+          import os
+          from thrds import SlackClient
+          SlackClient(
+              token=os.environ['SLACK_BOT_TOKEN'],
+              channel='C0B5MKF28NP',
+              username='ctbk-bot',
+              icon_emoji=':bike:',
+          ).post(
+              f":warning: *`rides-tl` extend failed* for {os.environ['YM']} — the month's `rides` fills and the "
+              f"deploy went ahead; re-run `ctbk gbfs rides-tl-extend {os.environ['YM']}` (idempotent). "
+              f"<{os.environ['RUN_URL']}|logs>"
+          )
+          PY
+
       # One prod deploy at the very end, after `rides` has the month (the
       # screenshots render it). `www.yml` skips this pipeline's own mid-run
       # pushes to `main` for the same reason.
