@@ -26,10 +26,12 @@ const { round } = Math
  * requested → black map). Raster tiles decode on the main thread, so they
  * render regardless. Revisit CARTO vector once the worker is sorted.
  */
-export function rasterStyle(dark: boolean): StyleSpecification {
-  const url = dark
-    ? 'https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}.png'
-    : 'https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}.png'
+export function rasterStyle(dark: boolean, tileBase?: string): StyleSpecification {
+  const url = tileBase
+    ? `${tileBase}/{z}/{x}/{y}.png`
+    : dark
+      ? 'https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}.png'
+      : 'https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}.png'
   return {
     version: 8,
     sources: { base: { type: 'raster', tiles: [url], tileSize: 256 } },
@@ -38,13 +40,15 @@ export function rasterStyle(dark: boolean): StyleSpecification {
 }
 
 /** deck.gl layers as a MapLibre control, updated in place each render. */
-function DeckOverlay({ layers }: { layers: Layer[] }) {
+function DeckOverlay({ layers, onAfterRender }: { layers: Layer[]; onAfterRender?: () => void }) {
   // Overlaid (not interleaved): deck renders in its own canvas ABOVE maplibre's
   // basemap canvas. Interleaved mode (deck drawing into maplibre's GL context)
   // left the basemap unpainted here — tiles fetched 200 but never composited.
   // Overlaid is exactly the stacking we want (marks over basemap) anyway.
   const overlay = useControl(() => new MapboxOverlay({ interleaved: false, layers }))
-  overlay.setProps({ layers })
+  // deck calls `props.onAfterRender` unconditionally: an explicit
+  // `undefined` would replace its no-op default and throw on every draw.
+  overlay.setProps(onAfterRender ? { layers, onAfterRender } : { layers })
   return null
 }
 
@@ -66,6 +70,13 @@ export interface GLMapProps {
    *  so a screenshot right after render isn't black. Off by default (a
    *  buffer copy per frame). */
   preserveDrawingBuffer?: boolean
+  /** Pan/zoom/rotate enabled (default). Movie mode fixes the camera. */
+  interactive?: boolean
+  /** After every deck redraw (movie mode's "frame rendered" signal). */
+  onAfterRender?: () => void
+  /** Local raster tile cache root (`{tileBase}/{z}/{x}/{y}.png`), as in
+   *  `StationMap` (`specs/done/deterministic-screenshots.md`). */
+  tileBase?: string
   /** `position: relative` wrapper class (sizing is the caller's). */
   className?: string
   /** Rendered inside the wrapper, above the map (overlays, drawers, chrome). */
@@ -83,13 +94,16 @@ export default function GLMap({
   onReady,
   cursor = 'grab',
   preserveDrawingBuffer = false,
+  interactive = true,
+  onAfterRender,
+  tileBase,
   className,
   children,
   containerRef,
 }: GLMapProps) {
   const { actualTheme } = useTheme()
   const dark = actualTheme === 'dark'
-  const mapStyle = useMemo(() => rasterStyle(dark), [dark])
+  const mapStyle = useMemo(() => rasterStyle(dark, tileBase), [dark, tileBase])
   const onReadyRef = useRef(onReady)
   onReadyRef.current = onReady
   const observerRef = useRef<ResizeObserver | null>(null)
@@ -102,6 +116,7 @@ export default function GLMap({
         mapStyle={mapStyle}
         attributionControl={false}
         cursor={cursor}
+        interactive={interactive}
         canvasContextAttributes={{ preserveDrawingBuffer }}
         onMove={(e) => onMove?.(round(e.viewState.latitude * 1000) / 1000, round(e.viewState.longitude * 1000) / 1000, round(e.viewState.zoom))}
         onClick={onClick}
@@ -117,7 +132,7 @@ export default function GLMap({
         }}
         style={{ width: '100%', height: '100%' }}
       >
-        <DeckOverlay layers={layers} />
+        <DeckOverlay layers={layers} onAfterRender={onAfterRender} />
       </MaplibreMap>
       {children}
     </div>
