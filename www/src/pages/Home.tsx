@@ -80,7 +80,10 @@ export const RideableTypesExample = "/?y=m&s=b&rt=ce&d=2002-"
 const StationMapEmbed = lazy(() => import("../components/StationMapEmbed"))
 
 function LazyStationMap() {
-  const [ref, isInView] = useIsInView<HTMLDivElement>('400px')
+  // Small lead margin: the GL map's chunks (deck.gl + MapLibre, ~0.5 MB gz)
+  // should load only once the map is about to scroll into view, not with the
+  // above-the-fold content (the map starts ~850px down on desktop and phone).
+  const [ref, isInView] = useIsInView<HTMLDivElement>('100px')
   const fullScreen = <Link to="/stations">Full screen version →</Link>
   return (
     <div ref={ref}>

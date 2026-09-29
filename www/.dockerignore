@@ -117,6 +117,7 @@
 !src/components/MonthRangePicker.tsx
 !src/components/MultiSelect.module.css
 !src/components/MultiSelect.tsx
+!src/components/MultiSelectBar.tsx
 !src/components/OverviewAvailabilityChart.tsx
 !src/components/PipelineContext.tsx
 !src/components/PipelineDiagram.tsx

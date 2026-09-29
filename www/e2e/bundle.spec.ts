@@ -50,6 +50,9 @@ const isJs = (r: Resource) =>
 const isCss = (r: Resource) =>
   /css/.test(r.mime) || /\.css(\?|$)/.test(r.url)
 
+/** Map chunks: the embed + GL map (and leaflet, which Home shouldn't load at all). */
+const MAP_CHUNK = /StationMap|GLMap|maplibre|leaflet/i
+
 const kb = (n: number) => `${(n / 1024).toFixed(1)} KB`
 
 const fmtReport = (resources: Resource[]) => {
@@ -98,12 +101,10 @@ test.describe('Bundle size (Home)', () => {
     await page.waitForSelector('.plotly', { timeout: 30_000 })
     await page.waitForLoadState('networkidle')
 
-    // The StationMap chunk contains leaflet + react-leaflet and should only
-    // load once the user scrolls the map section into view.
-    const mapChunks = resources.filter(r =>
-      /StationMap(\.|-)/i.test(r.url) || /leaflet/i.test(r.url),
-    )
-    expect(mapChunks.map(r => r.url.split('/').pop()), 'no leaflet/StationMap chunks before scroll').toEqual([])
+    // The embed's map chunks (deck.gl + MapLibre via `StationMapGL` / `GLMap`)
+    // should only load once the user scrolls the map section into view.
+    const mapChunks = resources.filter(r => MAP_CHUNK.test(r.url))
+    expect(mapChunks.map(r => r.url.split('/').pop()), 'no map chunks before scroll').toEqual([])
   })
 
   test('scrolling to map triggers the StationMap chunk load', async ({ page }) => {
@@ -114,14 +115,12 @@ test.describe('Bundle size (Home)', () => {
 
     const before = resources.length
     await page.locator('#map').scrollIntoViewIfNeeded()
-    // The leaflet map emits tile requests; wait for them.
-    await page.waitForSelector('.leaflet-container', { timeout: 15_000 })
+    // The GL map emits tile requests; wait for them.
+    await page.waitForSelector('.maplibregl-map', { timeout: 15_000 })
     await page.waitForLoadState('networkidle')
 
     const added = resources.slice(before)
-    const mapChunks = added.filter(r =>
-      /StationMap(\.|-)/i.test(r.url) || /leaflet/i.test(r.url),
-    )
+    const mapChunks = added.filter(r => MAP_CHUNK.test(r.url))
     expect(mapChunks.length, 'StationMap chunk loaded after scroll').toBeGreaterThan(0)
   })
 })

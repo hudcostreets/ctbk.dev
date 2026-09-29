@@ -1,14 +1,20 @@
 /**
- * Embeddable stations map: loads the latest-month data, renders
- * `<StationMap>`, and shows a selected-station caption with a details link.
- * Uses local state only (no URL sync), so it can drop into any page
- * without clobbering the host page's URL params.
+ * Embeddable stations map: loads the latest-month data, renders the GL
+ * `<StationMapGL>` (deck.gl + MapLibre, loaded lazily with this module), and
+ * shows a caption with a details link for the selection. Selection is the
+ * shared `lib/mapSelection` model (tap / long-press multi-select / rectangle,
+ * as on `/stations`), held in local state (no URL sync), so it can drop into
+ * any page without clobbering the host page's URL params; a multi-station
+ * set links out to `/stations?sel=…`.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import StationMap, { type Stations, type StationPairCounts } from './StationMap'
-import { flowLens } from './flowLens'
+import { flowArcs, flowLens } from './flowLens'
+import MultiSelectBar from './MultiSelectBar'
+import StationMapGL from './StationMapGL'
+import { selParam, useSelection } from '../lib/mapSelection'
 import css from '../stations.module.css'
+import type { Stations, StationPairCounts } from './stationMapCommon'
 
 const MANIFEST_URL = '/assets/station-urls.json'
 const DEFAULT_CENTER: [number, number] = [40.758, -73.965]
@@ -29,7 +35,7 @@ function formatMonth(yyyymm: string): string {
 }
 
 interface Props {
-  /** Applied to the wrapping `<div>` that hosts the Leaflet map (controls size/aspect). */
+  /** Applied to the wrapping `<div>` that hosts the map (controls size/aspect). */
   mapClassName?: string
   /** Optional extra content appended to the caption below the map (e.g. a link
    *  to the full-screen `/stations` page). Rendered after a `·` separator. */
@@ -40,12 +46,12 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [stations, setStations] = useState<Stations | null>(null)
   const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
-  // Transient hover preview; click promotes to `pinnedId` below.
+  // Transient hover preview (hover-capable pointers only); taps select.
   const [hoveredId, setHoveredId] = useState<string | undefined>(undefined)
-  const [pinnedId, setPinnedId] = useState<string | undefined>(undefined)
-  // The visible "selected" station = pinned (sticky) or, failing that,
-  // whatever the cursor is currently over.
-  const selectedId = pinnedId ?? hoveredId
+  const [selIds, setSelIds] = useState<string[]>([])
+  const { multi, apply } = useSelection(selIds, setSelIds)
+  // The captioned station: the one selected or, failing that, the hovered one.
+  const selectedId = selIds.length === 1 ? selIds[0] : selIds.length ? undefined : hoveredId
 
   useEffect(() => {
     fetch(MANIFEST_URL)
@@ -89,35 +95,44 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
   const selectedStation = selectedId && stations ? stations[selectedId] : null
   const monthLabel = manifest ? formatMonth(manifest.latestMonth) : null
 
-  // Flow lens: once a station is pinned (clicked), color every other station
-  // by the share of that station's outbound trips ending there. Keyed on the
-  // pinned id (not the transient hover), so recoloring commits on click. The
-  // embed uses the color channel only (no URL config here).
+  // Flow lens: once stations are selected, color every other station by the
+  // share of the set's outbound trips ending there, with the arc fan on top.
+  // Keyed on the selection (not the transient hover), so recoloring commits
+  // on tap. The embed uses the color channel only (no URL config here).
   const lens = useMemo(
-    () => flowLens(stations ?? {}, pairCounts, pinnedId ? [pinnedId] : [], 'c'),
-    [stations, pairCounts, pinnedId],
+    () => flowLens(stations ?? {}, pairCounts, selIds, 'c'),
+    [stations, pairCounts, selIds],
+  )
+  const arcs = useMemo(
+    () => (stations ? flowArcs(stations, pairCounts, selIds, 'out') : null),
+    [stations, pairCounts, selIds],
   )
 
   return (
     <>
       <div className={mapClassName}>
-        <StationMap
+        <StationMapGL
           stations={stations ?? {}}
-          selectedId={selectedId}
-          setSelectedId={setHoveredId}
-          pinnedId={pinnedId}
-          onPin={(id) => setPinnedId((cur) => (cur === id ? undefined : id))}
+          pinnedIds={selIds}
+          onSelAction={(a) => {
+            if (a.t === 'tap' && a.id === null && !a.toggle && !multi) setHoveredId(undefined)
+            apply(a)
+          }}
+          multi={multi}
           pairCounts={pairCounts}
           stationColors={lens?.colors ?? null}
-          lensActive={!!lens}
-          showLines
+          arcs={arcs}
+          setSelectedId={setHoveredId}
+          onHoverStation={(id) => { if (!id) setHoveredId(undefined) }}
           center={DEFAULT_CENTER}
           zoom={DEFAULT_ZOOM}
           className={css.embedMap}
-          hoverToSelect
-          onClick={() => { setPinnedId(undefined); setHoveredId(undefined) }}
           overlay={monthLabel && <>Citi Bike rides, {monthLabel}</>}
-        />
+        >
+          {multi && (
+            <MultiSelectBar n={selIds.length} onDone={() => apply({ t: 'done' })} onClear={() => apply({ t: 'clear' })} />
+          )}
+        </StationMapGL>
       </div>
       <div className={css.embedCaption}>
         {selectedStation && selectedId ? (
@@ -125,6 +140,12 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
             <strong>{selectedStation.name}</strong>
             {' — '}
             <Link to={`/s/${selectedId}`}>View station details →</Link>
+          </>
+        ) : selIds.length > 1 ? (
+          <>
+            <strong>{selIds.length} stations</strong>
+            {' — '}
+            <Link to={`/stations?sel=${selParam.encode(selIds)}`}>Compare on the stations page →</Link>
           </>
         ) : (
           <span className={css.placeholder}>Tap a station to see its top destinations and open its page.</span>
