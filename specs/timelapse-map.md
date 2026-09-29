@@ -1,6 +1,6 @@
 # Timelapse map: every station, one time bin per frame
 
-Status: in progress (2026-09-28). P0 done (scratch build validated); P1 page on `wip-deckgl`; P2 backend + `1h` landed (see the P2 bullet).
+Status: in progress (2026-09-29). Backend (P0, P2 `/api/tl`, P4 full-history build + monthly extend) on branch `rides-tl`, deployed to the dev worker only; FE (P1–P3 + control-bar and mobile UX passes) on `wip-deckgl`. Neither is merged to `main`.
 Author: Ryan + Claude
 Builds on: `specs/unified-page-architecture.md` (deck.gl + MapLibre GL map, Stages 1–3 on `wip-deckgl`); the rides pyramid (`specs/rides-v5.md`, `configs/pyramids/rides-{start,end}.yaml`).
 
@@ -124,6 +124,7 @@ RG pruning on `dt` stats works: consecutive frames are adjacent bytes, and a chu
 - **Playback**: hold the current chunk and the next; prefetch the next when the playhead passes 50% of the current (and one more at high fps). If the next chunk isn't in yet, **stall** with a buffering badge rather than skip frames.
 - **Scrub / jump**: snap to the nearest cached frame immediately (or a faint "loading" state if none is within ±1 chunk), fire the chunk under the new `t` first, then neighbours.
 - **Idle fill**: a priority queue over chunks by distance from the playhead — ±1, ±2, then every second chunk out to ±6, then exponential back-off — throttled to one in-flight request while idle. This is the progressive fan-out from the design discussion; start with ±1 only and widen once the rest works.
+- **Range fill** (as built): after the near fan-out, the queue continues through every chunk in `d`, two in flight, so the scrubber's totals strip fills in seconds (`1d` × 1 y = 12 chunks, < 1 s locally). A range change re-queues; a bin change drops the queue. The queue is created in an effect (a module-level/`useMemo` queue was shut down by StrictMode's double mount, so only ±1 ever loaded in dev).
 
 ## UX
 
@@ -132,6 +133,25 @@ RG pruning on `dt` stats works: consecutive frames are adjacent bytes, and a chu
 Add a new page `/timelapse` (`www/src/pages/Timelapse.tsx`), not a mode of `/stations`. It has its own controls, keyboard map and movie mode, and `/stations` already binds ←/→ to month nav (`hooks/useStationsKeyboardShortcuts.ts`). A later `/stations` → "▶ timelapse" link can carry `ll` and `sel` over.
 
 ### Layout
+
+As built after the mobile pass (2026-09-29); the original sketch is kept below it.
+
+- **Header strip** (top): compact clock (`Tue Jun 10 · 18:00`) + a thin legend color bar; tapping the bar or ⓘ expands the full legend (scale incl. the `sz` factor, "faint dot = …", frame info, source chip). Expanded by default on wide viewports. Only warning badges (buffering, error, synthetic, no data) stay in the collapsed strip.
+- **Transport**: ‹ › chevrons (step one bin; not ⏮/⏭, which read as first/last) around a larger, round, accent-filled ▶/❚❚.
+- **Control bar**: on phones, collapsed to transport + scrubber + timestamp + ⚙; ⚙ expands range, presets, bin, speed, style, size, loop, and (touch only) the keyboard hints. Desktop shows everything.
+- **Selection panel** (replaces per-station floating cards): docked right on desktop, a collapsible bottom sheet (max 38vh) above the controls on phones. Header: count, **Clear**, and **Done** + a "multi-select" tag in that mode. Rows: name, starts/ends/net at `t`, mini sparkline, ×. A single selection gets a larger sparkline and a "Station page →" link (`/s/<short name>`, which redirects to the slug; current stations only).
+- **Overlays consume pointer events**; selection gestures listen on the map canvas container only, so taps on overlays never reach stations.
+- **Tooltips** (floating-ui) only when `(hover: hover)`; the hover card follows the cursor, clamped to the viewport. The site's bottom-right `ThemeToggle` widget is hidden on `/timelapse` (it covered ⚙ and the scrubber end); `?` still opens the shortcuts modal.
+
+#### Selection gestures (pure state machine: `tlGesture`, `timelapseSelection`, with tests)
+
+- **Tap** a station: select only it. Tap empty map / `esc`: clear.
+- **Long-press** (~500 ms; < 10 px movement on touch, < 5 px mouse) on a station: enter **multi-select** and add it (short vibration where supported). In the mode, taps toggle; an empty-map tap does nothing (so a stray tap can't wipe a hand-built set); Done / Clear / `esc` / removing the last station exits.
+- **Rectangle select**: long-press then drag (touch or mouse), or shift-drag on desktop, draws a translucent rect with map panning suspended; on release adds stations inside it (current, plus retired ones alive at `t`). A long-press rect also enters multi-select. A second finger cancels the rect (becomes pinch). Shift-drag no longer triggers MapLibre box-zoom.
+- Desktop: shift/⌘-click toggles without entering the mode.
+- An immediate drag pans as usual.
+
+Original sketch:
 
 - Full-bleed GL map.
 - Top-left: a **clock** overlay showing the local date and time for hourly bins (e.g. "Tue Jun 10, 2025 · 08:00"), or the date + weekday for daily bins. Big type, so it's legible in movies.
@@ -146,13 +166,14 @@ Add a new page `/timelapse` (`www/src/pages/Timelapse.tsx`), not a mode of `/sta
 | param | codec | default | meaning |
 |---|---|---|---|
 | `b` | `codeParam` over every `/api/tl` tier (`1h`,`3h`,`6h`,`12h`,`1d`,`3d`,`7d`,`14d`,`1mo`) | `1d` | bin |
-| `d` | range string `YYMMDD-YYMMDD` | the bin's `DEFAULT_SPAN` ending yesterday (week at `1h`, year at `1d`, …) | playback range (inclusive days) |
+| `d` | range string `YYMMDD-YYMMDD` | the bin's `DEFAULT_SPAN` ending on the last published day (end of `station-urls.json` `latestMonth`; yesterday until that loads) — week at `1h`, year at `1d`, … | playback range (inclusive days) |
 | `t` | `YYMMDD` or `YYMMDDTHH` | range start | playhead. Written with **replace** on pause/step/scrub only, never per frame while playing |
 | `sp` | int | `8` | frames per second (1, 2, 4, 8, 16, 30; labeled in the bin's units, e.g. `24 h/s` at `3h`) |
 | `st` | `codeParam` `flow`/`act`/`split`/`col` | `flow` | style preset |
 | `lp` | `boolParam` | `false` | loop |
 | `ll` | `llzParam` (reuse `viewParam`) | system view | camera |
-| `sel` | `selParam` (reuse) | empty | pinned stations |
+| `sel` | `selParam` (reuse) | empty | selected stations (see Selection gestures) |
+| `sz` | float, ×0.25–×2 | `1` | circle-size multiplier (deck `radiusScale`); below zoom 11 radii also shrink ×½ per 2 zoom levels, floored at 0.35 |
 | `mv` | `boolParam` | `false` | movie mode (below) |
 | `fpb` | int | `1` | movie: rendered frames per bin (sub-bin interpolation) |
 
@@ -235,6 +256,7 @@ Pair data only exists **monthly** today (`pairs[ym].json` via `station-urls.json
 - *Control-bar UX (2026-09-28, `wip-deckgl`)*: all nine `/api/tl` tiers exposed (`1mo` frames are calendar months, same origin math as the worker; `DEFAULT_SCALE` per tier until the frozen per-bin p99 lands); per-bin clock labels (`Tue, Jun 10, 2025 · 18:00–21:00`, `Jun 5–11, 2025`, `June 2025`). Range picker for `d`: two date inputs bounded by genesis … the last published day (end of `station-urls.json` `latestMonth`) plus per-bin presets (`1h`: 1d/3d/1w/2w … `1d`: 1mo/3mo/1y/all); a preset keeps the current end when the playhead fits, else starts at the playhead. Frame-count guard: sub-day ranges over 1,500 frames show a "use <bin>" button; edits past 6,000 frames are trimmed (keeping the edited side, with a note); a bin switch re-fits the range to the new bin's default span around the playhead when it'd be > 1,500 frames at a finer bin or < 4 at a coarser one; changing the range clamps `t`. Scrubber hover previews the frame under the pointer (map + clock, hover line, floating-ui tip `Tue Jun 10 · 18:00 · 7,893 rides`), pausing playback while hovering (resumed on leave); click commits `t`; touch keeps tap/drag-to-commit. Pure logic in `query/timelapseControls.ts` (+ tests).
 - **P4 status (2026-09-28): full-history build done.** `engine config -C rides-tl-<a> -R -u` + `engine submit -C rides-tl-<a> -R -f -r 2013-06-01/2026-09-01` (capped at the latest published month, not "now", so no open tip is built), both anchors, ~20 min wall each incl. Spot startup. **275 shards / 581 MB per anchor**: `1h` 154 shards / 269 MB, `3h` 135 MB, `6h` 80 MB, `12h` 49 MB, `1d` 7 shards / 26 MB, coarser tiers < 20 MB together (the `1h` figure is under the 0.6 GB extrapolation because of historical station growth). **Validated** (read-only, `tmp/p4/`): manifests clean (275 latest, hash = md5 prefix, no gaps/overlaps in any of the 14 tiers; mid tiers end at their last rung boundary exactly as `rides/start` does, the tail being served cross-tier); footers all `dt,cell` / 32768; the exact-match gate vs `/api/rides` passed on 2014-07, 2019-10 and 2024-03 for both anchors, system-wide per day and for 3 stations per month (zero diffs); frame cost on a 2019 `1h@32d` shard = 1.4 KB/frame projected in a 48-frame chunk, 5.4 KB/frame in a 32-frame `1d` chunk from the 10 MB `1d@1024d` shard. Raw ids: 2014 shards are all numeric legacy ids (302/338 map to clusters; 36 are stations that died before short_names); 2026 has 2,433 ids, 947 in merged clusters, 1,486 singletons; leftovers to look at before the canonicalize pass: `s:Shop Morgan ` (trailing space, 42 rides) and two trailing-zero-dropped ids the id-map doesn't cover, `s:3576.1` (532) and `s:3593.1` (4,956), whereas `s:6131.1` does map. **Monthly extension wired** (`ctbk gbfs rides-tl-extend <YM>`, `ctbk/gbfs_cli.py`): `engine submit -C rides-tl-<a> -R -f -r 2013-06-01/<first of the month after YM>` for both anchors — fill mode builds only the missing shards, and the cap is the last published month's end, never "now", so no open tip is built — then `engine watch` on both job ids (the anchors run concurrently); `-n` prints the two submit commands (`test_rides_tl_extend_dry_run`). CI runs it right after `rides-extend` (`ci.yml` "Extend rides-tl": `continue-on-error` + a Slack `:warning:` on failure, since nothing on prod serves `rides-tl` yet, so it must block neither the month nor the deploy). No canonicalize pass is mirrored for `rides-tl`: `/api/tl` folds merged `s:` leaves at serve time while `TL_CANONICALIZED` is unset, so `rides-extend`'s canonicalize step gets a `rides-tl` twin only when the `c:` pass lands. Not yet done from this bullet: the canonicalize pass (`c:` rows), `tl-stations.json`.
 - **P4: backfill + CI.** Full-history `rides-tl` build on Batch (genesis → latest; ~0.5 GB/anchor at `1h`); `rides-tl-extend` alongside `rides-extend` monthly; canonicalize pass included on id-map changes; `tl-stations.json` regen in `ctbk update`.
+- *Mobile UX pass (2026-09-29, `wip-deckgl` `a966088c`)*: header strip, chevron transport, collapsible ⚙ controls, selection panel, long-press multi-select + rect select, `sz`, hover-only tooltips, range-fill prefetch (all under Layout / Client cache above). `VITE_API_BASE=http://localhost:…` is rewritten to the page's host (`lib/apiBase.ts`) so the dev FE works from a phone on the tailnet (the local `wrangler dev` must bind `--ip 0.0.0.0`). Verified in desktop Chrome and a 400×850 iframe; long-press / rect gestures only via synthetic touch pointer events, so real-device feel is unverified.
 - **P5 (v1.5): `col` 3D preset.**
 - **State frames (later)**: the same transposition for `smg-v1` (`dt,s2_cell` sort, identity-only) gives availability/state timelapses through the same endpoint shape.
 - **v2: arcs.** Estimate first, then build.
