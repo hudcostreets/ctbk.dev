@@ -14,10 +14,21 @@
 # tripped the paths filter, and CI shipped git's older source. The
 # regression was live for ~7 minutes.
 #
+# The stamp is also baked into the bundle (`--var GIT_SHA/GIT_DIRTY/
+# DEPLOYED_AT/DEPLOY_ENV`; the api worker serves it at `/api/version`, no
+# CF auth needed to read it), and a clean deploy force-pushes a marker
+# branch, `deployed/<worker>` (prod) or `deployed/<worker>-<env>`, so
+# `git log -1 deployed/api-dev` answers "what's on dev" (like `www`, the
+# live-site marker).
+#
+# Non-prod envs (`--env <name>`) are stamped and marked but skip the
+# compare-and-swap: dev legitimately jumps between branches.
+#
 # Usage:
 #   gbfs/deploy.sh <worker> [-- <extra wrangler args>]
 #   gbfs/deploy.sh api
 #   gbfs/deploy.sh api --force        # deploy anyway (see below)
+#   gbfs/deploy.sh api --env dev      # the `ctbk-gbfs-api-dev` worker
 #
 # Exit codes: 0 deployed, 1 usage/tooling error, 2 CAS check failed.
 
@@ -27,12 +38,21 @@ WORKER="${1:-}"
 shift || true
 FORCE=0
 EXTRA=()
+ENV_NAME=
+PREV=
 for arg in "$@"; do
     case "$arg" in
         --force|-f) FORCE=1 ;;
-        *) EXTRA+=("$arg") ;;
+        --env=*) ENV_NAME="${arg#--env=}"; EXTRA+=("$arg") ;;
+        *)
+            [ "$PREV" = --env ] || [ "$PREV" = -e ] && ENV_NAME="$arg"
+            EXTRA+=("$arg") ;;
     esac
+    PREV="$arg"
 done
+ENV_ARGS=()
+[ -n "$ENV_NAME" ] && ENV_ARGS=(--env "$ENV_NAME")
+TARGET="${ENV_NAME:-prod}"
 
 if [ -z "$WORKER" ]; then
     echo "usage: gbfs/deploy.sh <worker> [--force] [-- <wrangler args>]" >&2
@@ -86,7 +106,7 @@ fi
 
 # ── read prod's stamp ────────────────────────────────────────────────
 # `deployments list --json` is chronological; the live one is last.
-PROD_MSG="$(npx --no-install wrangler deployments list --json 2>/dev/null \
+PROD_MSG="$(npx --no-install wrangler deployments list --json "${ENV_ARGS[@]}" 2>/dev/null \
     | node -e '
         let s = "";
         process.stdin.on("data", d => s += d);
@@ -106,7 +126,7 @@ fail() {
     echo >&2
     echo "  ✗ deploy blocked: $1" >&2
     echo >&2
-    echo "  prod:     ${PROD_SHA:-<unstamped>}${PROD_DIRTY:+ (dirty=$PROD_DIRTY)}" >&2
+    echo "  $TARGET:     ${PROD_SHA:-<unstamped>}${PROD_DIRTY:+ (dirty=$PROD_DIRTY)}" >&2
     echo "  deploying: $SHA (dirty=$DIRTY)" >&2
     echo >&2
     echo "  $2" >&2
@@ -116,6 +136,8 @@ fail() {
 
 if [ "$FORCE" = 1 ]; then
     echo "⚠️  --force: skipping the compare-and-swap check"
+elif [ -n "$ENV_NAME" ]; then
+    echo "ℹ️  env $ENV_NAME: was ${PROD_SHA:-<unstamped>}${PROD_DIRTY:+ (dirty=$PROD_DIRTY)}; non-prod, no compare-and-swap"
 elif [ -z "$PROD_SHA" ]; then
     # Every deployment predating this script is unstamped; allowing the
     # first one through is what bootstraps the invariant.
@@ -138,10 +160,31 @@ else
          "In CI this usually means checkout needs 'fetch-depth: 0'."
 fi
 
-if [ "$DIRTY" = 1 ] && [ "$FORCE" != 1 ]; then
+if [ "$DIRTY" = 1 ] && [ "$FORCE" != 1 ] && [ -z "$ENV_NAME" ]; then
     fail "working tree is dirty under: ${SRC_PATHS[*]}" \
          "Deploying uncommitted code is how prod gets ahead of git in the first place."
 fi
 
-echo "→ deploying gbfs/$WORKER @ ${SHA:0:8} (dirty=$DIRTY)"
-npx --no-install wrangler deploy --message "sha=$SHA dirty=$DIRTY" "${EXTRA[@]}"
+echo "→ deploying gbfs/$WORKER @ ${SHA:0:8} (dirty=$DIRTY) to $TARGET"
+npx --no-install wrangler deploy --message "sha=$SHA dirty=$DIRTY" \
+    --var "GIT_SHA:$SHA" --var "GIT_DIRTY:$DIRTY" \
+    --var "DEPLOYED_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)" --var "DEPLOY_ENV:$TARGET" \
+    "${EXTRA[@]}"
+
+# ── marker branch ────────────────────────────────────────────────────
+# Best-effort: the deploy already happened, so a failed push only warns.
+# A dirty build has no commit to point at. Remote: $DEPLOY_MARKER_REMOTE,
+# else the one pointing at the GitHub repo (`origin` in CI).
+MARKER="deployed/$WORKER${ENV_NAME:+-$ENV_NAME}"
+if [ "$DIRTY" = 1 ]; then
+    echo "⚠️  dirty build: not moving $MARKER"
+else
+    REMOTE="${DEPLOY_MARKER_REMOTE:-$(git -C "$REPO_ROOT" remote -v | awk '/hudcostreets\/ctbk\.dev.*\(push\)/ {print $1; exit}')}"
+    if [ -z "$REMOTE" ]; then
+        echo "⚠️  no remote for hudcostreets/ctbk.dev; not moving $MARKER"
+    elif git -C "$REPO_ROOT" push --force "$REMOTE" "$SHA:refs/heads/$MARKER"; then
+        echo "✓ $REMOTE/$MARKER → ${SHA:0:8}"
+    else
+        echo "⚠️  couldn't push $REMOTE/$MARKER"
+    fi
+fi

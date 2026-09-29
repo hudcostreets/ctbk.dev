@@ -58,6 +58,13 @@ interface Env extends ServeEnv {
 	 *    blobs[3] = status, doubles[0] = perCallMs, doubles[1] = wallMs.
 	 *  Queryable via CF GraphQL `viewer.accounts.workersAnalyticsEngine`. */
 	PERF?: AnalyticsEngineDataset;
+	/** Deploy stamp, set by `gbfs/deploy.sh` (`--var`): the commit this
+	 *  bundle was built from, whether its tree was dirty, when it shipped,
+	 *  and which wrangler env. Served at `/api/version`. */
+	GIT_SHA?: string;
+	GIT_DIRTY?: string;
+	DEPLOYED_AT?: string;
+	DEPLOY_ENV?: string;
 	/** Folded into the `/api/rides*` + `/api/tl` edge-cache keys; bump to
 	 *  rotate every cached rides response after a data cutover. */
 	RIDES_CACHE_GEN?: string;
@@ -1255,6 +1262,17 @@ export default {
 
 		if (url.pathname === '/health') {
 			return jsonResponse({ status: 'ok' }, env);
+		}
+
+		// What's deployed here: the stamp `gbfs/deploy.sh` bakes in. Absent
+		// fields ⇒ deployed some other way (a bare `wrangler deploy`).
+		if (url.pathname === '/api/version') {
+			return jsonResponse({
+				sha: env.GIT_SHA ?? null,
+				dirty: env.GIT_DIRTY == null ? null : env.GIT_DIRTY === '1',
+				deployedAt: env.DEPLOYED_AT ?? null,
+				env: env.DEPLOY_ENV ?? null,
+			}, env);
 		}
 
 		// /api/health — pipeline health snapshot (feed + compactions +
