@@ -7,22 +7,30 @@
  * not a re-mount of thousands of SVG nodes.
  *
  * The basemap + deck overlay + camera live in `GLMap` (shared with
- * `/timelapse`); this component owns the `/stations` layers (lens-colored
- * dots, pin rings, arc fan), rectangle select and the hover drawer. Picking is
- * GPU-based (`pickable`), so the old invisible hit-circle hack is gone. Stage 3
- * adds the `ArcLayer` flow fan (`arcs`).
+ * `/timelapse`); this component owns the station layers (lens-colored dots,
+ * pin rings, arc fan) and the hover drawer. Selection gestures are the shared
+ * `lib/mapSelection` model (as on `/timelapse`): tap selects one, tap on
+ * empty map clears, long-press enters multi-select, long-press- or
+ * shift-drag box-selects, shift/⌘-click toggles; each emits a `SelAction`
+ * for the caller to reduce. Picking is GPU-based (`pickObject`), so the old
+ * invisible hit-circle hack is gone. Hover (drawer + `onHoverStation`) only
+ * on hover-capable pointers. Stage 3 adds the `ArcLayer` flow fan (`arcs`).
  *
- * Opt-in via `?gl=1` on `/stations` while it reaches parity with `StationMap`.
+ * The default map on `/stations` (`?gl=0` → Leaflet `StationMap`) and on the
+ * Home embed.
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ArcLayer, ScatterplotLayer } from '@deck.gl/layers'
-import type { Layer, PickingInfo } from '@deck.gl/core'
-import type { Map as MaplibreMapInstance } from 'maplibre-gl'
-import { useTheme } from '../contexts/ThemeContext'
-import css from '../stations.module.css'
-import type { Stations, StationPairCounts } from './StationMap'
+import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { rampRgb, type FlowArc } from './flowLens'
 import GLMap from './GLMap'
+import { useTheme } from '../contexts/ThemeContext'
+import { stationsInRect, useSelectionGestures, type SelAction } from '../lib/mapSelection'
+import { useCanHover } from '../lib/useMediaQuery'
+import css from '../stations.module.css'
+import type { Stations, StationPairCounts } from './stationMapCommon'
+import type { Layer, PickingInfo } from '@deck.gl/core'
+import type { MapboxOverlay } from '@deck.gl/mapbox'
+import type { Map as MaplibreMapInstance } from 'maplibre-gl'
 
 const { sqrt, max } = Math
 
@@ -50,13 +58,12 @@ type StationDatum = {
 
 export interface StationMapGLProps {
   stations: Stations
-  selectedId?: string
   pinnedIds?: readonly string[]
-  /** Multi-select toggle: `additive` (meta/ctrl-click) adds/removes; a plain
-   *  click replaces the set with this station. */
-  onTogglePin?: (id: string, additive: boolean) => void
-  /** Replace the selection set with these ids (rectangle/region select). */
-  onSelectSet?: (ids: string[], additive: boolean) => void
+  /** Selection gestures (tap / long-press / rectangle), for the caller to
+   *  reduce (`useSelection().apply`). */
+  onSelAction?: (a: SelAction) => void
+  /** Multi-select mode is on (hover-drawer hint only). */
+  multi?: boolean
   pairCounts?: StationPairCounts | null
   /** Per-station fill color (hex) from the flow lens / color-by-age. */
   stationColors?: Record<string, string> | null
@@ -74,15 +81,19 @@ export interface StationMapGLProps {
   center: [number, number]
   zoom: number
   onMove?: (lat: number, lng: number, zoom: number) => void
-  onClick?: () => void
+  /** Top-right caption (non-interactive). */
   overlay?: ReactNode
+  /** Extra chrome rendered over the map (outside the gesture surface). */
+  children?: ReactNode
+  /** Wrapper class (sizing); default `/stations`' full-height map. */
+  className?: string
 }
 
 export default function StationMapGL({
   stations,
   pinnedIds,
-  onTogglePin,
-  onSelectSet,
+  onSelAction,
+  multi = false,
   pairCounts,
   stationColors,
   stationRadii,
@@ -93,82 +104,17 @@ export default function StationMapGL({
   center,
   zoom,
   onMove,
-  onClick,
   overlay,
+  children,
+  className,
 }: StationMapGLProps) {
   const { actualTheme } = useTheme()
   const dark = actualTheme === 'dark'
 
+  const canHover = useCanHover()
   const [hoveredId, setHoveredId] = useState<string | null>(null)
-  // Read by the click handler: hover fires before click at the same point, so
-  // this reliably says which station (if any) is under the cursor at click.
-  const hoveredIdRef = useRef<string | null>(null)
-  // Set when a station's layer onClick fires, so the map's empty-space click
-  // handler knows not to clear the selection for that same click.
-  const justPickedRef = useRef(0)
-  const mapRef = useRef<MaplibreMapInstance | null>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-  // Rectangle-select drag box (container-relative px), or null when inactive.
-  const [box, setBox] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
-  // Latest values for the (once-attached) box-select listeners.
-  const stationsRef = useRef(stations)
-  stationsRef.current = stations
-  const onSelectSetRef = useRef(onSelectSet)
-  onSelectSetRef.current = onSelectSet
-
-  // Rectangle select: shift-drag a box → select every station inside it.
-  // Capture-phase mousedown so we can suppress maplibre's pan before it starts
-  // (and toggle `dragPan` off for the gesture). Corners are unprojected to a
-  // lng/lat bbox; meta/ctrl adds to the set instead of replacing.
-  useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
-    let start: { x: number; y: number } | null = null
-    const rel = (e: MouseEvent) => {
-      const r = el.getBoundingClientRect()
-      return { x: e.clientX - r.left, y: e.clientY - r.top }
-    }
-    const onDown = (e: MouseEvent) => {
-      if (!e.shiftKey || e.button !== 0 || !mapRef.current) return
-      e.preventDefault()
-      e.stopPropagation()
-      start = rel(e)
-      setBox({ x0: start.x, y0: start.y, x1: start.x, y1: start.y })
-      mapRef.current.dragPan.disable()
-    }
-    const onMove = (e: MouseEvent) => {
-      if (!start) return
-      const p = rel(e)
-      setBox({ x0: start.x, y0: start.y, x1: p.x, y1: p.y })
-    }
-    const onUp = (e: MouseEvent) => {
-      if (!start) return
-      const map = mapRef.current
-      const p = rel(e)
-      const [x0, y0] = [start.x, start.y]
-      start = null
-      setBox(null)
-      if (!map) return
-      map.dragPan.enable()
-      if (Math.abs(p.x - x0) < 3 || Math.abs(p.y - y0) < 3) return
-      const a = map.unproject([Math.min(x0, p.x), Math.min(y0, p.y)])
-      const b = map.unproject([Math.max(x0, p.x), Math.max(y0, p.y)])
-      const [latMin, latMax] = [Math.min(a.lat, b.lat), Math.max(a.lat, b.lat)]
-      const [lngMin, lngMax] = [Math.min(a.lng, b.lng), Math.max(a.lng, b.lng)]
-      const ids = Object.entries(stationsRef.current)
-        .filter(([, s]) => s.lat >= latMin && s.lat <= latMax && s.lng >= lngMin && s.lng <= lngMax)
-        .map(([id]) => id)
-      if (ids.length) onSelectSetRef.current?.(ids, e.metaKey || e.ctrlKey)
-    }
-    el.addEventListener('mousedown', onDown, true)
-    window.addEventListener('mousemove', onMove, true)
-    window.addEventListener('mouseup', onUp, true)
-    return () => {
-      el.removeEventListener('mousedown', onDown, true)
-      window.removeEventListener('mousemove', onMove, true)
-      window.removeEventListener('mouseup', onUp, true)
-    }
-  }, [])
+  const overlayRef = useRef<MapboxOverlay | null>(null)
+  const [map, setMap] = useState<MaplibreMapInstance | null>(null)
 
   const defaultColor: RGBA = dark ? [230, 126, 34, 180] : [211, 84, 0, 170]
 
@@ -182,6 +128,31 @@ export default function StationMapGL({
     }
     return out
   }, [stations, stationColors, dark])
+
+  // `[lng, lat]` pairs, `data`-indexed, for rectangle hit-testing.
+  const positions = useMemo(() => {
+    const out = new Float64Array(data.length * 2)
+    data.forEach((d, i) => { out[2 * i] = d.position[0]; out[2 * i + 1] = d.position[1] })
+    return out
+  }, [data])
+
+  const dragRect = useSelectionGestures(map, {
+    pickAt: (at, touch) => {
+      const o = overlayRef.current
+      if (!o) return null
+      const info = o.pickObject({ x: at.x, y: at.y, radius: touch ? 12 : 3, layerIds: ['stations'] })
+      return (info?.object as StationDatum | undefined)?.id ?? null
+    },
+    pickRect: (r) => {
+      if (!map) return []
+      const project = (lng: number, lat: number): [number, number] => {
+        const p = map.project([lng, lat])
+        return [p.x, p.y]
+      }
+      return stationsInRect(positions, project, r).map((i) => data[i].id)
+    },
+    apply: (a) => onSelAction?.(a),
+  }, !!onSelAction)
 
   // Changes whenever any fill could change → deck re-runs ONLY getFillColor
   // (re-uploads that one attribute buffer), never geometry.
@@ -240,19 +211,12 @@ export default function StationMapGL({
       pickable: true,
       autoHighlight: true,
       highlightColor: [255, 255, 255, 90],
-      onHover: (info: PickingInfo<StationDatum>) => {
+      onHover: canHover ? (info: PickingInfo<StationDatum>) => {
         const id = info.object?.id ?? null
-        hoveredIdRef.current = id
         setHoveredId(id)
         onHoverStation?.(id)
         if (id) setSelectedId?.(id)
-      },
-      onClick: (info, e) => {
-        if (!info.object) return
-        justPickedRef.current = Date.now()
-        const oe = (e as { srcEvent?: MouseEvent }).srcEvent
-        onTogglePin?.(info.object.id, !!(oe?.metaKey || oe?.ctrlKey))
-      },
+      } : undefined,
       updateTriggers: { getFillColor: colorTrigger, getLineColor: colorTrigger, getRadius: radiusTrigger },
     }),
     new ScatterplotLayer<StationDatum>({
@@ -291,48 +255,31 @@ export default function StationMapGL({
     ? sourceIds.reduce((sum, src) => sum + (pairCounts[src]?.[hoveredId] ?? 0), 0)
     : 0
 
-  // Empty-space click → clear, UNLESS a station's layer onClick just fired for
-  // this same click (deck picks fire alongside maplibre's click).
-  const handleClick = () => {
-    if (Date.now() - justPickedRef.current < 150) return
-    onClick?.()
-  }
-
   return (
     <GLMap
       layers={layers}
       center={center}
       zoom={zoom}
       onMove={onMove}
-      onClick={handleClick}
-      onReady={(m) => { mapRef.current = m }}
+      onOverlay={(o, m) => { overlayRef.current = o; setMap(m) }}
       cursor={hoveredId ? 'pointer' : 'grab'}
-      className={css.homeMap}
-      containerRef={containerRef}
+      className={className ?? css.homeMap}
     >
       {overlay && (
         <div style={{
           position: 'absolute', top: 8, right: 8, zIndex: 1000,
           background: 'rgba(0,0,0,0.65)', color: 'white', padding: '4px 10px',
-          borderRadius: 4, fontSize: 12, pointerEvents: 'none', backdropFilter: 'blur(4px)',
+          borderRadius: 4, fontSize: 12, backdropFilter: 'blur(4px)',
         }}>
           {overlay}
         </div>
       )}
-      {box && (
-        <div style={{
-          position: 'absolute',
-          left: Math.min(box.x0, box.x1),
-          top: Math.min(box.y0, box.y1),
-          width: Math.abs(box.x1 - box.x0),
-          height: Math.abs(box.y1 - box.y0),
-          border: '1.5px solid #e91e63',
-          background: 'rgba(233,30,99,0.12)',
-          zIndex: 1000,
-          pointerEvents: 'none',
+      {dragRect && (
+        <div className={css.dragRect} style={{
+          left: dragRect.x0, top: dragRect.y0, width: dragRect.x1 - dragRect.x0, height: dragRect.y1 - dragRect.y0,
         }} />
       )}
-      {hovered && (
+      {hovered && !dragRect && (
         <div className={css.hoverDrawer}>
           <span className={css.hoverDrawerName}>{hovered.name}</span>
           {hovered.ends > 0 && (
@@ -341,8 +288,12 @@ export default function StationMapGL({
           {hoveredFlow > 0 && (
             <span className={css.hoverDrawerFlow}>{hoveredFlow.toLocaleString()} from selection</span>
           )}
+          <span className={css.hoverDrawerHint}>
+            {multi ? 'click to toggle' : pinSet.has(hoveredId!) ? 'shift/⌘-click to remove' : 'click to select · shift/⌘-click to add'}
+          </span>
         </div>
       )}
+      {children}
     </GLMap>
   )
 }

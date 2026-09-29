@@ -157,6 +157,62 @@ a.subtitle:hover {
     font-weight: 600;
 }
 
+.hoverDrawerHint {
+    opacity: 0.6;
+    font-size: 11px;
+}
+
+/* GL map: in-progress rectangle select (long-press- or shift-drag). */
+.dragRect {
+    position: absolute;
+    z-index: 900;
+    border: 1.5px solid #e91e63;
+    background: rgba(233, 30, 99, 0.12);
+    pointer-events: none;
+}
+
+/* GL map: multi-select mode bar (bottom-center, over the map). */
+.multiBar {
+    position: absolute;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: calc(100% - 32px);
+    padding: 6px 8px 6px 12px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.78);
+    color: #fff;
+    font-size: 13px;
+    white-space: nowrap;
+    backdrop-filter: blur(4px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.multiBarHint {
+    opacity: 0.7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.multiBar button {
+    border: none;
+    border-radius: 999px;
+    padding: 4px 12px;
+    font: inherit;
+    cursor: pointer;
+    background: rgba(255, 255, 255, 0.15);
+    color: inherit;
+}
+
+.multiBar button.multiBarDone {
+    background: #e91e63;
+    font-weight: 600;
+}
+
 /* Suppress the browser's default focus ring on Leaflet's interactive
  * SVG elements (polylines + circles). Without this, clicking a fan
  * polyline gives the SVG path keyboard focus and the browser paints a

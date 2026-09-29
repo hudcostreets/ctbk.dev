@@ -7,6 +7,7 @@
 !Dockerfile.screenshots
 !ROADMAP.md
 !e2e/bundle.spec.ts
+!e2e/glMap.ts
 !e2e/home-chart.spec.ts
 !e2e/map-embed.spec.ts
 !e2e/merge-review.spec.ts
@@ -168,6 +169,7 @@
 !src/components/smgBrush.test.ts
 !src/components/smgBrush.tsx
 !src/components/smgStyle.ts
+!src/components/stationMapCommon.ts
 !src/contexts/FlagsContext.tsx
 !src/contexts/ThemeContext.tsx
 !src/controls.module.css

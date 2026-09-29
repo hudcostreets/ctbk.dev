@@ -1,27 +1,169 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
+import { latestStations, screenPos, waitForGLMap, type Station } from './glMap'
 
 /**
- * `/stations?gl=1`: deck.gl-over-MapLibre GPU map (see
- * `specs/unified-page-architecture.md` "Rendering architecture"). WebGL
- * pixels aren't asserted (headless canvases capture black between maplibre
- * renders); this pins that the GL surface mounts in place of Leaflet, with
- * the lens legend + arc fan path running without page errors.
+ * `/stations`: the deck.gl-over-MapLibre GPU map is the default (`?gl=0` →
+ * Leaflet), with the shared `lib/mapSelection` model (as on `/timelapse`).
+ * Stations are located by projecting their coordinates from the default
+ * camera (`glMap.ts`); WebGL pixels aren't asserted.
  */
-test('GL map mounts with lens legend + arc fan, no page errors', async ({ page }) => {
-  const errors: string[] = []
-  page.on('pageerror', (e) => errors.push(e.message))
-  await page.goto('/stations?gl=1&fan=1&sel=6450.12')
 
-  await expect(page.locator('.maplibregl-map')).toHaveCount(1)
-  await expect(page.locator('.leaflet-container')).toHaveCount(0)
-  // Lens legend names the source station, confirming pairs loaded + `flowLens` ran.
-  const source = page.locator('[class*="lensSource"]')
-  await expect(source.locator('strong')).toHaveText('8 Ave & W 33 St', { timeout: 15_000 })
-  await expect(source).toContainText(/^Trips from /)
+const CENTER = { lat: 40.758, lng: -73.965 }
+const ZOOM = 12
 
-  // ⇄ flips the lens (and arc fan) direction via `?dir=`.
-  await page.getByRole('button', { name: /where riders go/ }).click()
-  await expect(source).toContainText(/^Trips to /)
-  await expect.poll(() => new URL(page.url()).searchParams.get('dir')).toBe('i')
-  expect(errors).toEqual([])
+type Placed = Station & { x: number; y: number }
+
+/** Stations with their screen positions, busiest first, restricted to a band
+ *  of the map clear of the title bar / legend / rides panel. */
+async function placedStations(page: Page): Promise<Placed[]> {
+  const all = await latestStations(page)
+  const out: Placed[] = []
+  for (const s of all) {
+    const p = await screenPos(page, s, CENTER, ZOOM)
+    out.push({ ...s, ...p })
+  }
+  return out.sort((a, b) => b.ends - a.ends)
+}
+
+const inBand = (s: Placed) => s.x > 150 && s.x < 1000 && s.y > 200 && s.y < 420
+
+/** Two busy stations ≥ 40px apart, each ≥ 15px from any other station (so a
+ *  click picks exactly it). */
+function twoStations(all: Placed[]): [Placed, Placed] {
+  const isolated = (s: Placed) => all.every((o) => o === s || Math.hypot(o.x - s.x, o.y - s.y) >= 15)
+  const cands = all.filter((s) => inBand(s) && isolated(s))
+  const a = cands[0]
+  const b = cands.find((s) => Math.hypot(s.x - a.x, s.y - a.y) >= 40)
+  if (!a || !b) throw new Error('no isolated station pair in view')
+  return [a, b]
+}
+
+/** A point in the band with no station within 30px. */
+function emptySpot(all: Placed[]): { x: number; y: number } {
+  for (let y = 220; y < 420; y += 10) {
+    for (let x = 160; x < 1000; x += 10) {
+      if (all.every((s) => Math.hypot(s.x - x, s.y - y) >= 30)) return { x, y }
+    }
+  }
+  throw new Error('no empty spot in view')
+}
+
+/** ⌘-click (`mouse.click` takes no modifiers). */
+async function metaClick(page: Page, at: { x: number; y: number }) {
+  await page.keyboard.down('Meta')
+  await page.mouse.click(at.x, at.y)
+  await page.keyboard.up('Meta')
+}
+
+const selOf = (page: Page) => new URL(page.url()).searchParams.get('sel')
+
+async function openStations(page: Page, query = '') {
+  await page.goto(`/stations${query}`)
+  await waitForGLMap(page)
+  await expect(page.getByText('Loading...')).toHaveCount(0, { timeout: 15_000 })
+  // Let deck upload the station layer before picking.
+  await page.waitForTimeout(500)
+}
+
+test.describe('Station map (GL default)', () => {
+  test('GL by default; `?gl=0` falls back to Leaflet; old `?gl=1` links still GL', async ({ page }) => {
+    await page.goto('/stations')
+    await expect(page.locator('.maplibregl-map')).toHaveCount(1)
+    await expect(page.locator('.leaflet-container')).toHaveCount(0)
+
+    await page.goto('/stations?gl=0')
+    await expect(page.locator('.leaflet-container')).toHaveCount(1)
+    await expect(page.locator('.maplibregl-map')).toHaveCount(0)
+
+    await page.goto('/stations?gl=1')
+    await expect(page.locator('.maplibregl-map')).toHaveCount(1)
+    await expect(page.locator('.leaflet-container')).toHaveCount(0)
+  })
+
+  test('lens legend + arc fan, no page errors', async ({ page }) => {
+    const errors: string[] = []
+    page.on('pageerror', (e) => errors.push(e.message))
+    await page.goto('/stations?fan=1&sel=6450.12')
+
+    await expect(page.locator('.maplibregl-map')).toHaveCount(1)
+    // Lens legend names the source station, confirming pairs loaded + `flowLens` ran.
+    const source = page.locator('[class*="lensSource"]')
+    await expect(source.locator('strong')).toHaveText('8 Ave & W 33 St', { timeout: 15_000 })
+    await expect(source).toContainText(/^Trips from /)
+
+    // ⇄ flips the lens (and arc fan) direction via `?dir=`.
+    await page.getByRole('button', { name: /where riders go/ }).click()
+    await expect(source).toContainText(/^Trips to /)
+    await expect.poll(() => new URL(page.url()).searchParams.get('dir')).toBe('i')
+    expect(errors).toEqual([])
+  })
+
+  test('tap selects one, ⌘-click toggles, empty tap clears, back undoes', async ({ page }) => {
+    await openStations(page)
+    const all = await placedStations(page)
+    const [a, b] = twoStations(all)
+
+    await page.mouse.click(a.x, a.y)
+    await expect.poll(() => selOf(page)).toBe(a.id)
+    await page.mouse.click(b.x, b.y)
+    await expect.poll(() => selOf(page)).toBe(b.id)
+    await metaClick(page, a)
+    await expect.poll(() => selOf(page)).toBe(`${b.id},${a.id}`)
+    await metaClick(page, b)
+    await expect.poll(() => selOf(page)).toBe(a.id)
+
+    const empty = emptySpot(all)
+    await page.mouse.click(empty.x, empty.y)
+    await expect.poll(() => selOf(page)).toBe(null)
+
+    // Each edit is a history entry: back restores the previous set.
+    await page.goBack()
+    await expect.poll(() => selOf(page)).toBe(a.id)
+  })
+
+  test('long-press → multi-select (taps toggle, empty taps keep the set) → Done; Esc clears', async ({ page }) => {
+    await openStations(page)
+    const all = await placedStations(page)
+    const [a, b] = twoStations(all)
+
+    await page.mouse.move(a.x, a.y)
+    await page.mouse.down()
+    await page.waitForTimeout(700)
+    await page.mouse.up()
+    // The mode shows in the rides panel's header (chips + Done).
+    await expect(page.getByTestId('multi-mode')).toHaveCount(1)
+    await expect.poll(() => selOf(page)).toBe(a.id)
+
+    await page.mouse.click(b.x, b.y)
+    await expect(page.getByRole('button', { name: /^Remove / })).toHaveCount(2)
+    const empty = emptySpot(all)
+    await page.mouse.click(empty.x, empty.y)
+    await expect.poll(() => selOf(page)).toBe(`${a.id},${b.id}`)
+
+    await page.getByTestId('multi-done').click()
+    await expect(page.getByTestId('multi-mode')).toHaveCount(0)
+    await expect.poll(() => selOf(page)).toBe(`${a.id},${b.id}`)
+
+    await page.keyboard.press('Escape')
+    await expect.poll(() => selOf(page)).toBe(null)
+  })
+
+  test('shift-drag box-selects the stations inside it', async ({ page }) => {
+    await openStations(page)
+    const all = await placedStations(page)
+    const [a] = twoStations(all)
+    const r = { x0: a.x - 25, y0: a.y - 25, x1: a.x + 25, y1: a.y + 25 }
+    const inside = all.filter((s) => s.x >= r.x0 && s.x <= r.x1 && s.y >= r.y0 && s.y <= r.y1).map((s) => s.id).sort()
+
+    await page.keyboard.down('Shift')
+    await page.mouse.move(r.x0, r.y0)
+    await page.mouse.down()
+    await page.mouse.move(a.x, a.y, { steps: 3 })
+    await page.mouse.move(r.x1, r.y1, { steps: 3 })
+    await page.mouse.up()
+    await page.keyboard.up('Shift')
+
+    await expect.poll(() => (selOf(page) ?? '').split(',').filter(Boolean).sort()).toEqual(inside)
+    await expect(page.getByTestId('multi-mode')).toHaveCount(0)
+  })
 })

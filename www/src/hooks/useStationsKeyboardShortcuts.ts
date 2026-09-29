@@ -5,6 +5,8 @@ interface UseStationsKeyboardShortcutsProps {
   setMonth: (month: string) => void
   availableMonths: string[]
   setSelectedId: (id: string | undefined) => void
+  /** Empty the `?sel=` set (and leave multi-select mode). */
+  clearSelection: () => void
   openSearch: () => void
   toggleTheme: () => void
   monthSelectRef: React.RefObject<HTMLSelectElement | null>
@@ -17,6 +19,7 @@ export function useStationsKeyboardShortcuts({
   setMonth,
   availableMonths,
   setSelectedId,
+  clearSelection,
   openSearch,
   toggleTheme,
   monthSelectRef,
@@ -69,10 +72,13 @@ export function useStationsKeyboardShortcuts({
 
   // Station actions
   useAction('station:deselect', {
-    label: 'Deselect station',
+    label: 'Clear selection',
     group: 'Station',
     defaultBindings: ['escape'],
-    handler: () => setSelectedId(undefined),
+    handler: () => {
+      setSelectedId(undefined)
+      clearSelection()
+    },
   })
 
   useAction('station:search', {

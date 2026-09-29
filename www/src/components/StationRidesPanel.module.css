@@ -147,3 +147,24 @@
     opacity: 1;
     text-decoration: underline;
 }
+
+.modeTag {
+    font-size: 0.8em;
+    padding: 0.15em 0.6em;
+    border-radius: 999px;
+    background: rgba(233, 30, 99, 0.15);
+    color: #e91e63;
+    font-weight: 600;
+}
+
+.doneBtn {
+    border: none;
+    border-radius: 999px;
+    padding: 0.25em 0.9em;
+    font: inherit;
+    font-size: 0.85em;
+    font-weight: 600;
+    cursor: pointer;
+    background: #e91e63;
+    color: #fff;
+}

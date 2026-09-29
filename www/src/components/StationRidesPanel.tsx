@@ -18,6 +18,7 @@ import { RangeWidthControl, type DurationPreset } from './RangeWidthControl'
 import StationRidesChart, { ENDS_COLOR, STARTS_COLOR } from './StationRidesChart'
 import SmgPanel from './SmgPanel'
 import { BrushProvider } from './smgBrush'
+import { useCanHover } from '../lib/useMediaQuery'
 import { useMultiStationRides } from '../query/ridesMulti'
 import { SMG_GENESIS_S, smgCellsFor } from '../query/smg'
 import { formatDuration, rangeToUnixSeconds, roundDuration, timeRangeParam } from '../time-range'
@@ -56,6 +57,10 @@ interface Props {
   stations: Stations
   onRemove: (id: string) => void
   onClear: () => void
+  /** The map's multi-select mode (`lib/mapSelection`) is on: show it, with a
+   *  Done button (keep the set, leave the mode). */
+  multi?: boolean
+  onDone?: () => void
 }
 
 /** Which series the sheet shows for the set: rides (starts/ends) or the
@@ -64,7 +69,8 @@ interface Props {
 type PanelView = 'rides' | 'states'
 const PANEL_VIEWS: [PanelView, string][] = [['rides', 'r'], ['states', 's']]
 
-export default function StationRidesPanel({ shortNames, stations, onRemove, onClear }: Props) {
+export default function StationRidesPanel({ shortNames, stations, onRemove, onClear, multi = false, onDone }: Props) {
+  const canHover = useCanHover()
   const [range, setRange] = useUrlState('rr', timeRangeParam(YEAR_MS))
   const [binMs, setBinMs] = useUrlState('rb', intParam(0))
   const [view, setView] = useUrlState('rv', codeParam<PanelView>('rides', PANEL_VIEWS))
@@ -139,6 +145,12 @@ export default function StationRidesPanel({ shortNames, stations, onRemove, onCl
             </span>
           ))}
           <button type="button" className={css.clearBtn} onClick={onClear}>clear</button>
+          {multi && (
+            <>
+              <span className={css.modeTag} data-testid="multi-mode">multi-select: {canHover ? 'click' : 'tap'} stations to add / remove</span>
+              {onDone && <button type="button" className={css.doneBtn} onClick={onDone} data-testid="multi-done">Done</button>}
+            </>
+          )}
         </div>
         <div className={css.controls}>
           <span className={css.viewToggle} role="group" aria-label="Panel view">

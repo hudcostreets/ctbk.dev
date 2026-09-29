@@ -1,7 +1,8 @@
 import { test, expect, Page } from '@playwright/test'
 
 /**
- * /stations map: hover/click interactions.
+ * /stations Leaflet map (`?gl=0`, the fallback; the default GL map is
+ * `station-map-gl.spec.ts`): hover/click interactions.
  *
  * Map mechanics (see `specs/unified-page-architecture.md`): no Leaflet
  * tooltips at all — a single HTML hover drawer names the hovered station;
@@ -65,7 +66,7 @@ const LINES = '.leaflet-pane.leaflet-lines-pane path'
 
 test.describe('Station map — hover drawer + fan', () => {
   test('hovering a station fills the hover drawer; no map tooltips, no fan by default', async ({ page }) => {
-    await page.goto('/stations')
+    await page.goto('/stations?gl=0')
     await waitForStations(page)
     await selectBiggestStation(page)
 
@@ -79,7 +80,7 @@ test.describe('Station map — hover drawer + fan', () => {
   })
 
   test('`?fan=1` draws non-interactive destination lines for the hover-selected station', async ({ page }) => {
-    await page.goto('/stations?fan=1')
+    await page.goto('/stations?gl=0&fan=1')
     await waitForStations(page)
     await selectBiggestStation(page)
     await page.mouse.move(5, 5)
@@ -91,7 +92,7 @@ test.describe('Station map — hover drawer + fan', () => {
 
 test.describe('Station map — multi-select rides panel', () => {
   test('clicking a station toggles it into `?sel=` and opens the rides panel', async ({ page }) => {
-    await page.goto('/stations')
+    await page.goto('/stations?gl=0')
     await waitForStations(page)
     const station = await biggestStation(page)
     await page.mouse.click(station.x, station.y)

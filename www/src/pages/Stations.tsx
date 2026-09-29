@@ -1,19 +1,20 @@
 import { FormControl, MenuItem, Select, SelectChangeEvent } from '@mui/material'
 import { useUrlState, boolParam, cleanUrl, codeParam, llzParam, stringParam } from 'use-prms'
 import type { LLZ, Param } from 'use-prms'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { SpeedDial, useHotkeysContext } from 'use-kbd'
-import StationMap, {
+import {
   type Stations, type StationPairCounts, TILE_COLORS, resolveTileStyle,
-} from '../components/StationMap'
+} from '../components/stationMapCommon'
 import { flowArcs, flowLens, type LensChannel, type FlowDirection } from '../components/flowLens'
-import StationMapGL from '../components/StationMapGL'
 import StationRidesPanel from '../components/StationRidesPanel'
 import { RangeWidthControl } from '../components/RangeWidthControl'
 import { useTheme } from '../contexts/ThemeContext'
 import { useStationsKeyboardShortcuts } from '../hooks/useStationsKeyboardShortcuts'
 import { useStationsOmnibarEndpoint } from '../hooks/useStationsOmnibarEndpoint'
+import { selParam, useSelection, type SelAction } from '../lib/mapSelection'
+import { useCanHover } from '../lib/useMediaQuery'
 import { useTotalsQuery, type Side } from '../query/rollups'
 import { timeRangeParam } from '../time-range'
 import css from "../stations.module.css"
@@ -31,11 +32,17 @@ const sideParam: Param<'start' | 'end' | 'both'> = {
   decode: (raw) => (raw === 's' ? 'start' : raw === 'e' ? 'end' : 'both'),
 }
 
-/** URL codec for the multi-select station set (`?sel=`): comma-joined
- *  short_names, order-preserving (selection order = chip order). */
-const selParam: Param<string[]> = {
-  encode: (v) => (v.length ? v.join(',') : undefined),
-  decode: (raw) => (raw ? raw.split(',').filter(Boolean) : []),
+/** Map renderers, each lazy so only the one in use is fetched (deck.gl +
+ *  MapLibre for the default GL map, leaflet for `?gl=0`). */
+const StationMapGL = lazy(() => import('../components/StationMapGL'))
+const StationMap = lazy(() => import('../components/StationMap'))
+
+/** `?gl=`: the GL map (deck.gl + MapLibre) is the default; `?gl=0` falls back
+ *  to the Leaflet `StationMap`. Old `?gl=1` (and bare `?gl`) links still
+ *  decode to GL. */
+const glParam: Param<boolean> = {
+  encode: (v) => (v ? undefined : '0'),
+  decode: (raw) => raw !== '0' && raw !== 'false',
 }
 
 /** URL codec for the flow-lens channel (`?lens=`): `c` (color, default), `r`
@@ -136,25 +143,30 @@ export default function Stations() {
   // blob near the origin + costs a lot of SVG on hover.
   const [dir, setDir] = useUrlState('dir', codeParam<FlowDirection>('out', [['out', 'o'], ['in', 'i']]))
   const [fan] = useUrlState('fan', boolParam)
-  // `?gl=1` → experimental GPU map (deck.gl + MapLibre), Stage 1 of the
-  // rendering migration. Off = the current react-leaflet SVG map.
-  const [gl] = useUrlState('gl', boolParam)
+  const [gl] = useUrlState('gl', glParam)
   // Mark style on the GL map: solid `fill` (default) or hollow `ring`.
   const [mark] = useUrlState('mark', codeParam<'fill' | 'ring'>('fill', [['fill', 'f'], ['ring', 'r']]))
   // Live hover-preview: on the GL map, hovering a station (when nothing is
   // pinned) previews the lens for it — recoloring every station by that
-  // station's flow. Cheap on the GPU; gated to `gl` (would thrash the SVG map).
+  // station's flow. Cheap on the GPU; gated to `gl` (would thrash the SVG map)
+  // and to hover-capable pointers (a tap is a selection, not a preview).
+  const canHover = useCanHover()
   const [hoverPreviewId, setHoverPreviewId] = useState<string | null>(null)
-  // Region select (rectangle): replace the set, or add to it with a modifier.
-  const selectSet = useCallback((ids: string[], additive: boolean) => {
-    setSel(additive ? Array.from(new Set([...sel, ...ids])) : ids)
-  }, [sel, setSel])
-  // Plain click selects just that station; meta/ctrl-click adds/removes it
-  // from the working set (multi-select). Empty-map click clears the set.
-  const selectStation = useCallback((id: string, additive: boolean) => {
-    if (additive) setSel(sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id])
-    else setSel([id])
-  }, [sel, setSel])
+  // Selection (`lib/mapSelection`, shared with `/timelapse`): tap selects one,
+  // tap on empty map / Esc clears, long-press enters multi-select (taps
+  // toggle; Done / Clear), long-press- or shift-drag box-selects,
+  // shift/⌘-click toggles. Each edit is a history entry (`push` above).
+  const { multi, apply: applySel } = useSelection(sel, setSel)
+  const onSelAction = useCallback((a: SelAction) => {
+    // An empty-map tap that clears the set also drops the hover subtitle.
+    if (a.t === 'tap' && a.id === null && !a.toggle && !multi) setSelectedId(undefined)
+    applySel(a)
+  }, [applySel, multi, setSelectedId])
+  // Leaflet map: plain click = tap, meta/ctrl-click = toggle.
+  const selectStation = useCallback(
+    (id: string, additive: boolean) => onSelAction({ t: 'tap', id, toggle: additive }),
+    [onSelAction],
+  )
 
   // One-time legacy URL migration: ?lat=&lng=&z= → ?ll=lat+lng+zoom.
   // Each migrate callback reassembles the full `LLZ` from current URL
@@ -323,7 +335,7 @@ export default function Stations() {
   // for the color channel; also drives the radius channel when `?lens=` asks.
   // Lens source: the pinned set, or (GL only, nothing pinned) the hovered
   // station for a live preview.
-  const lensSourceIds = sel.length ? sel : (gl && hoverPreviewId ? [hoverPreviewId] : [])
+  const lensSourceIds = sel.length ? sel : (gl && canHover && hoverPreviewId ? [hoverPreviewId] : [])
   const flowStyle = useMemo(
     () => (lensSourceIds.length && effectiveStations
       ? flowLens(effectiveStations, pairCounts, lensSourceIds, lens, dir)
@@ -348,6 +360,7 @@ export default function Stations() {
     setMonth: setMonthSmart,
     availableMonths,
     setSelectedId,
+    clearSelection: () => applySel({ t: 'clear' }),
     openSearch: openOmnibar,
     toggleTheme,
     monthSelectRef,
@@ -385,13 +398,13 @@ export default function Stations() {
   return (
     <div className={css.container}>
       <main className={css.main}>
+        <Suspense fallback={<div className={css.homeMap} />}>
         {gl ? (
           <StationMapGL
             stations={effectiveStations ?? {}}
-            selectedId={selectedId}
             pinnedIds={sel}
-            onTogglePin={selectStation}
-            onSelectSet={selectSet}
+            onSelAction={onSelAction}
+            multi={multi}
             pairCounts={pairCounts}
             stationColors={effectiveColors}
             stationRadii={effectiveRadii}
@@ -402,7 +415,6 @@ export default function Stations() {
             center={[view.lat, view.lng]}
             zoom={view.zoom}
             onMove={(la, ln, z) => setView({ lat: la, lng: ln, zoom: z })}
-            onClick={() => { setSelectedId(undefined); setSel([]) }}
           />
         ) : (
         <StationMap
@@ -422,11 +434,12 @@ export default function Stations() {
           tileBase={tileBase}
           hoverToSelect
           onMove={(la, ln, z) => setView({ lat: la, lng: ln, zoom: z })}
-          onClick={() => { setSelectedId(undefined); setSel([]) }}
+          onClick={() => onSelAction({ t: 'tap', id: null, toggle: false })}
           pies={pies}
           pieRange={pies ? pieRange : undefined}
         />
         )}
+        </Suspense>
         {(loading || (api && apiTotals.isPending && !apiTotals.data)) && (
           <div className={css.loading}>Loading...</div>
         )}
@@ -504,8 +517,10 @@ export default function Stations() {
         <StationRidesPanel
           shortNames={sel}
           stations={stations}
-          onRemove={(id) => setSel(sel.filter((x) => x !== id))}
-          onClear={() => setSel([])}
+          onRemove={(id) => applySel({ t: 'remove', id })}
+          onClear={() => applySel({ t: 'clear' })}
+          multi={multi}
+          onDone={() => applySel({ t: 'done' })}
         />
       )}
       {stations && <SpeedDial ariaLabel="Search stations" />}
