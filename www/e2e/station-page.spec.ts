@@ -77,7 +77,7 @@ test.describe('Station page', () => {
     const text = (await summary.innerText()).replace(/\s+/g, ' ').trim()
     const m = text.match(/^(\w{3} \d+ – \w{3} \d+): (.*)$/)
     expect(m).not.toBeNull()
-    const labels = m![2].split(/ [\d.]+%/).filter(Boolean).map((l) => l.trim())
+    const labels = m![2].split(/ <?[\d.]+%/).filter(Boolean).map((l) => l.trim())
     const known = ['Empty', 'Full', 'Full, no e-bikes', 'No e-bikes', 'Offline', 'Bogus (0 bikes, 0 docks)', 'OK', 'Absent from feed', 'Stale feed', 'No poll']
     expect(labels.filter((l) => !known.includes(l))).toEqual([])
     expect(labels.filter((l) => l === 'OK')).toEqual(['OK'])
