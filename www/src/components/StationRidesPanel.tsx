@@ -18,6 +18,7 @@
  * SpeedDial clear of it).
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { codeParam, intParam, useUrlState } from 'use-prms'
 import { BIN_PRESETS, BinSelect } from './BinSelect'
 import { RangeWidthControl, type DurationPreset } from './RangeWidthControl'
@@ -71,6 +72,8 @@ interface Props {
   compact?: boolean
   /** The sheet's rendered height (px), on every resize; 0 on unmount. */
   onHeight?: (px: number) => void
+  /** `/timelapse` URL for this set + map view: a "▶ timelapse" link. */
+  timelapseHref?: string
 }
 
 /** Which series the sheet shows for the set: rides (starts/ends) or the
@@ -79,7 +82,7 @@ interface Props {
 type PanelView = 'rides' | 'states'
 const PANEL_VIEWS: [PanelView, string][] = [['rides', 'r'], ['states', 's']]
 
-export default function StationRidesPanel({ shortNames, stations, onRemove, onClear, multi = false, onDone, compact = false, onHeight }: Props) {
+export default function StationRidesPanel({ shortNames, stations, onRemove, onClear, multi = false, onDone, compact = false, onHeight, timelapseHref }: Props) {
   const canHover = useCanHover()
   const [range, setRange] = useUrlState('rr', timeRangeParam(YEAR_MS))
   const [binMs, setBinMs] = useUrlState('rb', intParam(0))
@@ -212,6 +215,7 @@ export default function StationRidesPanel({ shortNames, stations, onRemove, onCl
           {rides.isError && <span className={css.error}>rides fetch failed</span>}
         </>
       )}
+      {timelapseHref && <Link className={css.tlLink} to={timelapseHref} data-testid="timelapse-link">▶ timelapse</Link>}
     </div>
   )
   // Phone: the chart body hides (stays mounted) while collapsed.

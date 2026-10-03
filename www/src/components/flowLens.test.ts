@@ -100,4 +100,16 @@ describe('flowArcs', () => {
       { from: 'A', to: 'B', source: [-74.0, 40.7], target: [-74.01, 40.71], count: 100 },
     ])
   })
+  it('merges a multi-station set into one arc per other station, set end at the count-weighted centroid', () => {
+    const multi: StationPairCounts = { A: { C: 30, B: 5 }, B: { C: 10, D: 20 }, E: { A: 8, B: 2 } }
+    const cLng = (-74.0 * 30 + -74.01 * 10) / 40
+    const cLat = (40.7 * 30 + 40.71 * 10) / 40
+    expect(flowArcs(stations, multi, ['A', 'B'], 'out')).toEqual([
+      { from: 'B', to: 'D', source: [-74.01, 40.71], target: [-74.03, 40.73], count: 20 },
+      { from: 'A', to: 'C', source: [cLng, cLat], target: [-74.02, 40.72], count: 40 },
+    ])
+    expect(flowArcs(stations, multi, ['A', 'B'], 'in')).toEqual([
+      { from: 'E', to: 'A', source: [-74.04, 40.74], target: [(-74.0 * 8 + -74.01 * 2) / 10, (40.7 * 8 + 40.71 * 2) / 10], count: 10 },
+    ])
+  })
 })

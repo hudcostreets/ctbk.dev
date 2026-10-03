@@ -63,6 +63,9 @@ const DEFAULT_TILE_CODE = 'a'
 /** `latLngDecimals: 3` matches the `Math.round(...*1000)/1000` rounding the
  *  Leaflet `onMove` handler historically applied to lat/lng. */
 const viewParam = llzParam({ default: DEFAULT_LLZ, latLngDecimals: 3 })
+/** `ll` for links out (`/timelapse` has its own default view, so always
+ *  encode, even when this page is at `DEFAULT_LLZ`). */
+const viewOutParam = llzParam({ default: { lat: 0, lng: 0, zoom: 0 }, latLngDecimals: 3 })
 
 /** Format YYYYMM to "MMM 'YY" */
 function formatMonth(yyyymm: string): string {
@@ -137,6 +140,13 @@ export default function Stations() {
   // back/forward is the selection undo/redo buffer. Hover (`s`) stays on the
   // default replaceState, so sweeping the map never spams history.
   const [sel, setSel] = useUrlState('sel', selParam, { push: true })
+  const timelapseHref = useMemo(() => {
+    const q = new URLSearchParams()
+    for (const [k, v] of [['sel', selParam.encode(sel)], ['ll', viewOutParam.encode(view)]] as const) {
+      if (v) q.set(k, v)
+    }
+    return `/timelapse?${q}`
+  }, [sel, view])
   // Flow-lens channel(s) for the selected source set (color / radius / both).
   const [lens] = useUrlState('lens', lensParam)
   // Flow direction: `out` = where riders from the set go; `in` = where they
@@ -537,6 +547,7 @@ export default function Stations() {
           onDone={() => applySel({ t: 'done' })}
           compact={!wide}
           onHeight={setPanelH}
+          timelapseHref={timelapseHref}
         />
       )}
       {stations && (

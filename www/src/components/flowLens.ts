@@ -291,13 +291,16 @@ export type FlowArc = {
 }
 
 /**
- * Arc fan for a source set: one arc per directed (set ↔ other) station pair,
- * in riding direction (`out`: set → other; `in`: other → set). Same data as
- * the Leaflet destination fan (`pairCounts`), but with the lens's
- * `FLOOR_FRAC` cut (pairs below 4% of the heaviest pair are dropped — the
- * long 1–3-trip tail is what stacked into the SVG fan's red blob). Sorted
- * light→heavy, so heavy arcs draw on top; width/alpha come from
- * `arcWidthPx`/`arcAlpha` against the last (heaviest) arc's count.
+ * Arc fan for a source set: one arc per *other* station, in riding direction
+ * (`out`: set → other; `in`: other → set), carrying that station's total
+ * flow with the whole set. With several stations selected, the set end sits
+ * at the count-weighted centroid of the set stations that trade with that
+ * station, so N sources × M destinations collapse to ≤ M arcs (one width per
+ * destination) instead of an N×M hairball; a single source keeps its exact
+ * position. `FLOOR_FRAC` cut (arcs below 4% of the heaviest are dropped).
+ * Sorted light→heavy, so heavy arcs draw on top; width/alpha come from
+ * `arcWidthPx`/`arcAlpha` against the last (heaviest) arc's count. The set
+ * end's id is its heaviest contributor.
  */
 export function flowArcs(
   stations: Stations,
@@ -305,19 +308,29 @@ export function flowArcs(
   selIds: readonly string[],
   direction: FlowDirection = 'out',
 ): FlowArc[] {
-  const pairs = directedPairs(stations, pairCounts, selIds, direction)
-  if (!pairs.length) return []
-  const maxCount = max(...pairs.map((p) => p.count))
-  const kept = pairs.filter((p) => p.count >= maxCount * FLOOR_FRAC).sort((a, b) => a.count - b.count)
-  return kept.map(({ from, to, count }) => {
-    const a = stations[from]
-    const b = stations[to]
-    return {
-      from,
-      to,
-      source: [a.lng, a.lat],
-      target: [b.lng, b.lat],
-      count,
-    }
-  })
+  type Acc = { count: number, lng: number, lat: number, top: string, topCount: number }
+  const byOther = new Map<string, Acc>()
+  for (const { from, to, other, count } of directedPairs(stations, pairCounts, selIds, direction)) {
+    const setId = other === to ? from : to
+    const s = stations[setId]
+    const acc = byOther.get(other) ?? { count: 0, lng: 0, lat: 0, top: setId, topCount: 0 }
+    acc.count += count
+    acc.lng += s.lng * count
+    acc.lat += s.lat * count
+    if (count > acc.topCount) { acc.top = setId; acc.topCount = count }
+    byOther.set(other, acc)
+  }
+  if (!byOther.size) return []
+  const maxCount = max(...[...byOther.values()].map((a) => a.count))
+  const arcs: FlowArc[] = []
+  for (const [other, { count, lng, lat, top }] of byOther) {
+    if (count < maxCount * FLOOR_FRAC) continue
+    const o = stations[other]
+    const setEnd: [number, number] = [lng / count, lat / count]
+    const otherEnd: [number, number] = [o.lng, o.lat]
+    arcs.push(direction === 'out'
+      ? { from: top, to: other, source: setEnd, target: otherEnd, count }
+      : { from: other, to: top, source: otherEnd, target: setEnd, count })
+  }
+  return arcs.sort((a, b) => a.count - b.count)
 }
