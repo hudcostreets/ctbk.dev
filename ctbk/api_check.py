@@ -24,6 +24,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 GOLDENS = Path(__file__).parent / 'api_check_goldens'
+NORMALIZED = Path(__file__).parents[1] / 's3' / 'ctbk' / 'normalized'
 UA = 'ctbk-api-check/1.0'
 
 SYS_BBOX = '40.5,-74.2,41.0,-73.7'  # NYC + JC + HOB
@@ -41,6 +42,7 @@ class Ctx:
 	base: str
 	update: bool
 	nonce: str
+	rides_month: str | None = None
 
 	def get(self, path: str, **params: str) -> dict:
 		# `_nc`: every rides/avail response is edge-cached (24h immutable for
@@ -119,6 +121,59 @@ def rides_monthly(anchor: str, frm: str, to: str) -> Callable[[Ctx], str]:
 			raise CheckFailed(f'months {missing=} {extra=} (half-open [{frm}, {to}))')
 		c.golden(f'rides-{anchor}-{frm[:7]}-{to[:7]}', totals)
 		return f'{len(totals)} months, {sum(totals.values()):,} rides'
+	return check
+
+
+def _rides_month_range(month: str | None = None) -> tuple[str, str]:
+	"""Latest consolidated month in the checkout, rather than the newer ZIP
+	tip or the pyramid's coarsest tip, which can hide incomplete fine tiers."""
+	if month is None:
+		months = sorted(p.name[:6] for p in NORMALIZED.glob('[0-9]' * 6 + '.parquet.dvc'))
+		if not months:
+			raise CheckFailed(f'no consolidated months in {NORMALIZED} (use --rides-month)')
+		month = months[-1]
+	month = month.replace('-', '')
+	if len(month) != 6 or not month.isdigit():
+		raise CheckFailed(f'rides month must be YYYYMM or YYYY-MM; got {month!r}')
+	start = datetime(int(month[:4]), int(month[4:]), 1, tzinfo=timezone.utc)
+	end = datetime(start.year + (start.month == 12), start.month % 12 + 1, 1, tzinfo=timezone.utc)
+	return _iso(f'{start:%Y-%m-%d}'), _iso(f'{end:%Y-%m-%d}')
+
+
+def _plan_coverage(body: dict) -> list[tuple[str, str]]:
+	"""Union the planner's intervals; empty ride bins do not imply a hole."""
+	parse = lambda value: datetime.fromisoformat(value.replace('Z', '+00:00'))
+	intervals = sorted((parse(s['from']), parse(s['to'])) for s in body['plan']['segments'])
+	merged = []
+	for start, end in intervals:
+		if end <= start:
+			raise CheckFailed(f'invalid plan interval [{start.isoformat()}, {end.isoformat()})')
+		if merged and start <= merged[-1][1]:
+			merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+		else:
+			merged.append((start, end))
+	return [(s.isoformat().replace('+00:00', 'Z'), e.isoformat().replace('+00:00', 'Z')) for s, e in merged]
+
+
+def rides_latest_month(anchor: str) -> Callable[[Ctx], str]:
+	"""Every served fine tier covers the latest consolidated month and sums
+	to its monthly total. A monthly shard alone cannot satisfy this check."""
+	def check(c: Ctx) -> str:
+		frm, to = _rides_month_range(c.rides_month)
+		params = dict(anchor=anchor, cells=f's:{STATION}', reducer='sum', **{'from': frm, 'to': to})
+		monthly = c.get('/api/rides', bin='1mo', **params)
+		total = sum(r['count'] for r in monthly['records'])
+		if total <= 0:
+			raise CheckFailed(f'no monthly rides for s:{STATION} in {frm[:7]}')
+		for tier in ('1h', '3h', '6h', '12h', '1d'):
+			body = c.get('/api/rides', bin=tier, **params)
+			coverage = _plan_coverage(body)
+			if coverage != [(frm, to)]:
+				raise CheckFailed(f'{frm[:7]} {tier} plan covers {coverage!r}; expected {[(frm, to)]!r}')
+			fine_total = sum(r['count'] for r in body['records'])
+			if fine_total != total:
+				raise CheckFailed(f'{frm[:7]} {tier} total {fine_total:,} ≠ monthly {total:,}')
+		return f'{frm[:7]}: 5 fine tiers cover full month, {total:,} rides each'
 	return check
 
 
@@ -232,6 +287,8 @@ def totals_avail(c: Ctx) -> str:
 CHECKS: dict[str, Callable[[Ctx], str]] = {
 	'rides-start-monthly': rides_monthly('start', '2024-01-01', '2025-07-01'),
 	'rides-end-monthly': rides_monthly('end', '2021-01-01', '2023-01-01'),
+	'rides-start-latest-month': rides_latest_month('start'),
+	'rides-end-latest-month': rides_latest_month('end'),
 	'rides-station-daily': rides_station_daily,
 	'rides-canonical-eq-raw': rides_canonical_equals_raw,
 	'rides-cells-sum': rides_cells_sum,
@@ -244,8 +301,13 @@ CHECKS: dict[str, Callable[[Ctx], str]] = {
 }
 
 
-def run(base: str, update: bool, only: tuple[str, ...]) -> list[tuple[str, bool, str]]:
-	ctx = Ctx(base=base, update=update, nonce=str(int(datetime.now(timezone.utc).timestamp())))
+def run(
+	base: str,
+	update: bool,
+	only: tuple[str, ...],
+	rides_month: str | None = None,
+) -> list[tuple[str, bool, str]]:
+	ctx = Ctx(base=base, update=update, nonce=str(int(datetime.now(timezone.utc).timestamp())), rides_month=rides_month)
 	results = []
 	for name, check in CHECKS.items():
 		if only and not any(k in name for k in only):

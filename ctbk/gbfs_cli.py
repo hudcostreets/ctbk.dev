@@ -969,13 +969,19 @@ API_URLS = {
 AVAIL_METRIC_NAMES = ('bikes', 'ebikes', 'docks', 'disabled', 'pending')
 
 
-@gbfs.command('api-check', help='Contract checks of the live api worker against real data: goldens for closed rides windows + invariants (final bin of half-open ranges, canonical == raw totals, `/cells` == plain, plausible avail/smg/stations). Exits 1 on any failure. `ctbk/api_check.py`.')
+@gbfs.command('api-check', help='Contract checks of the live api worker against real data: goldens for closed rides windows + invariants (latest consolidated month covered at every fine rides tier, final bin of half-open ranges, canonical == raw totals, `/cells` == plain, plausible avail/smg/stations). Exits 1 on any failure. `ctbk/api_check.py`.')
 @option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='prod', show_default=True)
 @option('-k', '--only', multiple=True, help='Run only checks whose name contains this (repeatable).')
+@option('-m', '--rides-month', default=None, help='Month for the latest-month rides coverage checks, YYYYMM or YYYY-MM [default: latest consolidated `.dvc` in this checkout].')
 @option('-u', '--update-goldens', is_flag=True, help='(Re)write `ctbk/api_check_goldens/*.json` from the live responses instead of comparing.')
-def gbfs_api_check(env_name: str, only: tuple[str, ...], update_goldens: bool) -> None:
+def gbfs_api_check(
+	env_name: str,
+	only: tuple[str, ...],
+	rides_month: str | None,
+	update_goldens: bool,
+) -> None:
 	from ctbk.api_check import run
-	results = run(API_URLS[env_name], update_goldens, only)
+	results = run(API_URLS[env_name], update_goldens, only, rides_month)
 	for name, ok, detail in results:
 		print(f'{"✓" if ok else "✗"} {name}: {detail}')
 	failed = [name for name, ok, _ in results if not ok]
@@ -1397,14 +1403,21 @@ def _ym_month(ym: str) -> tuple[str, datetime]:
 	return ym, datetime(int(ym[:4]), int(ym[4:]), 1, tzinfo=timezone.utc)
 
 
-@gbfs.command('rides-extend', help='Monthly `rides` cadence for one freshly-ingested month: (1) mirror `normalized/<YM>.parquet` from the DVX cache to its plain key, within R2 (the Batch factory lists that prefix); (2) journal the previous month on `rides-start` (spillback refold); (3) `engine submit -f` both anchors on HCCS Batch, uncapped (open periods defer); (4) canonicalize [prev month, now) through each manifest (new hashed keys); (5) `engine register` each manifest into D1; (6) RG-manifest backfill + prune of superseded keys\' rows. Station-map/vocab/canonicalize-map regen for new stations is NOT covered — a canonicalize-map change needs a full-range `engine canonicalize`. Needs HCCS AWS creds (Batch), R2 RW creds, CLOUDFLARE_ACCOUNT_ID, and CTBK_REGISTRY_SECRET (+ a D1-write CLOUDFLARE_API_TOKEN for the prune).')
+@gbfs.command('rides-extend', help='Monthly `rides` cadence for one freshly-ingested month: (1) mirror `normalized/<YM>.parquet` from the DVX cache to its plain key, within R2 (the Batch factory lists that prefix); (2) journal the previous month on `rides-start` (spillback refold); (3) `engine submit -f` both anchors on HCCS Batch, capped at the first of the month after YM; (4) canonicalize [prev month, month-end) through each manifest (new hashed keys); (5) `engine register` each manifest into D1; (6) RG-manifest backfill + prune of superseded keys\' rows. Station-map/vocab/canonicalize-map regen for new stations is NOT covered — a canonicalize-map change needs a full-range `engine canonicalize`. Needs HCCS AWS creds (Batch), R2 RW creds, CLOUDFLARE_ACCOUNT_ID, and CTBK_REGISTRY_SECRET (+ a D1-write CLOUDFLARE_API_TOKEN for the prune).')
 @option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='prod', show_default=True, help='api worker whose registry proxy registers + backfills + prunes (shared D1).')
 @option('-n', '--dry-run', is_flag=True, help='Print planned actions (and engine commands); no writes or submits.')
 @argument('ym', metavar='YM')
 @click.pass_context
-def rides_extend(ctx: click.Context, env_name: str, dry_run: bool, ym: str) -> None:
+def rides_extend(
+	ctx: click.Context,
+	env_name: str,
+	dry_run: bool,
+	ym: str,
+) -> None:
+	from ctbk.pyramid_cascade.lite import RIDES_GENESIS
 	ym, m0 = _ym_month(ym)
 	p0 = datetime(m0.year - 1, 12, 1, tzinfo=timezone.utc) if m0.month == 1 else m0.replace(month=m0.month - 1)
+	m1 = datetime(m0.year + 1, 1, 1, tzinfo=timezone.utc) if m0.month == 12 else m0.replace(month=m0.month + 1)
 	os.environ.setdefault('CTBK_REGISTRY_URL', API_URLS[env_name])
 	_use_r2_rw_env()
 
@@ -1428,18 +1441,20 @@ def rides_extend(ctx: click.Context, env_name: str, dry_run: bool, ym: str) -> N
 		invalidate(pyramid, (p0, m0))
 		err(f'invalidate: journaled [{p0:%Y-%m-%d}, {m0:%Y-%m-%d}) on rides-start')
 
-	# 3. Fills, uncapped (genesis → now): the engine classifies the
-	# in-progress month's unpublished source as expected-absent and defers
-	# open periods (pyrmts ≥ 72f2552), so no tip relics to sweep. R2 creds
-	# come from the job def's Secrets Manager refs.
+	# 3. Fill only through the published source month. An uncapped min-cover
+	# can choose a long shard spanning that month and unpublished next-month
+	# source; deferring the whole shard then leaves published days uncovered.
+	# The cap selects shorter boundary shards while preserving long history.
+	# R2 creds come from the job def's Secrets Manager refs.
+	range_ = f'{RIDES_GENESIS:%Y-%m-%d}/{m1:%Y-%m-%d}'
 	for config_name, prefix, factory in RIDES_ANCHOR_SPECS:
-		rc = _engine_submit(config_name, scratch_prefix=prefix, fill=True, source_spec=factory, watch=True, dry_run=dry_run)
+		rc = _engine_submit(config_name, scratch_prefix=prefix, fill=True, range_=range_, source_spec=factory, watch=True, dry_run=dry_run)
 		if rc:
 			raise click.ClickException(f'{config_name} fill failed (rc={rc})')
 
 	# 4–5. Materialize `c:` rows on the new shards (and the spillback
 	# rebuilds), then point D1 at the resulting hashed keys.
-	span = f'{p0:%Y-%m-%dT%H:%M}/{datetime.now(timezone.utc):%Y-%m-%dT%H:%M}'
+	span = f'{p0:%Y-%m-%dT%H:%M}/{m1:%Y-%m-%dT%H:%M}'
 	for config_name, prefix, _ in RIDES_ANCHOR_SPECS:
 		ctx.invoke(gbfs_engine_canonicalize, config_name=config_name, range_=span, workers=4, dry_run=dry_run)
 		manifest = f's3://{bucket}/{prefix}/manifest.jsonl'
