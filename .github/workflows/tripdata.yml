@@ -25,6 +25,15 @@ jobs:
         run: |
           git config --global user.name 'GitHub Actions'
           git config --global user.email 'ryan-williams@users.noreply.github.com'
+
+      - name: Configure DVX `r2` remote creds
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          dvx remote modify --local r2 access_key_id "$R2_ACCESS_KEY_ID"
+          dvx remote modify --local r2 secret_access_key "$R2_SECRET_ACCESS_KEY"
+
       - name: Sync tripdata bucket
         id: sync
         run: .github/scripts/hccs-aws.sh ctbk import -ccdX html
