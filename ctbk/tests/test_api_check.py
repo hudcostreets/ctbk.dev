@@ -93,13 +93,63 @@ class LatestMonthCtx(Ctx):
 	def get(self, path: str, **params: str) -> dict:
 		self.calls.append((path, params))
 		tier = params['bin']
-		segments = [{'from': params['from'], 'to': self.gap_end if tier == self.gap_tier else params['to']}]
+		if tier == self.gap_tier and self.gap_end < '2026-09-01T00:00:00Z':
+			segments = [{'from': params['from'], 'to': min(params['to'], self.gap_end)}] if params['from'] < self.gap_end else []
+		else:
+			segments = [{'from': params['from'], 'to': self.gap_end if tier == self.gap_tier else params['to']}]
 		# Sparse station records are legitimate: planner intervals measure
 		# coverage, while bins with no trips contribute zero implicitly.
+		count = (4 if params['from'] == '2026-08-01T00:00:00Z' else 6) if tier == '1h' else 10
+		if tier == self.count_tier:
+			count -= 1
 		return {
-			'records': [{'dt': ms('2026-08'), 'count': 9 if tier == self.count_tier else 10}],
+			'records': [{'dt': ms('2026-08'), 'count': count}] if segments else [],
 			'plan': {'segments': segments},
 		}
+
+
+class LimitedPlanCtx(LatestMonthCtx):
+	def get(self, path: str, **params: str) -> dict:
+		if params['bin'] == '1h':
+			parse = lambda s: datetime.fromisoformat(s.replace('Z', '+00:00'))
+			atoms = int((parse(params['to']) - parse(params['from'])).total_seconds() / 3600)
+			if atoms > 512:
+				raise CheckFailed(f'HTTP 413: plan too large: atoms {atoms} > 512')
+		return super().get(path, **params)
+
+
+def test_latest_month_bounds_hourly_requests_below_worker_atom_limit():
+	ctx = LimitedPlanCtx()
+	assert rides_latest_month('start')(ctx) == '2026-08: 5 fine tiers cover full month, 10 rides each'
+	assert [(params['from'], params['to']) for _, params in ctx.calls if params['bin'] == '1h'] == [
+		('2026-08-01T00:00:00Z', '2026-08-17T00:00:00Z'),
+		('2026-08-17T00:00:00Z', '2026-09-01T00:00:00Z'),
+	]
+
+
+def test_latest_month_cli_uses_override_and_reports_both_anchors(monkeypatch):
+	from click.testing import CliRunner
+	from ctbk import gbfs_cli
+	class FixedDatetime(datetime):
+		@classmethod
+		def now(cls, tz=None):
+			return datetime(2026, 10, 6, tzinfo=timezone.utc)
+	contexts = []
+	def make_context(**kwargs):
+		contexts.append(kwargs)
+		return LimitedPlanCtx()
+	logged = []
+	monkeypatch.setattr(api_check, 'datetime', FixedDatetime)
+	monkeypatch.setattr(api_check, 'Ctx', make_context)
+	monkeypatch.setattr(gbfs_cli, 'err', lambda value: logged.append(value))
+	result = CliRunner().invoke(gbfs_cli.gbfs, ['api-check', '-k', 'latest-month', '-m', '202608'])
+	assert result.exit_code == 0, result.output
+	assert result.stdout.splitlines() == [
+		'✓ rides-start-latest-month: 2026-08: 5 fine tiers cover full month, 10 rides each',
+		'✓ rides-end-latest-month: 2026-08: 5 fine tiers cover full month, 10 rides each',
+	]
+	assert logged == ['2/2 checks passed']
+	assert contexts == [{'base': gbfs_cli.API_URLS['prod'], 'update': False, 'nonce': '1791244800', 'rides_month': '202608'}]
 
 
 @pytest.mark.parametrize('anchor', ['start', 'end'])
@@ -108,8 +158,13 @@ def test_latest_month_all_fine_tiers_cover_and_equal_monthly(anchor):
 	assert rides_latest_month(anchor)(ctx) == '2026-08: 5 fine tiers cover full month, 10 rides each'
 	assert ctx.calls == [
 		('/api/rides', {'bin': tier, 'anchor': anchor, 'cells': f's:{api_check.STATION}', 'reducer': 'sum',
-			'from': '2026-08-01T00:00:00Z', 'to': '2026-09-01T00:00:00Z'})
-		for tier in ('1mo', '1h', '3h', '6h', '12h', '1d')
+			'from': frm, 'to': to})
+		for tier, frm, to in [
+			('1mo', '2026-08-01T00:00:00Z', '2026-09-01T00:00:00Z'),
+			('1h', '2026-08-01T00:00:00Z', '2026-08-17T00:00:00Z'),
+			('1h', '2026-08-17T00:00:00Z', '2026-09-01T00:00:00Z'),
+			*[(tier, '2026-08-01T00:00:00Z', '2026-09-01T00:00:00Z') for tier in ('3h', '6h', '12h', '1d')],
+		]
 	]
 
 

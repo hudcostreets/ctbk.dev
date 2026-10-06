@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError
@@ -166,11 +166,18 @@ def rides_latest_month(anchor: str) -> Callable[[Ctx], str]:
 		if total <= 0:
 			raise CheckFailed(f'no monthly rides for s:{STATION} in {frm[:7]}')
 		for tier in ('1h', '3h', '6h', '12h', '1d'):
-			body = c.get('/api/rides', bin=tier, **params)
-			coverage = _plan_coverage(body)
+			# The worker caps plans at 512 atoms. A full hourly month has
+			# 672–744 atoms; two ≤16-day requests stay below that limit.
+			if tier == '1h':
+				middle = (datetime.fromisoformat(frm.replace('Z', '+00:00')) + timedelta(days=16)).isoformat().replace('+00:00', 'Z')
+				windows = [(frm, middle), (middle, to)]
+			else:
+				windows = [(frm, to)]
+			bodies = [c.get('/api/rides', bin=tier, **{**params, 'from': lo, 'to': hi}) for lo, hi in windows]
+			coverage = _plan_coverage({'plan': {'segments': [s for body in bodies for s in body['plan']['segments']]}})
 			if coverage != [(frm, to)]:
 				raise CheckFailed(f'{frm[:7]} {tier} plan covers {coverage!r}; expected {[(frm, to)]!r}')
-			fine_total = sum(r['count'] for r in body['records'])
+			fine_total = sum(r['count'] for body in bodies for r in body['records'])
 			if fine_total != total:
 				raise CheckFailed(f'{frm[:7]} {tier} total {fine_total:,} ≠ monthly {total:,}')
 		return f'{frm[:7]}: 5 fine tiers cover full month, {total:,} rides each'
