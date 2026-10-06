@@ -1756,6 +1756,16 @@ def gbfs_engine_canonicalize(
 	if not (acct and env.get('R2_ACCESS_KEY_ID') and env.get('R2_SECRET_ACCESS_KEY')):
 		raise click.ClickException('need CLOUDFLARE_ACCOUNT_ID + R2_RW_* (or R2_*) creds')
 	env.setdefault('R2_ENDPOINT_URL', f'https://{acct}.r2.cloudflarestorage.com')
+	# The engine opens an s3:// manifest through generic S3Storage, whose
+	# AWS_* variables take priority over R2_*. Keep the caller's Batch/OIDC
+	# credentials intact and select R2 for both storage paths in this child.
+	env.update(
+		AWS_ACCESS_KEY_ID=env['R2_ACCESS_KEY_ID'],
+		AWS_SECRET_ACCESS_KEY=env['R2_SECRET_ACCESS_KEY'],
+		AWS_ENDPOINT_URL=env['R2_ENDPOINT_URL'],
+	)
+	for name in ('AWS_SESSION_TOKEN', 'AWS_SECURITY_TOKEN', 'AWS_PROFILE', 'AWS_DEFAULT_PROFILE'):
+		env.pop(name, None)
 	rc = subprocess.run(cmd, env=env).returncode
 	if rc:
 		raise click.ClickException(f'{config_name}: pyrmts-engine canonicalize failed (rc={rc})')
