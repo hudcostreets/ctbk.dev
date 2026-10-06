@@ -130,10 +130,18 @@ async function sampleStatus(bucket: R2Bucket): Promise<number | null> {
 	const stations = data.data.stations.map(slimStation);
 	// `pop`: the CloudFront edge that served this snapshot (health's
 	// `feed-pop` alert: a non-US edge means stale, update-skipping reads).
-	const record: MinuteRecord & { pop?: string } = {
+	const record: MinuteRecord & { pop?: string; fetch_headers: Record<string, string> } = {
 		ts: lu,
 		polled_at: polledAt,
 		pop: resp.headers.get('x-amz-cf-pop') ?? undefined,
+		// Keep cache/routing provenance in the WAL after Workers Logs expire.
+		fetch_headers: Object.fromEntries(
+			['x-fetch-placement', 'x-fetch-colo', 'age', 'x-cache', 'cf-cache-status', 'last-modified']
+				.flatMap((key) => {
+					const value = resp.headers.get(key);
+					return value === null ? [] : [[key, value]];
+				}),
+		),
 		stations,
 	};
 
@@ -146,7 +154,7 @@ async function sampleStatus(bucket: R2Bucket): Promise<number | null> {
 	const h = (k: string) => resp.headers.get(k) ?? '-';
 	console.log(
 		`Polled ${stations.length} stations, LU=${lu} (+${polledAt - lu}s) → ${jsonKey}` +
-			` [colo=${h('x-fetch-colo')} age=${h('age')} x-cache=${h('x-cache')} pop=${h('x-amz-cf-pop')} cf=${h('cf-cache-status')}]`,
+			` [placement=${h('x-fetch-placement')} colo=${h('x-fetch-colo')} age=${h('age')} x-cache=${h('x-cache')} pop=${h('x-amz-cf-pop')} cf=${h('cf-cache-status')}]`,
 	);
 	return lu;
 }

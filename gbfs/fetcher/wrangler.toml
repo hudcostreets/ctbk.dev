@@ -10,5 +10,8 @@ compatibility_date = "2024-09-23"
 workers_dev = false
 preview_urls = false
 
+[observability]
+enabled = true
+
 [placement]
 region = "aws:us-east-1"

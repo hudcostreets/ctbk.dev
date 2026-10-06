@@ -1,8 +1,8 @@
 /**
  * `ctbk-gbfs-fetch`: fetch an allowlisted GBFS URL from a US-placed
  * isolate (`[placement] region`) and hand back the upstream response, plus
- * `x-fetch-colo` (the Cloudflare colo this ran in) so callers can log and
- * alert on where the request actually left from. Called by the pollers over
+ * `x-fetch-placement` (Cloudflare's execution placement) and `x-fetch-colo`
+ * (request colo, when supplied) so callers can diagnose routing. Called over
  * a service binding: `env.FETCH.fetch('https://fetch/?url=<encoded>')`.
  */
 
@@ -24,6 +24,7 @@ export async function handle(request: Request, upstream: typeof fetch = fetch): 
 	const headers = new Headers(resp.headers);
 	const colo = (request as Request & { cf?: { colo?: string } }).cf?.colo;
 	headers.set('x-fetch-colo', colo ?? '-');
+	headers.set('x-fetch-placement', request.headers.get('cf-placement') ?? '-');
 	return new Response(resp.body, { status: resp.status, headers });
 }
 
