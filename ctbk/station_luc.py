@@ -278,9 +278,9 @@ def station_luc_build_cmd(content_addressed: bool, date_from: str, no_history: b
             for loser, survivor in sorted(merged.items()):
                 err(f"    {loser} -> {survivor}")
 
-    # Churn report: active stations whose LUC moves vs the deployed
-    # denorm (each requires re-keyed pyramid rows — gates the rebuild
-    # sequencing in `specs/rides-v3-luc.md`).
+    # Computed LUCs depend on nearby stations, so they can change at fixed
+    # coordinates. Current pyramids use identities and frozen-vocabulary
+    # write chains; LUC churn alone does not require historical rebuilding.
     try:
         with open(LOCAL_PATH) as f:
             prev = json.load(f)['by_short_name']
@@ -299,17 +299,15 @@ def station_luc_build_cmd(content_addressed: bool, date_from: str, no_history: b
             if sn in prev and (v['cell'], v['level']) != (prev[sn]['cell'], prev[sn]['level'])
         ]
         new = sorted(sn for sn in by_short_name if sn not in prev)
-        err(f"  LUC churn vs {LOCAL_PATH}: {len(moved)} stations moved, {len(new)} new")
+        err(f"  LUC churn vs {LOCAL_PATH}: {len(moved)} stations changed LUC, {len(new)} new")
         for sn in sorted(moved)[:20]:
             err(f"    {sn}: L{prev[sn]['level']} {prev[sn]['cell']} -> L{by_short_name[sn]['level']} {by_short_name[sn]['cell']}")
         for sn in new[:20]:
             err(f"    new: {sn}")
 
     # CI hook (`ci.yml` monthly cadence): machine-readable delta counts.
-    # `moved` LUCs mean historical shard rows keyed under the OLD cell —
-    # incremental fills won't re-key them (drift vs a from-scratch
-    # rebuild) until the affected range is invalidated; CI pings Slack
-    # for manual review when nonzero. `new` stations are additive-safe.
+    # Review actual identity/write-chain changes before deciding whether
+    # historical shards need rebuilding. `new` stations are additive-safe.
     gh_out = os.environ.get('GITHUB_OUTPUT')
     if gh_out:
         with open(gh_out, 'a') as f:

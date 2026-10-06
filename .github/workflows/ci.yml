@@ -242,8 +242,8 @@ jobs:
               username='ctbk-bot',
               icon_emoji=':bike:',
           ).post(
-              f":warning: *station LUC churn* — {moved} station(s) moved ({lst}); historical pyramid rows "
-              f"stay keyed under the old cells until their ranges are invalidated (manual review). "
+              f":information_source: *station LUC changed* — {moved} station(s) ({lst}); this can reflect nearby stations. "
+              f"Review station identities and frozen-vocabulary write chains before deciding whether historical rebuilding is needed. "
               f"<{os.environ['RUN_URL']}|run>"
           )
           PY
