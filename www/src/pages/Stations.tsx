@@ -150,11 +150,10 @@ export default function Stations() {
   // Flow-lens channel(s) for the selected source set (color / radius / both).
   const [lens] = useUrlState('lens', lensParam)
   // Flow direction: `out` = where riders from the set go; `in` = where they
-  // come from. `fan` toggles the (heavy) destination-line overlay, off by
-  // default — the lens carries the flow signal and the fan stacks into a red
-  // blob near the origin + costs a lot of SVG on hover.
+  // come from. `fan` toggles arcs in the legend; the lens remains visible
+  // when arcs are off. The Leaflet fallback uses the same setting for lines.
   const [dir, setDir] = useUrlState('dir', codeParam<FlowDirection>('out', [['out', 'o'], ['in', 'i']]))
-  const [fan] = useUrlState('fan', boolParam)
+  const [fan, setFan] = useUrlState('fan', boolParam)
   const [gl] = useUrlState('gl', glParam)
   // Mark style on the GL map: solid `fill` (default) or hollow `ring`.
   const [mark] = useUrlState('mark', codeParam<'fill' | 'ring'>('fill', [['fill', 'f'], ['ring', 'r']]))
@@ -408,6 +407,8 @@ export default function Stations() {
       channel={lens}
       direction={dir}
       onToggleDirection={() => setDir(dir === 'out' ? 'in' : 'out')}
+      arcsEnabled={fan}
+      onArcsChange={setFan}
       total={flowStyle.total}
       topCount={flowStyle.topCount}
       arcMax={arcs?.length ? arcs[arcs.length - 1].count : null}
@@ -586,4 +587,3 @@ function ColorLegend({ births, actualTheme }: { births: StationBirths; actualThe
     </div>
   )
 }
-

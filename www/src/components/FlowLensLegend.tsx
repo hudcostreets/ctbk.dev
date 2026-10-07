@@ -1,7 +1,8 @@
 /**
  * Legend for the flow lens (`flowLens.ts`) on `/stations`: names the
  * selected source(s), reports the set's total flow, offers a direction
- * toggle (⇄), and keys the encodings with real trip counts:
+ * toggle (⇄), an Arcs checkbox synced with the URL, and keys the encodings
+ * with real trip counts:
  *   - a **size/color key**: 2–3 reference circles (sized by `lensRadiusPx`,
  *     colored by `lensColorT`, both at the base zoom), plus a grey "no trips"
  *     dot;
@@ -28,6 +29,8 @@ export default function FlowLensLegend({
   channel,
   direction,
   onToggleDirection,
+  arcsEnabled,
+  onArcsChange,
   total,
   topCount,
   arcMax,
@@ -39,6 +42,8 @@ export default function FlowLensLegend({
   channel: LensChannel
   direction: FlowDirection
   onToggleDirection: () => void
+  arcsEnabled: boolean
+  onArcsChange: (enabled: boolean) => void
   total: number
   topCount: number
   /** Heaviest arc's trip count, when the arc fan is drawn (→ width key). */
@@ -89,6 +94,10 @@ export default function FlowLensLegend({
           <button type="button" className={css.lensDirBtn} onClick={onToggleDirection}>
             ⇄ {out ? 'where riders go' : 'where riders come from'}
           </button>
+          <label className={css.lensArcsToggle}>
+            <input type="checkbox" checked={arcsEnabled} onChange={(event) => onArcsChange(event.target.checked)} />
+            Arcs
+          </label>
           <div className={css.keyTitle}>trips per station</div>
           <div className={css.sizeKey} data-testid="lens-size-key">
             {sizeTicks.map((n) => {

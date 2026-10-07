@@ -117,6 +117,31 @@ test.describe('Station map (GL default)', () => {
     await expect(page.getByTestId('lens-width-key')).toHaveCount(0)
   })
 
+  test('Arcs toggle updates the URL, survives reload, and preserves the map view', async ({ page }) => {
+    await page.goto('/stations?sel=6450.12&dir=i&ll=40.751-73.994+14.00')
+    const toggle = page.getByRole('checkbox', { name: 'Arcs', exact: true })
+    await expect(toggle).toBeVisible({ timeout: 15_000 })
+    await expect(toggle).not.toBeChecked()
+    await expect(page.getByTestId('lens-width-key')).toHaveCount(0)
+    const view = new URL(page.url()).searchParams.get('ll')
+    const state = () => {
+      const params = new URL(page.url()).searchParams
+      return Object.fromEntries(['fan', 'sel', 'dir', 'll'].map((key) => [key, params.get(key)]))
+    }
+
+    await toggle.check()
+    await expect.poll(state).toEqual({ fan: '', sel: '6450.12', dir: 'i', ll: view })
+    await expect(page.getByTestId('lens-width-key')).toBeVisible()
+    await page.reload()
+    await expect(toggle).toBeChecked({ timeout: 15_000 })
+    await expect(page.getByTestId('lens-width-key')).toBeVisible()
+
+    await toggle.uncheck()
+    await expect.poll(state).toEqual({ fan: null, sel: '6450.12', dir: 'i', ll: view })
+    await expect(page.getByTestId('lens-width-key')).toHaveCount(0)
+    await expect(page.getByTestId('source-info').locator('[class*="hoverDrawerName"]')).toHaveText('8 Ave & W 33 St')
+  })
+
   test('tap selects one, ⌘-click toggles, empty tap clears, back undoes', async ({ page }) => {
     await openStations(page)
     const all = await placedStations(page)
@@ -203,6 +228,14 @@ test.describe('Station map, phone layout', () => {
     await expect(page.getByTestId('lens-size-key')).toHaveCount(0)
     await legend.getByRole('button', { name: 'Show legend' }).click()
     await expect(page.getByTestId('lens-size-key')).toBeVisible()
+    const arcs = legend.getByRole('checkbox', { name: 'Arcs', exact: true })
+    await expect(arcs).toBeChecked()
+    await arcs.uncheck()
+    await expect.poll(() => new URL(page.url()).searchParams.get('fan')).toBe(null)
+    await expect(page.getByTestId('lens-width-key')).toHaveCount(0)
+    await arcs.check()
+    await expect.poll(() => new URL(page.url()).searchParams.get('fan')).toBe('')
+    await expect(page.getByTestId('lens-width-key')).toBeVisible()
     await legend.getByRole('button', { name: 'Hide legend' }).click()
     await expect(page.getByTestId('lens-size-key')).toHaveCount(0)
 
@@ -225,4 +258,3 @@ test.describe('Station map, phone layout', () => {
     }
   })
 })
-

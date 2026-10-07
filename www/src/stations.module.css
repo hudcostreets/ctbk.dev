@@ -415,6 +415,20 @@ a.drawerDetails:focus-visible {
     background: rgba(127, 127, 127, 0.28);
 }
 
+.lensArcsToggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 32px;
+    margin-bottom: 4px;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.lensArcsToggle input {
+    margin: 0;
+}
+
 .lensNote {
     display: flex;
     align-items: center;
