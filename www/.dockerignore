@@ -140,6 +140,7 @@
 !src/components/StageCard.tsx
 !src/components/StationAvailabilityChart.css
 !src/components/StationAvailabilityChart.tsx
+!src/components/StationInfoDrawer.tsx
 !src/components/StationMap.tsx
 !src/components/StationMapEmbed.tsx
 !src/components/StationMapGL.tsx
