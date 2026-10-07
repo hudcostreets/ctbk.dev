@@ -8,7 +8,7 @@
  *
  * The basemap + deck overlay + camera live in `GLMap` (shared with
  * `/timelapse`); this component owns the station layers (lens-colored dots,
- * pin rings, arc fan) and the hover drawer. Selection gestures are the shared
+ * pin rings, arc fan) and the station drawer. Selection gestures are the shared
  * `lib/mapSelection` model (as on `/timelapse`): tap selects one, tap on
  * empty map clears, long-press enters multi-select, long-press- or
  * shift-drag box-selects, shift/⌘-click toggles; each emits a `SelAction`
@@ -23,6 +23,7 @@ import { ArcLayer, ScatterplotLayer } from '@deck.gl/layers'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ARC_SRC_FRAC, arcAlpha, arcWidthPx, lensZoomScale, type FlowArc } from './flowLens'
 import GLMap from './GLMap'
+import StationInfoDrawer from './StationInfoDrawer'
 import { useTheme } from '../contexts/ThemeContext'
 import { stationsInRect, useSelectionGestures, type SelAction } from '../lib/mapSelection'
 import { useCanHover } from '../lib/useMediaQuery'
@@ -289,11 +290,7 @@ export default function StationMapGL({
     }),
   ]
 
-  const hovered = hoveredId ? stations[hoveredId] : null
   const sourceIds = pinnedIds && pinnedIds.length ? pinnedIds : []
-  const hoveredFlow = hovered && hoveredId && pairCounts && !pinSet.has(hoveredId)
-    ? sourceIds.reduce((sum, src) => sum + (pairCounts[src]?.[hoveredId] ?? 0), 0)
-    : 0
 
   return (
     <GLMap
@@ -319,20 +316,13 @@ export default function StationMapGL({
           left: dragRect.x0, top: dragRect.y0, width: dragRect.x1 - dragRect.x0, height: dragRect.y1 - dragRect.y0,
         }} />
       )}
-      {hovered && !dragRect && (
-        <div className={css.hoverDrawer}>
-          <span className={css.hoverDrawerName}>{hovered.name}</span>
-          {hovered.ends > 0 && (
-            <span className={css.hoverDrawerStat}>{hovered.ends.toLocaleString()} rides</span>
-          )}
-          {hoveredFlow > 0 && (
-            <span className={css.hoverDrawerFlow}>{hoveredFlow.toLocaleString()} from selection</span>
-          )}
-          <span className={css.hoverDrawerHint}>
-            {multi ? 'click to toggle' : pinSet.has(hoveredId!) ? 'shift/⌘-click to remove' : 'click to select · shift/⌘-click to add'}
-          </span>
-        </div>
-      )}
+      <StationInfoDrawer
+        stations={stations}
+        sourceIds={sourceIds}
+        hoveredId={dragRect ? null : hoveredId}
+        pairCounts={pairCounts}
+        hoverHint={multi ? 'click to toggle' : 'click to select · shift/⌘-click to add'}
+      />
       {children}
     </GLMap>
   )

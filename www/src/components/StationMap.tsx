@@ -3,9 +3,10 @@ import { Circle, CircleMarker, MapContainer, Pane, Polyline, TileLayer, Tooltip,
 import 'leaflet/dist/leaflet.css'
 import { useTheme } from '../contexts/ThemeContext'
 import css from '../stations.module.css'
-import StationPies from './StationPies'
+import StationInfoDrawer from './StationInfoDrawer'
 import type { TimeRange } from '../time-range'
 import { TILE_COLORS, TILE_STYLES, resolveTileStyle, type Stations, type TileColors, type StationPairCounts } from './stationMapCommon'
+import StationPies from './StationPies'
 
 const { sqrt, max } = Math
 
@@ -455,13 +456,8 @@ export default function StationMap({
   // the Leaflet panes — replacing the per-station map tooltips that stacked
   // and collided when a hover landed near a selected station.
   const [hoveredId, setHoveredId] = useState<string | null>(null)
-  const hovered = hoveredId ? stations[hoveredId] : null
   // Source set driving the flow lens (multi-select set, else the single pin).
   const sourceIds = pinnedIds?.length ? pinnedIds : (pinnedId ? [pinnedId] : [])
-  // Trips from the source set to the hovered station (if it's a destination).
-  const hoveredFlow = hovered && hoveredId && pairCounts && !sourceIds.includes(hoveredId)
-    ? sourceIds.reduce((sum, src) => sum + (pairCounts[src]?.[hoveredId] ?? 0), 0)
-    : 0
 
   return (
     <div style={{ position: 'relative', height: '100%', width: '100%' }}>
@@ -540,17 +536,7 @@ export default function StationMap({
         {overlay}
       </div>
     )}
-    {hovered && (
-      <div className={css.hoverDrawer}>
-        <span className={css.hoverDrawerName}>{hovered.name}</span>
-        {hovered.ends > 0 && (
-          <span className={css.hoverDrawerStat}>{hovered.ends.toLocaleString()} rides</span>
-        )}
-        {hoveredFlow > 0 && (
-          <span className={css.hoverDrawerFlow}>{hoveredFlow.toLocaleString()} from selection</span>
-        )}
-      </div>
-    )}
+      <StationInfoDrawer stations={stations} sourceIds={sourceIds} hoveredId={hoveredId} pairCounts={pairCounts} />
     </div>
   )
 }

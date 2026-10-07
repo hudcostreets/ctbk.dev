@@ -121,10 +121,9 @@ a.subtitle:hover {
     margin-bottom: 0;
 }
 
-/* Single hover readout: one fixed card (top-left, below the zoom control)
- * for whatever station the cursor is over — replaces the per-station map
- * tooltips that stacked/collided near a selected station. Dark card reads on
- * both light and dark tiles; non-interactive so it never blocks the map. */
+/* Source identity stays visible while destinations are inspected below it.
+ * Only the source section is interactive; the hover readout passes through
+ * pointer events so it cannot obscure the destination being inspected. */
 .hoverDrawer {
     position: absolute;
     left: 8px;
@@ -132,16 +131,80 @@ a.subtitle:hover {
     z-index: 1000;
     display: flex;
     flex-direction: column;
-    gap: 1px;
-    max-width: 260px;
-    padding: 6px 10px;
+    width: 272px;
+    max-width: calc(100% - 16px);
+    overflow: hidden;
     border-radius: 6px;
-    background: rgba(0, 0, 0, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    background: rgba(0, 0, 0, 0.86);
     color: #fff;
-    font-size: 12px;
-    line-height: 1.3;
+    font-size: 13px;
+    line-height: 1.4;
     pointer-events: none;
     backdrop-filter: blur(4px);
+}
+
+.drawerSource,
+.drawerDestination {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 10px 12px;
+}
+
+.drawerSource {
+    border-left: 3px solid #e91e63;
+    pointer-events: auto;
+}
+
+.drawerSource + .drawerDestination {
+    border-top: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.drawerRole {
+    color: #ccc;
+    font-size: 12px;
+}
+
+.drawerSourceList {
+    max-height: min(240px, 32vh);
+    overflow-y: auto;
+}
+
+.drawerSourceStation {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.drawerSourceStation + .drawerSourceStation {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+a.drawerDetails {
+    display: block;
+    min-height: 36px;
+    margin-top: 5px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    background: #fff;
+    color: #151515;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: center;
+    text-decoration: none;
+}
+
+a.drawerDetails:hover {
+    background: #ffdcea;
+    color: #151515;
+}
+
+a.drawerDetails:focus-visible {
+    outline: 2px solid #ff8eb5;
+    outline-offset: 2px;
 }
 
 .hoverDrawerName {
@@ -517,4 +580,3 @@ a.subtitle:hover {
     font-size: 0.9rem;
     opacity: 0.8;
 }
-

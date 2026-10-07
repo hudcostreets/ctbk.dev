@@ -3,8 +3,8 @@ import { latestStations, screenPos, waitForGLMap, type Station } from './glMap'
 
 /**
  * Home-page `StationMapEmbed` (GL map, shared `lib/mapSelection` model):
- * lazy-loads on scroll, shows a caption with a `<Link to="/s/<id>">` when one
- * station is selected (a `/stations?sel=…` link for several). Clicking the
+ * lazy-loads on scroll, keeps selected sources and details links in the map
+ * drawer (a `/stations?sel=…` caption link for several). Clicking the
  * link navigates the parent page (not an iframe).
  */
 
@@ -36,7 +36,7 @@ async function isolatedStations(page: Page): Promise<Placed[]> {
 }
 
 test.describe('Home map embed', () => {
-  test('clicking a station fills the caption with its details link', async ({ page }) => {
+  test('selected source info and details link persist after the pointer leaves', async ({ page }) => {
     await openHomeMap(page)
     await expect(page.getByText(/Tap a station/i)).toBeVisible()
 
@@ -45,6 +45,33 @@ test.describe('Home map embed', () => {
 
     const link = page.getByRole('link', { name: /View station details/i })
     await expect(link).toHaveAttribute('href', `/s/${a.id}`)
+    await page.mouse.move(5, 5)
+    const source = page.getByTestId('source-info')
+    await expect(source.locator('[class*="hoverDrawerName"]')).toHaveText(a.name)
+    await expect(source.locator('[class*="hoverDrawerStat"]')).toHaveText(`${a.ends.toLocaleString()} rides`)
+    await expect(source.getByRole('link', { name: 'View station details', exact: true })).toBeVisible()
+    await expect(page.getByTestId('destination-info')).toHaveCount(0)
+  })
+
+  test('hovered destination info appends below the source without replacing its link', async ({ page }) => {
+    await openHomeMap(page)
+    const [a, ...rest] = await isolatedStations(page)
+    const b = rest.find((s) => Math.hypot(s.x - a.x, s.y - a.y) >= 40)!
+    await page.mouse.click(a.x, a.y)
+    await page.mouse.move(b.x, b.y)
+
+    const source = page.getByTestId('source-info')
+    const destination = page.getByTestId('destination-info')
+    await expect(source.locator('[class*="hoverDrawerName"]')).toHaveText(a.name)
+    await expect(destination.locator('[class*="hoverDrawerName"]')).toHaveText(b.name)
+    await expect(destination.locator('[class*="hoverDrawerStat"]')).toHaveText(`${b.ends.toLocaleString()} rides`)
+    const drawer = page.getByRole('complementary', { name: 'Station information' })
+    expect(await drawer.locator(':scope > section').evaluateAll((sections) => sections.map((s) => s.getAttribute('aria-label'))))
+      .toEqual(['Selected sources', 'Destination'])
+    const link = source.getByRole('link', { name: 'View station details', exact: true })
+    await expect(link).toHaveAttribute('href', `/s/${a.id}`)
+    await link.click()
+    await expect.poll(() => new URL(page.url()).pathname).toBe(`/s/${a.id}`)
   })
 
   test('clicking the details link navigates the parent page', async ({ page }) => {

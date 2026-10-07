@@ -1,7 +1,7 @@
 /**
  * Embeddable stations map: loads the latest-month data, renders the GL
  * `<StationMapGL>` (deck.gl + MapLibre, loaded lazily with this module), and
- * shows a caption with a details link for the selection. Selection is the
+ * keeps selected-source details in the map's drawer. Selection is the
  * shared `lib/mapSelection` model (tap / long-press multi-select / rectangle,
  * as on `/stations`), held in local state (no URL sync), so it can drop into
  * any page without clobbering the host page's URL params; a multi-station
@@ -46,12 +46,8 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [stations, setStations] = useState<Stations | null>(null)
   const [pairCounts, setPairCounts] = useState<StationPairCounts | null>(null)
-  // Transient hover preview (hover-capable pointers only); taps select.
-  const [hoveredId, setHoveredId] = useState<string | undefined>(undefined)
   const [selIds, setSelIds] = useState<string[]>([])
   const { multi, apply } = useSelection(selIds, setSelIds)
-  // The captioned station: the one selected or, failing that, the hovered one.
-  const selectedId = selIds.length === 1 ? selIds[0] : selIds.length ? undefined : hoveredId
 
   useEffect(() => {
     fetch(MANIFEST_URL)
@@ -92,7 +88,6 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
       .catch(err => console.warn('Failed to load station data:', err))
   }, [manifest])
 
-  const selectedStation = selectedId && stations ? stations[selectedId] : null
   const monthLabel = manifest ? formatMonth(manifest.latestMonth) : null
 
   // Flow lens: once stations are selected, size + color every other station
@@ -114,17 +109,12 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
         <StationMapGL
           stations={stations ?? {}}
           pinnedIds={selIds}
-          onSelAction={(a) => {
-            if (a.t === 'tap' && a.id === null && !a.toggle && !multi) setHoveredId(undefined)
-            apply(a)
-          }}
+          onSelAction={apply}
           multi={multi}
           pairCounts={pairCounts}
           stationColors={lens?.colors ?? null}
           stationRadii={lens?.radii ?? null}
           arcs={arcs}
-          setSelectedId={setHoveredId}
-          onHoverStation={(id) => { if (!id) setHoveredId(undefined) }}
           center={DEFAULT_CENTER}
           zoom={DEFAULT_ZOOM}
           className={css.embedMap}
@@ -135,29 +125,23 @@ export default function StationMapEmbed({ mapClassName, captionTrailing }: Props
           )}
         </StationMapGL>
       </div>
-      <div className={css.embedCaption}>
-        {selectedStation && selectedId ? (
-          <>
-            <strong>{selectedStation.name}</strong>
-            {' — '}
-            <Link to={`/s/${selectedId}`}>View station details →</Link>
-          </>
-        ) : selIds.length > 1 ? (
+      {(selIds.length !== 1 || captionTrailing) && <div className={css.embedCaption}>
+        {selIds.length > 1 ? (
           <>
             <strong>{selIds.length} stations</strong>
             {' — '}
             <Link to={`/stations?sel=${selParam.encode(selIds)}`}>Compare on the stations page →</Link>
           </>
-        ) : (
+        ) : selIds.length === 0 ? (
           <span className={css.placeholder}>Tap a station to see its top destinations and open its page.</span>
-        )}
+        ) : null}
         {captionTrailing && (
           <>
-            <span className={css.captionSep}> · </span>
+            {selIds.length !== 1 && <span className={css.captionSep}> · </span>}
             {captionTrailing}
           </>
         )}
-      </div>
+      </div>}
     </>
   )
 }
