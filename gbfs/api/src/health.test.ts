@@ -69,4 +69,12 @@ describe('classifyFeedGaps', () => {
 	it('only settled minutes count', () => {
 		expect(classifyFeedGaps(all(5), all(10), 8)).toEqual({ settled: 8, missing: 3, unexplained: [], cronSkips: 0 });
 	});
+
+	it('a hole in the last settled minute waits for its next tick to settle', () => {
+		// 2026-10-10 14:46: the hole was the newest settled minute and the 14:47
+		// tick (outside `settled`) hadn't written its heartbeat yet → flagged,
+		// with "0 skipped tick(s)"; once 14:47's landed, an upstream skip.
+		expect(classifyFeedGaps(all(9, 7), all(8), 8)).toEqual({ settled: 8, missing: 1, unexplained: [], cronSkips: 0 });
+		expect(classifyFeedGaps(all(10, 7), all(10, 8), 9)).toEqual({ settled: 9, missing: 1, unexplained: ['00:07'], cronSkips: 1 });
+	});
 });

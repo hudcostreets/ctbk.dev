@@ -101,7 +101,10 @@ export function classifyFeedGaps(wal: Set<string>, heartbeats: Set<string>, sett
 		if (!heartbeats.has(m)) cronSkips++;
 		if (wal.has(m)) continue;
 		missing++;
-		if (!heartbeats.has(m) || !heartbeats.has(minuteLabel(i + 1))) unexplained.push(m.replace('-', ':'));
+		// Tick m+1 is judged only once settled: an in-flight tick's heartbeat
+		// may not have landed yet (crons start up to ~2 min late).
+		const nextSkipped = i + 1 < settled && !heartbeats.has(minuteLabel(i + 1));
+		if (!heartbeats.has(m) || nextSkipped) unexplained.push(m.replace('-', ':'));
 	}
 	return { settled, missing, unexplained, cronSkips };
 }

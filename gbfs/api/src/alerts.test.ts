@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import type { HealthSnapshot } from './health';
-import { d1SizeGB, DEFAULT_RULES, diffRules, feedLagP90Seconds, feedStaleMinutes, hourlyCompactionStaleMinutes, pyramidTipAgeHours, snapshotAgeMinutes, stationsStaleHours, type AlertState, type FiringEntry, type Rule, isUsPop } from './alerts';
+import { d1SizeGB, DEFAULT_RULES, diffRules, feedLagP90Seconds, feedStaleMinutes, hourlyCompactionStaleMinutes, pyramidTipAgeHours, snapshotAgeMinutes, stationsStaleHours, type AlertState, type FiringEntry, type Rule, isUsPop, runAlerts } from './alerts';
 
 const FIXED_NOW = new Date('2026-05-24T12:00:00Z');
 
@@ -252,5 +252,69 @@ describe('DEFAULT_RULES on a full snapshot', () => {
 		const us = fresh({ feed: { ...snap().feed, drift: { latestS: 5, ts: now, polledAt: now, series: [[now, 5]], pop: 'IAD12-P5' } } });
 		expect(firingIds(us)).toEqual([]);
 		expect([isUsPop('IAD12-P5'), isUsPop('jfk50-c1'), isUsPop('NRT12-P9')]).toEqual([true, true, false]);
+	});
+});
+
+/** In-memory R2 with etags and `onlyIf.etagMatches` (a failed precondition
+ *  returns `null`, as R2's `put` does). */
+class FakeR2 {
+	objects = new Map<string, { body: string; etag: string }>();
+	private n = 0;
+	async list() { return { objects: [], truncated: false, delimitedPrefixes: [] } as never; }
+	async get(key: string) {
+		const o = this.objects.get(key);
+		if (!o) return null;
+		return { etag: o.etag, json: async <T>() => JSON.parse(o.body) as T };
+	}
+	async put(key: string, body: string, opts?: { onlyIf?: { etagMatches?: string } }) {
+		const want = opts?.onlyIf?.etagMatches;
+		if (want !== undefined && this.objects.get(key)?.etag !== want) return null;
+		const o = { body, etag: `e${++this.n}` };
+		this.objects.set(key, o);
+		return { etag: o.etag };
+	}
+	state(): AlertState { return JSON.parse(this.objects.get('gbfs/alerts/state.json')!.body); }
+}
+
+describe('runAlerts', () => {
+	const rule: Rule = { id: 'always', description: 'never fires', check: () => true, firingText: () => 'boom' };
+
+	it('overlapping cron runs post a firing transition once', async () => {
+		vi.useRealTimers();
+		const r2 = new FakeR2();
+		await r2.put('health/snapshot.json', JSON.stringify(snap()));
+		const posts: string[][] = [];
+		const slack = {
+			sync: async (thread: { messages: string[] }) => {
+				posts.push(thread.messages);
+				// Slack's round-trip: the other run reads state meanwhile.
+				await new Promise((r) => setTimeout(r, 20));
+				return { threadId: `ts${posts.length}` };
+			},
+		};
+		const [a, b] = await Promise.all([
+			runAlerts(r2, 'tok', [rule], undefined, slack as never),
+			runAlerts(r2, 'tok', [rule], undefined, slack as never),
+		]);
+		expect(posts).toEqual([['boom']]);
+		expect([a.length, b.length].sort()).toEqual([0, 1]);
+		expect(Object.keys(r2.state().firing)).toEqual(['always']);
+		expect(r2.state().firing.always.threadTs).toBe('ts1');
+	});
+
+	it('a live claim defers to its holder; an expired one (a run that died mid-post) is taken over', async () => {
+		vi.useRealTimers();
+		const r2 = new FakeR2();
+		await r2.put('health/snapshot.json', JSON.stringify(snap()));
+		const posts: string[][] = [];
+		const slack = { sync: async (thread: { messages: string[] }) => { posts.push(thread.messages); return { threadId: 'ts1' }; } };
+		const claimed = (ageMs: number) => JSON.stringify({ firing: {}, claim: { at: new Date(Date.now() - ageMs).toISOString() } });
+		await r2.put('gbfs/alerts/state.json', claimed(60_000));
+		expect(await runAlerts(r2, 'tok', [rule], undefined, slack as never)).toEqual([]);
+		expect(posts).toEqual([]);
+		await r2.put('gbfs/alerts/state.json', claimed(6 * 60_000));
+		expect((await runAlerts(r2, 'tok', [rule], undefined, slack as never)).map((t) => t.rule.id)).toEqual(['always']);
+		expect(posts).toEqual([['boom']]);
+		expect(r2.state()).toEqual({ firing: { always: { firingSince: expect.any(String), threadTs: 'ts1', firingText: 'boom' } } });
 	});
 });

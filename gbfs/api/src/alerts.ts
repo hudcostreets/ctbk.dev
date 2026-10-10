@@ -42,10 +42,16 @@ export interface FiringEntry {
 export interface AlertState {
 	/** Map of `ruleId` → `FiringEntry`. Absent ⇒ rule not currently firing. */
 	firing: Record<string, FiringEntry>;
+	/** Set while a run posts its transitions to Slack (see `runAlerts`). */
+	claim?: { at: string };
 }
 
 /** R2 key for the dedup state JSON. */
 const STATE_KEY = 'gbfs/alerts/state.json';
+
+/** A claim older than this is a run that died mid-post; the next run may
+ *  take over (and re-post — at-least-once beats a stuck alert). */
+const CLAIM_TTL_MS = 5 * 60_000;
 
 /** Slack channel — kept in code (not secret) for grep-ability. */
 const SLACK_CHANNEL = 'C0B5MKF28NP';
@@ -293,12 +299,13 @@ export function resolvedText(rule: Rule): string {
 	return `:white_check_mark: *Resolved* — ${rule.description}`;
 }
 
-export async function readState(r2: HealthR2): Promise<AlertState> {
+/** State plus its R2 etag (`null` when the object doesn't exist yet). */
+export async function readState(r2: AlertR2): Promise<{ state: AlertState; etag: string | null }> {
 	const obj = await r2.get(STATE_KEY);
-	if (!obj) return { firing: {} };
-	const parsed = await obj.json<unknown>() as { firing?: unknown };
+	if (!obj) return { state: { firing: {} }, etag: null };
+	const parsed = await obj.json<unknown>() as { firing?: unknown; claim?: AlertState['claim'] };
 	const firing = (parsed.firing && typeof parsed.firing === 'object') ? parsed.firing as Record<string, unknown> : {};
-	const out: AlertState = { firing: {} };
+	const out: AlertState = { firing: {}, ...(parsed.claim ? { claim: parsed.claim } : {}) };
 	for (const [id, raw] of Object.entries(firing)) {
 		// Tolerate legacy entries (`firing[id]: string`) — drop them; next
 		// firing of the same rule will rebuild a proper entry.
@@ -306,18 +313,28 @@ export async function readState(r2: HealthR2): Promise<AlertState> {
 			out.firing[id] = raw as FiringEntry;
 		}
 	}
-	return out;
+	return { state: out, etag: obj.etag };
 }
 
-/** R2 binding shape extended with `put` for state writes. */
-export interface AlertR2 extends HealthR2 {
-	put(key: string, body: string, opts?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
+/** R2 binding shape extended with etags and conditional `put` (R2 returns
+ *  `null` when `onlyIf` fails). */
+export interface AlertR2 extends Omit<HealthR2, 'get' | 'put'> {
+	get(key: string): Promise<{ etag: string; json<T = unknown>(): Promise<T> } | null>;
+	put(
+		key: string,
+		body: string,
+		opts?: { httpMetadata?: { contentType?: string }; onlyIf?: { etagMatches: string } },
+	): Promise<{ etag: string } | null>;
 }
 
-export async function writeState(r2: AlertR2, state: AlertState): Promise<void> {
-	await r2.put(STATE_KEY, JSON.stringify(state), {
+/** Write `state` iff the object still has `etag`; returns the new etag, or
+ *  `null` if another run wrote in between. */
+export async function writeState(r2: AlertR2, state: AlertState, etag: string): Promise<string | null> {
+	const obj = await r2.put(STATE_KEY, JSON.stringify(state), {
 		httpMetadata: { contentType: 'application/json' },
+		onlyIf: { etagMatches: etag },
 	});
+	return obj?.etag ?? null;
 }
 
 /** Apply a transition via Slack. Returns the state mutation to merge in
@@ -325,7 +342,7 @@ export async function writeState(r2: AlertR2, state: AlertState): Promise<void> 
  *  Throws nothing — Slack errors are logged + swallowed so one bad rule
  *  doesn't block others. */
 export async function applyTransition(
-	slack: SlackClient,
+	slack: Pick<SlackClient, 'sync'>,
 	t: Transition,
 	nowIso: string,
 ): Promise<{ kind: 'firing'; id: string; entry: FiringEntry } | { kind: 'resolved'; id: string } | null> {
@@ -358,14 +375,22 @@ export async function applyTransition(
 }
 
 /** Entry point for the scheduled handler. Returns the transitions whose
- *  Slack syncs succeeded — useful for tests and logging. */
+ *  Slack syncs succeeded — useful for tests and logging.
+ *
+ *  Minute crons overlap (a run can outlast the next tick by a minute), so
+ *  two runs can see the same transition. Before posting, a run claims the
+ *  state object with a conditional write; a run that loses the race, or
+ *  finds a live claim, posts nothing and leaves the transition to the
+ *  claimant (2026-10-10: one `feed-missed-lus` firing posted twice, 1.5 s
+ *  apart, from overlapping runs). */
 export async function runAlerts(
 	r2: AlertR2,
 	slackToken: string,
 	rules: Rule[] = DEFAULT_RULES,
 	db?: D1Database,
+	slackClient?: Pick<SlackClient, 'sync'>,
 ): Promise<Transition[]> {
-	const [snapshot, prev] = await Promise.all([
+	let [snapshot, { state: prev, etag }] = await Promise.all([
 		currentSnapshot(r2, db),
 		readState(r2),
 	]);
@@ -374,8 +399,22 @@ export async function runAlerts(
 		await writeHeartbeat(r2, 0, Object.keys(prev.firing));
 		return [];
 	}
+	if (prev.claim && Date.now() - Date.parse(prev.claim.at) < CLAIM_TTL_MS) {
+		console.log(`alerts: state claimed at ${prev.claim.at} by another run; skipping`);
+		return [];
+	}
+	if (etag === null) {
+		// First run ever: create the object so there's an etag to claim against.
+		etag = (await r2.put(STATE_KEY, JSON.stringify(prev)))!.etag;
+	}
+	const nowIso = new Date().toISOString();
+	const claimEtag = await writeState(r2, { ...prev, claim: { at: nowIso } }, etag);
+	if (claimEtag === null) {
+		console.log('alerts: lost the state claim to another run; skipping');
+		return [];
+	}
 
-	const slack = new SlackClient({
+	const slack = slackClient ?? new SlackClient({
 		token: slackToken,
 		channel: SLACK_CHANNEL,
 		username: SLACK_USERNAME,
@@ -385,7 +424,6 @@ export async function runAlerts(
 		fetch: (input, init) => fetch(input, init),
 	});
 
-	const nowIso = new Date().toISOString();
 	const next: AlertState = { firing: { ...prev.firing } };
 	const succeeded: Transition[] = [];
 	for (const t of transitions) {
@@ -398,8 +436,9 @@ export async function runAlerts(
 		}
 		succeeded.push(t);
 	}
-	if (succeeded.length > 0) {
-		await writeState(r2, next);
+	// Always written (even with every Slack sync failed): it releases the claim.
+	if (await writeState(r2, next, claimEtag) === null) {
+		console.error('alerts: state changed under our claim (expired mid-post?); overwrote nothing');
 	}
 	await writeHeartbeat(r2, transitions.length - succeeded.length, Object.keys(next.firing));
 	return succeeded;
