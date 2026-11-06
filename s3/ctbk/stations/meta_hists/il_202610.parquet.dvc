@@ -1,0 +1,10 @@
+outs:
+- md5: 43fcfee49f15e29e13183133f8845adf
+  size: 77706
+  hash: md5
+  path: il_202610.parquet
+meta:
+  computation:
+    cmd: ctbk smh create -w0 -g il 202610
+    deps:
+      /s3/ctbk/normalized/202610.parquet: 6de747612a58ba98c5721742b0feeb1c
