@@ -56,7 +56,7 @@ def test_monthly_extend_refolds_the_previous_start_month_without_cloud_calls(mon
     result = CliRunner().invoke(extend, ['-d', '202601', '-n'])
     assert result.exit_code == 0
     assert loads(result.stdout) == {
-        'queue': 'ctbk-reproc', 'image': '688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-reproc:de615adb',
+        'queue': 'ctbk-reproc', 'image': '688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-reproc:1a7fdd1d',
         'months': 2, 'vcpus': 4, 'memory': 8192,
         'useExistingJobDefinition': True,
         'assetsRef': ref,

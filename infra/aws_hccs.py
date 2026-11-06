@@ -293,8 +293,12 @@ def _reproc(r2_secrets: list) -> tuple[aws.batch.JobQueue, aws.ecr.Repository]:
             {'rulePriority': 1, 'description': 'expire untagged after 7 days',
              'selection': {'tagStatus': 'untagged', 'countType': 'sinceImagePushed', 'countUnit': 'days', 'countNumber': 7},
              'action': {'type': 'expire'}},
-            {'rulePriority': 2, 'description': 'keep the 4 most recent tags',
-             'selection': {'tagStatus': 'tagged', 'tagPatternList': ['*'], 'countType': 'imageCountMoreThan', 'countNumber': 4},
+            # Branch experiments mustn't crowd out `:main`, which the job defs pull.
+            {'rulePriority': 2, 'description': 'keep the 4 most recent routes-* tags',
+             'selection': {'tagStatus': 'tagged', 'tagPatternList': ['routes-*'], 'countType': 'imageCountMoreThan', 'countNumber': 4},
+             'action': {'type': 'expire'}},
+            {'rulePriority': 3, 'description': 'keep the 20 most recent tags',
+             'selection': {'tagStatus': 'tagged', 'tagPatternList': ['*'], 'countType': 'imageCountMoreThan', 'countNumber': 20},
              'action': {'type': 'expire'}},
         ]}),
     )

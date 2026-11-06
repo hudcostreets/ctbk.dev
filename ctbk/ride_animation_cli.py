@@ -371,7 +371,7 @@ def animation_assets_ref() -> str:
 @option('-d', '--date', 'ym', required=True, help='Newly ingested end month, YYYYMM; rebuild its preceding start month too.')
 @option('-k', '--prefix', default='rides-anim-candidate/v1', show_default=True)
 @option('-n', '--dry-run', is_flag=True)
-@option('-s', '--image', default='688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-reproc:de615adb', show_default=True)
+@option('-s', '--image', default='688066488567.dkr.ecr.us-east-1.amazonaws.com/ctbk-reproc:1a7fdd1d', show_default=True)
 def extend(
     ym: str,
     prefix: str,
