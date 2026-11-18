@@ -16,6 +16,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from time import sleep
 
 import pandas as pd
 
@@ -93,23 +94,32 @@ def fill_from_v11(date_str: str, out_dir: Path) -> int:
     return len(missing)
 
 
+SYNC_ATTEMPTS = 3
+
+
+def s3_sync(src: str, dst: Path):
+    """`aws s3 sync` the JSONs under `src` into `dst`, retrying transient R2
+    failures (throughput timeouts, dropped connections). A rerun fetches only
+    what's still missing, so retrying is cheap."""
+    for attempt in range(1, SYNC_ATTEMPTS + 1):
+        result = subprocess.run(
+            ['aws', 's3', 'sync', src, str(dst), '--exclude', '*', '--include', '*.json', *AWS_PROFILE_ARGS],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return
+        print(f"Sync of {src} failed (attempt {attempt}/{SYNC_ATTEMPTS}): {result.stderr}", file=sys.stderr)
+        if attempt < SYNC_ATTEMPTS:
+            sleep(30 * attempt)
+    sys.exit(1)
+
+
 def download(date_str: str):
     """Download all WAL JSONs for a date from R2 via aws s3 sync."""
     out_dir = WAL_DIR / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    r2_prefix = f's3://{R2_BUCKET}/{R2_PREFIX}/status/{date_str}/'
-    result = subprocess.run(
-        [
-            'aws', 's3', 'sync', r2_prefix, str(out_dir),
-            '--exclude', '*', '--include', '*.json',
-            *AWS_PROFILE_ARGS,
-        ],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(f"Download failed: {result.stderr}", file=sys.stderr)
-        sys.exit(1)
+    s3_sync(f's3://{R2_BUCKET}/{R2_PREFIX}/status/{date_str}/', out_dir)
 
     count = len(list(out_dir.glob('*.json')))
     print(f"Downloaded {count} WAL files for {date_str}")
@@ -117,13 +127,7 @@ def download(date_str: str):
     # aliases. Never delete either source while compacting.
     generations_dir = out_dir / 'generations'
     generations_dir.mkdir(exist_ok=True)
-    subprocess.run(
-        [
-            'aws', 's3', 'sync', f's3://{R2_BUCKET}/{GENERATION_PREFIX}/{date_str}/', str(generations_dir),
-            '--exclude', '*', '--include', '*.json', *AWS_PROFILE_ARGS,
-        ],
-        capture_output=True, text=True, check=True,
-    )
+    s3_sync(f's3://{R2_BUCKET}/{GENERATION_PREFIX}/{date_str}/', generations_dir)
     count += sum(1 for path in generations_dir.glob('*.json') if path.stem.isdigit())
     filled = fill_from_v11(date_str, out_dir)
     if filled:
