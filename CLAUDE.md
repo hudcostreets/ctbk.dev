@@ -15,8 +15,7 @@ This is **ctbk.dev** - a data pipeline and visualization dashboard for NYC Citi 
 ### Data Pipeline Flow
 ```
 s3://tripdata (.csv.zip) → norm → cons ─┬→ agg (histograms: e_c, se_c, ymrgtb_cd, ymrgtbs_cd, ymrgtbe_cd)
-                                        ├→ smh → sm → spj
-                                        └→ station-trips-json (per-station ymdgtb JSONs)
+                                        └→ smh → sm → spj
 ```
 
 The monthly driver is `ctbk update -S <YYYYMM>` (`ctbk/update.py`) — `norm` reads the `s3://tripdata` `.csv.zip`s **directly** (the old `csv` extract stage is orphaned). Stage outputs are content-addressed in the DVX cache (`s3://ctbk/.dvc/files/md5/…`, migrating to R2 behind `data.ctbk.dev`; see `specs/s3-to-r2-migration.md`).
@@ -139,7 +138,7 @@ CI (`.github/workflows/ci.yml`) polls for new Citi Bike data monthly and runs th
 ctbk update -S <YYYYMM>        # -S skips station-harmonize (whole-history; CI runs it separately)
 ```
 
-which runs, in order: `norm` → `cons` → `smh -gil` / `smh -gin` → `agg` ×5 (`-ge -ac`, `-gse -ac`, `-g ymrgtb -acd`, `-g ymrgtbs -acd`, `-g ymrgtbe -acd`) → `sm` → `spj` → `station-trips-json -a -d` (per-station ymdgtb JSONs) → `node www/scripts/gen-station-urls.js`. The rides rollup-pyramid rebuild (R2-only, no DVX artifacts) runs afterward as a separate best-effort CI step. The root `update.sh` is a thin deprecated pointer to this command.
+which runs, in order: `norm` → `cons` → `smh -gil` / `smh -gin` → `agg` ×5 (`-ge -ac`, `-gse -ac`, `-g ymrgtb -acd`, `-g ymrgtbs -acd`, `-g ymrgtbe -acd`) → `sm` → `spj` → `node www/scripts/gen-station-urls.js` → `ctbk dag -fjson` (`www/public/assets/dag.json`). The rides rollup-pyramid rebuild (R2-only, no DVX artifacts) runs afterward as a separate best-effort CI step. The root `update.sh` is a thin deprecated pointer to this command.
 
 ## Development Notes
 

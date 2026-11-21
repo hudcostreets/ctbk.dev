@@ -1,0 +1,154 @@
+# avail-v3 cutover: `e`-side fsck backfill runbook
+
+> **Superseded** (spec triage, 2026-11-19): One-shot avail-v3 fsck runbook; avail-v3 retired 2026-08-28 (`0fc9e73f`, `fb0dbd6a`).
+
+What `e` does as part of the avail-v3 unified-shard-ladder cutover.
+Laptop already ran steps 1-5 (D1 ALTER, cascade + api deploy, D1
+canonical-row DELETE, push). This spec covers what `e` does next.
+
+**Live-cascade status (2026-07-04 12:07 UTC):** cascade OOM fix
+(`cefb66f7` + `bd08ef64`) is now deployed via manual
+`wrangler deploy` (version `883c6e27`). Also on top: workflow patch
+`cfcc641f` wires `cascade` into `.github/workflows/gbfs.yml` so future
+edits auto-deploy. Steady-state /5m cron is writing all rungs from
+that timestamp forward. **`e`'s fsck fills only 2026-04-08 → 07-04
+12:07** — post-deploy periods already exist on R2 and `fsck --fill`
+will HEAD-skip them (`status: exists`, no rewrite). Fsck will
+re-register those `exists` shards in D1 idempotently.
+
+## Where this fits
+
+The avail-v3 cutover migrates the pyramid from the prior
+canonical/partial-shards dichotomy to pyrmts's unified-shard-ladder
+model (per-tier `shards: [...]` ladder, fixed-duration rungs only,
+N=1440 bins per largest shard). Full plan:
+
+- `specs/avail-v3-ladder-migration.md` — **umbrella** (why this
+  cutover, phase index, dependency graph). Skim for context.
+- `specs/avail-v3-fsck-backfill.md` — **fsck design** (companion to
+  this runbook; describes the per-shard materializer dispatched by
+  `(tier, shard_dur)` case).
+- `specs/avail-v3-storage-rename.md` — **R2 / D1 rename runbook**.
+  Most steps already executed by laptop (R2 COPY, D1 ALTER, deploys,
+  canonical-row DELETE). Still useful for the final R2 DELETE legacy
+  cleanup recipe (`scripts/avail-v3-rename.py r2-delete`) the laptop
+  runs post-handoff.
+
+Three earlier specs (`avail-v3-1m-backfill.md`,
+`avail-v3-intermediate-backfill.md`, `avail-v3-steady-state.md`) were
+removed in commit `<this commit>` — fsck subsumes all three, and
+their pre-unified-ladder framing was actively misleading post-cutover.
+
+## Pre-flight (verify)
+
+```bash
+# Should be at cfcc641f or later.
+grhh                                # align WT to pushed HEAD
+git merge-base --is-ancestor cfcc641f HEAD || echo 'OUT OF DATE - pull from macbook'
+git log --oneline -3                # most-recent commits, exact set may evolve
+
+uv sync                             # refresh pyrmts dep + ctbk install
+
+# Sanity check: fsck discovery should print expected ≈ 2562 × N days,
+# existing ≈ ~5k, missing = the rest. Adjust `-r` start date if newer
+# raw GBFS data is available.
+ctbk pyramid-cascade --fsck -c configs/pyramids/avail.yaml \
+    -r 2026-04-08/$(date -u +%Y-%m-%d) | head -30
+```
+
+If the gap counts look reasonable, proceed.
+
+## Run the fill
+
+```bash
+# Heavy: 80+ days of raw GBFS data → ~tens-of-thousands of shards
+# materialized across all 15 tier ladders. Wall-clock probably hours.
+# Logs to stdout; emits tmp/fsck-d1-record.sql at the end.
+ctbk pyramid-cascade --fsck --fill -c configs/pyramids/avail.yaml \
+    -r 2026-04-08/$(date -u +%Y-%m-%d) \
+    2>&1 | tee tmp/fsck-fill-$(date -u +%Y%m%dT%H%M).log
+```
+
+CLI options worth knowing:
+- `-L N` / `--fill-limit N`: stop after N gaps (smoke / staged).
+- No `--ingester` flag needed (fsck mode skips the engine).
+- No `--engine` / `--workers`: fsck currently fills serially. Future
+  Phase C adds ProcessPool parallelism per the spec.
+
+Per-shard log format (every ~20 gaps + on error/empty):
+```
+  [N/M] /tier@shard YYYY-MM-DD → status [(R rows, B bytes)]
+```
+
+Status legend:
+- `wrote` — built + uploaded.
+- `exists` — R2 path already there (from earlier r2-copy); HEAD-skipped.
+- `no_inputs` — source shards/raw all missing; can't build. Investigate.
+- `empty` — sources present but no rows fell in the period. Rare; OK.
+- `error` — exception during read/build/write. Logged with the
+  exception repr; check the log + decide whether to retry.
+
+End-of-run summary:
+```
+fill summary: wrote=X, exists=Y, ...
+emitted N shard INSERTs (2N statements) → tmp/fsck-d1-record.sql
+```
+
+## Apply the D1 INSERT batch
+
+```bash
+(cd gbfs/api && wrangler d1 execute ctbk-gbfs --remote \
+    --file ../../tmp/fsck-d1-record.sql)
+```
+
+This populates `pyramid_shards` + `pyramid_watermarks` for every
+materialized (and `exists`) shard. After this completes, the deployed
+api worker can find the historical shards via its planner walk.
+
+## Verify
+
+```bash
+# Should report 0 missing (or very close — handful for periods that
+# closed during the fill run).
+ctbk pyramid-cascade --fsck -c configs/pyramids/avail.yaml \
+    -r 2026-04-08/$(date -u +%Y-%m-%d) | grep "missing:"
+
+# Spot-check via pyramid-status (the script handles cadence vs shard_dur
+# auto-detect post-ALTER).
+pyramid-status.py avail | head -20
+```
+
+Hand off to laptop for steps 9-10 (CIC /health + Grove St plateau
+check; R2 DELETE legacy via `scripts/avail-v3-rename.py r2-delete`).
+
+## Failure modes
+
+- **OOM** on the per-shard build (Polars peak during `_build_tier_shard`):
+  the existing engine uses `PIVOT_CHUNKS` to bound working set per
+  block. The fsck per-shard path inherits the chunking but operates
+  on whatever the source shards' size is. If a particular shard
+  OOMs, file an issue + skip with `--fill-limit` until it.
+- **R2 transient 5xx**: `materialize.py` doesn't retry per shard
+  today. Re-run; idempotent (HEAD-skip already-written).
+- **D1 INSERT batch too large for wrangler**: split
+  `tmp/fsck-d1-record.sql` into chunks of ~1000 statements + apply
+  each. (D1's `--file` cap is on the order of MB; ~50k inserts is
+  probably fine. Try first; split if it errors.)
+
+## When this is done
+
+- Laptop reruns `--fsck` (no `--fill`); expects 0 gaps.
+- Laptop verifies Grove St plateau is gone (the original bug that
+  motivated this cutover).
+- Laptop runs `scripts/avail-v3-rename.py r2-delete` to GC the legacy
+  R2 paths now superseded by the new layout.
+
+## Cross-reference
+
+See "Where this fits" at the top. Code pointers:
+
+- `gbfs/cascade/src/avail3/cascade.ts` — the steady-state CFW writer
+  whose mechanics fsck mirrors.
+- `ctbk/pyramid_cascade/materialize.py` — the per-shard fill driver.
+- `ctbk/pyramid_cascade/fsck.py` — gap discovery + fill orchestration
+  (the `--fsck --fill` CLI path).
