@@ -130,7 +130,7 @@ export function mergeManifestRgs(chunks: ManifestRg[][]): ManifestRg[] {
 	return [...byIdx.values()].sort((a, b) => a.rg_idx - b.rg_idx);
 }
 
-interface ChunkMeta {
+export interface ChunkMeta {
 	name: string;
 	type: string;
 	codec: string;
@@ -139,6 +139,90 @@ interface ChunkMeta {
 	total_compressed_size: number;
 	data_page_offset: number;
 	dictionary_page_offset?: number;
+}
+
+// ─── `chunk_meta` encoding ───────────────────────────────────────────────
+//
+// Two formats coexist in `rg_manifest.chunk_meta`:
+//
+// - legacy: a JSON array of `ChunkMeta` objects. ~2.3KB per rides RG,
+//   because every row repeats each column's name, type, codec and
+//   encodings: it was ~55% of `ctbk-gbfs`'s 5GB (2026-11-21).
+// - compact: `{"s": <schema fingerprint>, "c": [[codec, data_page_offset,
+//   total_compressed_size, dictionary_page_offset|null(, num_values)], …]}`.
+//   Name and type come from the pyramid's `rg_manifest_schema` leaves (column
+//   chunks are in leaf order); `num_values` is omitted when it equals the
+//   RG's `num_rows`; `encodings` is dropped (hyparquet's decode reads each
+//   page's own encoding, never the column-chunk list).
+//
+// The fingerprint guards the one way compact rows can go wrong: the per-
+// pyramid schema row is overwritten by each fill, so if a pyramid's columns
+// ever change, older shards' compact rows would otherwise be decoded against
+// the new leaves. A mismatch throws, which `fetchShardRows` already handles
+// (drop the key's rows, serve via footer, refill).
+
+export interface SchemaLeaf {
+	name: string;
+	type: string;
+}
+
+type CompactChunk = [string, number, number, number | null] | [string, number, number, number | null, number];
+
+interface CompactChunkMeta {
+	s: string;
+	c: CompactChunk[];
+}
+
+/** Flat-schema leaves (every element after the root that has no children). */
+export function schemaLeaves(schema: unknown[]): SchemaLeaf[] {
+	return (schema as { name: string; type?: string; num_children?: number }[])
+		.slice(1)
+		.filter((e) => !e.num_children)
+		.map((e) => ({ name: e.name, type: String(e.type) }));
+}
+
+/** FNV-1a (32-bit) over the leaves' `name:type` list, as 8 hex chars. */
+export function schemaFingerprint(leaves: SchemaLeaf[]): string {
+	let h = 0x811c9dc5;
+	for (const ch of leaves.map((l) => `${l.name}:${l.type}`).join(',')) {
+		h ^= ch.charCodeAt(0);
+		h = Math.imul(h, 0x01000193) >>> 0;
+	}
+	return h.toString(16).padStart(8, '0');
+}
+
+/** Compact form when `chunks` line up with `leaves` by name and type;
+ *  otherwise the legacy object array (still decodable). */
+export function encodeChunkMeta(chunks: ChunkMeta[], leaves: SchemaLeaf[], numRows: number): string {
+	const aligned = chunks.length === leaves.length
+		&& chunks.every((c, i) => c.name === leaves[i]!.name && c.type === leaves[i]!.type);
+	if (!aligned) return JSON.stringify(chunks);
+	const c: CompactChunk[] = chunks.map((ch) => {
+		const base: [string, number, number, number | null] = [
+			ch.codec, ch.data_page_offset, ch.total_compressed_size, ch.dictionary_page_offset ?? null,
+		];
+		return ch.num_values === numRows ? base : [...base, ch.num_values];
+	});
+	return JSON.stringify({ s: schemaFingerprint(leaves), c } satisfies CompactChunkMeta);
+}
+
+/** Decode either format to `ChunkMeta[]`. Compact rows need the pyramid's
+ *  current leaves; a fingerprint or arity mismatch throws. */
+export function decodeChunkMeta(json: string, leaves: SchemaLeaf[], numRows: number): ChunkMeta[] {
+	const parsed = JSON.parse(json) as ChunkMeta[] | CompactChunkMeta;
+	if (Array.isArray(parsed)) return parsed;
+	const fp = schemaFingerprint(leaves);
+	if (parsed.s !== fp) throw new Error(`chunk_meta schema fingerprint ${parsed.s} != current ${fp}`);
+	if (parsed.c.length !== leaves.length) throw new Error(`chunk_meta has ${parsed.c.length} columns, schema has ${leaves.length}`);
+	return parsed.c.map(([codec, data_page_offset, total_compressed_size, dict, num_values], i) => ({
+		name: leaves[i]!.name,
+		type: leaves[i]!.type,
+		codec,
+		num_values: num_values ?? numRows,
+		total_compressed_size,
+		data_page_offset,
+		...(dict === null ? {} : { dictionary_page_offset: dict }),
+	}));
 }
 
 export interface SegmentFetchOpts {
@@ -155,7 +239,7 @@ export interface SegmentFetchOpts {
 }
 
 /** In-isolate cache of per-pyramid schema JSON (stable across shards). */
-const schemaCache = new Map<string, unknown[]>();
+const schemaCache = new Map<string, { json: string; schema: unknown[] }>();
 
 const num = (v: unknown): number => typeof v === 'bigint' ? Number(v) : (v as number);
 
@@ -213,9 +297,13 @@ export async function fetchShardRows(opts: SegmentFetchOpts): Promise<Row[]> {
 		return fallbackFetch(opts);
 	}
 
-	const schema = schemaCache.get(pyramid) ?? (() => {
+	// Keyed on the JSON text (fetched every request anyway), so a fill that
+	// rewrites the pyramid's schema row is seen immediately rather than
+	// decoding its compact rows against a stale cached parse.
+	const cached = schemaCache.get(pyramid);
+	const schema = cached?.json === schemaJson ? cached.schema : (() => {
 		const s = JSON.parse(schemaJson) as unknown[];
-		schemaCache.set(pyramid, s);
+		schemaCache.set(pyramid, { json: schemaJson, schema: s });
 		return s;
 	})();
 	const rgs = mergeManifestRgs(matchResults.map((r) => (r.results ?? []) as unknown as ManifestRg[]));
@@ -235,9 +323,10 @@ export async function fetchShardRows(opts: SegmentFetchOpts): Promise<Row[]> {
 	}
 }
 
-async function decodeManifestRgs(opts: SegmentFetchOpts, schema: unknown[], rgs: ManifestRg[]): Promise<Row[]> {
+export async function decodeManifestRgs(opts: Pick<SegmentFetchOpts, 'storage' | 'key'>, schema: unknown[], rgs: ManifestRg[]): Promise<Row[]> {
+	const leaves = schemaLeaves(schema);
 	const row_groups = rgs.map((rg) => {
-		const chunks = JSON.parse(rg.chunk_meta) as ChunkMeta[];
+		const chunks = decodeChunkMeta(rg.chunk_meta, leaves, rg.num_rows);
 		return {
 			columns: chunks.map((c) => ({
 				file_offset: c.dictionary_page_offset ?? c.data_page_offset,
@@ -427,6 +516,65 @@ export async function pruneManifestOrphans(
 	};
 }
 
+/** Rewrite legacy `chunk_meta` rows as compact (`ctbk gbfs manifest
+ *  compact`), `limit` keys per call in key order after `after`. Reads are
+ *  PK-prefix lookups (no table scans). A row converts only if
+ *  re-decoding the compact form reproduces the legacy chunks exactly
+ *  (minus `encodings`); each UPDATE is a compare-and-swap on the old
+ *  `chunk_meta`, so a concurrent refill is never clobbered. */
+export async function compactManifestKeys(
+	db: D1Database,
+	pyramid: string,
+	{ after = '', limit = 1, dryRun = false }: { after?: string; limit?: number; dryRun?: boolean } = {},
+): Promise<{ keys: string[]; rgs: number; converted: number; compact: number; unaligned: number; mismatched: number; bytes_before: number; bytes_after: number; next: string | null }> {
+	const [keysRes, schemaRes] = await db.batch([
+		db.prepare('SELECT key FROM rg_manifest_fills WHERE pyramid = ? AND key > ? ORDER BY key LIMIT ?').bind(pyramid, after, limit),
+		db.prepare('SELECT schema_json FROM rg_manifest_schema WHERE pyramid = ?').bind(pyramid),
+	]);
+	const keys = ((keysRes!.results ?? []) as { key: string }[]).map((r) => r.key);
+	const schemaJson = (schemaRes!.results?.[0] as { schema_json: string } | undefined)?.schema_json;
+	if (schemaJson === undefined) throw new Error(`no rg_manifest_schema row for ${pyramid}`);
+	const leaves = schemaLeaves(JSON.parse(schemaJson) as unknown[]);
+	const out = { keys, rgs: 0, converted: 0, compact: 0, unaligned: 0, mismatched: 0, bytes_before: 0, bytes_after: 0 };
+	const update = db.prepare('UPDATE rg_manifest SET chunk_meta = ? WHERE pyramid = ? AND key = ? AND rg_idx = ? AND chunk_meta = ?');
+	for (const key of keys) {
+		const rows = (await db.prepare('SELECT rg_idx, num_rows, chunk_meta FROM rg_manifest WHERE pyramid = ? AND key = ?')
+			.bind(pyramid, key).all<{ rg_idx: number; num_rows: number; chunk_meta: string }>()).results ?? [];
+		const stmts: D1PreparedStatement[] = [];
+		for (const row of rows) {
+			out.rgs++;
+			out.bytes_before += row.chunk_meta.length;
+			const parsed = JSON.parse(row.chunk_meta) as unknown;
+			if (!Array.isArray(parsed)) {
+				out.compact++;
+				out.bytes_after += row.chunk_meta.length;
+				continue;
+			}
+			const legacy = parsed as ChunkMeta[];
+			const enc = encodeChunkMeta(legacy, leaves, row.num_rows);
+			if (enc.startsWith('[')) {
+				out.unaligned++;
+				out.bytes_after += row.chunk_meta.length;
+				continue;
+			}
+			const canon = (cs: ChunkMeta[]) => JSON.stringify(cs.map(({ encodings: _e, ...c }) =>
+				Object.fromEntries(Object.entries(c).filter(([, v]) => v !== undefined).sort(([a], [b]) => a.localeCompare(b)))));
+			if (canon(decodeChunkMeta(enc, leaves, row.num_rows)) !== canon(legacy)) {
+				out.mismatched++;
+				out.bytes_after += row.chunk_meta.length;
+				continue;
+			}
+			out.converted++;
+			out.bytes_after += enc.length;
+			stmts.push(update.bind(enc, pyramid, key, row.rg_idx, row.chunk_meta));
+		}
+		if (!dryRun) {
+			for (let i = 0; i < stmts.length; i += 50) await db.batch(stmts.slice(i, i + 50));
+		}
+	}
+	return { ...out, next: keys.length === limit ? keys[keys.length - 1]! : null };
+}
+
 /** Fill coverage for a pyramid: registered keys vs completed fills, with
  *  stale fills (shard re-registered since) called out separately. */
 export async function manifestStatus(
@@ -472,6 +620,23 @@ async function fillManifest(opts: SegmentFetchOpts, metadata: FileMetaData): Pro
 	}
 }
 
+/** One RG's per-column chunk metadata, as read from a footer. */
+export function rgChunkMetas(rg: FileMetaData['row_groups'][number]): ChunkMeta[] {
+	return rg.columns.map((c) => {
+		const md = c.meta_data!;
+		return {
+			name: md.path_in_schema[0]!,
+			type: md.type as unknown as string,
+			codec: md.codec as unknown as string,
+			encodings: md.encodings as unknown as string[] | undefined,
+			num_values: num(md.num_values),
+			total_compressed_size: num(md.total_compressed_size),
+			data_page_offset: num(md.data_page_offset),
+			dictionary_page_offset: md.dictionary_page_offset !== undefined ? num(md.dictionary_page_offset) : undefined,
+		};
+	});
+}
+
 async function fillManifestInner(db: D1Database, pyramid: string, key: string, writtenAt: number, metadata: FileMetaData, cellCol: string): Promise<void> {
 	const cellIdx = findColIdx(metadata, cellCol);
 	const dtIdx = findColIdx(metadata, 'dt');
@@ -486,21 +651,10 @@ async function fillManifestInner(db: D1Database, pyramid: string, key: string, w
 		db.prepare('INSERT OR REPLACE INTO rg_manifest_schema (pyramid, schema_json) VALUES (?, ?)')
 			.bind(pyramid, JSON.stringify(metadata.schema, (_k, v) => typeof v === 'bigint' ? Number(v) : v)),
 	];
+	const leaves = schemaLeaves(metadata.schema as unknown[]);
 	let rowStart = 0;
 	metadata.row_groups.forEach((rg, rgIdx) => {
-		const chunks: ChunkMeta[] = rg.columns.map((c) => {
-			const md = c.meta_data!;
-			return {
-				name: md.path_in_schema[0],
-				type: md.type as unknown as string,
-				codec: md.codec as unknown as string,
-				encodings: md.encodings as unknown as string[] | undefined,
-				num_values: num(md.num_values),
-				total_compressed_size: num(md.total_compressed_size),
-				data_page_offset: num(md.data_page_offset),
-				dictionary_page_offset: md.dictionary_page_offset !== undefined ? num(md.dictionary_page_offset) : undefined,
-			};
-		});
+		const chunks = rgChunkMetas(rg);
 		const starts = chunks.map((c) => c.dictionary_page_offset ?? c.data_page_offset);
 		const ends = chunks.map((c) => (c.dictionary_page_offset ?? c.data_page_offset) + c.total_compressed_size);
 		const cellStats = cellIdx >= 0 ? rg.columns[cellIdx]?.meta_data?.statistics : undefined;
@@ -511,7 +665,7 @@ async function fillManifestInner(db: D1Database, pyramid: string, key: string, w
 			Math.min(...starts), Math.max(...ends),
 			statStr(cellStats?.min_value), statStr(cellStats?.max_value),
 			statNum(dtStats?.min_value), statNum(dtStats?.max_value),
-			JSON.stringify(chunks),
+			encodeChunkMeta(chunks, leaves, nRows),
 		));
 		rowStart += nRows;
 	});

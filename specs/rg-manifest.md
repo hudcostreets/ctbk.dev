@@ -107,3 +107,9 @@ Where it lives: P1 in `gbfs/api` directly (import hyparquet; bypass `pyramid.sto
 - `chunk_meta` compactness: full per-column JSON (~1KB/RG) vs. minimal (offsets + sizes only, reconstruct encodings from schema defaults). Start full; measure D1 storage.
 - D1 read-replication sessions for the manifest query (read-mostly, tiny rows — the pattern replication is for; #98 precedent).
 - Whether a `s:`-only "station-identity satellite pyramid" (tiny shards, only identity rows) is still worth it post-manifest — manifest likely makes it unnecessary; revisit only if station-query volume grows.
+
+## Compact `chunk_meta` (2026-11-21)
+
+At 1.43M rows `rg_manifest` was ~5 GB of `ctbk-gbfs`'s 5.0 GB, ~2.75 GB of it `chunk_meta`: every RG row repeated each column's name, type, codec and encodings as JSON objects (~2.3 KB per rides RG). Fills now write `{"s": <schema fingerprint>, "c": [[codec, data_page_offset, total_compressed_size, dictionary_page_offset|null(, num_values)], …]}` — name/type come from `rg_manifest_schema`'s leaves, `num_values` only when ≠ `num_rows`, `encodings` dropped (hyparquet reads each page's own). The fingerprint (FNV-1a of the leaves' `name:type`) makes a compact row decoded against a since-changed pyramid schema throw → the existing footer fallback + refill. Chunks that don't line up with the schema stay legacy; the reader accepts both.
+
+Existing rows migrate via `ctbk gbfs manifest compact` (worker op `manifest_compact`: one key per call, PK-prefix reads, round-trip-verified CAS UPDATEs). Full-table JSON scans through D1 REST tripped "D1 DB is overloaded" (7429) on 2026-11-21 — keep migrations/inspections key-scoped and throttled.

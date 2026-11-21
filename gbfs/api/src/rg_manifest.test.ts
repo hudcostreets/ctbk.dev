@@ -1,7 +1,23 @@
 /// <reference types="node" />
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { parquetMetadata, parquetReadObjects } from 'hyparquet';
 import { describe, expect, it } from 'vitest';
-import { cellTokenChunks, matchQuery, mergeManifestRgs, pruneManifestOrphans, type ManifestRg } from './rg_manifest';
+import {
+	cellTokenChunks,
+	compactManifestKeys,
+	decodeChunkMeta,
+	decodeManifestRgs,
+	encodeChunkMeta,
+	matchQuery,
+	mergeManifestRgs,
+	pruneManifestOrphans,
+	rgChunkMetas,
+	schemaFingerprint,
+	schemaLeaves,
+	type ChunkMeta,
+	type ManifestRg,
+} from './rg_manifest';
 
 // D1's hard ceiling — the reason the cell predicate chunks at all.
 const D1_MAX_BINDS = 100;
@@ -120,12 +136,13 @@ const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof
 
 /** D1 over `node:sqlite`: `prepare().bind().all()` + transactional `batch()`,
  *  with just the columns `pruneManifestOrphans` touches. */
-function sqliteD1() {
+function sqliteD1(rgManifestCols = 'pyramid TEXT, key TEXT, rg_idx INTEGER') {
 	const db = new DatabaseSync(':memory:');
 	db.exec(`
 		CREATE TABLE pyramid_shards (pyramid TEXT, key TEXT);
-		CREATE TABLE rg_manifest (pyramid TEXT, key TEXT, rg_idx INTEGER, PRIMARY KEY (pyramid, key, rg_idx));
+		CREATE TABLE rg_manifest (${rgManifestCols}, PRIMARY KEY (pyramid, key, rg_idx));
 		CREATE TABLE rg_manifest_fills (pyramid TEXT, key TEXT, n_rgs INTEGER, PRIMARY KEY (pyramid, key));
+		CREATE TABLE rg_manifest_schema (pyramid TEXT PRIMARY KEY, schema_json TEXT NOT NULL);
 	`);
 	type Stmt = { sql: string; args: unknown[]; bind: (...a: unknown[]) => Stmt; all: () => Promise<{ results: unknown[] }> };
 	const stmt = (sql: string, args: unknown[] = []): Stmt => ({
@@ -138,9 +155,11 @@ function sqliteD1() {
 		prepare: (sql: string) => stmt(sql),
 		batch: async (stmts: Stmt[]) => {
 			db.exec('BEGIN');
-			for (const st of stmts) db.prepare(st.sql).run(...(st.args as never[]));
+			const out = stmts.map((st) => st.sql.startsWith('SELECT')
+				? { results: db.prepare(st.sql).all(...(st.args as never[])) }
+				: (db.prepare(st.sql).run(...(st.args as never[])), { results: [] }));
 			db.exec('COMMIT');
-			return [];
+			return out;
 		},
 	};
 }
@@ -181,5 +200,120 @@ describe('pruneManifestOrphans', () => {
 		const d1 = seed();
 		expect(await pruneManifestOrphans(d1 as never, 'rides-start', { dryRun: true })).toEqual({ keys: ['old.a', 'old.b'], rgs: 4, remaining: 2 });
 		expect(rows(d1).rgs).toBe(2 + 3 + 1 + 4);
+	});
+});
+
+// Two of the 11 rides columns, as `fillManifestInner` extracts them from a
+// footer, and the pyramid's stored (hyparquet) schema they line up with.
+const SCHEMA = [
+	{ repetition_type: 'REQUIRED', name: 'schema', num_children: 2 },
+	{ type: 'BYTE_ARRAY', repetition_type: 'OPTIONAL', name: 'cell', converted_type: 'UTF8' },
+	{ type: 'INT64', repetition_type: 'OPTIONAL', name: 'dt' },
+];
+const LEAVES = schemaLeaves(SCHEMA);
+const FP = schemaFingerprint(LEAVES);
+const LEGACY: ChunkMeta[] = [
+	{ name: 'cell', type: 'BYTE_ARRAY', codec: 'SNAPPY', encodings: ['PLAIN', 'RLE', 'RLE_DICTIONARY'], num_values: 2048, total_compressed_size: 104, data_page_offset: 47, dictionary_page_offset: 4 },
+	{ name: 'dt', type: 'INT64', codec: 'SNAPPY', encodings: ['PLAIN', 'RLE'], num_values: 2048, total_compressed_size: 3268, data_page_offset: 151 },
+];
+const withoutEncodings = (cs: ChunkMeta[]) => cs.map(({ encodings: _e, ...c }) => c);
+
+describe('chunk_meta encoding', () => {
+	it('schema leaves skip the root', () => {
+		expect(LEAVES).toEqual([{ name: 'cell', type: 'BYTE_ARRAY' }, { name: 'dt', type: 'INT64' }]);
+		expect(FP).toMatch(/^[0-9a-f]{8}$/);
+	});
+
+	it('aligned chunks encode compactly, and decode back minus `encodings`', () => {
+		const enc = encodeChunkMeta(LEGACY, LEAVES, 2048);
+		expect(enc).toBe(`{"s":"${FP}","c":[["SNAPPY",47,104,4],["SNAPPY",151,3268,null]]}`);
+		expect(decodeChunkMeta(enc, LEAVES, 2048)).toEqual(withoutEncodings(LEGACY));
+	});
+
+	it('`num_values` is kept only when it differs from the RG\'s row count', () => {
+		const enc = encodeChunkMeta(LEGACY, LEAVES, 2050);
+		expect(enc).toBe(`{"s":"${FP}","c":[["SNAPPY",47,104,4,2048],["SNAPPY",151,3268,null,2048]]}`);
+		expect(decodeChunkMeta(enc, LEAVES, 2050)).toEqual(withoutEncodings(LEGACY));
+	});
+
+	it('chunks that don\'t line up with the schema stay legacy', () => {
+		const reordered = [LEGACY[1]!, LEGACY[0]!];
+		expect(encodeChunkMeta(reordered, LEAVES, 2048)).toBe(JSON.stringify(reordered));
+		expect(encodeChunkMeta(LEGACY.slice(0, 1), LEAVES, 2048)).toBe(JSON.stringify(LEGACY.slice(0, 1)));
+	});
+
+	it('legacy rows decode as-is', () => {
+		expect(decodeChunkMeta(JSON.stringify(LEGACY), LEAVES, 2048)).toEqual(LEGACY);
+	});
+
+	it('a compact row written against another schema throws (→ footer fallback + refill)', () => {
+		const enc = encodeChunkMeta(LEGACY, LEAVES, 2048);
+		const renamed = [LEAVES[0]!, { name: 'dt2', type: 'INT64' }];
+		expect(() => decodeChunkMeta(enc, renamed, 2048)).toThrow(`chunk_meta schema fingerprint ${FP} != current ${schemaFingerprint(renamed)}`);
+	});
+});
+
+describe('compactManifestKeys', () => {
+	function seed() {
+		const d1 = sqliteD1('pyramid TEXT, key TEXT, rg_idx INTEGER, num_rows INTEGER, chunk_meta TEXT');
+		d1.db.prepare('INSERT INTO rg_manifest_schema VALUES (?, ?)').run('rides-start', JSON.stringify(SCHEMA));
+		const add = (key: string, metas: string[]) => {
+			d1.db.prepare('INSERT INTO rg_manifest_fills VALUES (?, ?, ?)').run('rides-start', key, metas.length);
+			metas.forEach((m, i) => d1.db.prepare('INSERT INTO rg_manifest VALUES (?, ?, ?, ?, ?)').run('rides-start', key, i, 2048, m));
+		};
+		add('a', [JSON.stringify(LEGACY), JSON.stringify(LEGACY)]);
+		add('b', [JSON.stringify([LEGACY[1], LEGACY[0]]), encodeChunkMeta(LEGACY, LEAVES, 2048)]);
+		return d1;
+	}
+	const metas = (d1: ReturnType<typeof seed>) => d1.db.prepare('SELECT key, rg_idx, chunk_meta FROM rg_manifest ORDER BY key, rg_idx').all()
+		.map((r) => { const { key, rg_idx, chunk_meta } = r as { key: string; rg_idx: number; chunk_meta: string }; return `${key}/${rg_idx} ${chunk_meta.startsWith('[') ? 'legacy' : 'compact'}`; });
+	const compactLen = encodeChunkMeta(LEGACY, LEAVES, 2048).length;
+	const legacyLen = JSON.stringify(LEGACY).length;
+
+	it('converts legacy rows one key per call, leaving unaligned and already-compact rows alone', async () => {
+		const d1 = seed();
+		expect(await compactManifestKeys(d1 as never, 'rides-start')).toEqual({
+			keys: ['a'], rgs: 2, converted: 2, compact: 0, unaligned: 0, mismatched: 0,
+			bytes_before: 2 * legacyLen, bytes_after: 2 * compactLen, next: 'a',
+		});
+		expect(await compactManifestKeys(d1 as never, 'rides-start', { after: 'a' })).toEqual({
+			keys: ['b'], rgs: 2, converted: 0, compact: 1, unaligned: 1, mismatched: 0,
+			bytes_before: legacyLen + compactLen, bytes_after: legacyLen + compactLen, next: 'b',
+		});
+		expect(await compactManifestKeys(d1 as never, 'rides-start', { after: 'b' })).toMatchObject({ keys: [], next: null });
+		expect(metas(d1)).toEqual(['a/0 compact', 'a/1 compact', 'b/0 legacy', 'b/1 compact']);
+	});
+
+	it('dry run reports without writing', async () => {
+		const d1 = seed();
+		expect(await compactManifestKeys(d1 as never, 'rides-start', { limit: 2, dryRun: true })).toMatchObject({ keys: ['a', 'b'], converted: 2, next: 'b' });
+		expect(metas(d1)).toEqual(['a/0 legacy', 'a/1 legacy', 'b/0 legacy', 'b/1 compact']);
+	});
+});
+
+describe('decodeManifestRgs over a real shard', () => {
+	// `tl-1m.parquet`: one RG, dictionary-encoded `cell`, plain `dt`/`count_n`.
+	const buf = readFileSync(new URL('./fixtures/tl-1m.parquet', import.meta.url));
+	const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+	const ab = bytes.slice().buffer;
+	const metadata = parquetMetadata(ab);
+	const schema = JSON.parse(JSON.stringify(metadata.schema, (_k, v) => typeof v === 'bigint' ? Number(v) : v)) as unknown[];
+	const leaves = schemaLeaves(schema);
+	const storage = { getRange: async (_key: string, start: number, end: number) => bytes.subarray(start, end) };
+	const manifestRgs = (encode: (cs: ChunkMeta[], numRows: number) => string): ManifestRg[] =>
+		metadata.row_groups.map((rg, rg_idx) => ({
+			rg_idx, row_start: 0, num_rows: Number(rg.num_rows), byte_start: 0, byte_end: bytes.byteLength,
+			chunk_meta: encode(rgChunkMetas(rg), Number(rg.num_rows)),
+		}));
+
+	it('compact and legacy rows decode to the same rows as a full-file read', async () => {
+		const full = (await parquetReadObjects({ file: ab })).map((r) => ({ ...r, dt: new Date(Number(r.dt)), count_n: Number(r.count_n) }));
+		const compact = manifestRgs((cs, n) => encodeChunkMeta(cs, leaves, n));
+		expect(compact[0]!.chunk_meta.startsWith('{"s":')).toBe(true);
+		const opts = { storage: storage as never, key: 'tl-1m.parquet' };
+		const fromCompact = await decodeManifestRgs(opts, schema, compact);
+		const fromLegacy = await decodeManifestRgs(opts, schema, manifestRgs((cs) => JSON.stringify(cs)));
+		expect(fromCompact).toEqual(fromLegacy);
+		expect(fromCompact.map((r) => ({ ...r }))).toEqual(full);
 	});
 });

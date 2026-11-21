@@ -319,6 +319,31 @@ def _key_shard_bins(key: str) -> int:
 	return shard_min // tier_min
 
 
+@gbfs_manifest.command('compact', help='Rewrite legacy `rg_manifest.chunk_meta` rows (per-column JSON objects, ~2.3KB/RG) in the compact schema-fingerprinted form (~0.3KB/RG). One key per call via the api worker\'s `manifest_compact` op (PK-prefix reads, compare-and-swap UPDATEs, round-trip-verified); sleeps between calls so serving traffic keeps headroom. Resumable with `-a`. Billed as ~1 row write per converted RG (no indexed column changes).')
+@option('-a', '--after', default='', help='Resume after this key (the last `next` printed).')
+@option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='prod', show_default=True, help='api worker to run on (shared D1).')
+@option('-m', '--max', 'max_keys', type=int, default=None, help='Stop after this many keys (per pyramid).')
+@option('-n', '--dry-run', is_flag=True, help='Report what would convert; write nothing.')
+@option('-p', '--pyramid', 'pyramids', multiple=True, help='Pyramid name (repeatable) [default: rides-start, rides-end, smg-v1, avail-v6].')
+@option('-s', '--sleep', 'sleep_s', type=float, default=2.0, show_default=True, help='Seconds between calls.')
+def gbfs_manifest_compact(after: str, env_name: str, max_keys: int | None, dry_run: bool, pyramids: tuple[str, ...], sleep_s: float) -> None:
+	totals = dict(keys=0, rgs=0, converted=0, compact=0, unaligned=0, mismatched=0, bytes_before=0, bytes_after=0)
+	for pyramid in pyramids or ('rides-start', 'rides-end', 'smg-v1', 'avail-v6'):
+		cursor, n = after, 0
+		while cursor is not None and (max_keys is None or n < max_keys):
+			r = _registry_post(env_name, {'op': 'manifest_compact', 'pyramid': pyramid, 'after': cursor, 'limit': 1, 'dry_run': dry_run})
+			if not r['keys']:
+				break
+			n += 1
+			for k in totals:
+				totals[k] += len(r['keys']) if k == 'keys' else r[k]
+			err(f'{pyramid} {r["keys"][0]}: {r["converted"]}/{r["rgs"]} converted ({r["compact"]} already compact, {r["unaligned"]} unaligned, {r["mismatched"]} mismatched), {r["bytes_before"] / 1e6:.2f} → {r["bytes_after"] / 1e6:.2f} MB, {r["ms"]}ms')
+			cursor = r['next']
+			if cursor is not None:
+				time.sleep(sleep_s)
+	err(f'total: {totals["keys"]} keys, {totals["converted"]}/{totals["rgs"]} RGs converted, {totals["compact"]} already compact, {totals["unaligned"]} unaligned, {totals["mismatched"]} mismatched; chunk_meta {totals["bytes_before"] / 1e9:.3f} → {totals["bytes_after"] / 1e9:.3f} GB')
+
+
 @gbfs_manifest.command('backfill', help='Fill manifest rows for unfilled/stale shards (worker parses each footer server-side via `manifest_fill`; sequential, idempotent). Keys below `--min-bins` are skipped client-side — small shards\' footers are cheap via the fallback path, and for avail they are exactly the Lambda-churned ones.')
 @option('-b', '--min-bins', type=int, default=450, show_default=True, help='Skip keys whose shard/tier duration ratio (bins per shard) is below this — proxy for the worker-side `MIN_FILL_RGS` floor.')
 @option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='prod', show_default=True, help='api worker to run fills on.')

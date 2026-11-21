@@ -528,7 +528,7 @@ import { DEFAULT_PYRAMID, repairGeneration, serveAvailV3, serveAvailV3Cells } fr
 import { RIDES, serveRides } from './rides_v1';
 import { retryingStorage, withR2Retry } from './r2_retry';
 import { r2Storage } from 'pyrmts-cfw';
-import { backfillManifestKey, manifestStatus, pruneManifestOrphans } from './rg_manifest';
+import { backfillManifestKey, compactManifestKeys, manifestStatus, pruneManifestOrphans } from './rg_manifest';
 import { serveTl } from './tl';
 import { httpStorage } from './http_storage';
 
@@ -1290,7 +1290,7 @@ export default {
 			const auth = request.headers.get('Authorization') ?? '';
 			if (auth !== `Bearer ${env.REGISTRY_SECRET}`) return errorResponse('unauthorized', 403, env);
 			try {
-				const body = await request.json<{ op: string; pyramid?: string; key?: string; limit?: number; dry_run?: boolean; rows?: {
+				const body = await request.json<{ op: string; pyramid?: string; key?: string; limit?: number; dry_run?: boolean; after?: string; rows?: {
 					pyramid: string; tier: string; shard_dur: string;
 					period_start: number; period_end: number; key: string; written_at: number;
 				}[] }>();
@@ -1332,6 +1332,12 @@ export default {
 				if (body.op === 'manifest_prune') {
 					if (!body.pyramid) return errorResponse('pyramid required', 400, env);
 					return jsonResponse(await pruneManifestOrphans(env.DB, body.pyramid, { limit: body.limit, dryRun: body.dry_run }), env);
+				}
+				if (body.op === 'manifest_compact') {
+					if (!body.pyramid) return errorResponse('pyramid required', 400, env);
+					const t0 = performance.now();
+					const res = await compactManifestKeys(env.DB, body.pyramid, { after: body.after, limit: body.limit, dryRun: body.dry_run });
+					return jsonResponse({ ...res, ms: Math.round(performance.now() - t0) }, env);
 				}
 				if (body.op === 'manifest_fill') {
 					if (!body.pyramid || !body.key) return errorResponse('pyramid + key required', 400, env);
