@@ -1,5 +1,7 @@
 # Station-id corruption in `cons` + harmonize guard fixes
 
+> **Done** (2026-11-21): §6 GC complete. D1 (`rides-next-*` registry rows, orphan RG rows) was already clean; R2: `pyrmts-engine gc --apply` deleted 564 + 562 superseded `rides/{start,end}/` shards (110.5 → 41.2 GB), plus `normalized-next/` (159 keys, 12.4 GB), the `manifest-{pre-repair,next}.jsonl` files and the pre-repair/candidate `station-luc` / canonicalize-map / extra-stations copies. `api-check` 13/13 after.
+
 Status (2026-09-26): code fixed and merged. Steps 1–3 of the ops sequence ran on HCCS Batch (`specs/batch-pipeline.md`): 59-month `cons` + derived stages, `ymrgtb{s,e}_cd`, and a harmonize matching the preview (71 id-map changes), all on branch `trailing-zero-repair` (unmerged). The prod rollout follows **Candidate rollout** below, not ops-sequence steps 4–10 in place.
 
 Found via `/merge-review` (rides-rekey P5): `c:4452.01` "Lafayette Ave & Classon Ave" absorbed Journal Square (JC, 10 km away) through raw id `3640`.
