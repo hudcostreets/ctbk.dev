@@ -164,7 +164,7 @@ describe('diffRules', () => {
 /** `pyramidTips` with each watched pyramid's newest shard ending `h` hours ago. */
 const tipsAt = (ages: Record<string, number>) => Object.fromEntries(Object.entries(ages).map(([name, h]) =>
 	[name, FIXED_NOW.getTime() - h * 3_600_000]));
-const HEALTHY_TIPS = { 'avail-v5': 0.2, 'avail-v6': 0.2, 'smg-v1': 12, 'rides-start': 24 * 24, 'rides-end': 24 * 24 };
+const HEALTHY_TIPS = { 'avail-v6': 0.2, 'smg-v1': 12, 'rides-start': 24 * 24, 'rides-end': 24 * 24 };
 
 const firingIds = (s: HealthSnapshot) => DEFAULT_RULES.filter((r) => r.check(s)).map((r) => r.id);
 
@@ -200,9 +200,8 @@ describe('DEFAULT_RULES on a full snapshot', () => {
 		expect(firingIds(fresh())).toEqual([]);
 	});
 
-	it('a dead cascade (avail tips 1.5h behind) fires both avail tip rules only', () => {
-		expect(firingIds(fresh({ pyramidTips: tipsAt({ ...HEALTHY_TIPS, 'avail-v5': 1.5, 'avail-v6': 1.5 }) }))).toEqual([
-			'pyramid-tip-stale:avail-v5',
+	it('a dead cascade (avail tip 1.5h behind) fires the avail tip rule only', () => {
+		expect(firingIds(fresh({ pyramidTips: tipsAt({ ...HEALTHY_TIPS, 'avail-v6': 1.5 }) }))).toEqual([
 			'pyramid-tip-stale:avail-v6',
 		]);
 	});

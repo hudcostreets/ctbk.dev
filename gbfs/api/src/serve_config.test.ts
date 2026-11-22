@@ -63,7 +63,7 @@ describe('serve_config', () => {
 		configureServe({ RIDES_PYRAMID: 'rides-next' });
 		const asked: string[] = [];
 		const tips = await getPyramidTips(mockDb(asked));
-		expect(asked.slice().sort()).toEqual(['avail-v5', 'avail-v6', 'rides-next-end', 'rides-next-start', 'smg-v1']);
+		expect(asked.slice().sort()).toEqual(['avail-v6', 'rides-next-end', 'rides-next-start', 'smg-v1']);
 		expect(Object.keys(tips)).toEqual(WATCHED_PYRAMIDS);
 	});
 });

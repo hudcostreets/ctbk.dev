@@ -223,7 +223,7 @@ export interface HealthSnapshot {
 }
 
 /** Pyramids whose fill tip `alerts.ts` watches. */
-export const WATCHED_PYRAMIDS = ['avail-v5', 'avail-v6', 'smg-v1', 'rides-start', 'rides-end'];
+export const WATCHED_PYRAMIDS = ['avail-v6', 'smg-v1', 'rides-start', 'rides-end'];
 
 /** A watched pyramid's D1 registry name. `rides-{start,end}` are roles (the
  *  keys `pyramidTips` + the tip alerts use), resolved through
@@ -606,12 +606,9 @@ async function annotateSegmentBytes(
 }
 
 /** Registry pyramids surfaced on /health: (D1 `pyramid` name, R2 key
- *  prefix). avail v3/v5/v6 share the TIERS ladder; rides pyramids
- *  carry their own ladder + genesis (`rides: true`). Dormant avail-v4 is
- *  intentionally omitted (superseded by v5). */
+ *  prefix). avail-v6 + smg-v1 share the TIERS ladder; rides pyramids
+ *  carry their own ladder + genesis (`rides: true`). */
 const healthPyramids = (): { name: string; keyPrefix: string; rides?: boolean }[] => [
-	{ name: 'avail', keyPrefix: 'avail-v3' },
-	{ name: 'avail-v5', keyPrefix: 'avail-v5' },
 	{ name: 'avail-v6', keyPrefix: 'avail-v6' },
 	// Station-minute states: avail-v6's ladder + genesis (`configs/pyramids/smg-v1.yaml`).
 	{ name: 'smg-v1', keyPrefix: 'smg-v1' },

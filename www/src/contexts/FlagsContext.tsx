@@ -22,10 +22,10 @@ export const FLAGS = {
   availPyramid: {
     // 'default' omits the `pyramid` param so the worker resolves its
     // `DEFAULT_PYRAMID` (and the FE follows server-side cutovers for
-    // free); explicit values pin — e.g. `?availPyramid=avail-v6` to
-    // sanity-check a burn-in successor from the real chart UI.
+    // free); explicit values pin — add a burn-in successor here to
+    // sanity-check it from the real chart UI.
     default: 'default' as const,
-    options: ['default', 'avail-v5', 'avail-v6'] as const,
+    options: ['default', 'avail-v6'] as const,
     description: 'avail-v3 pyramid (default = worker-resolved)',
   },
 } as const satisfies Record<string, FlagDef<string>>

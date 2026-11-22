@@ -172,7 +172,6 @@ const HOURLY_STALE_MIN = 90;
  *  daily after the ~05:00Z compaction, rides monthly after each tripdata
  *  drop (published ~2 weeks into the following month). */
 const PYRAMID_TIP_MAX_HOURS: Record<string, number> = {
-	'avail-v5': 1,
 	'avail-v6': 1,
 	'smg-v1': 36,
 	'rides-start': 50 * 24,

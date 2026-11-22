@@ -70,7 +70,7 @@ const DEFAULT_REDUCER: Reducer = 'mean';
 /** 14-tier ladder for the new pyramid-cascade layout (per
  *  `configs/pyramids/avail.yaml`). Shard sizes here MUST track the
  *  YAML's `shard` per tier — the worker constructs R2 keys from
- *  `(tier, period)` via `KEY_TEMPLATE`, so a mismatch silently 404s.
+ *  `(tier, period)` via the pyramid's `keyTemplate`, so a mismatch silently 404s.
  *
  *  R2 path `name`s use `<N>m` for minutes (matching the builder's
  *  tier keys); pyrmts `bin`/`shard` Duration strings use the typed
@@ -110,13 +110,9 @@ export const TIERS: Tier[] = [
 	{ name: '7d',  bin: '7d',    shards: ['28d', '56d', '112d', '224d', '448d', '896d', '1792d', '3584d', '7168d'] },
 ];
 
-const KEY_TEMPLATE = 'avail-v3/{tier}/{shard}/{period}.parquet';
-
 /** Serveable pyramids: `?pyramid=` values → (D1 registry name, key
- *  template, key style). Same ladder/genesis; v5 is the
- *  engine-backfilled, vocab-keyed successor (`specs/avail-v5-stack.md`),
- *  default 2026-07-29 → 2026-08-10; v3 (`avail`) stays addressable
- *  behind the explicit param until retirement. */
+ *  template, key style). All share the TIERS ladder + genesis; any other
+ *  `?pyramid=` is a 400. */
 interface ServedPyramid {
 	name: string;
 	keyTemplate: string;
@@ -129,12 +125,8 @@ interface ServedPyramid {
  *  8 classic_only 9 ok. `state` is raw; `state_ff` forward-fills the nullish ids. */
 export const SMG_METRICS = ['state', 'state_ff'] as const;
 const PYRAMIDS: Record<string, ServedPyramid> = {
-	'avail': { name: 'avail', keyTemplate: KEY_TEMPLATE },
-	'avail-v5': { name: 'avail-v5', keyTemplate: 'avail-v5/{tier}/{shard}/{period}.parquet', vocab: true },
-	// LU-attributed successor (engine raw-ingest regen, `specs/lu-attribution.md`);
-	// same frozen-vocab keys as v5. Default since 2026-08-10 (post
-	// burn-in: recent windows byte-equal to v5, tip freshness equal,
-	// historical deltas = the intended LU re-attribution correction).
+	// LU-attributed (engine raw-ingest regen, `specs/lu-attribution.md`),
+	// frozen-vocab keys. Default since 2026-08-10.
 	'avail-v6': { name: 'avail-v6', keyTemplate: 'avail-v6/{tier}/{shard}/{period}.parquet', vocab: true },
 	// Station-minute state histograms — the categorical sibling of avail-v6
 	// (same ladder/cells/vocab keys); `reducer=hist` is the meaningful reducer
@@ -177,7 +169,7 @@ const RESOLUTIONS = [15, 14, 13, 12, 11, 10];
  *  both workers so cover math agrees on the closed-history region. */
 export const AVAIL_GENESIS = new Date('2026-04-07T01:15:00Z');
 
-function makeBaseProps(bucket: R2Bucket, keyTemplate: string = KEY_TEMPLATE, metrics: readonly string[] = METRICS): Omit<GeoPyramid, 'dims'> {
+function makeBaseProps(bucket: R2Bucket, keyTemplate: string, metrics: readonly string[] = METRICS): Omit<GeoPyramid, 'dims'> {
 	return {
 		storage: parquetBackend(retryingStorage(r2Storage(bucket))),
 		// Unified `{tier}/{shard}/{period}` template per unified-shard-ladder
@@ -195,13 +187,13 @@ function makeBaseProps(bucket: R2Bucket, keyTemplate: string = KEY_TEMPLATE, met
 
 /** Rollup pyramid — empty `dims` so `stitch` collapses cells, leaving
  *  one row per (dt) summed across the bbox/cells covering set. */
-export function availV3Pyramid(bucket: R2Bucket, keyTemplate?: string, metrics?: readonly string[]): GeoPyramid {
+export function availV3Pyramid(bucket: R2Bucket, keyTemplate: string, metrics?: readonly string[]): GeoPyramid {
 	return { ...makeBaseProps(bucket, keyTemplate, metrics), dims: [] };
 }
 
 /** Per-cell pyramid — adds `s2_cell` to dims so stitch preserves
  *  cell-level breakdown. */
-export function availV3CellsPyramid(bucket: R2Bucket, keyTemplate?: string, metrics?: readonly string[]): GeoPyramid {
+export function availV3CellsPyramid(bucket: R2Bucket, keyTemplate: string, metrics?: readonly string[]): GeoPyramid {
 	return { ...makeBaseProps(bucket, keyTemplate, metrics), dims: [{ name: 's2_cell', type: 'string' }] };
 }
 
@@ -323,7 +315,6 @@ function parseInstant(s: string | null): Date | null {
 // Per-isolate singleton — Workers reuse isolates across requests, so the
 // CachedShardIndex's in-memory TTL applies across them.
 
-const PYRAMID_NAME = 'avail';
 const WATERMARK_CACHE_TTL_MS = 60_000;
 
 let _shardIndex: ShardIndex | null = null;
@@ -334,7 +325,7 @@ function getShardIndex(db: D1Database): ShardIndex {
 	return _shardIndex;
 }
 
-async function loadWatermarks(db: D1Database, pyramidName: string = PYRAMID_NAME): Promise<Record<string, Date>> {
+async function loadWatermarks(db: D1Database, pyramidName: string): Promise<Record<string, Date>> {
 	try {
 		const map = await getShardIndex(db).getWatermarks(pyramidName);
 		return Object.fromEntries(map);
@@ -360,7 +351,7 @@ interface EarliestCache {
 }
 const _earliestCaches = new Map<string, EarliestCache>();
 
-async function loadEarliestPerShard(db: D1Database, pyramidName: string = PYRAMID_NAME): Promise<Record<string, Date>> {
+async function loadEarliestPerShard(db: D1Database, pyramidName: string): Promise<Record<string, Date>> {
 	const now = Date.now();
 	const cached = _earliestCaches.get(pyramidName);
 	if (cached && (now - cached.ts) < WATERMARK_CACHE_TTL_MS) {
@@ -394,7 +385,7 @@ async function loadEarliestPerShard(db: D1Database, pyramidName: string = PYRAMI
 	}
 }
 
-// ─── avail-v5 vocab covers (bbox → frozen-vocabulary terms) ───────────
+// ─── vocab covers (bbox → frozen-vocabulary terms) ───────────
 //
 // v5 rows live only at the frozen station-cell vocabulary + `s:<name>`
 // identity keys (drop-LUC). `v5BBoxCover` maps a bbox to the exact
@@ -498,7 +489,7 @@ async function serveGeoReduced(
 	db: D1Database,
 	request: Request,
 	cors: string | null,
-	pyramidName: string = PYRAMID_NAME,
+	pyramidName: string,
 	// ctx.waitUntil passthrough — carries deferred RG-manifest fills past
 	// the response (`rg_manifest.ts`).
 	defer: (p: Promise<unknown>) => void = () => {},

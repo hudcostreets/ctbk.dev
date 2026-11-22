@@ -1155,8 +1155,6 @@ async function executeRidesQuery(
  *  R2 key prefix, plus ladder + genesis (rides ladders/geneses differ
  *  from avail's; omitted → avail defaults). */
 const reconcilePyramids = (): { name: string; prefix: string; rides?: boolean }[] => [
-	{ name: 'avail', prefix: 'avail-v3/' },
-	{ name: 'avail-v5', prefix: 'avail-v5/' },
 	{ name: 'avail-v6', prefix: 'avail-v6/' },
 	// Same ladder + genesis as avail-v6 (`configs/pyramids/smg-v1.yaml`); the
 	// daily Batch `-f` fill writes shards but doesn't register them.
@@ -1961,7 +1959,7 @@ export default {
 		if (url.pathname.startsWith('/api/files/')) {
 			const handlers = createHandlers(
 				R2Store(env.R2, {
-					prefixes: ['gbfs/', 'avail/', 'avail-v3/', 'avail-v5/', 'avail-v6/', 'smg-v1/', 'rides-v5/', 'rides/', 'stations/'],
+					prefixes: ['gbfs/', 'avail/', 'avail-v6/', 'smg-v1/', 'rides-v5/', 'rides/', 'stations/'],
 					publicBaseUrl: env.R2_PUBLIC_BASE_URL,
 					presign: {
 						endpoint: env.R2_S3_ENDPOINT,

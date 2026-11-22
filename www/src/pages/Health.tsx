@@ -462,8 +462,8 @@ function PyramidsSection({ pyramids, defaultPyramid }: { pyramids: PyramidsHealt
   // Prod-default pyramid full-size; non-default pyramids collapse into
   // <details> — burn-in successors ABOVE the primary (they're what's
   // coming next), legacy below. Version ordering rides the lexical name
-  // ('avail' < 'avail-v5' < 'avail-v6').
-  const dflt = defaultPyramid ?? 'avail-v5'
+  // ('avail-v6' < 'avail-v7').
+  const dflt = defaultPyramid ?? 'avail-v6'
   const primary = pyramids.find((p) => p.name === dflt)
   const successors = pyramids.filter((p) => p.name > dflt).sort((a, b) => b.name.localeCompare(a.name))
   const legacy = pyramids.filter((p) => p.name !== dflt && p.name <= dflt)
