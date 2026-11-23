@@ -2,7 +2,7 @@
 
 Imported (created imperatively 2026-09-11 … 09-25, adopted here):
 - the avail cascade Lambda (`ctbk-avail-cascade-v5`) + its role, log group,
-  and the v5/v6 tick schedules;
+  and the v6 tick schedule;
 - the `pyrmts-engine` Batch stack (Fargate Spot CE, queue, execution role,
   log group) + the three ECR repos.
 
@@ -38,7 +38,6 @@ GITHUB_REPO = 'hudcostreets/ctbk.dev'
 
 LAMBDA = 'ctbk-avail-cascade-v5'
 TICKS = {
-    'ctbk-avail-cascade-v5-tick': ('cron(3/5 * * * ? *)', 'avail-v5 cascade fill', 'avail-v5'),
     'ctbk-avail-cascade-v6-tick': ('cron(4/5 * * * ? *)', 'avail-v6 cascade fill (LU-attributed successor)', 'avail-v6'),
 }
 BATCH_SUBNETS = [

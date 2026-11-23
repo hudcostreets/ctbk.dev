@@ -7,6 +7,8 @@
 - rides-v1/v2 (h3): code + 17.5 GB R2 data GC'd 2026-08-15 (`specs/done/h3-gc.md`).
 - rides-v3 monthly rebuild: dropped from ci.yml 2026-08-15 (frozen at 202607; `ctbk rides-v3-extend` remains as a manual tool). The v3 'all'-shard merge-patches were the CI runner's OOM-flakiest phase — three validation-run deaths in one afternoon.
 
+- **avail<6 serving + data GC'd 2026-11-21 … 11-23.** `455a45be` dropped `avail` (v3) + `avail-v5` from `PYRAMIDS`, health, alerts, reconcile, `/api/files` and the FE flag (`?pyramid=avail|avail-v5` → 400). The v5 EventBridge tick was disabled 11-22 and, after a clean ~1-day soak (no alerts, avail-v6 min-cover complete), deleted via a targeted `pulumi up` (rule, target, invoke permission; `TICKS` now has only v6). R2 `avail-v5/` (84,558 keys, 167 GB) and `avail-v3/` (25,451 keys, 108 GB) were deleted. D1 dropped the `pyramid_shards` rows for `avail`, `avail-v4` and `avail-v5` (106,587 rows) plus 154 `avail` watermarks, via the new registry-proxy `drop` op (`ctbk gbfs d1 drop`; it refuses watched pyramids). The Lambda `ctbk-avail-cascade-v5` stays: it is config-driven and serves the v6 tick. Not yet done: v3 code GC (`ctbk/avail_v3.py`, `gbfs/cascade/src/avail3`, `deploy-image.py`'s v3 `FUNC`/`REBUILD_FUNC` path). It is entangled with `station_luc.py`, `avail_loader_replay.py`, the `ctbk gbfs cascade` CLI and `lambda_exec`.
+
 ## rides-v3 GC (after 202608 auto-month is green)
 
 - `ctbk/rides_v1.py` wholesale (v3 is its only remaining variant) + `rides-v3-extend`, `rides-v1-build` CLI regs, `import ctbk` wiring, `s2cell`/`pyrmts` deps it alone pulls.

@@ -17,7 +17,7 @@ re-target + invoke permission re-added).
 Usage:
     gbfs/lambda/deploy-image.py            # build + push + deploy all
     gbfs/lambda/deploy-image.py -n         # build image only
-    gbfs/lambda/deploy-image.py -5         # deploy only the v5 tick
+    gbfs/lambda/deploy-image.py -5         # deploy only the tick function
 """
 from __future__ import annotations
 
@@ -219,7 +219,7 @@ def ensure_schedule(
 
 
 @command()
-@option('-5', '--v5-only', is_flag=True, help='Deploy only the v5 tick function.')
+@option('-5', '--v5-only', is_flag=True, help='Deploy only the (v6) tick function.')
 @option('-n', '--build-only', is_flag=True, help='Stage + docker build only; no push/deploy.')
 def main(v5_only: bool, build_only: bool):
     missing = [k for k in ENV_KEYS if k not in os.environ]
@@ -237,15 +237,11 @@ def main(v5_only: bool, build_only: bool):
 
     v5_arn = recreate_function(
         lam, role_arn, uri, name=V5_FUNC,
-        description='avail-v5 cascade tick (image; specs/avail-v5-stack.md)',
+        description='avail-v6 cascade tick (image; specs/avail-v5-stack.md)',
         env_extra={'GC_ENABLED': os.environ.get('GC_ENABLED', '0'), 'FILL_ALL': '1'},
         reserved=1, memory_mb=MEMORY_MB)
-    ensure_schedule(events, lam, v5_arn, func_name=V5_FUNC, rule=f'{V5_FUNC}-tick',
-                    rate='cron(3/5 * * * ? *)', input_json='{"config": "avail-v5"}',
-                    description='avail-v5 cascade fill')
-    # v6 tick rides the same (config-driven) function; the offset minute +
-    # reserved=1 serialize it behind the v5 tick. Both run until cutover
-    # (default flip + v5 GC), then the v5 rule is deleted.
+    # The function keeps its `-v5` name (ARN referenced by the Pulumi
+    # import); it's config-driven, and avail-v6 is its only tick.
     ensure_schedule(events, lam, v5_arn, func_name=V5_FUNC, rule='ctbk-avail-cascade-v6-tick',
                     rate='cron(4/5 * * * ? *)', input_json='{"config": "avail-v6"}',
                     description='avail-v6 cascade fill (LU-attributed successor)')
