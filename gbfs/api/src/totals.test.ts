@@ -6,6 +6,8 @@ import {
 	availHistQuantile,
 	daysIn,
 	decadesIn,
+	estimateAvailStationGroups,
+	AVAIL_MAX_STATION_GROUPS,
 	parseTotalsParams,
 	pickAvailAggTier,
 	pickTripsAggTier,
@@ -814,8 +816,23 @@ describe('parseTotalsParams: bin=', () => {
 	});
 
 	it('accepts sub-hour bin (routes to raw tier downstream)', () => {
-		expect(parseTotalsParams(baseParams({ bin: '60' })).binS).toBe(60);
-		expect(parseTotalsParams(baseParams({ bin: '300' })).binS).toBe(300);
+		const sid = { 'filter.station_id': '00284700-9d22-42ce-8485-113fed9879c1' };
+		expect(parseTotalsParams(baseParams({ bin: '60', ...sid })).binS).toBe(60);
+		expect(parseTotalsParams(baseParams({ bin: '300', ...sid })).binS).toBe(300);
+	});
+
+	it('caps unfiltered scope=stations output (station × bin × metric groups)', () => {
+		const week = { from: '1700000000', to: String(1700000000 + 7 * 86400) };
+		const quarter = { from: '1700000000', to: String(1700000000 + 92 * 86400) };
+		expect(estimateAvailStationGroups(1700000000, 1700000000 + 92 * 86400, 86400, false)).toBe(2600 * 93);
+		expect(parseTotalsParams(baseParams({ bin: '86400', ...quarter })).binS).toBe(86400);
+		expect(() => parseTotalsParams(baseParams({ bin: '3600', ...week }))).toThrow(
+			`too many output rows (~439400 station×bin groups > ${AVAIL_MAX_STATION_GROUPS}): add filter.station_id, use scope=all, a coarser bin, or a shorter range`);
+		expect(() => parseTotalsParams(baseParams({ bin: '86400', metric: 'all', ...quarter }))).toThrow(
+			`too many output rows (~1209000 station×bin×metric groups > ${AVAIL_MAX_STATION_GROUPS}): add filter.station_id, use scope=all, a coarser bin, or a shorter range`);
+		// Filtered or aggregated scopes are bounded by the filter / scope, not capped.
+		expect(parseTotalsParams(baseParams({ bin: '3600', 'filter.station_id': 'x', ...week })).binS).toBe(3600);
+		expect(parseTotalsParams(baseParams({ bin: '3600', scope: 'all', ...week })).binS).toBe(3600);
 	});
 
 	it('rejects non-positive bin', () => {

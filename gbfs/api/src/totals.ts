@@ -113,6 +113,19 @@ export interface TotalsResponse {
  * Parse + validate `/api/totals` query parameters. Pure; throws on invalid
  * input. See top-of-file for the parameter shape.
  */
+/** Unfiltered `scope=stations` availability output is one accumulator (with
+ *  its own state histogram) per station × bin × metric, all held until
+ *  finalize. Past ~250k groups the isolate exceeds its 128MB cap and the
+ *  request dies as a bare 503 (measured on prod 2026-11-23: 232k daily
+ *  groups → 200; 353k hourly and 390k daily-all-metrics → 503). */
+export const AVAIL_MAX_STATION_GROUPS = 250_000;
+const AVAIL_STATIONS_EST = 2_600;
+
+export function estimateAvailStationGroups(fromS: number, toS: number, binS: number | undefined, allMetrics: boolean): number {
+	const bins = binS ? Math.floor((toS - fromS) / binS) + 1 : 1;
+	return AVAIL_STATIONS_EST * bins * (allMetrics ? AVAIL_METRICS.length : 1);
+}
+
 export function parseTotalsParams(params: URLSearchParams): TotalsParams {
 	const kindRaw = params.get('kind');
 	if (kindRaw !== 'trips' && kindRaw !== 'availability') {
@@ -212,6 +225,15 @@ export function parseTotalsParams(params: URLSearchParams): TotalsParams {
 		// Sub-hour bins route to the `raw` tier (per-poll /day raw bundle for
 		// closed days + /h1 raw + WAL stitch for the in-progress day).
 		binS = b;
+	}
+
+	if (kind === 'availability' && scope === 'stations' && !filterStationId?.length) {
+		const groups = estimateAvailStationGroups(fromS, toS, binS, metric === 'all');
+		if (groups > AVAIL_MAX_STATION_GROUPS) {
+			throw new Error(
+				`too many output rows (~${groups} station×bin${metric === 'all' ? '×metric' : ''} groups > ${AVAIL_MAX_STATION_GROUPS}): `
+				+ `add filter.station_id, use scope=all, a coarser bin, or a shorter range`);
+		}
 	}
 
 	return {
