@@ -45,9 +45,11 @@ export async function dropPyramidRows(
 	const before = await count(db, pyramid);
 	if (dryRun) return { pyramid, deleted: 0, remaining: before, dryRun: true };
 	if (before > 0) {
+		// `pyramid_shards` is `WITHOUT ROWID`: address the chunk by its PK.
 		await db.prepare(
-			'DELETE FROM pyramid_shards WHERE rowid IN (SELECT rowid FROM pyramid_shards WHERE pyramid = ? LIMIT ?)',
-		).bind(pyramid, limit).all();
+			'DELETE FROM pyramid_shards WHERE pyramid = ? AND (tier, shard_dur, period_start) IN '
+			+ '(SELECT tier, shard_dur, period_start FROM pyramid_shards WHERE pyramid = ? LIMIT ?)',
+		).bind(pyramid, pyramid, limit).all();
 	}
 	const remaining = await count(db, pyramid);
 	const result: DropResult = { pyramid, deleted: before - remaining, remaining };

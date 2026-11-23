@@ -11,10 +11,18 @@ const TABLES = ['pyramid_shards', 'pyramid_watermarks', 'rg_manifest', 'rg_manif
  *  row in every side table) and a kept one (`keep`). */
 function seed() {
 	const db = new DatabaseSync(':memory:');
-	for (const t of TABLES) db.exec(`CREATE TABLE ${t} (pyramid TEXT, key TEXT)`);
+	// Prod DDL: `WITHOUT ROWID`, so deletes must address rows by PK.
+	db.exec(`CREATE TABLE pyramid_shards (
+		pyramid TEXT NOT NULL, tier TEXT NOT NULL, shard_dur TEXT NOT NULL DEFAULT '',
+		period_start INTEGER NOT NULL, period_end INTEGER NOT NULL, key TEXT NOT NULL, written_at INTEGER NOT NULL,
+		PRIMARY KEY (pyramid, tier, shard_dur, period_start)
+	) WITHOUT ROWID`);
+	for (const t of TABLES.slice(1)) db.exec(`CREATE TABLE ${t} (pyramid TEXT, key TEXT)`);
 	for (const p of ['old', 'keep']) {
 		const n = p === 'old' ? 5 : 2;
-		for (let i = 0; i < n; i++) db.prepare('INSERT INTO pyramid_shards VALUES (?, ?)').run(p, `${p}/${i}`);
+		for (let i = 0; i < n; i++) {
+			db.prepare('INSERT INTO pyramid_shards VALUES (?, ?, ?, ?, ?, ?, ?)').run(p, '1m', '1d', i, i + 1, `${p}/${i}`, 0);
+		}
 		for (const t of TABLES.slice(1)) db.prepare(`INSERT INTO ${t} VALUES (?, ?)`).run(p, `${p}/0`);
 	}
 	type Stmt = { sql: string; args: unknown[]; bind: (...a: unknown[]) => Stmt; all: () => Promise<{ results: unknown[] }> };
