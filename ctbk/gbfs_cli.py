@@ -95,21 +95,22 @@ def gbfs_d1() -> None:
 	pass
 
 
-@gbfs_d1.command('drop', help='Retire pyramids from the registry: delete their `pyramid_shards` rows (D1 REST; needs a D1-write `CLOUDFLARE_API_TOKEN`). Dry run unless `-y`. Their RG-manifest rows become orphans — follow with `ctbk gbfs manifest prune -p …`. R2 shards are untouched.')
+@gbfs_d1.command('drop', help='Retire pyramids from the registry: delete their `pyramid_shards` rows in chunks, then (once none remain) their `pyramid_watermarks` + RG-manifest rows. Via the api worker\'s registry proxy (`drop` op, D1 binding); the worker refuses live (watched) pyramids. Dry run unless `-y`. R2 shards are untouched. Billed as row writes (~2× rows, index).')
+@option('-e', '--env', 'env_name', type=click.Choice(['dev', 'prod']), default='prod', show_default=True, help='api worker to run the drop on (shared D1).')
 @option('-p', '--pyramid', 'pyramids', multiple=True, required=True, help='Pyramid name (repeatable).')
 @option('-y', '--yes', is_flag=True, help='Actually delete (default: report row counts only).')
-def gbfs_d1_drop(pyramids: tuple[str, ...], yes: bool) -> None:
-	from ctbk.pyramid_cascade.d1_http import d1_query
-	marks = ','.join('?' * len(pyramids))
-	counts = d1_query(f'SELECT pyramid, COUNT(*) AS n FROM pyramid_shards WHERE pyramid IN ({marks}) GROUP BY 1', list(pyramids))
-	for r in counts:
-		err(f'{r["pyramid"]}: {r["n"]} registry rows')
-	if not yes:
-		err('dry run; pass -y to delete')
-		return
-	d1_query(f'DELETE FROM pyramid_shards WHERE pyramid IN ({marks})', list(pyramids))
-	left = d1_query(f'SELECT COUNT(*) AS n FROM pyramid_shards WHERE pyramid IN ({marks})', list(pyramids))[0]['n']
-	err(f'deleted; {left} rows remain')
+def gbfs_d1_drop(env_name: str, pyramids: tuple[str, ...], yes: bool) -> None:
+	for pyramid in pyramids:
+		deleted = 0
+		while True:
+			r = _registry_post(env_name, {'op': 'drop', 'pyramid': pyramid, 'dry_run': not yes, 'limit': 5000})
+			deleted += r['deleted']
+			if not yes:
+				err(f'{pyramid}: {r["remaining"]} registry rows (dry run; pass -y to delete)')
+				break
+			err(f'{pyramid}: deleted {deleted}, {r["remaining"]} remain')
+			if r.get('cleared'):
+				break
 
 
 @gbfs_d1.command('shards', help='Tabulate `pyramid_shards` grouped by (tier, shard_dur).')

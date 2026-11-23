@@ -529,6 +529,7 @@ import { RIDES, serveRides } from './rides_v1';
 import { retryingStorage, withR2Retry } from './r2_retry';
 import { r2Storage } from 'pyrmts-cfw';
 import { backfillManifestKey, compactManifestKeys, manifestStatus, pruneManifestOrphans } from './rg_manifest';
+import { dropPyramidRows } from './registry_drop';
 import { serveTl } from './tl';
 import { httpStorage } from './http_storage';
 
@@ -1330,6 +1331,12 @@ export default {
 				if (body.op === 'manifest_prune') {
 					if (!body.pyramid) return errorResponse('pyramid required', 400, env);
 					return jsonResponse(await pruneManifestOrphans(env.DB, body.pyramid, { limit: body.limit, dryRun: body.dry_run }), env);
+				}
+				if (body.op === 'drop') {
+					if (!body.pyramid) return errorResponse('pyramid required', 400, env);
+					const res = await dropPyramidRows(env.DB, body.pyramid, { limit: body.limit, dryRun: body.dry_run });
+					console.log(`registry: drop ${JSON.stringify(res)}`);
+					return jsonResponse(res, env);
 				}
 				if (body.op === 'manifest_compact') {
 					if (!body.pyramid) return errorResponse('pyramid required', 400, env);
