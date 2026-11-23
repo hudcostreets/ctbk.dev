@@ -496,6 +496,7 @@ import {
 	type Side,
 } from './planQuery';
 import { binAndAggregate } from './bin';
+import { rowGroupBatches } from './row_group_batches';
 import { listExpectedShards, type Pyramid } from 'pyrmts';
 import {
 	AVAIL_RAW_PROJECTION,
@@ -675,6 +676,44 @@ async function readR2ParquetStationPruned(
 		}
 	}
 	return out;
+}
+
+/**
+ * Read one parquet from R2 into `fold`, without ever holding the whole file
+ * as JS objects: station-filtered reads are rg-pruned (few rows); unfiltered
+ * reads fold `FOLD_BATCH_ROWS` rows (whole row groups) at a time. A month's
+ * `avail/agg/d1` file is ~3.7M rows ≈ 790MB of decoded objects — far past the
+ * 128MB isolate cap, which 503'd every unfiltered daily-bin query. Returns
+ * false if the object doesn't exist.
+ */
+const FOLD_BATCH_ROWS = 50_000;
+async function readAndFold(
+	r2: R2Bucket,
+	key: string,
+	stationFilter: string[] | null,
+	columns: string[],
+	fold: (rows: Record<string, unknown>[]) => void,
+): Promise<boolean> {
+	if (stationFilter) {
+		const rows = await readR2ParquetStationPruned(r2, key, stationFilter, columns);
+		if (rows === null) return false;
+		if (rows.length > 0) fold(rows);
+		return true;
+	}
+	const file = await asyncBufferFromR2(r2, key);
+	if (!file) return false;
+	const { parquetMetadataAsync, parquetReadObjects } = await import('hyparquet');
+	const metadata = await parquetMetadataAsync(file);
+	for (const { rowStart, rowEnd } of rowGroupBatches(metadata.row_groups.map((rg) => Number(rg.num_rows)), FOLD_BATCH_ROWS)) {
+		const rows = await parquetReadObjects({ file, metadata, rowStart, rowEnd, columns, ...R2_COALESCE }) as Record<string, unknown>[];
+		for (const r of rows) {
+			for (const k of Object.keys(r)) {
+				if (typeof r[k] === 'bigint') r[k] = Number(r[k]);
+			}
+		}
+		fold(rows);
+	}
+	return true;
 }
 
 /** Parse and validate `/api/query` params; throws on invalid input. */
@@ -950,30 +989,18 @@ async function resolveAvailTier(
 			return;
 		}
 		const rawProj = AVAIL_RAW_PROJECTION as string[];
-		const dayRows = stationFilter
-			? await readR2ParquetStationPruned(r2, availRawDayKey(period), stationFilter, rawProj)
-			: await readR2Parquet(r2, availRawDayKey(period), rawProj);
-		if (dayRows !== null) {
-			if (dayRows.length > 0) {
-				availFold(pollRowsToHistRows(dayRows as unknown as AvailRow[]), p, groups as never);
-			}
-			return;
-		}
+		const foldPolls = (rows: Record<string, unknown>[]) =>
+			availFold(pollRowsToHistRows(rows as unknown as AvailRow[]), p, groups as never);
+		if (await readAndFold(r2, availRawDayKey(period), stationFilter, rawProj, foldPolls)) return;
 		// /day raw missing for a closed day → backfill gap. Fall back to the
 		// 24 h1 raw shards (built by the per-hour compactor before /day raw
-		// existed). Idempotent vs. /day raw — same poll rows.
+		// existed). Idempotent vs. /day raw — same poll rows. Unfiltered reads
+		// go one shard at a time (bounded heap); filtered ones are rg-pruned.
 		const hourKeys = Array.from({ length: 24 }, (_, h) => `gbfs/avail/h1/${period}/${pad2(h)}.parquet`);
-		const hourResults = await Promise.all(
-			hourKeys.map((k) =>
-				stationFilter
-					? readR2ParquetStationPruned(r2, k, stationFilter, rawProj)
-					: readR2Parquet(r2, k, rawProj),
-			),
-		);
-		for (const rows of hourResults) {
-			if (rows && rows.length > 0) {
-				availFold(pollRowsToHistRows(rows as unknown as AvailRow[]), p, groups as never);
-			}
+		if (stationFilter) {
+			await Promise.all(hourKeys.map((k) => readAndFold(r2, k, stationFilter, rawProj, foldPolls)));
+		} else {
+			for (const k of hourKeys) await readAndFold(r2, k, null, rawProj, foldPolls);
 		}
 		return;
 	}
@@ -983,13 +1010,8 @@ async function resolveAvailTier(
 		tier === 'h1'  ? `avail/agg/h1/${period}.parquet` :
 		tier === 'd1'  ? `avail/agg/d1/${period}.parquet` :
 		                 `avail/agg/mo1/${period}.parquet`;
-	const rows = stationFilter
-		? await readR2ParquetStationPruned(r2, key, stationFilter, projection)
-		: await readR2Parquet(r2, key, projection);
-	if (rows !== null) {
-		if (rows.length > 0) availFold(rows as unknown as AvailHistRow[], p, groups as never);
-		return;
-	}
+	const foldHist = (rows: Record<string, unknown>[]) => availFold(rows as unknown as AvailHistRow[], p, groups as never);
+	if (await readAndFold(r2, key, stationFilter, projection, foldHist)) return;
 
 	// Agg file missing. Fall through to finer tier IFF this period is in-progress.
 	const today = now.toISOString().slice(0, 10);
