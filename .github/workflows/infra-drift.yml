@@ -42,11 +42,9 @@ jobs:
             "pyrmts-ops @ $base#subdirectory=python/pyrmts_ops"
       - name: Verify avail EventBridge schedules
         run: |
-          # Both avail ticks target the v5 function (v6 rides the same
-          # config-driven image), in the HCCS account since 2026-09-25 (the
-          # retired v3 rule stayed behind on RAC and is deleted with it).
+          # The live avail tick: v6 rides the config-driven image deployed as
+          # the `ctbk-avail-cascade-v5` function (HCCS account since 2026-09-25).
           .github/scripts/hccs-aws.sh .venv/bin/pyrmts-ops aws verify \
-            'ctbk-avail-cascade-v5-tick=ctbk-avail-cascade-v5@cron(3/5 * * * ? *)' \
             'ctbk-avail-cascade-v6-tick=ctbk-avail-cascade-v5@cron(4/5 * * * ? *)'
 
       - name: Notify Slack — failure
