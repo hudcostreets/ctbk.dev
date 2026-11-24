@@ -83,7 +83,7 @@ Orthogonal to the trip-data pipeline above. Polls Citi Bike's GBFS feed every mi
 | Poll | `gbfs/worker` (CFW, cron `* * * * *`) | Fetch `station_status.json`, write WAL JSON to R2 at `gbfs/status/YYYY-MM-DD/HH-MM.json` (~580 KB / file). Daily, also fetch `station_information.json` → `gbfs/info/YYYY-MM-DD.json`. |
 | Load | `gbfs/loader` (CFW, R2-event queue consumer) | On each new WAL JSON: `INSERT OR REPLACE` ~2,360 rows into D1 day-table `availability_YYYYMMDD` (created on demand). Daily info → upsert into D1 `stations` table. |
 | Serve | `gbfs/api` (CFW) | `/api/stations/:id/{today,range}`, `/api/query`, `/api/totals`, `/api/rides`. D1 for hot (≤ `HOT_DAYS_RETAIN`=7d), R2 parquet fallback for cold. Daily cron (`0 1 * * *`) drops D1 day-tables older than retention. |
-| Compact | `gbfs/compact-r2.py` (GHA, cron `15 0 * * *`) | Pulls yesterday's WAL JSONs from R2, writes `gbfs/status/YYYY-MM-DD.parquet` (system-wide, ~12-18 MB), and slices into per-station files `gbfs/stations/<gbfs_uuid>/<YYYY-MM>.parquet`. |
+| Compact | `gbfs/compact-r2.py` (GHA, cron `15 0 * * *`) | Pulls yesterday's WAL JSONs from R2, writes `gbfs/status/YYYY-MM-DD.parquet` (system-wide, ~12-18 MB), and slices into per-station files `gbfs/stations/<gbfs_uuid>/<YYYY-MM>.parquet`. Last step: `ctbk gbfs raw-gc` deletes raw JSON older than 90 days once each day's parquet is verified to cover it. |
 
 Consumed by `StationDetail`'s availability chart (`uPlot`) via `useStationRange`.
 
