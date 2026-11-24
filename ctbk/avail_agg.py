@@ -54,6 +54,53 @@ METRIC_COLS = {
 
 OUT_COLS = ['dt', 'station_id', 'metric', 'state', 'minutes']
 
+# The hourly compactor's raw schema (`gbfs/avail/h1/<date>/<HH>.parquet`); the
+# daily parquet carries the same columns (int16 metrics) plus
+# `vehicle_types_available`.
+RAW_COLS = [
+    'station_id', 'ts', 'polled_at', *METRIC_COLS,
+    'is_installed', 'is_renting', 'is_returning', 'last_reported',
+]
+RAW_INT32_COLS = [*METRIC_COLS, 'is_installed', 'is_renting', 'is_returning']
+
+
+def read_raw_day(
+    date: str,
+    cols: list[str] = RAW_COLS,
+    sync: bool = True,
+    h1_dir: Path = LOCAL_RAW,
+    daily_dir: Path = LOCAL_DAILY,
+) -> DataFrame:
+    """One closed day's raw polls, for the derived avail tiers.
+
+    The hourly compactor's 24 shards when all are present; otherwise the daily
+    compaction parquet (`gbfs/status/<date>.parquet`), which covers every
+    captured LU of the day (including generations and 1.1 backup fills) and,
+    unlike the minute JSONs it's built from, is never garbage-collected
+    (`ctbk gbfs raw-gc`). A partial hourly set is used only when there's no
+    daily parquet. Metric/flag columns come back int32 either way."""
+    raw_dir = h1_dir / date
+    if sync:
+        _r2_sync_in(f'{R2_AVAIL_H1_RAW}/{date}/', raw_dir)
+    files = sorted(raw_dir.glob('*.parquet'))
+    if len(files) < 24:
+        daily_local = daily_dir / f'{date}.parquet'
+        if sync and not daily_local.exists():
+            _r2_cp_in(f'{R2_DAILY_RAW}/{date}.parquet', daily_local)
+        if daily_local.exists():
+            if files:
+                err(f"{date}: only {len(files)} of 24 h1 shards; reading the daily parquet")
+            files = [daily_local]
+        elif files:
+            err(f"WARNING: {date} has only {len(files)} of 24 h1 shards, and no daily parquet")
+        else:
+            raise FileNotFoundError(
+                f"No raw availability data for {date}: "
+                f"neither {R2_AVAIL_H1_RAW}/{date}/ nor {R2_DAILY_RAW}/{date}.parquet"
+            )
+    df = pd.concat([pd.read_parquet(f, columns=cols) for f in files], ignore_index=True)
+    return df.astype({c: 'int32' for c in RAW_INT32_COLS if c in cols})
+
 
 def _r2_sync_in(remote_prefix: str, local_dir: Path):
     """Download from R2 to local mirror via aws s3 sync."""
@@ -186,32 +233,7 @@ class AvailAggH1Day:
         return str(LOCAL_AGG / 'h1' / f'{self.date}.parquet')
 
     def _read_input(self, sync: bool) -> DataFrame:
-        """Source preference: hourly compactor shards if present, else the
-        legacy daily compaction parquet (`gbfs/status/<date>.parquet` from
-        `compact-r2.py`). Both schemas carry the 5 metric cols + station_id +
-        ts; the daily file uses int16 vs int32 but pandas reads either."""
-        cols = ['station_id', 'ts', *METRIC_COLS.keys()]
-        # Try hourly shards first (the new compactor's output, 2026-04-20+).
-        raw_dir = LOCAL_RAW / self.date
-        if sync:
-            _r2_sync_in(f'{R2_AVAIL_H1_RAW}/{self.date}/', raw_dir)
-        files = sorted(raw_dir.glob('*.parquet'))
-        if files:
-            frames = [pd.read_parquet(f, columns=cols) for f in files]
-            return pd.concat(frames, ignore_index=True)
-
-        # Fallback: legacy daily parquet (compact-r2.py output).
-        daily_local = LOCAL_DAILY / f'{self.date}.parquet'
-        if sync and not daily_local.exists():
-            ok = _r2_cp_in(f'{R2_DAILY_RAW}/{self.date}.parquet', daily_local)
-            if not ok:
-                raise FileNotFoundError(
-                    f"No raw availability data for {self.date}: "
-                    f"neither {R2_AVAIL_H1_RAW}/{self.date}/ nor {R2_DAILY_RAW}/{self.date}.parquet"
-                )
-        if not daily_local.exists():
-            raise FileNotFoundError(f"No raw availability data for {self.date}")
-        return pd.read_parquet(daily_local, columns=cols)
+        return read_raw_day(self.date, cols=['station_id', 'ts', *METRIC_COLS], sync=sync)
 
     def create(self, sync: bool = True) -> Path:
         df = self._read_input(sync=sync)

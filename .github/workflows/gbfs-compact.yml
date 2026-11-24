@@ -132,6 +132,19 @@ jobs:
                     "s3://ctbk/avail/agg/mo1/${{ steps.date.outputs.year }}.parquet" \
                     --endpoint-url "$AWS_ENDPOINT_URL"
 
+      # Raw JSON retention (`ctbk/gbfs_raw_gc.py`): delete the minute JSONs
+      # (WAL aliases, generations, 1.1 backup polls) of days past 90, each day
+      # only once its daily parquet is verified to hold every LU they recorded.
+      # Last, so a failed build above never runs it; a day that fails the check
+      # is left untouched and fails this step (→ Slack).
+      - name: GC raw JSON older than 90 days
+        if: ${{ !inputs.date }}
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: ctbk gbfs raw-gc -k 90
+
       - name: Notify Slack — failure
         if: failure()
         uses: ./.github/actions/slack-notify

@@ -595,6 +595,20 @@ def _use_r2_rw_env() -> None:
 			os.environ[f'R2_{k}'] = v
 
 
+def _r2_creds(rw: bool = False) -> tuple[str, str, str]:
+	"""(account id, access key id, secret) for the ctbk R2 bucket. `rw` picks
+	the `R2_RW_`-prefixed pair (the default pair may be read-only), as does an
+	unset default pair; CI's `R2_*` secret is itself the RW key, so `rw` falls
+	back to it."""
+	kp = 'R2_RW_' if (rw and os.environ.get('R2_RW_ACCESS_KEY_ID')) or not os.environ.get('R2_ACCESS_KEY_ID') else 'R2_'
+	acct = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
+	akid = os.environ.get(f'{kp}ACCESS_KEY_ID')
+	sk = os.environ.get(f'{kp}SECRET_ACCESS_KEY')
+	if not (acct and akid and sk):
+		raise click.ClickException(f'CLOUDFLARE_ACCOUNT_ID / {kp}ACCESS_KEY_ID / {kp}SECRET_ACCESS_KEY not set. `source .envrc`.')
+	return acct, akid, sk
+
+
 def _r2_client(rw: bool = False) -> tuple[object, str]:
 	"""Build a boto3 S3 client pointed at the ctbk R2 endpoint. Reads
 	`CLOUDFLARE_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`
@@ -605,13 +619,7 @@ def _r2_client(rw: bool = False) -> tuple[object, str]:
 		import boto3  # type: ignore[import-untyped]
 	except ImportError as e:
 		raise click.ClickException('boto3 not installed. `uv sync` or `pip install boto3`.') from e
-	# CI's `R2_*` secret is itself the RW key, so `rw` falls back to it.
-	kp = 'R2_RW_' if (rw and os.environ.get('R2_RW_ACCESS_KEY_ID')) or not os.environ.get('R2_ACCESS_KEY_ID') else 'R2_'
-	acct = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
-	akid = os.environ.get(f'{kp}ACCESS_KEY_ID')
-	sk = os.environ.get(f'{kp}SECRET_ACCESS_KEY')
-	if not (acct and akid and sk):
-		raise click.ClickException(f'CLOUDFLARE_ACCOUNT_ID / {kp}ACCESS_KEY_ID / {kp}SECRET_ACCESS_KEY not set. `source .envrc`.')
+	acct, akid, sk = _r2_creds(rw)
 	bucket = os.environ.get('R2_BUCKET', 'ctbk')
 	client = boto3.client(
 		's3',
@@ -2456,11 +2464,7 @@ def gbfs_engine_adopt(
 def gbfs_r2_pq(show_meta: bool, head_n: int, key: str) -> None:
 	import pyarrow.parquet as pq
 	import s3fs
-	acct = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
-	akid = os.environ.get('R2_ACCESS_KEY_ID')
-	sk = os.environ.get('R2_SECRET_ACCESS_KEY')
-	if not (acct and akid and sk):
-		raise click.ClickException('CLOUDFLARE_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY not set. `source .envrc`.')
+	acct, akid, sk = _r2_creds()
 	bucket = os.environ.get('R2_BUCKET', 'ctbk')
 	fs = s3fs.S3FileSystem(
 		key=akid,

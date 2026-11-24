@@ -17,5 +17,6 @@ from . import flow_routes_nj as _flow_routes_nj  # noqa: F401 — registers NJ r
 from . import flow_routes_city as _flow_routes_city  # noqa: F401 — registers city routing and system flows
 from . import r2_credentials as _r2_credentials  # noqa: F401 — registers `ctbk r2-creds`
 from . import gbfs_empty as _gbfs_empty  # noqa: F401 — registers `ctbk gbfs empty` group
+from . import gbfs_raw_gc as _gbfs_raw_gc  # noqa: F401 — registers `ctbk gbfs raw-gc`
 from .stations import meta_hists, modes, pair_jsons, harmonize
 from .cli import yms

@@ -44,6 +44,7 @@ from click import Choice, argument, option
 from utz import err
 
 from ctbk.gbfs_cli import gbfs
+from ctbk.gbfs_raw_gc import manifest_key
 from ctbk.pyramid_cascade.lite import r2_client, r2_endpoint
 
 BUCKET = 'ctbk'
@@ -428,10 +429,18 @@ def filled_minutes(cli, d: date) -> list[int]:
     """UTC minutes of the day the 2.3 WAL (`gbfs/status/<day>/`) lacks but the 1.1
     side-poller (`gbfs/probe/v11/<day>/`) recorded — the minutes daily compaction
     filled from 1.1 (`compact-r2.py` `fill_from_v11`). The coverage doc carries them so
-    `/health/feed` can tell "observed via 1.1" apart from 2.3 capture."""
+    `/health/feed` can tell "observed via 1.1" apart from 2.3 capture. Once `ctbk gbfs
+    raw-gc` has deleted the day's JSONs, its manifest holds the same set."""
     day = d.strftime(ISO_DAY)
-    missing = _minute_names(cli, f'gbfs/probe/v11/{day}/') - _minute_names(cli, f'gbfs/status/{day}/')
-    return sorted(int(n[:2]) * 60 + int(n[3:5]) for n in missing)
+    v11 = _minute_names(cli, f'gbfs/probe/v11/{day}/')
+    wal = _minute_names(cli, f'gbfs/status/{day}/')
+    if not v11 and not wal:
+        try:
+            doc = json.loads(cli.get_object(Bucket=BUCKET, Key=manifest_key(day))['Body'].read())
+        except cli.exceptions.NoSuchKey:
+            return []
+        return doc['filled']
+    return sorted(int(n[:2]) * 60 + int(n[3:5]) for n in v11 - wal)
 
 
 def write_coverage(cli, dp: DayPlanes) -> dict:
